@@ -2499,7 +2499,7 @@ export function getDashboard(): DashboardStats {
   ).get(month) as MonthlySummary | undefined
 
   const lastRun = db.prepare(
-    `${RUN_SELECT} ORDER BY r.started_at DESC LIMIT 1`,
+    `${RUN_SELECT} ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1`,
   ).get() as CollectorRun | undefined
 
   // 取り込み元ごとの直近1件（mercari + 有効なメロジョイ口座ごとに1件）。
