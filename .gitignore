@@ -12,3 +12,6 @@ session/
 .DS_Store
 *.log
 .vscode/
+
+# Claude Code の個人設定（フック等。環境固有のパスを含む）
+.claude/settings.local.json
