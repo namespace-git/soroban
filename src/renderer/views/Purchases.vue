@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
+import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue'
 import type {
   PurchaseSummary, ShopAccount, PurchaseLineInput, AllocMethod, PurchaseInput, Tag,
 } from '../../shared/types'
@@ -21,6 +21,8 @@ const changed = inject<() => void>('changed', () => {})
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+// 横断検索から goto('purchases', { search, focusId }) で開かれる
+const gotoPayload = inject<Ref<{ search?: string; focusId?: string } | null>>('gotoPayload', ref(null))
 const showForm = ref(false)
 const loaded = ref(false)
 /** 下書きを確定中の仕入 id。null なら新規登録 */
@@ -80,6 +82,24 @@ async function load() {
 }
 onMounted(load)
 watch(revision, load)
+
+// --- 横断検索からの遷移：検索語を引き継ぎ、該当行を一時的にハイライトする ---
+const focusedId = ref<string | null>(null)
+
+async function focusRow(id: string) {
+  await load()
+  await nextTick()
+  focusedId.value = id
+  document.querySelector(`[data-row-id="${id}"]`)?.scrollIntoView({ block: 'center' })
+  setTimeout(() => { if (focusedId.value === id) focusedId.value = null }, 2000)
+}
+
+watch(gotoPayload, (p) => {
+  if (!p) return
+  if (p.search) searchText.value = p.search
+  if (p.focusId) focusRow(p.focusId)
+  gotoPayload.value = null
+}, { immediate: true })
 
 const subtotal = computed(() =>
   form.value.lines.reduce((s, l) => s + (l.unit_price || 0) * (l.quantity || 0), 0),
@@ -361,7 +381,11 @@ async function remove(p: PurchaseSummary) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="p in filteredPurchases" :key="p.id">
+            <tr
+              v-for="p in filteredPurchases" :key="p.id"
+              :data-row-id="p.id"
+              :class="{ focused: focusedId === p.id }"
+            >
               <td class="faint">{{ p.ordered_at }}</td>
               <td class="thumb-cell">
                 <span class="thumb-placeholder">{{ placeholderChar(p) }}</span>
@@ -491,6 +515,9 @@ async function remove(p: PurchaseSummary) {
 .table-panel td.actions { white-space: nowrap; text-align: right; }
 .table-panel .actions > * { vertical-align: middle; margin-left: 4px; }
 .table-panel th.col-thumb { width: 64px; }
+
+/* 横断検索から来たときに該当行を一時的に示す */
+tr.focused { background: var(--brand-soft); }
 
 .thumb-cell { padding-right: 4px; }
 .thumb-placeholder {

@@ -320,6 +320,23 @@ export interface Listing {
   expected_profit: number | null
 }
 
+/** 横断検索の 1 件。クリックでその種類のタブへ飛び、検索語を引き継ぐ */
+export interface SearchHit {
+  kind: 'inventory' | 'listing' | 'sale' | 'purchase'
+  /** inventory: inventory_item.id / listing: mercari_item_id / sale: sale.id / purchase: purchase.id */
+  id: string
+  title: string
+  /** 型番（あれば） */
+  model_code: string | null
+  /** 状態の表示語（未出品／出品中／販売済／廃棄／出品中／公開停止中／売れた／取り下げ／送料未入力／未紐付け／下書き／確定 など） */
+  status_label: string
+  /** 表示用の金額（在庫は原価、出品は出品価格、販売は販売価格、仕入は総原価） */
+  amount: number
+  /** 並び替え用の日付 YYYY-MM-DD（仕入日／初めて見た日／販売日／注文日） */
+  date: string
+  thumb_url: string | null
+}
+
 export interface InventoryPatch {
   name?: string
   model_code?: string | null
@@ -584,13 +601,25 @@ export interface SorobanApi {
   // 出品（メルカリ）と在庫の引き当て
   /** status 未指定なら active + suspended。onlyUnallocated で未引き当てだけ */
   listListings(filter?: { status?: ListingStatus[]; onlyUnallocated?: boolean }): Promise<Listing[]>
-  /** 出品に在庫を引き当てる（追加）。既に他の active な出品に引き当て済み・販売済みの在庫はエラー */
+  /**
+   * 出品に在庫を引き当てる（追加）。販売済み・廃棄済みの在庫はエラー。
+   * 他の active/suspended な出品に引き当て済みの在庫は、その引き当てを外してこちらへ**移す**
+   * （再出品・付け替え。人の最新の決定を優先。元の出品は未引き当てに戻る）
+   */
   reserveInventory(mercariItemId: string, inventoryItemIds: string[]): Promise<void>
   unreserveInventory(mercariItemId: string, inventoryItemId: string): Promise<void>
-  /** 出品の引き当て候補。型番の完全一致 → シリーズ一致 → 名前の一致の順。引き当て済み・販売済みは除く */
+  /**
+   * 出品の引き当て候補。型番の完全一致 → シリーズ一致 → 名前の一致の順。販売済み・廃棄済みは除く。
+   * 他の出品に引き当て済みの在庫も返す（`listing` に引き当て先が入る。画面では「出品 X から移す」と見せる）。
+   * この出品自身に引き当て済みのものは除く
+   */
   suggestForListing(mercariItemId: string, limit?: number): Promise<InventoryItem[]>
   /** 人が「取り下げた」と記録する。引き当ては外れ、在庫は未出品に戻る */
   endListing(mercariItemId: string): Promise<void>
+
+  // 横断検索（「あの商品どうなった？」を 1 か所で。全期間・全状態が対象）
+  /** 空白区切り AND、NFKC 正規化。種類ごとに新しい順、合計 limit 件（既定 60） */
+  searchAll(query: string, limit?: number): Promise<SearchHit[]>
 
   // マスタ
   listShopAccounts(): Promise<ShopAccount[]>

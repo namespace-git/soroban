@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
-import type { Listing, ListingStatus } from '../../shared/types'
+import { ref, computed, onMounted, watch, inject, nextTick, type Ref } from 'vue'
+import type { Listing, ListingStatus, CollectorRun } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -28,8 +28,9 @@ const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = 
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
-// ダッシュボードの「未引き当ての出品」から goto('listings', { onlyUnallocated }) / goto('listings', { mercariItemId }) で開かれる
-const gotoPayload = inject<Ref<{ mercariItemId?: string; onlyUnallocated?: boolean } | null>>('gotoPayload', ref(null))
+// ダッシュボードの「未引き当ての出品」から goto('listings', { onlyUnallocated }) / goto('listings', { mercariItemId }) で開かれる。
+// 横断検索からは goto('listings', { search, focusId }) で開かれる
+const gotoPayload = inject<Ref<{ mercariItemId?: string; onlyUnallocated?: boolean; search?: string; focusId?: string } | null>>('gotoPayload', ref(null))
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -106,12 +107,49 @@ async function openFromId(id: string) {
   if (target) openAllocate(target)
 }
 
+// --- 横断検索からの遷移：検索語を引き継ぎ、該当行を一時的にハイライトする ---
+const focusedId = ref<string | null>(null)
+
+async function focusRow(id: string) {
+  await load()
+  await nextTick()
+  focusedId.value = id
+  document.querySelector(`[data-row-id="${id}"]`)?.scrollIntoView({ block: 'center' })
+  setTimeout(() => { if (focusedId.value === id) focusedId.value = null }, 2000)
+}
+
 watch(gotoPayload, (p) => {
   if (!p) return
   if (p.onlyUnallocated) onlyUnallocated.value = true
+  if (p.search) search.value = p.search
   if (p.mercariItemId) openFromId(p.mercariItemId)
+  if (p.focusId) focusRow(p.focusId)
   gotoPayload.value = null
 }, { immediate: true })
+
+// --- 最終取り込み時刻（メルカリ・成功のみ）。この時刻より last_seen_at が古い出品は
+//     「1ページ目に無かっただけ」の可能性があるので目立たせる ---
+const lastMercariRun = ref<CollectorRun | null>(null)
+
+async function loadLastMercariRun() {
+  const dash = await window.soroban.getDashboard()
+  const run = dash.lastRun
+  lastMercariRun.value = run && run.source === 'mercari' && run.status === 'ok' ? run : null
+}
+onMounted(loadLastMercariRun)
+watch(revision, loadLastMercariRun)
+
+function seenStale(l: Listing): boolean {
+  if (l.status !== 'active' && l.status !== 'suspended') return false
+  const finishedAt = lastMercariRun.value?.finished_at
+  return !!finishedAt && l.last_seen_at < finishedAt
+}
+
+function formatSeen(iso: string): string {
+  const d = new Date(iso)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
 
 // --- 取り下げ ---
 async function endListing(l: Listing) {
@@ -168,7 +206,11 @@ async function endListing(l: Listing) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="l in filtered" :key="l.mercari_item_id">
+            <tr
+              v-for="l in filtered" :key="l.mercari_item_id"
+              :data-row-id="l.mercari_item_id"
+              :class="{ focused: focusedId === l.mercari_item_id }"
+            >
               <td class="thumb-cell clickable" @click="openAllocate(l)">
                 <img
                   v-if="showThumb(l)"
@@ -190,7 +232,17 @@ async function endListing(l: Listing) {
 
               <td class="num">{{ yen(l.price) }}</td>
 
-              <td><StatusChip :tone="STATUS_TONE[l.status]" :label="STATUS_LABEL[l.status]" /></td>
+              <td>
+                <div class="chip-row">
+                  <StatusChip :tone="STATUS_TONE[l.status]" :label="STATUS_LABEL[l.status]" />
+                  <StatusChip
+                    v-if="seenStale(l)"
+                    tone="neutral"
+                    label="前回の取り込みで見えず"
+                    title="1ページ目に無かっただけかもしれません。売れていれば売上に出ます"
+                  />
+                </div>
+              </td>
 
               <td>
                 <div v-if="l.items.length" class="reserved-cell">
@@ -213,7 +265,10 @@ async function endListing(l: Listing) {
                 </Transition>
               </td>
 
-              <td class="faint nowrap">{{ l.first_seen_at }}</td>
+              <td class="date-cell">
+                <div class="faint nowrap">{{ l.first_seen_at }}</div>
+                <div class="faint nowrap seen-note">最終確認 {{ formatSeen(l.last_seen_at) }}</div>
+              </td>
 
               <td class="actions">
                 <button class="sm" :class="l.items.length ? 'ghost' : 'link-btn'" @click="openAllocate(l)">
@@ -296,6 +351,12 @@ label.row { white-space: nowrap; }
 }
 
 .nowrap { white-space: nowrap; }
+
+/* 横断検索から来たときに該当行を一時的に示す */
+tr.focused { background: var(--brand-soft); }
+
+.date-cell { display: flex; flex-direction: column; gap: 2px; }
+.seen-note { font-size: var(--fs-12); }
 
 .thumb-cell { padding-right: 4px; }
 .thumb, .thumb-placeholder {

@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, provide } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, provide } from 'vue'
 import Icon from './components/Icon.vue'
 import InputDialog from './components/InputDialog.vue'
 import type { PromptOptions } from './components/InputDialog.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import type { ConfirmChoice } from './components/ConfirmDialog.vue'
+import SearchBox from './components/SearchBox.vue'
+import GlobalSearch from './components/GlobalSearch.vue'
 import Dashboard from './views/Dashboard.vue'
 import Listings from './views/Listings.vue'
 import Sales from './views/Sales.vue'
@@ -13,12 +15,21 @@ import Inventory from './views/Inventory.vue'
 import Products from './views/Products.vue'
 import Monthly from './views/Monthly.vue'
 import Settings from './views/Settings.vue'
-import type { CollectorRun, DashboardStats } from '../shared/types'
+import type { CollectorRun, DashboardStats, SearchHit } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 
 type Tab = 'dashboard' | 'listings' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'settings'
-/** goto にタブと一緒に渡す情報。型番指定（商品タブ）・出品指定（出品タブ）・未引き当てだけ絞る指定 */
-export type GotoPayload = { modelCode?: string; mercariItemId?: string; onlyUnallocated?: boolean }
+/**
+ * goto にタブと一緒に渡す情報。型番指定（商品タブ）・出品指定（出品タブ）・未引き当てだけ絞る指定・
+ * 横断検索からの遷移（検索語を引き継ぐ・該当行をハイライトする）
+ */
+export type GotoPayload = {
+  modelCode?: string
+  mercariItemId?: string
+  onlyUnallocated?: boolean
+  search?: string
+  focusId?: string
+}
 
 const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [
   { key: 'dashboard', label: 'ホーム', icon: 'home' },
@@ -42,7 +53,61 @@ provide('revision', revision)
 // 直近の goto() 呼び出しに添えられた情報（型番など）。切替先の view が inject して読む
 const gotoPayload = ref<GotoPayload | null>(null)
 provide('gotoPayload', gotoPayload)
-provide('goto', (t: Tab, payload?: GotoPayload) => { tab.value = t; gotoPayload.value = payload ?? null })
+function goto(t: Tab, payload?: GotoPayload) { tab.value = t; gotoPayload.value = payload ?? null }
+provide('goto', goto)
+
+// --- 横断検索（Ctrl+K / Cmd+K でフォーカス。250ms デバウンスで searchAll） ---
+
+const searchWrap = ref<HTMLElement | null>(null)
+const searchQuery = ref('')
+const searchOpen = ref(false)
+const searchHits = ref<SearchHit[]>([])
+const searchLoading = ref(false)
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+
+watch(searchQuery, (q) => {
+  clearTimeout(searchTimer)
+  const trimmed = q.trim()
+  if (!trimmed) {
+    searchOpen.value = false
+    searchHits.value = []
+    return
+  }
+  searchOpen.value = true
+  searchTimer = setTimeout(async () => {
+    searchLoading.value = true
+    try {
+      searchHits.value = await window.soroban.searchAll(trimmed)
+    } finally {
+      searchLoading.value = false
+    }
+  }, 250)
+})
+
+function focusSearch() {
+  searchWrap.value?.querySelector('input')?.focus()
+}
+
+function onGlobalKeydown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault()
+    focusSearch()
+  }
+}
+
+const TAB_FOR_KIND: Record<SearchHit['kind'], Tab> = {
+  inventory: 'inventory', listing: 'listings', sale: 'sales', purchase: 'purchases',
+}
+
+function onSearchSelect(hit: SearchHit) {
+  goto(TAB_FOR_KIND[hit.kind], { search: searchQuery.value, focusId: hit.id })
+  searchOpen.value = false
+  searchQuery.value = ''
+}
+
+function closeSearch() {
+  searchOpen.value = false
+}
 
 // ナビの要対応バッジ・上部バーの取り込み状態はシェル自身も読む
 const stats = ref<DashboardStats | null>(null)
@@ -205,6 +270,11 @@ onMounted(() => {
     reportRun(runs)
     loadStats()
   })
+  window.addEventListener('keydown', onGlobalKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onGlobalKeydown)
 })
 
 // 子側の revision カウンタが動くたびに要対応件数・取り込み状態も更新する
@@ -239,6 +309,9 @@ watch(revision, loadStats)
     <div class="main-col">
       <header class="topbar">
         <div class="grow" />
+        <div ref="searchWrap" class="global-search">
+          <SearchBox v-model="searchQuery" placeholder="すべてから探す（Ctrl+K）" />
+        </div>
         <span class="run-status" :class="{ warn: runIsWarn }">
           <Icon v-if="runIsWarn" name="alert" :size="14" />
           {{ runStatusText }}
@@ -286,6 +359,15 @@ watch(revision, loadStats)
       :choices="choiceState?.choices ?? []"
       @choose="onChoose"
       @cancel="onChooseCancel"
+    />
+
+    <GlobalSearch
+      :open="searchOpen"
+      :query="searchQuery"
+      :hits="searchHits"
+      :loading="searchLoading"
+      @close="closeSearch"
+      @select="onSearchSelect"
     />
   </div>
 </template>
@@ -396,6 +478,8 @@ watch(revision, loadStats)
   background: var(--canvas);
   border-bottom: none;
 }
+
+.global-search { flex-shrink: 0; }
 
 .run-status {
   display: inline-flex;

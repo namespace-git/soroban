@@ -19,8 +19,10 @@ import type {
   ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
   Listing, ListingStatus,
   Expense, ExpenseInput,
+  SearchHit,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
+import { matchesSearch } from '../components/SearchBox.vue'
 
 // ------------------------------------------------------------
 // 小さなユーティリティ
@@ -141,6 +143,35 @@ function commonCharCount(a: string, b: string): number {
 
 function calcFeeMock(price: number, rateBp: number): number {
   return Math.round((price * rateBp) / 10000)
+}
+
+// ------------------------------------------------------------
+// 横断検索：種類ごとの状態表示語
+// ------------------------------------------------------------
+
+const LISTING_STATUS_LABEL: Record<ListingStatus, string> = {
+  active: '出品中', suspended: '公開停止中', sold: '売れた', ended: '取り下げ',
+}
+
+function inventorySearchStatusLabel(i: InventoryItem): string {
+  if (i.status === 'sold') return '販売済'
+  if (i.status === 'disposed') return '廃棄'
+  if (i.status === 'personal_use') return '自家消費'
+  if (i.status === 'split') return '分割済'
+  if (i.listing) return i.listing.status === 'suspended' ? '公開停止中' : '出品中'
+  return '未出品'
+}
+
+function saleSearchStatusLabel(s: SaleProfit): string {
+  if (!s.is_shipping_confirmed) return '送料未入力'
+  if (s.kind === 'resale' && s.unmatched) return '未紐付け'
+  switch (s.status) {
+    case 'waiting_shipment': return '発送待ち'
+    case 'shipped': return '発送済み'
+    case 'delivered': return '受取済み'
+    case 'completed': return '完了'
+    default: return '確定'
+  }
 }
 
 // ------------------------------------------------------------
@@ -811,7 +842,9 @@ function addListing(opts: {
     price,
     status: opts.status,
     first_seen_at: todayLocal(daysAgo(opts.daysAgoFirstSeen)),
-    last_seen_at: isoLocal(daysAgo(Math.max(0, opts.daysAgoFirstSeen - 1))),
+    // active／suspended は直近の取り込みで見えた体（1 件だけ「前回見えず」の見本にする）。sold／ended は最終日に固定
+    last_seen_at: (opts.status === 'active' || opts.status === 'suspended') && opts.daysAgoFirstSeen !== 3
+      ? isoLocal(new Date()) : isoLocal(daysAgo(Math.max(0, opts.daysAgoFirstSeen - 1))),
     thumb_url: null,
     model_codes: extractAllCodes(title),
   })
@@ -1918,16 +1951,18 @@ const api: SorobanApi = {
       if (!item || item.status !== 'in_stock') {
         throw new Error('すでに販売済み・分割済みの在庫です')
       }
-      if (item.listing) {
-        throw new Error('すでに他の出品に引き当て済みです')
-      }
     }
-    const current = listingItems.get(mercariItemId) ?? []
-    listingItems.set(mercariItemId, [...current, ...inventoryItemIds])
     for (const id of inventoryItemIds) {
       const item = inventory.find(i => i.id === id)!
+      // 他の出品に引き当て済みなら、そちらの引き当てを外してこちらへ移す
+      if (item.listing && item.listing.mercari_item_id !== mercariItemId) {
+        const fromId = item.listing.mercari_item_id
+        listingItems.set(fromId, (listingItems.get(fromId) ?? []).filter(x => x !== id))
+      }
       item.listing = { mercari_item_id: mercariItemId, price: rec.price, status: rec.status }
     }
+    const current = listingItems.get(mercariItemId) ?? []
+    listingItems.set(mercariItemId, [...new Set([...current, ...inventoryItemIds])])
     return wait(undefined)
   },
 
@@ -1946,7 +1981,9 @@ const api: SorobanApi = {
     const modelSet = new Set(rec.model_codes)
     const seriesSet = new Set(rec.model_codes.map(mc => mc.split('-')[0]))
     const target = normalizeName(rec.title)
-    const items = inventory.filter(i => i.status === 'in_stock' && !i.listing && !already.has(i.id))
+    // 他の出品に引き当て済みの在庫も候補に含める（画面側で「出品Xから移す」と見せる）。
+    // この出品自身に引き当て済みのものだけ除く
+    const items = inventory.filter(i => i.status === 'in_stock' && !already.has(i.id))
     const ranked = items
       .map(item => {
         let score = 0
@@ -1972,6 +2009,67 @@ const api: SorobanApi = {
       if (item) item.listing = null
     }
     return wait(undefined)
+  },
+
+  async searchAll(query: string, limit = 60): Promise<SearchHit[]> {
+    const inventoryHits: SearchHit[] = inventory
+      .filter(i => matchesSearch([i.name, i.model_code, i.series_code, i.note, i.order_no, i.shop_account_name], query))
+      .sort((a, b) => (a.acquired_at < b.acquired_at ? 1 : -1))
+      .map(i => ({
+        kind: 'inventory' as const,
+        id: i.id,
+        title: i.name,
+        model_code: i.model_code,
+        status_label: inventorySearchStatusLabel(i),
+        amount: i.landed_cost,
+        date: i.acquired_at,
+        thumb_url: i.thumb_url,
+      }))
+
+    const listingHits: SearchHit[] = listingRecords
+      .filter(r => matchesSearch([r.title, ...r.model_codes], query))
+      .sort((a, b) => (a.first_seen_at < b.first_seen_at ? 1 : -1))
+      .map(r => ({
+        kind: 'listing' as const,
+        id: r.mercari_item_id,
+        title: r.title,
+        model_code: r.model_codes[0] ?? null,
+        status_label: LISTING_STATUS_LABEL[r.status],
+        amount: r.price,
+        date: r.first_seen_at,
+        thumb_url: r.thumb_url,
+      }))
+
+    const saleHits: SearchHit[] = sales
+      .filter(s => matchesSearch([s.title, s.note, s.buyer, ...s.model_codes], query))
+      .sort((a, b) => (a.sold_at < b.sold_at ? 1 : -1))
+      .map(s => ({
+        kind: 'sale' as const,
+        id: s.id,
+        title: s.title,
+        model_code: s.model_codes[0] ?? null,
+        status_label: saleSearchStatusLabel(s),
+        amount: s.price,
+        date: s.sold_at,
+        thumb_url: s.thumb_url,
+      }))
+
+    const purchaseHits: SearchHit[] = purchases
+      .filter(p => matchesSearch([p.first_line_name, p.order_no, p.note, p.shop_account_name, p.first_model_code], query))
+      .sort((a, b) => (a.ordered_at < b.ordered_at ? 1 : -1))
+      .map(p => ({
+        kind: 'purchase' as const,
+        id: p.id,
+        title: p.first_line_name ?? p.order_no ?? '仕入',
+        model_code: p.first_model_code,
+        status_label: p.status === 'draft' ? '下書き' : '確定',
+        amount: p.total_cost,
+        date: p.ordered_at,
+        thumb_url: null,
+      }))
+
+    const all = [...inventoryHits, ...listingHits, ...saleHits, ...purchaseHits]
+    return wait(all.slice(0, limit))
   },
 
   async listShopAccounts() {

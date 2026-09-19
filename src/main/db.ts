@@ -13,8 +13,8 @@ import type {
   MonthlySummary, ProductDetail, ProductMonthPoint, ProductSummary, PurchaseDetail,
   PurchaseDraftInput, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
   PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleTotals,
-  ShippingMethod, ShopAccount, ShopAccountKind, Tag, TimelineEvent, VariantSummary, CollectorRun,
-  RunStatus, CollectorSource,
+  SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, Tag, TimelineEvent, VariantSummary,
+  CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
 
 // ============================================================
@@ -1641,13 +1641,26 @@ export function listListings(
   return filter?.onlyUnallocated ? listings.filter(l => l.items.length === 0) : listings
 }
 
-/** 出品に在庫を引き当てる（追加）。既に他の active な出品に引き当て済み・販売済みの在庫はエラー */
+/**
+ * 出品に在庫を引き当てる（追加）。既に他の active/suspended な出品に引き当て済みの
+ * 在庫は、その引き当てを同じトランザクション内で先に外してからこちらへ移す
+ * （再出品・付け替え。人の最新の決定を優先。元の出品は未引き当てに戻る）。
+ * 販売済み・廃棄済みの在庫は trg_listing_line_guard がそのまま拒否する。
+ */
 export function reserveInventory(mercariItemId: string, inventoryItemIds: string[]): void {
+  const delOther = db.prepare(`
+    DELETE FROM listing_line
+     WHERE inventory_item_id = ?
+       AND listing_id IN (SELECT mercari_item_id FROM listing WHERE status IN ('active','suspended'))
+  `)
   const ins = db.prepare(
     `INSERT INTO listing_line (id, listing_id, inventory_item_id) VALUES (?, ?, ?)`,
   )
   const tx = db.transaction(() => {
-    for (const itemId of inventoryItemIds) ins.run(randomUUID(), mercariItemId, itemId)
+    for (const itemId of inventoryItemIds) {
+      delOther.run(itemId)
+      ins.run(randomUUID(), mercariItemId, itemId)
+    }
   })
   tx()
 }
@@ -1659,7 +1672,9 @@ export function unreserveInventory(mercariItemId: string, inventoryItemId: strin
 
 /**
  * 出品の引き当て候補。型番の完全一致 → シリーズ一致 → 名前の一致の順。
- * 引き当て済み（他の active/suspended な出品）・販売済みは除く。
+ * 販売済み・廃棄済みは除く。他の出品に引き当て済みの在庫も候補に含める
+ * （InventoryItem.listing に引き当て先が入る。この出品自身に引き当て済みのものは除く）。
+ * 同順位なら未引き当てを先に。
  */
 export function suggestForListing(mercariItemId: string, limit = 20): InventoryItem[] {
   const listing = db.prepare('SELECT title FROM listing WHERE mercari_item_id = ?')
@@ -1674,12 +1689,18 @@ export function suggestForListing(mercariItemId: string, limit = 20): InventoryI
   const head = target.slice(0, 6)
 
   const items = db.prepare(
-    `SELECT * FROM inventory_view WHERE status = 'in_stock' AND listing_id IS NULL`,
-  ).all() as InventoryRow[]
+    `SELECT * FROM inventory_view WHERE status = 'in_stock' AND (listing_id IS NULL OR listing_id != ?)`,
+  ).all(mercariItemId) as InventoryRow[]
 
   const picked = items
     .map(item => ({ item, r: rankInventoryMatch(item, codeSet, seriesCodes, target, head) }))
-    .sort((a, b) => (a.r !== b.r ? a.r - b.r : b.item.aging_days - a.item.aging_days))
+    .sort((a, b) => {
+      if (a.r !== b.r) return a.r - b.r
+      const aReserved = a.item.listing_id ? 1 : 0
+      const bReserved = b.item.listing_id ? 1 : 0
+      if (aReserved !== bReserved) return aReserved - bReserved
+      return b.item.aging_days - a.item.aging_days
+    })
     .slice(0, limit)
     .map(({ item }) => item)
 
@@ -2492,6 +2513,198 @@ export function getDashboard(): DashboardStats {
     thisMonth: thisMonth ?? null,
     lastRun: lastRun ?? null,
   }
+}
+
+// ============================================================
+// 横断検索（「あの商品どうなった？」を1か所で。全期間・全状態が対象）
+//
+// SQL の LIKE は大文字小文字・全角半角を無視できないため、候補は SQL で
+// 広めに取り（既存の listInventory/listListings/listSales/listPurchases をそのまま
+// 使う）、絞り込みは renderer の SearchBox.vue の matchesSearch と同じ規則で
+// JS 側（normalize('NFKC').toLowerCase() + 空白区切り AND）で行う。
+// ============================================================
+
+const SEARCH_INVENTORY_STATUSES: InventoryStatus[] =
+  ['in_stock', 'sold', 'disposed', 'personal_use', 'split']
+const SEARCH_LISTING_STATUSES: ListingStatus[] = ['active', 'suspended', 'sold', 'ended']
+
+function normalizeSearchText(s: string): string {
+  return s.normalize('NFKC').toLowerCase()
+}
+
+/** query を空白区切りにした語（terms）が haystacks のどれかに全部含まれるか（AND） */
+function matchesQuery(haystacks: Array<string | null | undefined>, terms: string[]): boolean {
+  if (terms.length === 0) return true
+  const normalized = haystacks.filter((h): h is string => !!h).map(normalizeSearchText)
+  return terms.every(term => normalized.some(h => h.includes(term)))
+}
+
+function inventoryStatusLabel(item: InventoryItem): string {
+  switch (item.status) {
+    case 'in_stock': return item.listing ? '出品中' : '未出品'
+    case 'sold': return '販売済'
+    case 'disposed': return '廃棄'
+    case 'personal_use': return '自家消費'
+    case 'split': return '分割済'
+  }
+}
+
+function listingStatusLabel(status: ListingStatus): string {
+  switch (status) {
+    case 'active': return '出品中'
+    case 'suspended': return '公開停止中'
+    case 'sold': return '売れた'
+    case 'ended': return '取り下げ'
+  }
+}
+
+/** 優先はこの順、複数なら先頭：送料未入力 → 未紐付け（転売のみ） → 私物 → 完了 */
+function saleStatusLabel(s: SaleProfit): string {
+  if (s.is_shipping_confirmed === 0) return '送料未入力'
+  if (s.unmatched === 1 && s.kind === 'resale') return '未紐付け'
+  if (s.kind === 'personal') return '私物'
+  return '完了'
+}
+
+function purchaseStatusLabel(p: PurchaseSummary): string {
+  if (p.status === 'draft') return '下書き'
+  if (p.fulfillment === 'delivered') return '到着済'
+  if (p.fulfillment === 'shipped') return '配送中'
+  return '未着'
+}
+
+/** 仕入の明細（全件）の name/model_code を、purchase_id ごとにまとめて1クエリで引く */
+function loadPurchaseLineTexts(purchaseIds: string[]): Map<string, string[]> {
+  const map = new Map<string, string[]>()
+  if (purchaseIds.length === 0) return map
+
+  const ph = purchaseIds.map(() => '?').join(',')
+  const rows = db.prepare(
+    `SELECT purchase_id, name, model_code FROM purchase_line WHERE purchase_id IN (${ph})`,
+  ).all(...purchaseIds) as Array<{ purchase_id: string; name: string; model_code: string | null }>
+
+  for (const r of rows) {
+    const arr = map.get(r.purchase_id) ?? []
+    arr.push(r.name)
+    if (r.model_code) arr.push(r.model_code)
+    map.set(r.purchase_id, arr)
+  }
+  return map
+}
+
+/** date（YYYY-MM-DD 等）降順に並べ、種類ごとの上限で切る */
+function sortAndSlice(hits: SearchHit[], perKind: number): SearchHit[] {
+  return hits
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+    .slice(0, perKind)
+}
+
+function searchInventoryHits(terms: string[], perKind: number): SearchHit[] {
+  const items = SEARCH_INVENTORY_STATUSES.flatMap(status => listInventory(status))
+
+  const hits: SearchHit[] = items
+    .filter(i => matchesQuery([
+      i.name, i.model_code, i.series_code, i.material, i.note,
+      i.order_no, i.shop_account_name,
+      ...i.tags.map(t => t.name), ...i.inherited_tags.map(t => t.name),
+    ], terms))
+    .map(i => ({
+      kind: 'inventory',
+      id: i.id,
+      title: i.name,
+      model_code: i.model_code,
+      status_label: inventoryStatusLabel(i),
+      amount: i.landed_cost,
+      date: i.acquired_at,
+      thumb_url: i.thumb_url,
+    }))
+
+  return sortAndSlice(hits, perKind)
+}
+
+function searchListingHits(terms: string[], perKind: number): SearchHit[] {
+  const listings = listListings({ status: SEARCH_LISTING_STATUSES })
+
+  const hits: SearchHit[] = listings
+    .filter(l => matchesQuery([
+      l.title, ...l.model_codes,
+      ...l.items.map(i => i.name), ...l.items.map(i => i.model_code),
+    ], terms))
+    .map(l => ({
+      kind: 'listing',
+      id: l.mercari_item_id,
+      title: l.title,
+      model_code: l.model_codes[0] ?? null,
+      status_label: listingStatusLabel(l.status),
+      amount: l.price,
+      date: l.first_seen_at,
+      thumb_url: l.thumb_url,
+    }))
+
+  return sortAndSlice(hits, perKind)
+}
+
+function searchSaleHits(terms: string[], perKind: number): SearchHit[] {
+  const sales = listSales()
+
+  const hits: SearchHit[] = sales
+    .filter(s => matchesQuery([
+      s.title, s.note, s.buyer, ...s.model_codes,
+      ...s.tags.map(t => t.name), ...s.inherited_tags.map(t => t.name),
+    ], terms))
+    .map(s => ({
+      kind: 'sale',
+      id: s.id,
+      title: s.title,
+      model_code: s.model_codes[0] ?? null,
+      status_label: saleStatusLabel(s),
+      amount: s.price,
+      date: s.sold_at,
+      thumb_url: s.thumb_url,
+    }))
+
+  return sortAndSlice(hits, perKind)
+}
+
+function searchPurchaseHits(terms: string[], perKind: number): SearchHit[] {
+  const purchases = listPurchases()
+  const lineTexts = loadPurchaseLineTexts(purchases.map(p => p.id))
+
+  const hits: SearchHit[] = purchases
+    .filter(p => matchesQuery([
+      p.first_line_name, p.order_no, p.shop_account_name, p.note,
+      ...p.tags.map(t => t.name), ...(lineTexts.get(p.id) ?? []),
+    ], terms))
+    .map(p => ({
+      kind: 'purchase',
+      id: p.id,
+      title: p.first_line_name ?? p.order_no ?? '(仕入)',
+      model_code: p.first_model_code,
+      status_label: purchaseStatusLabel(p),
+      amount: p.total_cost,
+      date: p.ordered_at,
+      thumb_url: null,
+    }))
+
+  return sortAndSlice(hits, perKind)
+}
+
+/**
+ * 空白区切りAND、NFKC正規化。種類ごと（inventory→listing→sale→purchase）に新しい順、
+ * 種類ごとの上限は ceil(limit/4)。空文字なら []
+ */
+export function searchAll(query: string, limit = 60): SearchHit[] {
+  const terms = normalizeSearchText(query).trim().split(/\s+/).filter(Boolean)
+  if (terms.length === 0) return []
+
+  const perKind = Math.ceil(limit / 4)
+
+  return [
+    ...searchInventoryHits(terms, perKind),
+    ...searchListingHits(terms, perKind),
+    ...searchSaleHits(terms, perKind),
+    ...searchPurchaseHits(terms, perKind),
+  ]
 }
 
 // ============================================================

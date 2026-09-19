@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
+import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue'
 import type { InventoryItem, Tag } from '../../shared/types'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import Icon from '../components/Icon.vue'
@@ -23,6 +23,8 @@ const changed = inject<() => void>('changed', () => {})
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+// 横断検索から goto('inventory', { search, focusId }) で開かれる
+const gotoPayload = inject<Ref<{ search?: string; focusId?: string } | null>>('gotoPayload', ref(null))
 
 const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
 
@@ -87,6 +89,24 @@ async function loadTags() {
 }
 onMounted(loadTags)
 watch(revision, loadTags)
+
+// --- 横断検索からの遷移：検索語を引き継ぎ、該当行を一時的にハイライトする ---
+const focusedId = ref<string | null>(null)
+
+async function focusRow(id: string) {
+  await load()
+  await nextTick()
+  focusedId.value = id
+  document.querySelector(`[data-row-id="${id}"]`)?.scrollIntoView({ block: 'center' })
+  setTimeout(() => { if (focusedId.value === id) focusedId.value = null }, 2000)
+}
+
+watch(gotoPayload, (p) => {
+  if (!p) return
+  if (p.search) searchText.value = p.search
+  if (p.focusId) focusRow(p.focusId)
+  gotoPayload.value = null
+}, { immediate: true })
 
 const filteredItems = computed(() => {
   let list = items.value
@@ -228,7 +248,11 @@ async function editNote(item: InventoryItem) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="i in filteredItems" :key="i.id">
+          <tr
+            v-for="i in filteredItems" :key="i.id"
+            :data-row-id="i.id"
+            :class="{ focused: focusedId === i.id }"
+          >
             <td class="thumb-cell clickable" @click="openTimeline(i)" title="履歴を見る">
               <img
                 v-if="showThumb(i)"
@@ -359,6 +383,9 @@ async function editNote(item: InventoryItem) {
   font-weight: 700;
   font-size: var(--fs-14);
 }
+
+/* 横断検索から来たときに該当行を一時的に示す */
+tr.focused { background: var(--brand-soft); }
 
 @media (max-width: 1099px) {
   .table-panel { overflow-x: auto; }

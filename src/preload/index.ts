@@ -62,6 +62,8 @@ const api: SorobanApi = {
   suggestForListing: invoke('suggestForListing'),
   endListing: invoke('endListing'),
 
+  searchAll: invoke('searchAll'),
+
   listShopAccounts: invoke('listShopAccounts'),
   createShopAccount: invoke('createShopAccount'),
   updateShopAccount: invoke('updateShopAccount'),

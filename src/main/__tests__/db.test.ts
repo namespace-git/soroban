@@ -1511,7 +1511,7 @@ describe('db（:memory:）', () => {
       expect(db.listListings({ status: ['ended'] })[0].status).toBe('ended')
     })
 
-    it('reserveInventory：二重引き当て・売却済み在庫の引き当てをトリガーで拒否する', () => {
+    it('reserveInventory：他の出品への引き当ては外れてこちらへ移る。売却済み在庫の引き当ては拒否する', () => {
       db.createPurchase({
         shop_account_id: shopId,
         ordered_at: '2026-01-01',
@@ -1532,7 +1532,12 @@ describe('db（:memory:）', () => {
       expect(db.listListings().find(l => l.mercari_item_id === 'LA')!.items.map(i => i.id))
         .toEqual([itemA.id])
 
-      expect(() => db.reserveInventory('LB', [itemA.id])).toThrow('既に別の出品に引き当て済み')
+      // 他の出品(LA)に引き当て済みの在庫をLBへ移す：LAは未引き当てに戻り、LBに移る。在庫はin_stockのまま
+      db.reserveInventory('LB', [itemA.id])
+      expect(db.listListings().find(l => l.mercari_item_id === 'LA')!.items).toEqual([])
+      expect(db.listListings().find(l => l.mercari_item_id === 'LB')!.items.map(i => i.id))
+        .toEqual([itemA.id])
+      expect(db.listInventory('in_stock').some(i => i.id === itemA.id)).toBe(true)
 
       const saleId = db.createSale({ title: '在庫B手動売却', sold_at: '2026-01-05', price: 2000 })
       db.linkInventory(saleId, [itemB.id])
@@ -1561,7 +1566,7 @@ describe('db（:memory:）', () => {
         .toEqual([item.id])
     })
 
-    it('suggestForListing：型番一致 → 引き当て済みの在庫は候補から除く', () => {
+    it('suggestForListing：型番一致 → 自分自身に引き当て済みの在庫は候補から除く', () => {
       db.createPurchase({
         shop_account_id: shopId,
         ordered_at: '2026-01-01',
@@ -1579,6 +1584,37 @@ describe('db（:memory:）', () => {
       db.reserveInventory('LZ', [item1.id])
       const after = db.suggestForListing('LZ')
       expect(after.map(s => s.id)).toEqual([item2.id])
+    })
+
+    it('suggestForListing：他の出品に引き当て済みの在庫も候補に含み、listingに引き当て先が入る。reserveInventoryで移すと在庫はin_stockのまま', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'クリームわん【Z090-1】', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'SA', title: 'クリームわん【Z090-1】', price: 3000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'SB', title: 'クリームわん【Z090-1】', price: 3200, suspended: false, thumbUrl: null },
+      ])
+
+      db.reserveInventory('SA', [item.id])
+
+      // SA自身の候補からは除かれる
+      expect(db.suggestForListing('SA').map(s => s.id)).toEqual([])
+
+      // SBの候補には、SAに引き当て済みのまま出る（listingに引き当て先が入る）
+      const forB = db.suggestForListing('SB')
+      expect(forB.map(s => s.id)).toEqual([item.id])
+      expect(forB[0].listing).toEqual({ mercari_item_id: 'SA', price: 3000, status: 'active' })
+
+      // SBへ移す：SAは未引き当てに戻り、SBに引き当て、在庫はin_stockのまま
+      db.reserveInventory('SB', [item.id])
+      expect(db.listListings().find(l => l.mercari_item_id === 'SA')!.items).toEqual([])
+      expect(db.listListings().find(l => l.mercari_item_id === 'SB')!.items.map(i => i.id))
+        .toEqual([item.id])
+      expect(db.listInventory('in_stock').some(i => i.id === item.id)).toBe(true)
     })
 
     it('listListings：reserved_cost・expected_profitが引き当てた在庫から出る。未引き当てはnull', () => {
@@ -2098,6 +2134,257 @@ describe('db（:memory:）', () => {
       monthly = db.listMonthly()
       expect(monthly.find(m => m.month === '2026-05' && m.kind === 'resale')).toBeDefined()
       expect(db.listExpenses('2026-05')).toHaveLength(1)
+    })
+  })
+
+  describe('searchAll：横断検索', () => {
+    it('空文字（空白のみ含む）は[]を返す', () => {
+      expect(db.searchAll('')).toEqual([])
+      expect(db.searchAll('   ')).toEqual([])
+    })
+
+    it('型番で在庫・出品・販売・仕入のすべてにヒットする', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        order_no: 'PO-Z200',
+        lines: [{ name: 'クリームわん【Z200-1】', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+
+      db.upsertListings([
+        { mercariItemId: 'SZ200', title: 'クリームわん【Z200-1】', price: 2500, suspended: false, thumbUrl: null },
+      ])
+
+      // 手入力の私物販売（型番が一致していても私物は自動紐付けの対象外）。
+      // 送料未入力のままだと status_label は「送料未入力」が優先されるので確定させておく
+      const personalSaleId = db.createSale({
+        title: 'クリームわん【Z200-1】', sold_at: '2026-01-10', price: 3000, kind: 'personal',
+      })
+      db.updateSale(personalSaleId, { shipping_fee: 0 })
+
+      const hits = db.searchAll('Z200-1')
+      expect(hits.map(h => h.kind).sort()).toEqual(['inventory', 'listing', 'purchase', 'sale'])
+
+      const inv = hits.find(h => h.kind === 'inventory')!
+      expect(inv.id).toBe(item.id)
+      expect(inv.model_code).toBe('Z200-1')
+      expect(inv.status_label).toBe('未出品')
+      expect(inv.amount).toBe(item.landed_cost)
+      expect(inv.date).toBe(item.acquired_at)
+
+      const lst = hits.find(h => h.kind === 'listing')!
+      expect(lst.id).toBe('SZ200')
+      expect(lst.status_label).toBe('出品中')
+      expect(lst.amount).toBe(2500)
+
+      const sale = hits.find(h => h.kind === 'sale')!
+      expect(sale.status_label).toBe('私物')
+      expect(sale.amount).toBe(3000)
+
+      const purchase = hits.find(h => h.kind === 'purchase')!
+      expect(purchase.status_label).toBe('未着')
+      expect(purchase.amount).toBe(1000)
+    })
+
+    it('タグ名（直接・派生）でヒットする', () => {
+      const tag = db.createTag('限定品')
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'タグ検索対象', unit_price: 1000, quantity: 1 }],
+      })
+      const purchaseId = db.listPurchases()[0].id
+      db.setPurchaseTags(purchaseId, [tag])
+
+      // 仕入のタグは在庫・販売にも派生する
+      const item = db.listInventory('in_stock')[0]
+      const saleId = db.createSale({ title: 'タグ検索対象の販売', sold_at: '2026-01-05', price: 2000 })
+      db.linkInventory(saleId, [item.id])
+
+      const hits = db.searchAll('限定品')
+      expect(hits.map(h => h.kind).sort()).toEqual(['inventory', 'purchase', 'sale'])
+    })
+
+    it('買い手（buyer）でヒットする', () => {
+      const saleId = db.createSale({ title: '買い手検索対象', sold_at: '2026-01-01', price: 1000 })
+      db.getDb().prepare(`UPDATE sale SET buyer = ? WHERE id = ?`).run('やまだたろう', saleId)
+
+      const hits = db.searchAll('やまだたろう')
+      expect(hits).toHaveLength(1)
+      expect(hits[0].kind).toBe('sale')
+      expect(hits[0].id).toBe(saleId)
+    })
+
+    it('注文番号・メモでヒットする（仕入）', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        order_no: 'ORDER-777',
+        note: '特別な注文',
+        lines: [{ name: 'メモ検索対象', unit_price: 1000, quantity: 1 }],
+      })
+      // order_noは在庫（inventory_view経由）・仕入の両方の検索対象なので両方にヒットする
+      const orderHits = db.searchAll('ORDER-777')
+      expect(orderHits.map(h => h.kind).sort()).toEqual(['inventory', 'purchase'])
+
+      // noteは仕入自身のメモ（在庫のnoteとは別）なので仕入だけにヒットする
+      expect(db.searchAll('特別な注文')).toHaveLength(1)
+      expect(db.searchAll('特別な注文')[0].kind).toBe('purchase')
+    })
+
+    it('空白区切りAND：全部の語を満たすものだけヒットする', () => {
+      db.createSale({ title: 'AAA商品', sold_at: '2026-01-01', price: 1000, note: 'BBBメモ' })
+      db.createSale({ title: 'AAA商品2', sold_at: '2026-01-02', price: 1000 })
+
+      expect(db.searchAll('AAA BBB')).toHaveLength(1)
+      expect(db.searchAll('AAA')).toHaveLength(2)
+    })
+
+    it('全角英数はNFKC正規化で半角と同一視する', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{
+          name: 'ぜんかく検索テスト', unit_price: 1000, quantity: 1,
+          model_code: 'Z300', series_code: 'Z300',
+        }],
+      })
+
+      const hits = db.searchAll('Ｚ３００')
+      expect(hits.some(h => h.model_code === 'Z300')).toBe(true)
+    })
+
+    it('limit：種類ごとの上限はceil(limit/4)', () => {
+      for (let i = 0; i < 10; i++) {
+        db.createSale({
+          title: `件数テスト${i}`,
+          sold_at: `2026-01-${String(i + 1).padStart(2, '0')}`,
+          price: 1000,
+        })
+      }
+      const hits = db.searchAll('件数テスト', 8) // perKind = ceil(8/4) = 2
+      expect(hits.filter(h => h.kind === 'sale')).toHaveLength(2)
+    })
+
+    it('sale の status_label は 送料未入力 → 未紐付け（転売のみ） → 私物 → 完了 の優先順', () => {
+      const s1 = db.createSale({ title: '送料未入力テスト', sold_at: '2026-01-01', price: 1000 })
+      expect(db.searchAll('送料未入力テスト')[0].status_label).toBe('送料未入力')
+
+      db.updateSale(s1, { shipping_fee: 200 })
+      expect(db.searchAll('送料未入力テスト')[0].status_label).toBe('未紐付け')
+
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '紐付け用在庫', unit_price: 500, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.linkInventory(s1, [item.id])
+      expect(db.searchAll('送料未入力テスト')[0].status_label).toBe('完了')
+
+      const s2 = db.createSale({ title: '私物テスト検索', sold_at: '2026-01-02', price: 1000, kind: 'personal' })
+      db.updateSale(s2, { shipping_fee: 100 })
+      expect(db.searchAll('私物テスト検索')[0].status_label).toBe('私物')
+    })
+
+    it('inventory の status_label：出品中/未出品/廃棄/自家消費/販売済/分割済', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [
+          { name: 'ラベル在庫A', unit_price: 1000, quantity: 1 },
+          { name: 'ラベル在庫B', unit_price: 1000, quantity: 1 },
+          { name: 'ラベル在庫C', unit_price: 1000, quantity: 1 },
+          { name: 'ラベル在庫D', unit_price: 1000, quantity: 1 },
+          { name: 'ラベル在庫E', unit_price: 1000, quantity: 1 },
+          { name: 'ラベル在庫F', unit_price: 1000, quantity: 1 },
+        ],
+      })
+      const byName = (name: string) => db.listInventory('in_stock').find(i => i.name === name)!
+      const a = byName('ラベル在庫A')
+      const c = byName('ラベル在庫C')
+      const d = byName('ラベル在庫D')
+      const e = byName('ラベル在庫E')
+      const f = byName('ラベル在庫F')
+
+      db.upsertListings([
+        { mercariItemId: 'LBL1', title: 'ラベル在庫A', price: 2000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LBL1', [a.id])
+      db.disposeInventory(c.id, '壊れた')
+      db.disposeInventory(d.id, '自分用', 'personal_use')
+      const saleId = db.createSale({ title: 'ラベル販売済み', sold_at: '2026-01-05', price: 2000 })
+      db.linkInventory(saleId, [e.id])
+      db.splitInventory(f.id, 2)
+
+      expect(db.searchAll('ラベル在庫A')[0].status_label).toBe('出品中')
+      expect(db.searchAll('ラベル在庫B')[0].status_label).toBe('未出品')
+      expect(db.searchAll('ラベル在庫C')[0].status_label).toBe('廃棄')
+      expect(db.searchAll('ラベル在庫D')[0].status_label).toBe('自家消費')
+      expect(db.searchAll('ラベル在庫E')[0].status_label).toBe('販売済')
+      // 分割で生まれた子は親と同名（in_stock）で出るため、親自身のidで引く
+      expect(db.searchAll('ラベル在庫F').find(h => h.id === f.id)!.status_label).toBe('分割済')
+    })
+
+    it('listing の status_label：出品中/公開停止中/売れた/取り下げ', () => {
+      db.upsertListings([
+        { mercariItemId: 'LBLA', title: 'リストA', price: 1000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'LBLB', title: 'リストB', price: 1000, suspended: true, thumbUrl: null },
+        { mercariItemId: 'LBLC', title: 'リストC', price: 1000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'LBLD', title: 'リストD', price: 1000, suspended: false, thumbUrl: null },
+      ])
+      db.insertCollected([{ mercariItemId: 'LBLC', title: 'リストC', price: 1000, soldAt: '2026-01-01' }])
+      db.endListing('LBLD')
+
+      expect(db.searchAll('リストA')[0].status_label).toBe('出品中')
+      expect(db.searchAll('リストB')[0].status_label).toBe('公開停止中')
+      expect(db.searchAll('リストC').find(h => h.kind === 'listing')!.status_label).toBe('売れた')
+      expect(db.searchAll('リストD')[0].status_label).toBe('取り下げ')
+    })
+
+    it('purchase の status_label：下書き/未着/配送中/到着済', () => {
+      db.createPurchaseDraft({
+        import_key: 'IMP-DRAFT',
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        lines: [{ name: '下書き商品テスト', quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '未着商品テスト', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        fulfillment: 'shipped',
+        lines: [{ name: '配送中商品テスト', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        fulfillment: 'delivered',
+        lines: [{ name: '到着済商品テスト', unit_price: 1000, quantity: 1 }],
+      })
+
+      // 確定済みの仕入は在庫（同名）も一緒にヒットするため、purchase種別だけ見る
+      const purchaseHit = (title: string) =>
+        db.searchAll(title).find(h => h.kind === 'purchase')!
+
+      expect(db.searchAll('下書き商品テスト')[0].status_label).toBe('下書き')
+      expect(purchaseHit('未着商品テスト').status_label).toBe('未着')
+      expect(purchaseHit('配送中商品テスト').status_label).toBe('配送中')
+      expect(purchaseHit('到着済商品テスト').status_label).toBe('到着済')
     })
   })
 })

@@ -76,6 +76,14 @@ const pickedCost = computed(() =>
 const totalCost = computed(() => reservedCost.value + pickedCost.value)
 const totalCount = computed(() => (props.listing?.items.length ?? 0) + picked.value.size)
 
+// チェック済みの候補のうち、他の出品からの移動になるもの
+const movingCount = computed(() =>
+  candidates.value.filter(c => picked.value.has(c.id) && c.listing).length,
+)
+const confirmLabel = computed(() =>
+  movingCount.value > 0 ? `引き当てる（${movingCount.value}点を移す）` : '引き当てる',
+)
+
 const previewProfit = computed(() => {
   if (!props.listing) return 0
   const fee = calcFee(props.listing.price, feeRateBp.value)
@@ -84,11 +92,19 @@ const previewProfit = computed(() => {
 
 async function confirmReserve() {
   if (!props.listing || picked.value.size === 0) return
+  const ids = [...picked.value]
+  const moved = candidates.value.filter(c => ids.includes(c.id) && c.listing).length
   try {
-    await window.soroban.reserveInventory(props.listing.mercari_item_id, [...picked.value])
+    await window.soroban.reserveInventory(props.listing.mercari_item_id, ids)
     picked.value = new Set()
     emit('changed')
     await load()
+    toast(
+      moved > 0
+        ? `${ids.length}点を引き当てました（${moved}点は別の出品から移しました）`
+        : `${ids.length}点を引き当てました`,
+      'ok',
+    )
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), 'warn')
   }
@@ -155,6 +171,11 @@ function placeholderChar(): string {
           @change="toggle(c.id)"
         />
         <StatusChip v-if="c.model_code" tone="neutral" :label="c.model_code" />
+        <StatusChip
+          v-if="c.listing && c.listing.mercari_item_id !== listing?.mercari_item_id"
+          tone="neutral"
+          :label="`出品 ${yen(c.listing.price)} に引き当て済み`"
+        />
         <span class="grow">{{ c.name }}</span>
         <span class="faint nowrap">{{ c.aging_days }}日</span>
         <span class="num">{{ yen(c.landed_cost) }}</span>
@@ -172,7 +193,7 @@ function placeholderChar(): string {
           </strong>
         </div>
         <button class="primary" :disabled="!picked.size" @click="confirmReserve">
-          引き当てる
+          {{ confirmLabel }}
         </button>
       </div>
     </template>

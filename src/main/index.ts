@@ -145,6 +145,8 @@ function registerIpc(): void {
   handle('suggestForListing', (mercariItemId, limit) => db.suggestForListing(mercariItemId, limit))
   handle('endListing', (mercariItemId) => db.endListing(mercariItemId))
 
+  handle('searchAll', (query, limit) => db.searchAll(query, limit))
+
   handle('listShopAccounts', () => db.listShopAccounts())
   handle('createShopAccount', (name, kind) => db.createShopAccount(name, kind))
   handle('updateShopAccount', (id, patch) => db.updateShopAccount(id, patch))

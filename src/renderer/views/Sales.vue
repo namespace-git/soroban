@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
+import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue'
 import type { SaleProfit, ShippingMethod, InventoryItem, SaleKind, SaleInput, SaleFilter, SaleTotals, Tag } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
@@ -26,6 +26,8 @@ const totals = ref<SaleTotals | null>(null)
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const loaded = ref(false)
+// 横断検索から goto('sales', { search, focusId }) で開かれる
+const gotoPayload = inject<Ref<{ search?: string; focusId?: string } | null>>('gotoPayload', ref(null))
 
 // 販売の手入力フォーム
 const showForm = ref(false)
@@ -113,6 +115,24 @@ onMounted(async () => {
 })
 watch(revision, loadTags)
 watch([revision, onlyPending, tagFilter, hasSearch], load)
+
+// --- 横断検索からの遷移：検索語を引き継ぎ、該当行を一時的にハイライトする ---
+const focusedId = ref<string | null>(null)
+
+async function focusRow(id: string) {
+  await load()
+  await nextTick()
+  focusedId.value = id
+  document.querySelector(`[data-row-id="${id}"]`)?.scrollIntoView({ block: 'center' })
+  setTimeout(() => { if (focusedId.value === id) focusedId.value = null }, 2000)
+}
+
+watch(gotoPayload, (p) => {
+  if (!p) return
+  if (p.search) searchText.value = p.search
+  if (p.focusId) focusRow(p.focusId)
+  gotoPayload.value = null
+}, { immediate: true })
 
 // --- 手入力登録 ---
 
@@ -383,7 +403,11 @@ async function remove(sale: SaleProfit) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in filteredSales" :key="s.id">
+            <tr
+              v-for="s in filteredSales" :key="s.id"
+              :data-row-id="s.id"
+              :class="{ focused: focusedId === s.id }"
+            >
               <td class="faint nowrap">{{ s.sold_at.slice(5) }}</td>
 
               <td
@@ -630,6 +654,9 @@ async function remove(sale: SaleProfit) {
 .col-actions { width: 112px; }
 
 .nowrap { white-space: nowrap; }
+
+/* 横断検索から来たときに該当行を一時的に示す */
+tr.focused { background: var(--brand-soft); }
 
 .thumb-cell { padding-right: 4px; }
 .thumb, .thumb-placeholder {
