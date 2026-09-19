@@ -51,3 +51,12 @@ export function openShopLoginWindow(shopAccountId: string): Promise<void> {
     win.on('closed', () => resolve())
   })
 }
+
+/**
+ * アカウント削除時にログイン状態を消す。プロファイルを残さない。
+ */
+export async function clearShopSession(shopAccountId: string): Promise<void> {
+  const s = session.fromPartition(partitionFor(shopAccountId))
+  await s.clearStorageData()
+  await s.clearCache()
+}

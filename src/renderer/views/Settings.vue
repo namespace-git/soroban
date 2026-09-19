@@ -18,12 +18,6 @@ const tags = ref<Tag[]>([])
 const saved = ref('')
 const loaded = ref(false)
 
-const kindLabel: Record<ShopAccountKind, string> = {
-  mellojoy: 'メロジョイ',
-  tiktok: 'TikTok Shop',
-  other: 'その他',
-}
-
 async function load() {
   const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes] = await Promise.all([
     window.soroban.listShippingMethods(),
@@ -112,6 +106,37 @@ async function addShopAccount() {
   await window.soroban.createShopAccount(name, isMellojoy ? 'mellojoy' : 'other')
   accounts.value = await window.soroban.listShopAccounts()
   changed()
+}
+
+async function renameAccount(a: ShopAccount) {
+  const name = await ask('仕入先の名前', { initial: a.name })
+  if (!name) return
+  await window.soroban.updateShopAccount(a.id, { name })
+  accounts.value = await window.soroban.listShopAccounts()
+  changed()
+}
+
+async function updateAccountKind(a: ShopAccount, kind: ShopAccountKind) {
+  await window.soroban.updateShopAccount(a.id, { kind })
+  accounts.value = await window.soroban.listShopAccounts()
+  changed()
+}
+
+async function toggleAccountActive(a: ShopAccount) {
+  await window.soroban.updateShopAccount(a.id, { is_active: a.is_active ? 0 : 1 })
+  accounts.value = await window.soroban.listShopAccounts()
+  changed()
+}
+
+async function removeAccount(a: ShopAccount) {
+  if (!confirm(`「${a.name}」を削除しますか？ ログイン状態も消えます`)) return
+  try {
+    await window.soroban.deleteShopAccount(a.id)
+    accounts.value = await window.soroban.listShopAccounts()
+    changed()
+  } catch (e) {
+    alert((e as Error).message)
+  }
 }
 
 async function addTag() {
@@ -318,17 +343,31 @@ const runLabel: Record<string, string> = {
       <!-- 仕入先 -->
       <div class="panel">
         <p class="panel-title">仕入先</p>
-        <table class="compact">
+        <table class="compact accounts-table">
           <thead>
             <tr><th>名前</th><th>種別</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="a in accounts" :key="a.id">
-              <td>{{ a.name }}</td>
-              <td><StatusChip tone="neutral" :label="kindLabel[a.kind]" /></td>
+              <td class="name-cell">
+                <span :class="{ faint: !a.is_active }">{{ a.name }}</span>
+                <StatusChip v-if="!a.is_active" tone="neutral" label="無効" />
+              </td>
+              <td>
+                <select :value="a.kind" @change="updateAccountKind(a, ($event.target as HTMLSelectElement).value as ShopAccountKind)">
+                  <option value="mellojoy">メロジョイ</option>
+                  <option value="tiktok">TikTok Shop</option>
+                  <option value="other">その他</option>
+                </select>
+              </td>
               <td class="actions">
-                <button v-if="a.kind === 'mellojoy'" class="sm" @click="openShopLogin(a.id)">
+                <button class="sm ghost" @click="renameAccount(a)">改名</button>
+                <button v-if="a.kind === 'mellojoy' && a.is_active" class="sm" @click="openShopLogin(a.id)">
                   <Icon name="login" :size="14" /> ログイン
+                </button>
+                <button class="sm ghost" @click="toggleAccountActive(a)">{{ a.is_active ? '無効にする' : '有効にする' }}</button>
+                <button class="icon ghost" @click="removeAccount(a)" aria-label="削除">
+                  <Icon name="trash" :size="16" />
                 </button>
               </td>
             </tr>
@@ -437,6 +476,18 @@ const runLabel: Record<string, string> = {
 
 .add-row { margin: 12px 0 0; }
 .add-row button { display: inline-flex; align-items: center; gap: 6px; }
+
+.name-cell { display: flex; align-items: center; gap: 8px; }
+
+.accounts-table select {
+  border-color: transparent;
+  background: transparent;
+}
+.accounts-table select:hover,
+.accounts-table select:focus {
+  border-color: var(--line);
+  background: var(--surface);
+}
 
 .money-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; width: auto; }
 .money-cell .yen { color: var(--text-dim); font-size: var(--fs-12); }

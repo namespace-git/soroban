@@ -767,6 +767,31 @@ describe('db（:memory:）', () => {
     }
   })
 
+  it('updateShopAccount / deleteShopAccount：改名・種別変更・無効化、仕入の有無で削除の可否が変わる', () => {
+    db.updateShopAccount(shopId, { name: 'メロジョイA改', kind: 'tiktok', is_active: 0 })
+    const updated = db.listShopAccounts().find(a => a.id === shopId)!
+    expect(updated.name).toBe('メロジョイA改')
+    expect(updated.kind).toBe('tiktok')
+    expect(updated.is_active).toBe(0)
+
+    // is_active に関係なく listShopAccounts は全件返す
+    expect(db.listShopAccounts().some(a => a.id === shopId)).toBe(true)
+
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-01',
+      shipping_fee: 0,
+      lines: [{ name: '仕入あり', unit_price: 1000, quantity: 1 }],
+    })
+    expect(() => db.deleteShopAccount(shopId)).toThrow('この仕入先は仕入で使われています。無効にしてください')
+    expect(db.listShopAccounts().some(a => a.id === shopId)).toBe(true)
+
+    // 仕入の無いアカウントは消せる
+    const otherId = db.createShopAccount('仕入なしアカウント')
+    db.deleteShopAccount(otherId)
+    expect(db.listShopAccounts().some(a => a.id === otherId)).toBe(false)
+  })
+
   it('resetData：仕入・販売・紐付け・runを消す。マスタ（shop_account/shipping_method/setting）は残す', () => {
     db.createPurchase({
       shop_account_id: shopId,

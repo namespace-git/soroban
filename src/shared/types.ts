@@ -380,6 +380,9 @@ export interface SorobanApi {
   // マスタ
   listShopAccounts(): Promise<ShopAccount[]>
   createShopAccount(name: string, kind?: ShopAccountKind): Promise<string>
+  updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number }): Promise<void>
+  /** 仕入で使われていれば例外（消せない）。使われていなければ削除。ログイン用プロファイルも消す */
+  deleteShopAccount(id: string): Promise<void>
   listShippingMethods(): Promise<ShippingMethod[]>
   saveShippingMethod(m: Partial<ShippingMethod> & { name: string; fee: number }): Promise<void>
   deleteShippingMethod(id: string): Promise<void>

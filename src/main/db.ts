@@ -1220,6 +1220,33 @@ export function createShopAccount(name: string, kind: ShopAccountKind = 'other')
   return id
 }
 
+export function updateShopAccount(
+  id: string,
+  patch: { name?: string; kind?: ShopAccountKind; is_active?: number },
+): void {
+  const sets: string[] = []
+  const vals: unknown[] = []
+  const put = (col: string, v: unknown) => { sets.push(`${col} = ?`); vals.push(v) }
+
+  if (patch.name !== undefined) put('name', patch.name)
+  if (patch.kind !== undefined) put('kind', patch.kind)
+  if (patch.is_active !== undefined) put('is_active', patch.is_active)
+  if (sets.length === 0) return
+
+  vals.push(id)
+  db.prepare(`UPDATE shop_account SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
+}
+
+/** 仕入で使われていたら消させない（無効化を促す）。無ければ物理削除 */
+export function deleteShopAccount(id: string): void {
+  const used = db.prepare('SELECT COUNT(*) AS c FROM purchase WHERE shop_account_id = ?')
+    .get(id) as { c: number }
+  if (used.c > 0) {
+    throw new Error('この仕入先は仕入で使われています。無効にしてください')
+  }
+  db.prepare('DELETE FROM shop_account WHERE id = ?').run(id)
+}
+
 export function listShippingMethods(): ShippingMethod[] {
   return db.prepare(
     'SELECT * FROM shipping_method WHERE is_active = 1 ORDER BY sort_order, name',

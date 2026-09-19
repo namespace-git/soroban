@@ -1280,6 +1280,24 @@ const api: SorobanApi = {
     return wait(id)
   },
 
+  async updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number }) {
+    const account = shopAccounts.find(s => s.id === id)
+    if (!account) throw new Error('仕入先が見つかりません')
+    if (patch.name !== undefined) account.name = patch.name
+    if (patch.kind !== undefined) account.kind = patch.kind
+    if (patch.is_active !== undefined) account.is_active = patch.is_active
+    return wait(undefined)
+  },
+
+  async deleteShopAccount(id: string) {
+    const used = purchases.some(p => p.shop_account_id === id)
+    if (used) {
+      throw new Error('この仕入先は仕入で使われています。無効にしてください')
+    }
+    shopAccounts.splice(0, shopAccounts.length, ...shopAccounts.filter(s => s.id !== id))
+    return wait(undefined)
+  },
+
   async listShippingMethods() {
     return wait(shippingMethods.slice().sort((a, b) => a.sort_order - b.sort_order))
   },

@@ -92,6 +92,11 @@ function registerIpc(): void {
 
   handle('listShopAccounts', () => db.listShopAccounts())
   handle('createShopAccount', (name, kind) => db.createShopAccount(name, kind))
+  handle('updateShopAccount', (id, patch) => db.updateShopAccount(id, patch))
+  handle('deleteShopAccount', async (id) => {
+    db.deleteShopAccount(id)
+    await collectorMellojoy.clearShopSession(id)
+  })
   handle('listShippingMethods', () => db.listShippingMethods())
   handle('saveShippingMethod', (m) => db.saveShippingMethod(m))
   handle('deleteShippingMethod', (id) => db.deleteShippingMethod(id))

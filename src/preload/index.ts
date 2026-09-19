@@ -49,6 +49,8 @@ const api: SorobanApi = {
 
   listShopAccounts: invoke('listShopAccounts'),
   createShopAccount: invoke('createShopAccount'),
+  updateShopAccount: invoke('updateShopAccount'),
+  deleteShopAccount: invoke('deleteShopAccount'),
   listShippingMethods: invoke('listShippingMethods'),
   saveShippingMethod: invoke('saveShippingMethod'),
   deleteShippingMethod: invoke('deleteShippingMethod'),
