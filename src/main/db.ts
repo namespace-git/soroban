@@ -8,12 +8,13 @@ import { allocate, calcFee, splitEvenly } from './money'
 import { extractCode, extractCodes, extractMaterial } from './code'
 import { thisMonthLocal, todayLocal } from '../shared/date'
 import type {
-  AllocMethod, DashboardStats, Fulfillment, InventoryItem, InventoryPatch, InventoryStatus,
-  ItemTimeline, LinkSource, Listing, ListingStatus, Material, MonthlySummary, ProductDetail,
-  ProductMonthPoint, ProductSummary, PurchaseDetail, PurchaseDraftInput, PurchaseInput,
-  PurchaseLine, PurchaseLineInput, PurchaseStatus, PurchaseSummary, SaleFilter, SaleInput,
-  SaleKind, SalePatch, SaleProfit, SaleTotals, ShippingMethod, ShopAccount, ShopAccountKind, Tag,
-  TimelineEvent, VariantSummary, CollectorRun, RunStatus, CollectorSource,
+  AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, Fulfillment, InventoryItem,
+  InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus, Material,
+  MonthlySummary, ProductDetail, ProductMonthPoint, ProductSummary, PurchaseDetail,
+  PurchaseDraftInput, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
+  PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleTotals,
+  ShippingMethod, ShopAccount, ShopAccountKind, Tag, TimelineEvent, VariantSummary, CollectorRun,
+  RunStatus, CollectorSource,
 } from '../shared/types'
 
 // ============================================================
@@ -177,6 +178,7 @@ function rebuildInventoryItemForSplit(): void {
     // inventory_tag も inventory_item を参照する外部キーを持つため、存在するなら
     // 先に落としておく（version<3 の段階で作り直される想定。通常は存在しない）
     db.exec(`
+      DROP VIEW IF EXISTS sale_line_share;
       DROP VIEW IF EXISTS sale_profit;
       DROP VIEW IF EXISTS monthly_summary;
       DROP VIEW IF EXISTS inventory_view;
@@ -285,6 +287,7 @@ function rebuildSaleLineForListingSource(): void {
   db.pragma('foreign_keys = OFF')
   const tx = db.transaction(() => {
     db.exec(`
+      DROP VIEW IF EXISTS sale_line_share;
       DROP VIEW IF EXISTS sale_profit;
       DROP VIEW IF EXISTS monthly_summary;
       DROP VIEW IF EXISTS inventory_view;
@@ -531,6 +534,24 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '9')
          ON CONFLICT(key) DO UPDATE SET value = '9'`,
+    ).run()
+  }
+
+  if (version < 10) {
+    // 期間費用（R-05）。auto=1 は振込手数料の自動計上（月1件）。
+    // expense_auto_month は「その月に自動計上を検討したか」の記録。
+    // auto=1 の行を人が消しても、この記録が残る限り再作成しない
+    addColumnIfMissing('expense', 'auto', 'INTEGER NOT NULL DEFAULT 0')
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS expense_auto_month (
+        month      TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '10')
+         ON CONFLICT(key) DO UPDATE SET value = '10'`,
     ).run()
   }
 
@@ -902,7 +923,22 @@ export function deletePurchase(id: string): void {
   if (sold.c > 0) {
     throw new Error(`この仕入には販売済みの在庫が${sold.c}点あります。先に紐付けを解除してください`)
   }
-  db.prepare('DELETE FROM purchase WHERE id = ?').run(id)
+
+  // 出品への引き当て（listing_line）は inventory_item への外部キーに ON DELETE が
+  // 無いため、在庫より先に purchase を消すと FK 違反になる。先に引き当てだけ外す
+  // （出品自体は残り、未引き当てに戻る。listing.status は変えない）
+  const tx = db.transaction(() => {
+    db.prepare(`
+      DELETE FROM listing_line
+      WHERE inventory_item_id IN (
+        SELECT i.id FROM inventory_item i
+        JOIN purchase_line pl ON pl.id = i.purchase_line_id
+        WHERE pl.purchase_id = ?
+      )
+    `).run(id)
+    db.prepare('DELETE FROM purchase WHERE id = ?').run(id)
+  })
+  tx()
 }
 
 // ============================================================
@@ -1662,10 +1698,12 @@ export function endListing(mercariItemId: string): void {
 }
 
 /**
- * 新しく取り込んだ販売の mercari_item_id と同じ出品があり、引き当て（listing_line）が
- * あれば、それをそのまま sale_line（link_source='listing'）へ移す。出品は sold にし、
- * listing_line は消す（人の決定をそのまま引き継ぐ。型番一致より優先）。
- * 出品が無い・引き当てが無ければ何もせず false を返す（呼び出し側が型番FIFOにフォールバック）。
+ * 新しく取り込んだ販売の mercari_item_id と同じ出品があれば、その出品を sold にする
+ * （引き当ての有無に関わらず。売れた以上、出品タブに active のまま残さない）。
+ * 引き当て（listing_line）があれば、それをそのまま sale_line（link_source='listing'）へ移す
+ * （人の決定をそのまま引き継ぐ。型番一致より優先）。
+ * 出品が無ければ何もせず false。引き当てが無かった（sale_line へ引き継げなかった）ときも
+ * false を返す（呼び出し側が型番FIFOにフォールバック。出品を sold にする処理自体はここで完了済み）。
  */
 function takeOverListing(saleId: string, mercariItemId: string | null): boolean {
   if (!mercariItemId) return false
@@ -1677,19 +1715,22 @@ function takeOverListing(saleId: string, mercariItemId: string | null): boolean 
 
   const lines = db.prepare('SELECT inventory_item_id FROM listing_line WHERE listing_id = ?')
     .all(mercariItemId) as Array<{ inventory_item_id: string }>
-  if (lines.length === 0) return false
 
-  const insLine = db.prepare(
-    `INSERT INTO sale_line (id, sale_id, inventory_item_id, link_source) VALUES (?, ?, ?, 'listing')`,
-  )
-  for (const l of lines) insLine.run(randomUUID(), saleId, l.inventory_item_id)
+  const tx = db.transaction(() => {
+    if (lines.length > 0) {
+      const insLine = db.prepare(
+        `INSERT INTO sale_line (id, sale_id, inventory_item_id, link_source) VALUES (?, ?, ?, 'listing')`,
+      )
+      for (const l of lines) insLine.run(randomUUID(), saleId, l.inventory_item_id)
+      db.prepare('DELETE FROM listing_line WHERE listing_id = ?').run(mercariItemId)
+    }
+    db.prepare(
+      `UPDATE listing SET status = 'sold', updated_at = datetime('now') WHERE mercari_item_id = ?`,
+    ).run(mercariItemId)
+  })
+  tx()
 
-  db.prepare('DELETE FROM listing_line WHERE listing_id = ?').run(mercariItemId)
-  db.prepare(
-    `UPDATE listing SET status = 'sold', updated_at = datetime('now') WHERE mercari_item_id = ?`,
-  ).run(mercariItemId)
-
-  return true
+  return lines.length > 0
 }
 
 /** サムネイルをまだ持っていない出品（mercari_item_id）を返す */
@@ -1819,10 +1860,151 @@ export function disposeInventory(
 // 集計
 // ============================================================
 
+/**
+ * 転売の販売がある月それぞれについて、振込手数料を expense に自動計上する（月1件）。
+ * 既に expense_auto_month にその月の記録があれば何もしない（人が自動行を消しても、
+ * その月にはもう作らない。設定 transfer_fee を後から変えても、既に作った月は動かさない）。
+ * 設定が 0 以下のときは expense は作らないが、expense_auto_month には記録する
+ * （後から設定を上げても過去月には遡って作らないため）。
+ *
+ * 自動の振込手数料は「転売の販売がある月にだけ存在する」。区分変更（転売→私物）などで
+ * その月の転売の販売が0件になったら、自動行（auto=1）と expense_auto_month の記録を消す
+ * （人が入れた手動の費用は残す）。転売の販売が再び入れば、その時点でまた作り直す。
+ */
+function ensureTransferFees(): void {
+  const resaleMonths = new Set(
+    (db.prepare(
+      `SELECT DISTINCT substr(sold_at, 1, 7) AS month FROM sale WHERE kind = 'resale'`,
+    ).all() as Array<{ month: string }>).map(r => r.month),
+  )
+  const trackedMonths = (db.prepare('SELECT month FROM expense_auto_month').all() as
+    Array<{ month: string }>).map(r => r.month)
+
+  const transferFee = setting('transfer_fee', 200)
+  const untrack = db.prepare('DELETE FROM expense_auto_month WHERE month = ?')
+  const deleteAutoExpense = db.prepare(
+    `DELETE FROM expense WHERE auto = 1 AND substr(occurred_at, 1, 7) = ?`,
+  )
+  const markDone = db.prepare(`INSERT INTO expense_auto_month (month) VALUES (?)`)
+  const insExpense = db.prepare(`
+    INSERT INTO expense (id, occurred_at, category, amount, note, auto)
+    VALUES (?, ?, 'transfer_fee', ?, '振込手数料（自動）', 1)
+  `)
+  const lastSaleDate = db.prepare(
+    `SELECT MAX(sold_at) AS d FROM sale WHERE kind = 'resale' AND substr(sold_at, 1, 7) = ?`,
+  )
+
+  const tx = db.transaction(() => {
+    // 転売の販売が0件になった月：自動行を消し、記録も消す（手動の費用は残す）
+    for (const month of trackedMonths) {
+      if (resaleMonths.has(month)) continue
+      deleteAutoExpense.run(month)
+      untrack.run(month)
+    }
+
+    // まだ記録していない、転売の販売がある月：自動計上する
+    for (const month of resaleMonths) {
+      if (trackedMonths.includes(month)) continue
+
+      if (transferFee > 0) {
+        const row = lastSaleDate.get(month) as { d: string | null }
+        // その月に転売の販売がある月だけをここに集めているので d は必ず取れる
+        const occurredAt = row.d ?? `${month}-28`
+        insExpense.run(randomUUID(), occurredAt, transferFee)
+      }
+      markDone.run(month)
+    }
+  })
+  tx()
+}
+
 export function listMonthly(): MonthlySummary[] {
-  return db.prepare(
+  ensureTransferFees()
+
+  const rows = db.prepare(
     `SELECT * FROM monthly_summary ORDER BY month DESC, kind`,
-  ).all() as MonthlySummary[]
+  ).all() as Array<Omit<MonthlySummary, 'unconfirmed_shipping' | 'expense_total' | 'net_profit'>>
+
+  // 送料未入力の件数（月×kind）
+  const unconfirmedRows = db.prepare(`
+    SELECT substr(sold_at, 1, 7) AS month, kind, COUNT(*) AS c
+    FROM sale WHERE is_shipping_confirmed = 0
+    GROUP BY substr(sold_at, 1, 7), kind
+  `).all() as Array<{ month: string; kind: SaleKind; c: number }>
+  const unconfirmedMap = new Map(unconfirmedRows.map(r => [`${r.month}:${r.kind}`, r.c]))
+
+  // 期間費用の月合計。kind='resale' の行にだけ乗せる（私物は税務上別扱い）
+  const expenseRows = db.prepare(`
+    SELECT substr(occurred_at, 1, 7) AS month, COALESCE(SUM(amount), 0) AS total
+    FROM expense GROUP BY substr(occurred_at, 1, 7)
+  `).all() as Array<{ month: string; total: number }>
+  const expenseMap = new Map(expenseRows.map(r => [r.month, r.total]))
+
+  const result: MonthlySummary[] = rows.map(r => {
+    const expense_total = r.kind === 'resale' ? (expenseMap.get(r.month) ?? 0) : 0
+    return {
+      ...r,
+      unconfirmed_shipping: unconfirmedMap.get(`${r.month}:${r.kind}`) ?? 0,
+      expense_total,
+      net_profit: r.gross_profit - expense_total,
+    }
+  })
+
+  // 売上がまだ無いが費用だけある月：resale の行が消えてしまうと期間費用も画面から消えるため、
+  // 0件のresale行を補って出す
+  const resaleMonths = new Set(result.filter(r => r.kind === 'resale').map(r => r.month))
+  for (const [month, total] of expenseMap) {
+    if (resaleMonths.has(month)) continue
+    result.push({
+      month, kind: 'resale',
+      sales_count: 0, revenue: 0, total_fee: 0, total_shipping: 0, total_packaging: 0,
+      total_cost: 0, gross_profit: 0,
+      unconfirmed_shipping: 0, expense_total: total, net_profit: -total,
+    })
+  }
+
+  result.sort((a, b) => {
+    if (a.month !== b.month) return a.month < b.month ? 1 : -1 // month DESC
+    return a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0 // kind ASC（personal, resale の順）
+  })
+  return result
+}
+
+// ------------------------------------------------------------
+// 期間費用（振込手数料・梱包材の買い足しなど、販売1件に紐付かない費用）
+// ------------------------------------------------------------
+
+const EXPENSE_CATEGORIES: ExpenseCategory[] = ['transfer_fee', 'supplies', 'other']
+
+/** month は YYYY-MM。省略で全部。新しい順 */
+export function listExpenses(month?: string): Expense[] {
+  if (month) {
+    return db.prepare(`
+      SELECT id, occurred_at, category, amount, note, auto FROM expense
+      WHERE substr(occurred_at, 1, 7) = ?
+      ORDER BY occurred_at DESC, created_at DESC
+    `).all(month) as Expense[]
+  }
+  return db.prepare(`
+    SELECT id, occurred_at, category, amount, note, auto FROM expense
+    ORDER BY occurred_at DESC, created_at DESC
+  `).all() as Expense[]
+}
+
+export function createExpense(input: ExpenseInput): string {
+  if (!EXPENSE_CATEGORIES.includes(input.category)) {
+    throw new Error(`不正な費用区分です: ${input.category}`)
+  }
+  const id = randomUUID()
+  db.prepare(`
+    INSERT INTO expense (id, occurred_at, category, amount, note, auto)
+    VALUES (?, ?, ?, ?, ?, 0)
+  `).run(id, input.occurred_at, input.category, input.amount, input.note ?? null)
+  return id
+}
+
+export function deleteExpense(id: string): void {
+  db.prepare('DELETE FROM expense WHERE id = ?').run(id)
 }
 
 export function listVariantSummary(
@@ -1926,13 +2108,15 @@ export function getProduct(modelCode: string): ProductDetail | null {
     WHERE model_code = ? AND status != 'split'
   `).all(modelCode) as Array<{ acquired_at: string; landed_cost: number }>
 
+  // 1点あたりの売上・粗利は sale_line_share の整数按分をそのまま使う（端数は最終行に寄っている）
   const soldRows = db.prepare(`
-    SELECT sp.sold_at, sp.price, sp.gross_profit, sp.item_count
+    SELECT sp.sold_at, sls.price_share AS price, sls.profit_share AS profit
     FROM inventory_item i
-    JOIN sale_line   sl ON sl.inventory_item_id = i.id
-    JOIN sale_profit sp ON sp.id = sl.sale_id
+    JOIN sale_line       sl  ON sl.inventory_item_id = i.id
+    JOIN sale_profit     sp  ON sp.id = sl.sale_id
+    JOIN sale_line_share sls ON sls.inventory_item_id = i.id
     WHERE i.model_code = ?
-  `).all(modelCode) as Array<{ sold_at: string; price: number; gross_profit: number; item_count: number }>
+  `).all(modelCode) as Array<{ sold_at: string; price: number; profit: number }>
 
   const disposedRows = db.prepare(`
     SELECT disposed_at
@@ -1954,8 +2138,8 @@ export function getProduct(modelCode: string): ProductDetail | null {
     const m = r.sold_at.slice(0, 7)
     const cur = soldByMonth.get(m) ?? { sold: 0, sales_amount: 0, profit: 0 }
     cur.sold += 1
-    cur.sales_amount += Math.round(r.price / r.item_count)
-    cur.profit += Math.round(r.gross_profit / r.item_count)
+    cur.sales_amount += r.price
+    cur.profit += r.profit
     soldByMonth.set(m, cur)
   }
 
@@ -2123,9 +2307,12 @@ export function getItemTimeline(inventoryItemId: string): ItemTimeline | null {
   if (sale) {
     const detailParts = [yenText(sale.price)]
     if (sale.item_count > 1) {
-      detailParts.push(
-        `（まとめ売り ${sale.item_count} 点、1 点あたり ${yenText(Math.floor(sale.price / sale.item_count))}）`,
-      )
+      // この在庫1点あたりの取り分。sale_line_share の整数按分（端数は最終行）を使う
+      const share = db.prepare(
+        'SELECT price_share FROM sale_line_share WHERE inventory_item_id = ? AND sale_id = ?',
+      ).get(inventoryItemId, sale.id) as { price_share: number } | undefined
+      const perItem = share?.price_share ?? Math.floor(sale.price / sale.item_count)
+      detailParts.push(`（まとめ売り ${sale.item_count} 点、1 点あたり ${yenText(perItem)}）`)
     }
     if (sale.buyer) detailParts.push(`買い手：${sale.buyer}`)
 
@@ -2638,6 +2825,7 @@ export function resetData(): void {
       DELETE FROM purchase;
       DELETE FROM collector_run;
       DELETE FROM expense;
+      DELETE FROM expense_auto_month;
     `)
   })
   tx()

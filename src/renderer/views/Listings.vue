@@ -21,8 +21,8 @@ const STATUS_FILTER_MAP: Record<StatusFilterKey, ListingStatus[] | undefined> = 
 const STATUS_LABEL: Record<ListingStatus, string> = {
   active: '出品中', suspended: '公開停止中', sold: '売れた', ended: '取り下げ',
 }
-const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok'> = {
-  active: 'brand', suspended: 'neutral', sold: 'ok', ended: 'neutral',
+const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = {
+  active: 'info', suspended: 'neutral', sold: 'ok', ended: 'neutral',
 }
 
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
@@ -162,7 +162,7 @@ async function endListing(l: Listing) {
               <th class="num col-amt">出品価格</th>
               <th class="col-status">状態</th>
               <th class="col-reserved">引き当てた在庫</th>
-              <th class="num col-amt">見込み粗利</th>
+              <th class="num col-amt">見込み粗利（送料前）</th>
               <th class="col-date">初めて見た日</th>
               <th class="col-actions"></th>
             </tr>
@@ -203,16 +203,20 @@ async function endListing(l: Listing) {
               </td>
 
               <td class="num">
-                <strong v-if="l.expected_profit != null" :class="l.expected_profit >= 0 ? 'profit' : 'loss'">
-                  {{ yen(l.expected_profit) }}
-                </strong>
-                <span v-else class="faint">—</span>
+                <Transition name="settle" mode="out-in">
+                  <strong
+                    v-if="l.expected_profit != null"
+                    :key="'c' + l.expected_profit"
+                    :class="l.expected_profit >= 0 ? 'profit' : 'loss'"
+                  >{{ yen(l.expected_profit) }}</strong>
+                  <span v-else key="u" class="faint">—</span>
+                </Transition>
               </td>
 
               <td class="faint nowrap">{{ l.first_seen_at }}</td>
 
               <td class="actions">
-                <button class="sm" @click="openAllocate(l)">
+                <button class="sm" :class="l.items.length ? 'ghost' : 'link-btn'" @click="openAllocate(l)">
                   <Icon name="link" :size="14" /> {{ l.items.length ? '追加' : '引き当て' }}
                 </button>
                 <button
@@ -243,7 +247,8 @@ async function endListing(l: Listing) {
 </template>
 
 <style scoped>
-.search-hint { font-size: var(--fs-12); }
+.toolbar { flex-wrap: wrap; }
+label.row { white-space: nowrap; }
 
 .search-field {
   display: flex;
@@ -254,17 +259,20 @@ async function endListing(l: Listing) {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   color: var(--text-faint);
+  flex: 1 1 200px;
+  min-width: 0;
 }
 .search-field input {
   flex: 1;
-  width: 220px;
+  width: auto;
+  min-width: 0;
   border: none;
   padding: 0;
   height: auto;
   background: transparent;
 }
 
-.table-panel { padding: 0; overflow: hidden; }
+.table-panel { padding: 0; overflow-x: auto; }
 .table-panel table { table-layout: auto; }
 .table-panel td { padding: 8px 12px; }
 
@@ -275,6 +283,17 @@ async function endListing(l: Listing) {
 .col-reserved { width: 200px; }
 .col-date     { width: 96px; }
 .col-actions  { width: 168px; }
+
+/* 1099px 以下：狭幅で列を詰めて右側の列（状態・引き当て・日付・操作）が
+   overflow で隠れないようにする。それでも収まらない分は表の中だけ横スクロールする */
+@media (max-width: 1099px) {
+  .col-thumb    { width: 48px; }
+  .col-amt      { width: 80px; }
+  .col-status   { width: 96px; }
+  .col-reserved { width: 160px; }
+  .col-date     { width: 72px; }
+  .col-actions  { width: 140px; }
+}
 
 .nowrap { white-space: nowrap; }
 

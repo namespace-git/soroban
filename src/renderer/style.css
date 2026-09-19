@@ -127,6 +127,14 @@ input, textarea { caret-color: var(--accent); }
 .dim    { color: var(--text-dim); }
 .faint  { color: var(--text-faint); }
 
+/* --- 粗利確定の署名アニメーション --- */
+.settle-enter-from  { opacity: 0; transform: translateY(4px); }
+.settle-enter-active {
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.settle-leave-active { transition: opacity 80ms; }
+.settle-leave-to     { opacity: 0; }
+
 /* --- レイアウト --- */
 
 .page {
@@ -323,6 +331,16 @@ button.icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+/* 行内の「紐付け」「引き当て」。要対応の橙を載せる唯一のボタン（.sm と併用） */
+button.link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
 }
 
 /* --- 入力 --- */

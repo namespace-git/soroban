@@ -438,6 +438,40 @@ export interface MonthlySummary {
   total_packaging: number
   total_cost: number
   gross_profit: number
+  /** 送料が未入力（is_shipping_confirmed=0）の販売数。その分は送料 0 で集計されているので画面で注記する */
+  unconfirmed_shipping: number
+  /**
+   * 期間費用（expense テーブル、その月の合計）。kind='resale' の行にだけ載せ、私物の行は 0。
+   * 振込手数料は「月 1 回の振込」前提で、転売の販売がある月に 1 件だけ自動で expense に作られる
+   * （作った時点の設定値で固定。後から設定を変えても過去月は動かない）
+   */
+  expense_total: number
+  /** 純利益 = 粗利 − 期間費用 */
+  net_profit: number
+}
+
+// ------------------------------------------------------------
+// 期間費用（振込手数料・梱包材の買い足しなど、販売 1 件に紐付かない費用）
+// ------------------------------------------------------------
+
+export type ExpenseCategory = 'transfer_fee' | 'supplies' | 'other'
+
+export interface Expense {
+  id: string
+  /** YYYY-MM-DD */
+  occurred_at: string
+  category: ExpenseCategory
+  amount: number
+  note: string | null
+  /** 1 なら振込手数料の自動計上（月 1 件）。消すと、その月にはもう自動で作らない */
+  auto: number
+}
+
+export interface ExpenseInput {
+  occurred_at: string
+  category: ExpenseCategory
+  amount: number
+  note?: string | null
 }
 
 export interface DashboardStats {
@@ -523,6 +557,12 @@ export interface SorobanApi {
 
   // 集計
   listMonthly(): Promise<MonthlySummary[]>
+
+  // 期間費用
+  /** month は YYYY-MM。省略で全部。新しい順 */
+  listExpenses(month?: string): Promise<Expense[]>
+  createExpense(input: ExpenseInput): Promise<string>
+  deleteExpense(id: string): Promise<void>
 
   // タグ
   listTags(): Promise<Tag[]>

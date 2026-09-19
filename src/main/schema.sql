@@ -323,10 +323,20 @@ CREATE TABLE IF NOT EXISTS expense (
   category    TEXT NOT NULL,   -- transfer_fee | supplies | other
   amount      INTEGER NOT NULL,
   note        TEXT,
+  -- 1 = 振込手数料の自動計上（月1件）。人が消しても、その月にはもう自動で作らない
+  -- （expense_auto_month に記録が残るため）
+  auto        INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_expense_date ON expense(occurred_at);
+
+-- 振込手数料を自動計上した月の記録。auto=1の行を人が消しても、この記録が残る限り
+-- その月にはもう自動で作り直さない（手数料設定を後から変えても過去月は動かさない、と同じ思想）
+CREATE TABLE IF NOT EXISTS expense_auto_month (
+  month      TEXT PRIMARY KEY, -- YYYY-MM
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- ============================================================
 -- 収集の実行記録
@@ -485,18 +495,56 @@ LEFT JOIN sale             ON sale.id = sl.sale_id
 LEFT JOIN listing_line  ll ON ll.inventory_item_id = i.id
 LEFT JOIN listing       lst ON lst.mercari_item_id = ll.listing_id AND lst.status IN ('active','suspended');
 
+-- 1販売の価格・粗利を、紐付けた点数（sale_line）に整数で按分したもの。
+-- まとめ売り（1販売に複数在庫）のとき、1点あたりの売上・粗利を「商品ページ」
+-- 「在庫の履歴」で使う。CLAUDE.md の按分と同じ流儀：
+--   base = floor(合計 / 点数)、余り r（0 <= r < 点数）は「最後の r 行」に +1 する。
+-- 「最後」の順序は sale_line の挿入順（= rowid の昇順）で決める。
+-- created_at は秒精度で同じ販売内の複数行が同時刻になり得るため、順序の決定には使わない
+-- （tie-break に UUID の id を使うと挿入順と無関係になり、テストが再現できなくなる）。
+-- 各行の price_share・profit_share の合計は、必ず sale_profit.price / gross_profit と一致する。
+DROP VIEW IF EXISTS sale_line_share;
+CREATE VIEW sale_line_share AS
+WITH ordered AS (
+  SELECT
+    sl.id                AS sale_line_id,
+    sl.sale_id,
+    sl.inventory_item_id,
+    i.landed_cost         AS cost,
+    sp.item_count,
+    sp.price,
+    sp.gross_profit,
+    ROW_NUMBER() OVER (PARTITION BY sl.sale_id ORDER BY sl.rowid) AS rn,
+    -- 余り（0 <= 余り < item_count）。SQLite の % は負数で C 流の切り捨てになるため
+    -- (x % n + n) % n で正規化してから使う（gross_profit は赤字（負）もあり得る）
+    ((sp.price % sp.item_count) + sp.item_count) % sp.item_count        AS price_rem,
+    ((sp.gross_profit % sp.item_count) + sp.item_count) % sp.item_count AS profit_rem
+  FROM sale_line sl
+  JOIN sale_profit    sp ON sp.id = sl.sale_id
+  JOIN inventory_item i  ON i.id = sl.inventory_item_id
+)
+SELECT
+  sale_line_id,
+  sale_id,
+  inventory_item_id,
+  cost,
+  (price - price_rem) / item_count
+    + CASE WHEN rn > item_count - price_rem THEN 1 ELSE 0 END AS price_share,
+  (gross_profit - profit_rem) / item_count
+    + CASE WHEN rn > item_count - profit_rem THEN 1 ELSE 0 END AS profit_share
+FROM ordered;
+
 -- 型番（バリアント）ごとの実績。ホームの型番ランキングで使う
 DROP VIEW IF EXISTS variant_summary;
 CREATE VIEW variant_summary AS
 WITH linked AS (
-  -- 1販売の価格・粗利を、紐付けた点数で割って1点あたりに直す（まとめ売り対応）
+  -- sale_line_share の整数按分をそのまま使う（1点あたりの売上・粗利。まとめ売り対応）
   SELECT
     i.model_code,
-    CAST(sp.price AS REAL) / sp.item_count        AS price_share,
-    CAST(sp.gross_profit AS REAL) / sp.item_count AS profit_share
+    sls.price_share  AS price_share,
+    sls.profit_share AS profit_share
   FROM inventory_item i
-  JOIN sale_line   sl ON sl.inventory_item_id = i.id
-  JOIN sale_profit sp ON sp.id = sl.sale_id
+  JOIN sale_line_share sls ON sls.inventory_item_id = i.id
   WHERE i.model_code IS NOT NULL
 ),
 agg AS (

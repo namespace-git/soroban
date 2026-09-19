@@ -47,12 +47,15 @@ describe('ペルソナ17：月をまたぐ人', () => {
     expect(aug).toMatchObject({
       sales_count: 2, revenue: 6000, total_fee: 600, total_shipping: 400,
       total_packaging: 0, total_cost: 0, gross_profit: 5000, // 3200 + 1800
+      unconfirmed_shipping: 1, // D の分。08月の粗利が仮の値を含むことがこの件数で分かる
     })
+    expect(julResale.unconfirmed_shipping).toBe(0)
 
     const sep = monthly.find(m => m.month === '2026-09' && m.kind === 'resale')!
     expect(sep).toMatchObject({
       sales_count: 1, revenue: 5000, total_fee: 500, total_shipping: 500,
       total_packaging: 0, total_cost: 0, gross_profit: 4000,
+      unconfirmed_shipping: 0,
     })
 
     // 全部足した合計が saleTotals() と一致する
@@ -77,9 +80,13 @@ describe('ペルソナ17：月をまたぐ人', () => {
   })
 })
 
-// 怪しいと思った点（実装を読んで確認したこと。db.tsは直していない）：
+// 怪しいと思った点（実装を読んで確認したこと）：
 // sale_profit ビュー・monthly_summary は is_shipping_confirmed を見ない。
 // 送料未入力（D）の shipping_fee は既定0円のまま合計・粗利に混ざり込み、
 // 08月の粗利は「本当は送料が引かれる前」の仮の値が確定値と区別なく合算される。
 // listSales({ onlyPending: true }) で個別には分かるが、listMonthly/saleTotals の
-// 数字だけを見た人には「未確定を含む」ことが伝わらない。UI側で注記が要るかもしれない。
+// 数字だけを見た人には「未確定を含む」ことが伝わらない。
+// → R-05（期間費用）で MonthlySummary.unconfirmed_shipping を足したので、
+// listMonthly() の戻り値だけでも「その月は◯件が未確定」と分かるようになった
+// （上のテストで08月=1件・07月/09月=0件を確認）。それでも粗利の数字自体は
+// 送料0円換算のままなので、UI側で件数を目立たせる注記は引き続き要る。

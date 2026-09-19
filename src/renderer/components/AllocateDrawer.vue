@@ -27,8 +27,8 @@ const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleStr
 const STATUS_LABEL: Record<ListingStatus, string> = {
   active: '出品中', suspended: '公開停止中', sold: '売れた', ended: '取り下げ',
 }
-const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok'> = {
-  active: 'brand', suspended: 'neutral', sold: 'ok', ended: 'neutral',
+const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = {
+  active: 'info', suspended: 'neutral', sold: 'ok', ended: 'neutral',
 }
 
 // 実際の手数料計算（src/main/money.ts の calcFee と同じ：切り捨て）。
@@ -140,9 +140,7 @@ function placeholderChar(): string {
         <StatusChip v-if="it.model_code" tone="neutral" :label="it.model_code" />
         <span class="grow">{{ it.name }}</span>
         <span class="num">{{ yen(it.landed_cost) }}</span>
-        <button class="icon ghost" aria-label="引き当てを解除" @click="unreserve(it.id)">
-          <Icon name="close" :size="14" />
-        </button>
+        <button class="sm ghost" @click="unreserve(it.id)">解除</button>
       </div>
     </div>
 
@@ -170,7 +168,7 @@ function placeholderChar(): string {
           <span class="faint">{{ totalCount }}点</span>
           <span class="num">原価 {{ yen(totalCost) }}</span>
           <strong class="num" :class="previewProfit >= 0 ? 'profit' : 'loss'">
-            見込み粗利 {{ yen(previewProfit) }}
+            見込み粗利（送料・梱包前） {{ yen(previewProfit) }}
           </strong>
         </div>
         <button class="primary" :disabled="!picked.size" @click="confirmReserve">

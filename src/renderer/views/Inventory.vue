@@ -319,8 +319,6 @@ async function editNote(item: InventoryItem) {
 </template>
 
 <style scoped>
-.search-hint { font-size: var(--fs-12); }
-
 /* 派生タグ（仕入から引き継いだもの）は直接付けたタグより少し薄く見せる */
 .chip-inherited { opacity: .7; }
 

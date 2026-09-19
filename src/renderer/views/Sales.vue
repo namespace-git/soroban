@@ -605,8 +605,6 @@ async function remove(sale: SaleProfit) {
 }
 .field-wide input { width: 320px; }
 
-.search-hint { font-size: var(--fs-12); }
-
 /* 派生タグ（仕入・在庫から引き継いだもの）は直接付けたタグより少し薄く見せる */
 .chip-inherited { opacity: .7; }
 
@@ -700,15 +698,6 @@ tr:hover .fade-btn { opacity: 1; }
   .col-ship  { width: 176px; }
 }
 
-.link-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--warn);
-  background: var(--warn-bg);
-  border-color: var(--warn-line);
-}
-
 .cost-cell {
   display: inline-flex;
   flex-direction: column;
@@ -789,12 +778,4 @@ tr:hover .fade-btn { opacity: 1; }
 
 .match-footer { display: flex; align-items: center; gap: 16px; }
 .calc { flex: 1; display: flex; gap: 14px; align-items: baseline; font-size: var(--fs-13); }
-
-/* --- 粗利確定の署名アニメーション --- */
-.settle-enter-from  { opacity: 0; transform: translateY(4px); }
-.settle-enter-active {
-  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
-}
-.settle-leave-active { transition: opacity 80ms; }
-.settle-leave-to     { opacity: 0; }
 </style>

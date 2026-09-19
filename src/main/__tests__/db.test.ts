@@ -1049,7 +1049,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('9')
+      expect(db.getSettings().schema_version).toBe('10')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1170,7 +1170,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('9')
+      expect(db.getSettings().schema_version).toBe('10')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1636,6 +1636,60 @@ describe('db（:memory:）', () => {
       expect(sold?.status).toBe('sold')
     })
 
+    it('insertCollected：引き当てが無い出品が売れても出品はsoldになり、販売は型番FIFOで自動紐付けされる', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'クリームわん【Z085-1】', unit_price: 1000, quantity: 1 }],
+      })
+      db.upsertListings([
+        { mercariItemId: 'mNoAlloc', title: 'クリームわん【Z085-1】', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      // reserveInventoryはしない（未引き当てのまま出品が売れるケース）
+
+      db.insertCollected([
+        { mercariItemId: 'mNoAlloc', title: 'クリームわん【Z085-1】', price: 3000, soldAt: '2026-01-10' },
+      ])
+
+      // 引き当てが無くても、売れた以上は出品タブ（active/suspended）に残さない
+      expect(db.listListings().find(l => l.mercari_item_id === 'mNoAlloc')).toBeUndefined()
+      const sold = db.listListings({ status: ['sold'] }).find(l => l.mercari_item_id === 'mNoAlloc')
+      expect(sold?.status).toBe('sold')
+
+      // takeOverListingが引き継げなかった（引き当て無し）ので、型番FIFOの自動確定にフォールバックする
+      const sale = db.listSales().find(s => s.mercari_item_id === 'mNoAlloc')!
+      expect(sale.unmatched).toBe(0)
+      expect(sale.auto_linked).toBe(1)
+      expect(sale.cost).toBe(1000)
+    })
+
+    it('deletePurchase：出品に引き当て中の在庫を含む仕入も削除できる（引き当ては外れ、出品は未引き当てに戻る）', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '引き当て中の商品', unit_price: 1000, quantity: 1 }],
+      })
+      const purchaseId = db.listPurchases().find(p => p.first_line_name === '引き当て中の商品')!.id
+      const item = db.listInventory('in_stock').find(i => i.name === '引き当て中の商品')!
+      db.upsertListings([
+        { mercariItemId: 'mDeletePurchase', title: '引き当て中の商品', price: 2000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('mDeletePurchase', [item.id])
+
+      // listing_line にON DELETEが無いためFK違反で失敗していた（修正前）。今は成功する
+      expect(() => db.deletePurchase(purchaseId)).not.toThrow()
+
+      // 出品自体は残るが、未引き当てに戻る（在庫が消えたので）
+      const listing = db.listListings().find(l => l.mercari_item_id === 'mDeletePurchase')!
+      expect(listing.items).toEqual([])
+      expect(
+        db.listListings({ onlyUnallocated: true }).some(l => l.mercari_item_id === 'mDeletePurchase'),
+      ).toBe(true)
+      expect(db.listPurchases().find(p => p.id === purchaseId)).toBeUndefined()
+    })
+
     it('型番FIFOの自動確定は、他の出品に引き当て済みの在庫を候補から除く', () => {
       db.createPurchase({
         shop_account_id: shopId,
@@ -1963,6 +2017,87 @@ describe('db（:memory:）', () => {
 
       const saleBranch2 = db.createSale({ title: '【A035-1】メロージョイ ミニランド', sold_at: '2026-01-10', price: 2000 })
       expect(db.listSales().find(s => s.id === saleBranch2)!.unmatched).toBe(0)
+    })
+  })
+
+  describe('期間費用（R-05）', () => {
+    it('転売の販売がある月に振込手数料が自動計上され、消しても再作成されない。手動費用はresaleの月合計にだけ乗る。設定変更は既に作った月に遡らない', () => {
+      // 2026-01・2026-02にそれぞれ転売1件（未紐付けなのでcost=0。fee=floor(price*0.1)）
+      db.createSale({ title: '費用テスト1月', sold_at: '2026-01-15', price: 2000 })
+      db.createSale({ title: '費用テスト2月', sold_at: '2026-02-10', price: 3000 })
+
+      let monthly = db.listMonthly()
+      const jan = monthly.find(m => m.month === '2026-01' && m.kind === 'resale')!
+      const feb = monthly.find(m => m.month === '2026-02' && m.kind === 'resale')!
+      expect(jan.gross_profit).toBe(2000 - 200) // fee=200, cost=0
+      expect(jan.expense_total).toBe(200) // 既定のtransfer_fee
+      expect(jan.net_profit).toBe(jan.gross_profit - 200)
+      expect(jan.unconfirmed_shipping).toBe(1) // 送料未入力
+      expect(feb.expense_total).toBe(200)
+      expect(feb.net_profit).toBe(feb.gross_profit - 200)
+
+      const janExpenses = db.listExpenses('2026-01')
+      expect(janExpenses).toHaveLength(1)
+      expect(janExpenses[0]).toMatchObject({ category: 'transfer_fee', amount: 200, auto: 1 })
+
+      // 自動行を消す→もう一度listMonthlyしても再作成されない
+      db.deleteExpense(janExpenses[0].id)
+      monthly = db.listMonthly()
+      expect(monthly.find(m => m.month === '2026-01' && m.kind === 'resale')!.expense_total).toBe(0)
+      expect(db.listExpenses('2026-01')).toHaveLength(0)
+
+      // 手動の期間費用（supplies）はresaleの月合計に足される
+      db.createExpense({ occurred_at: '2026-01-20', category: 'supplies', amount: 300 })
+      monthly = db.listMonthly()
+      const janWithSupplies = monthly.find(m => m.month === '2026-01' && m.kind === 'resale')!
+      expect(janWithSupplies.expense_total).toBe(300)
+      expect(janWithSupplies.net_profit).toBe(janWithSupplies.gross_profit - 300)
+
+      // 設定を上げても、既に自動計上を検討した月（2月）はそのまま200。新しい月（3月）だけ300になる
+      db.setSetting('transfer_fee', '300')
+      db.createSale({ title: '費用テスト3月', sold_at: '2026-03-05', price: 1000 })
+      monthly = db.listMonthly()
+      expect(monthly.find(m => m.month === '2026-02' && m.kind === 'resale')!.expense_total).toBe(200)
+      expect(monthly.find(m => m.month === '2026-03' && m.kind === 'resale')!.expense_total).toBe(300)
+
+      // 私物の販売がある月に手動の期間費用を計上しても、私物側の行には乗らない（0のまま）。
+      // 転売の売上が無い月でも、期間費用が残っていればresaleの行が0件で出る
+      db.createSale({ title: '私物テスト4月', sold_at: '2026-04-01', price: 1000, kind: 'personal' })
+      db.createExpense({ occurred_at: '2026-04-10', category: 'other', amount: 500 })
+      monthly = db.listMonthly()
+      expect(monthly.find(m => m.month === '2026-04' && m.kind === 'personal')!.expense_total).toBe(0)
+      const resaleApr = monthly.find(m => m.month === '2026-04' && m.kind === 'resale')!
+      expect(resaleApr.sales_count).toBe(0)
+      expect(resaleApr.expense_total).toBe(500)
+      expect(resaleApr.net_profit).toBe(-500)
+    })
+
+    it('createExpense：不正な費用区分はthrow', () => {
+      expect(() => db.createExpense(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { occurred_at: '2026-01-01', category: 'invalid' as any, amount: 100 },
+      )).toThrow()
+    })
+
+    it('区分変更（転売→私物）でその月の転売が0件になったら自動行が消え、resale行も消える。転売に戻すと作り直す', () => {
+      const saleId = db.createSale({ title: '振込手数料テスト', sold_at: '2026-05-10', price: 2000 })
+
+      let monthly = db.listMonthly()
+      expect(monthly.find(m => m.month === '2026-05' && m.kind === 'resale')).toBeDefined()
+      expect(db.listExpenses('2026-05')).toHaveLength(1)
+
+      // 転売→私物：この月の転売の販売が0件になる
+      db.updateSale(saleId, { kind: 'personal' })
+      monthly = db.listMonthly()
+      expect(monthly.find(m => m.month === '2026-05' && m.kind === 'resale')).toBeUndefined()
+      expect(db.listExpenses('2026-05')).toHaveLength(0) // 自動行も消えている
+      expect(monthly.find(m => m.month === '2026-05' && m.kind === 'personal')!.expense_total).toBe(0)
+
+      // 私物→転売に戻すと自動行が作り直される
+      db.updateSale(saleId, { kind: 'resale' })
+      monthly = db.listMonthly()
+      expect(monthly.find(m => m.month === '2026-05' && m.kind === 'resale')).toBeDefined()
+      expect(db.listExpenses('2026-05')).toHaveLength(1)
     })
   })
 })

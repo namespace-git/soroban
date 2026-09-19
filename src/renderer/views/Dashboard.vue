@@ -61,6 +61,7 @@ const runLabel: Record<string, string> = {
             <span class="stat-card-value">{{ yen(stats.thisMonth?.gross_profit ?? 0) }}</span>
             <span class="stat-card-sub">
               売上 {{ yen(stats.thisMonth?.revenue ?? 0) }} ・ 件数 {{ stats.thisMonth?.sales_count ?? 0 }} 件
+              ・ 純利益 {{ yen(stats.thisMonth?.net_profit ?? 0) }}
             </span>
           </div>
 

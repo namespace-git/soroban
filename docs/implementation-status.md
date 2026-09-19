@@ -7,7 +7,7 @@
 
 ## 🚦 いま動いているもの
 
-（なし。出品タブ・仕入タグ・全画面検索の波は 2026-09-20 に完了 → `docs/changelog/2026-09.md`、要件 3-C）
+（なし。2026-09-20 深夜の自走分（期間費用・純利益・按分の整数統一・出品タブの仕上げ）は完了 → `docs/changelog/2026-09.md`）
 
 ---
 
@@ -24,7 +24,6 @@
 
 | ID | 要件 |
 |---|---|
-| R-05 | 振込手数料などの期間費用（`expense` テーブルは済、API・UIが無い） |
 | — | 収集の `scrape()` / `scrapeDetail()` セレクタ検証（実DOMを見ないと直せない） |
 
 ## ユーザー作業待ち
@@ -48,11 +47,6 @@
 
 | WS | 対象ファイル | 内容 |
 |---|---|---|
-| WS-A | `src/main/db.ts` `src/shared/types.ts` `src/preload/index.ts` `src/main/index.ts` | R-05 期間費用: `listExpenses(month?)` / `createExpense` / `deleteExpense`。`monthly_summary` に期間費用を足すか、別ビュー `monthly_expense` にして画面で並べる（**利益の式は変えない**。粗利と純利益を分けて出す） |
-| WS-B | `src/renderer/views/Settings.vue` | 期間費用の入力UI（振込手数料など。日付・区分・金額） |
-| WS-C | `src/renderer/views/Monthly.vue` | 月次に期間費用・純利益の列を追加 |
 | — | `src/main/collector.ts` | `scrape()` のセレクタ検証。**実際にログインした状態の DOM を見ないと直せない**のでユーザー作業が要る |
 | — | 全画面 | 横断検索（1 か所で在庫／出品／売上／仕入をまたぐ）。Codex 提案。各画面の検索が定着してから |
-| — | `db.ts` `Products.vue` | `variant_summary`（合計してから丸め）と `getProduct`（1 点ずつ丸め）で 1 円ずれる（persona-02）。どちらかに揃える |
-| — | `Monthly.vue` | 送料未入力の販売は月次で送料 0 として集計されている（persona-17）。注記を出す |
 | — | `src/renderer/views/{Dashboard,Sales}.vue` ほか | 正の粗利にも「＋」を付けるか（PRODUCT.md は「符号でも読める」と書いているが、現状は負にだけ「−」）。ダークモード（トークンは意味名なので `prefers-color-scheme` 層を足せる）|

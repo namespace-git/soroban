@@ -122,6 +122,10 @@ function registerIpc(): void {
 
   handle('listMonthly', () => db.listMonthly())
 
+  handle('listExpenses', (month) => db.listExpenses(month))
+  handle('createExpense', (input) => db.createExpense(input))
+  handle('deleteExpense', (id) => db.deleteExpense(id))
+
   handle('listTags', () => db.listTags())
   handle('createTag', (name) => db.createTag(name))
   handle('renameTag', (id, name) => db.renameTag(id, name))

@@ -46,20 +46,31 @@ describe('ペルソナ02：まとめ売りの人', () => {
     // 粗利 = 12000 - 1200 - 0 - 0 - 4300 = 6500
     expect(sale.gross_profit).toBe(6500)
 
-    // 商品ページの按分：価格・粗利を点数(3)で割って1点あたりに直したものが月別に積まれる
+    // 商品ページの按分：価格・粗利を紐付けた点数(3)で整数按分したもの（sale_line_share）が月別に積まれる。
+    // 按分の順序は sale_line の挿入順（= linkInventory に渡した配列の順）：
+    //   price 12000 / 3 = 4000 ちょうど（余りなし）→ 3点とも 4000
+    //   gross_profit 6500 / 3 = 2166 余り2 → 余り2は「最後の2行」に+1
+    //     rn1 = xItems[0] → 2166 / rn2 = xItems[1] → 2167 / rn3 = yItems[0] → 2167
+    //   （2166 + 2167 + 2167 = 6500 で sale.gross_profit と一致）
     const month = '2026-03'
     const productX = db.getProduct('X001')!
     const pointX = productX.months.find(m => m.month === month)!
-    // X001は2点紐付いているので、1点あたりの按分値(round(12000/3)=4000, round(6500/3)=2167)が2つ分積まれる
     expect(pointX.sold).toBe(2)
     expect(pointX.sales_amount).toBe(4000 * 2)
-    expect(pointX.profit).toBe(2167 * 2)
+    expect(pointX.profit).toBe(2166 + 2167)
 
     const productY = db.getProduct('Y001')!
     const pointY = productY.months.find(m => m.month === month)!
     expect(pointY.sold).toBe(1)
     expect(pointY.sales_amount).toBe(4000)
     expect(pointY.profit).toBe(2167)
+
+    // 按分の合計は必ず販売の price / gross_profit に一致する（丸めで総額をずらさない）
+    const shares = db.getDb().prepare(
+      'SELECT price_share, profit_share FROM sale_line_share WHERE sale_id = ?',
+    ).all(saleId) as Array<{ price_share: number; profit_share: number }>
+    expect(shares.reduce((s, r) => s + r.price_share, 0)).toBe(sale.price)
+    expect(shares.reduce((s, r) => s + r.profit_share, 0)).toBe(sale.gross_profit)
 
     // 履歴ドロワー：「まとめ売り 3 点」の表記
     const timeline = db.getItemTimeline(yItems[0].id)!
