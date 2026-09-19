@@ -7,7 +7,7 @@ import Skeleton from '../components/Skeleton.vue'
 
 const stats = ref<DashboardStats | null>(null)
 const revision = inject<Ref<number>>('revision')!
-const goto = inject<(t: string, payload?: { modelCode?: string }) => void>('goto')!
+const goto = inject<(t: string, payload?: { modelCode?: string; onlyUnallocated?: boolean }) => void>('goto')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -20,7 +20,8 @@ watch(revision, load)
 // 要対応の合計（送料未入力＋未紐付け＋価格未入力の仕入）
 const needsTotal = computed(() => {
   if (!stats.value) return 0
-  return stats.value.needsShipping + stats.value.needsMatch + stats.value.needsPurchaseConfirm
+  return stats.value.needsShipping + stats.value.needsMatch
+    + stats.value.needsPurchaseConfirm + stats.value.needsListingAllocation
 })
 
 // 型番ランキング
@@ -113,6 +114,16 @@ const runLabel: Record<string, string> = {
             >
               <span class="need-count">{{ stats.needsPurchaseConfirm }}</span>
               <span class="need-desc">価格未入力の仕入</span>
+              <span class="grow" />
+              <span class="pill">開く <Icon name="arrow-right" :size="12" /></span>
+            </button>
+            <button
+              class="need-row"
+              :class="{ zero: stats.needsListingAllocation === 0 }"
+              @click="goto('listings', { onlyUnallocated: true })"
+            >
+              <span class="need-count">{{ stats.needsListingAllocation }}</span>
+              <span class="need-desc">未引き当ての出品</span>
               <span class="grow" />
               <span class="pill">開く <Icon name="arrow-right" :size="12" /></span>
             </button>

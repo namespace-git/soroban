@@ -6,6 +6,7 @@ import type { PromptOptions } from './components/InputDialog.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import type { ConfirmChoice } from './components/ConfirmDialog.vue'
 import Dashboard from './views/Dashboard.vue'
+import Listings from './views/Listings.vue'
 import Sales from './views/Sales.vue'
 import Purchases from './views/Purchases.vue'
 import Inventory from './views/Inventory.vue'
@@ -15,12 +16,13 @@ import Settings from './views/Settings.vue'
 import type { CollectorRun, DashboardStats } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 
-type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'settings'
-/** goto にタブと一緒に渡す情報。今のところ商品タブへの型番指定だけ */
-export type GotoPayload = { modelCode?: string }
+type Tab = 'dashboard' | 'listings' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'settings'
+/** goto にタブと一緒に渡す情報。型番指定（商品タブ）・出品指定（出品タブ）・未引き当てだけ絞る指定 */
+export type GotoPayload = { modelCode?: string; mercariItemId?: string; onlyUnallocated?: boolean }
 
 const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [
   { key: 'dashboard', label: 'ホーム', icon: 'home' },
+  { key: 'listings', label: '出品', icon: 'listing' },
   { key: 'sales', label: '売上', icon: 'sales' },
   { key: 'purchases', label: '仕入', icon: 'purchase' },
   { key: 'inventory', label: '在庫', icon: 'inventory' },
@@ -255,6 +257,7 @@ watch(revision, loadStats)
 
       <main>
         <Dashboard v-if="tab === 'dashboard'" />
+        <Listings v-else-if="tab === 'listings'" />
         <Sales v-else-if="tab === 'sales'" />
         <Purchases v-else-if="tab === 'purchases'" />
         <Inventory v-else-if="tab === 'inventory'" />

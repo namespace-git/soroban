@@ -17,6 +17,7 @@ import type {
   MonthlySummary, DashboardStats, CollectorRun,
   Material, VariantSummary, Tag, Fulfillment,
   ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
+  Listing, ListingStatus,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 
@@ -311,8 +312,10 @@ function addConfirmedPurchase(opts: {
         parent_id: null,
         note: null,
         tags: [],
+        inherited_tags: [],
         fulfillment,
         thumb_url: null,
+        listing: null,
       })
       itemPurchaseId.set(itemId, purchaseId)
     }
@@ -340,6 +343,7 @@ function addConfirmedPurchase(opts: {
     other_cost: 0,
     alloc_method: 'by_amount',
     lines,
+    tags: [],
   })
 }
 
@@ -394,8 +398,10 @@ function addTiktokPurchase(opts: {
         parent_id: null,
         note: null,
         tags: [],
+        inherited_tags: [],
         fulfillment: null,
         thumb_url: null,
+        listing: null,
       })
       itemPurchaseId.set(itemId, purchaseId)
     }
@@ -423,6 +429,7 @@ function addTiktokPurchase(opts: {
     other_cost: 0,
     alloc_method: 'by_amount',
     lines,
+    tags: [],
   })
 }
 
@@ -470,6 +477,7 @@ function addDraftPurchase(opts: {
     other_cost: 0,
     alloc_method: 'by_amount',
     lines,
+    tags: [],
   })
 }
 
@@ -625,6 +633,7 @@ function buildSaleFixed(opts: {
     auto_linked: opts.autoLinked ? 1 : 0,
     source,
     tags: [],
+    inherited_tags: [],
     ...saleStatusFor(source, soldAt),
   }
 
@@ -741,6 +750,95 @@ function buildInitialSales(): void {
 }
 
 // ------------------------------------------------------------
+// 出品（メルカリの出品中タブ）
+// ------------------------------------------------------------
+
+interface ListingRecord {
+  mercari_item_id: string
+  title: string
+  price: number
+  status: ListingStatus
+  first_seen_at: string
+  last_seen_at: string
+  thumb_url: string | null
+  model_codes: string[]
+}
+
+let listingRecords: ListingRecord[] = []
+/** listing.mercari_item_id -> 引き当てた在庫 id[] */
+const listingItems = new Map<string, string[]>()
+
+function buildListing(rec: ListingRecord): Listing {
+  const ids = listingItems.get(rec.mercari_item_id) ?? []
+  const items = ids
+    .map(id => inventory.find(i => i.id === id))
+    .filter((i): i is InventoryItem => !!i)
+  const reservedCost = items.reduce((s, it) => s + it.landed_cost, 0)
+  const rateBp = Number(settings.fee_rate_bp)
+  const expectedProfit = items.length
+    ? rec.price - calcFeeMock(rec.price, rateBp) - reservedCost
+    : null
+  return {
+    mercari_item_id: rec.mercari_item_id,
+    title: rec.title,
+    price: rec.price,
+    status: rec.status,
+    first_seen_at: rec.first_seen_at,
+    last_seen_at: rec.last_seen_at,
+    thumb_url: rec.thumb_url,
+    model_codes: rec.model_codes,
+    items: items.map(i => ({ id: i.id, name: i.name, model_code: i.model_code, landed_cost: i.landed_cost })),
+    reserved_cost: reservedCost,
+    expected_profit: expectedProfit,
+  }
+}
+
+/** 型番から出品を1件合成する。reserve なら在庫の在庫から古い順に1点を引き当てる */
+function addListing(opts: {
+  model: string
+  status: ListingStatus
+  daysAgoFirstSeen: number
+  reserve: boolean
+}): void {
+  const v = variantOf(opts.model)
+  const title = `【${opts.model}】${displayName(v)}`
+  const price = Math.round((v.price * 1.8) / 100) * 100
+  const id = mercariId()
+  listingRecords.push({
+    mercari_item_id: id,
+    title,
+    price,
+    status: opts.status,
+    first_seen_at: todayLocal(daysAgo(opts.daysAgoFirstSeen)),
+    last_seen_at: isoLocal(daysAgo(Math.max(0, opts.daysAgoFirstSeen - 1))),
+    thumb_url: null,
+    model_codes: extractAllCodes(title),
+  })
+  if (opts.reserve) {
+    const item = takeOldestByModel(opts.model)
+    if (item) {
+      listingItems.set(id, [item.id])
+      item.listing = { mercari_item_id: id, price, status: opts.status }
+    }
+  }
+}
+
+/** 出品中6件（うち未引き当て3件）・公開停止中2件・売れた2件・取り下げ1件 */
+function buildInitialListings(): void {
+  addListing({ model: 'Z080-2', status: 'active', daysAgoFirstSeen: 10, reserve: true })
+  addListing({ model: 'Z012-1', status: 'active', daysAgoFirstSeen: 6, reserve: false })
+  addListing({ model: 'A035', status: 'active', daysAgoFirstSeen: 4, reserve: false })
+  addListing({ model: 'Z099-1', status: 'active', daysAgoFirstSeen: 8, reserve: true })
+  addListing({ model: 'Z045-2', status: 'active', daysAgoFirstSeen: 3, reserve: false })
+  addListing({ model: 'A012', status: 'active', daysAgoFirstSeen: 12, reserve: true })
+  addListing({ model: 'Z056-1', status: 'suspended', daysAgoFirstSeen: 20, reserve: true })
+  addListing({ model: 'Z056-2', status: 'suspended', daysAgoFirstSeen: 18, reserve: true })
+  addListing({ model: 'Z001-4', status: 'sold', daysAgoFirstSeen: 25, reserve: true })
+  addListing({ model: 'Z088-2', status: 'sold', daysAgoFirstSeen: 22, reserve: true })
+  addListing({ model: 'Z012-3', status: 'ended', daysAgoFirstSeen: 30, reserve: false })
+}
+
+// ------------------------------------------------------------
 // 月次集計
 // ------------------------------------------------------------
 
@@ -829,6 +927,34 @@ function recalcSale(sale: SaleProfit): void {
   sale.cost = items.reduce((s, it) => s + it.landed_cost, 0)
   sale.unmatched = sale.item_count === 0 ? 1 : 0
   sale.gross_profit = sale.price - sale.fee - sale.shipping_fee - sale.packaging_cost - sale.cost
+  recalcSaleInheritedTags(sale)
+}
+
+/** 在庫の inherited_tags = 紐付く仕入のタグ（在庫に直接付いたタグと重複するものは除く） */
+function recalcItemInheritedTags(item: InventoryItem): void {
+  const purchaseId = itemPurchaseId.get(item.id)
+  const purchase = purchaseId ? purchases.find(p => p.id === purchaseId) : undefined
+  const direct = new Set(item.tags.map(t => t.id))
+  item.inherited_tags = (purchase?.tags ?? []).filter(t => !direct.has(t.id))
+}
+
+/** 販売の inherited_tags = 紐付いた在庫のタグ ∪ その在庫の inherited_tags（販売に直接付いたタグと重複するものは除く） */
+function recalcSaleInheritedTags(sale: SaleProfit): void {
+  const ids = saleLines.get(sale.id) ?? []
+  const items = ids.map(id => inventory.find(it => it.id === id)).filter((it): it is InventoryItem => !!it)
+  const direct = new Set(sale.tags.map(t => t.id))
+  const merged = new Map<string, Tag>()
+  for (const it of items) {
+    for (const t of it.tags) if (!direct.has(t.id)) merged.set(t.id, t)
+    for (const t of it.inherited_tags) if (!direct.has(t.id)) merged.set(t.id, t)
+  }
+  sale.inherited_tags = [...merged.values()]
+}
+
+/** 仕入・在庫すべての inherited_tags を仕入のタグから作り直す（初期データ構築の仕上げ用） */
+function recalcAllInheritance(): void {
+  for (const it of inventory) recalcItemInheritedTags(it)
+  for (const s of sales) recalcSaleInheritedTags(s)
 }
 
 function findSale(id: string): SaleProfit {
@@ -845,7 +971,11 @@ function filterSales(filter?: SaleFilter): SaleProfit[] {
   if (filter?.onlyPending) {
     rows = rows.filter(s => !s.is_shipping_confirmed || (s.kind === 'resale' && s.unmatched === 1))
   }
-  if (filter?.tagId) rows = rows.filter(s => s.tags.some(t => t.id === filter.tagId))
+  if (filter?.tagId) {
+    rows = rows.filter(s =>
+      s.tags.some(t => t.id === filter.tagId) || s.inherited_tags.some(t => t.id === filter.tagId),
+    )
+  }
   return rows
 }
 
@@ -1108,6 +1238,9 @@ const api: SorobanApi = {
     const needsShipping = sales.filter(s => !s.is_shipping_confirmed).length
     const needsMatch = sales.filter(s => s.kind === 'resale' && s.unmatched).length
     const needsPurchaseConfirm = purchases.filter(p => p.status === 'draft').length
+    const needsListingAllocation = listingRecords.filter(
+      r => r.status === 'active' && (listingItems.get(r.mercari_item_id) ?? []).length === 0,
+    ).length
     const stock = inventory.filter(i => i.status === 'in_stock')
     const stockCount = stock.length
     const stockValue = stock.reduce((s, i) => s + i.landed_cost, 0)
@@ -1116,7 +1249,10 @@ const api: SorobanApi = {
     const month = thisMonthLocal()
     const thisMonth = monthlyFromSales(sales).find(m => m.month === month && m.kind === 'resale') ?? null
     const lastRun = runs[0] ?? null
-    return wait({ needsShipping, needsMatch, needsPurchaseConfirm, stockCount, stockValue, agingCount, thisMonth, lastRun })
+    return wait({
+      needsShipping, needsMatch, needsPurchaseConfirm, needsListingAllocation,
+      stockCount, stockValue, agingCount, thisMonth, lastRun,
+    })
   },
 
   async listSales(filter) {
@@ -1170,6 +1306,7 @@ const api: SorobanApi = {
       auto_linked: 0,
       source: 'manual',
       tags: [],
+      inherited_tags: [],
       status: null,
       shipped_at: null,
       delivered_at: null,
@@ -1370,8 +1507,10 @@ const api: SorobanApi = {
           parent_id: null,
           note: null,
           tags: [],
+          inherited_tags: [], // 新規の仕入はまだタグを持たない
           fulfillment: null,
           thumb_url: null,
+          listing: null,
         })
         itemPurchaseId.set(itemId, purchaseId)
       }
@@ -1398,6 +1537,7 @@ const api: SorobanApi = {
       other_cost: otherCost,
       alloc_method: method,
       lines,
+      tags: [],
     })
 
     return wait(purchaseId)
@@ -1456,8 +1596,10 @@ const api: SorobanApi = {
           parent_id: null,
           note: null,
           tags: [],
+          inherited_tags: [...p.tags], // 確定前に仕入へ付けたタグをそのまま引き継ぐ
           fulfillment: null,
           thumb_url: null,
+          listing: null,
         })
         itemPurchaseId.set(itemId, p.id)
       }
@@ -1526,6 +1668,7 @@ const api: SorobanApi = {
     const parts = splitEvenly(item.landed_cost, count) // 端数は最後の子へ
     const childIds: string[] = []
     const purchaseId = itemPurchaseId.get(item.id)
+    const purchase = purchaseId ? purchases.find(p => p.id === purchaseId) : undefined
 
     for (let n = 0; n < count; n++) {
       const childId = uid()
@@ -1544,8 +1687,10 @@ const api: SorobanApi = {
         parent_id: item.id,
         note: null,
         tags: [],
+        inherited_tags: purchase ? [...purchase.tags] : [], // 分割元と同じ仕入のタグを引き継ぐ
         fulfillment: item.fulfillment,
         thumb_url: null,
+        listing: null,
       })
       childIds.push(childId)
       if (purchaseId) itemPurchaseId.set(childId, purchaseId)
@@ -1594,14 +1739,22 @@ const api: SorobanApi = {
 
   async deleteTag(id: string) {
     tags = tags.filter(t => t.id !== id)
-    for (const s of sales) s.tags = s.tags.filter(t => t.id !== id)
-    for (const it of inventory) it.tags = it.tags.filter(t => t.id !== id)
+    for (const s of sales) {
+      s.tags = s.tags.filter(t => t.id !== id)
+      s.inherited_tags = s.inherited_tags.filter(t => t.id !== id)
+    }
+    for (const it of inventory) {
+      it.tags = it.tags.filter(t => t.id !== id)
+      it.inherited_tags = it.inherited_tags.filter(t => t.id !== id)
+    }
+    for (const p of purchases) p.tags = p.tags.filter(t => t.id !== id)
     return wait(undefined)
   },
 
   async setSaleTags(saleId: string, tagIds: string[]) {
     const sale = findSale(saleId)
     sale.tags = tagIds.map(id => tags.find(t => t.id === id)).filter((t): t is Tag => !!t)
+    recalcSaleInheritedTags(sale)
     return wait(undefined)
   },
 
@@ -1609,6 +1762,23 @@ const api: SorobanApi = {
     const item = inventory.find(i => i.id === inventoryItemId)
     if (!item) throw new Error('在庫が見つかりません')
     item.tags = tagIds.map(id => tags.find(t => t.id === id)).filter((t): t is Tag => !!t)
+    recalcItemInheritedTags(item)
+    const sale = saleForItem(item.id)
+    if (sale) recalcSaleInheritedTags(sale)
+    return wait(undefined)
+  },
+
+  /** 仕入に直接付いたタグを置き換える。この仕入から生まれた在庫の inherited_tags、
+   *  さらにその在庫が紐付いた販売の inherited_tags も連動して作り直す */
+  async setPurchaseTags(purchaseId: string, tagIds: string[]) {
+    const p = findPurchase(purchaseId)
+    p.tags = tagIds.map(id => tags.find(t => t.id === id)).filter((t): t is Tag => !!t)
+    for (const it of inventory) {
+      if (itemPurchaseId.get(it.id) !== purchaseId) continue
+      recalcItemInheritedTags(it)
+      const sale = saleForItem(it.id)
+      if (sale) recalcSaleInheritedTags(sale)
+    }
     return wait(undefined)
   },
 
@@ -1650,6 +1820,78 @@ const api: SorobanApi = {
     const item = inventory.find(i => i.id === inventoryItemId)
     if (!item) return wait(null)
     return wait(buildItemTimeline(item))
+  },
+
+  async listListings(filter) {
+    const statuses = filter?.status ?? ['active', 'suspended']
+    let rows = listingRecords.filter(r => statuses.includes(r.status)).map(buildListing)
+    if (filter?.onlyUnallocated) rows = rows.filter(r => r.items.length === 0)
+    rows.sort((a, b) => (a.first_seen_at < b.first_seen_at ? 1 : a.first_seen_at > b.first_seen_at ? -1 : 0))
+    return wait(rows)
+  },
+
+  async reserveInventory(mercariItemId: string, inventoryItemIds: string[]) {
+    const rec = listingRecords.find(r => r.mercari_item_id === mercariItemId)
+    if (!rec) throw new Error('出品が見つかりません')
+    for (const id of inventoryItemIds) {
+      const item = inventory.find(i => i.id === id)
+      if (!item || item.status !== 'in_stock') {
+        throw new Error('すでに販売済み・分割済みの在庫です')
+      }
+      if (item.listing) {
+        throw new Error('すでに他の出品に引き当て済みです')
+      }
+    }
+    const current = listingItems.get(mercariItemId) ?? []
+    listingItems.set(mercariItemId, [...current, ...inventoryItemIds])
+    for (const id of inventoryItemIds) {
+      const item = inventory.find(i => i.id === id)!
+      item.listing = { mercari_item_id: mercariItemId, price: rec.price, status: rec.status }
+    }
+    return wait(undefined)
+  },
+
+  async unreserveInventory(mercariItemId: string, inventoryItemId: string) {
+    const current = listingItems.get(mercariItemId) ?? []
+    listingItems.set(mercariItemId, current.filter(id => id !== inventoryItemId))
+    const item = inventory.find(i => i.id === inventoryItemId)
+    if (item) item.listing = null
+    return wait(undefined)
+  },
+
+  async suggestForListing(mercariItemId: string, limit = 20) {
+    const rec = listingRecords.find(r => r.mercari_item_id === mercariItemId)
+    if (!rec) return wait([])
+    const already = new Set(listingItems.get(mercariItemId) ?? [])
+    const modelSet = new Set(rec.model_codes)
+    const seriesSet = new Set(rec.model_codes.map(mc => mc.split('-')[0]))
+    const target = normalizeName(rec.title)
+    const items = inventory.filter(i => i.status === 'in_stock' && !i.listing && !already.has(i.id))
+    const ranked = items
+      .map(item => {
+        let score = 0
+        if (item.model_code && modelSet.has(item.model_code)) score = 3
+        else if (item.series_code && seriesSet.has(item.series_code)) score = 2
+        else if (commonCharCount(target, normalizeName(item.name)) > 0) score = 1
+        return { item, score }
+      })
+      .sort((a, b) => (b.score !== a.score ? b.score - a.score : b.item.aging_days - a.item.aging_days))
+      .slice(0, limit)
+      .map(({ item }) => item)
+    return wait(ranked)
+  },
+
+  async endListing(mercariItemId: string) {
+    const rec = listingRecords.find(r => r.mercari_item_id === mercariItemId)
+    if (!rec) throw new Error('出品が見つかりません')
+    const ids = listingItems.get(mercariItemId) ?? []
+    listingItems.set(mercariItemId, [])
+    rec.status = 'ended'
+    for (const id of ids) {
+      const item = inventory.find(i => i.id === id)
+      if (item) item.listing = null
+    }
+    return wait(undefined)
   },
 
   async listShopAccounts() {
@@ -1787,10 +2029,12 @@ const api: SorobanApi = {
     purchases = []
     inventory = []
     runs = []
+    listingRecords = []
     saleLines.clear()
     itemPurchaseId.clear()
     itemDisposedAt.clear()
     itemSplitAt.clear()
+    listingItems.clear()
     return wait(undefined)
   },
 }
@@ -1811,12 +2055,25 @@ function assignInitialTags(): void {
   })
 }
 
+/**
+ * 仕入の一部にタグを付ける（見え方の確認用）。派生の見え方を確かめるため、
+ * ここで付けたタグは recalcAllInheritance() で在庫・販売の inherited_tags に流し込む
+ */
+function assignInitialPurchaseTags(): void {
+  purchases.forEach((p, i) => {
+    if (i % 3 === 1) p.tags = [tags[(i + 1) % tags.length]]
+  })
+}
+
 export function installMock(): void {
   buildInitialPurchasesAndInventory()
   buildInitialSales()
+  buildInitialListings()
   buildInitialRuns()
   assignInitialNote()
   assignInitialTags()
+  assignInitialPurchaseTags()
+  recalcAllInheritance()
 
   window.soroban = api
   ;(window as unknown as { sorobanEvents: { onCollectDone(cb: (runs: CollectorRun[]) => void): void } }).sorobanEvents = {

@@ -238,9 +238,10 @@ CREATE TABLE IF NOT EXISTS sale_line (
   sale_id           TEXT NOT NULL REFERENCES sale(id) ON DELETE CASCADE,
   -- UNIQUE: 1つの在庫は1回しか売れない
   inventory_item_id TEXT NOT NULL UNIQUE REFERENCES inventory_item(id),
-  -- auto = 型番の完全一致で自動確定 / manual = 人が確定
+  -- auto = 型番の完全一致で自動確定 / manual = 人が確定 /
+  -- listing = 出品に人が引き当てた在庫を、売れたときにそのまま引き継いだ
   link_source       TEXT NOT NULL DEFAULT 'manual'
-                    CHECK (link_source IN ('auto','manual')),
+                    CHECK (link_source IN ('auto','manual','listing')),
   created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -261,6 +262,55 @@ BEGIN
   UPDATE inventory_item
      SET status = 'in_stock', updated_at = datetime('now')
    WHERE id = OLD.inventory_item_id;
+END;
+
+-- ============================================================
+-- 出品（メルカリの出品中タブから取り込む）と在庫の引き当て
+--
+-- 出品そのものは在庫の状態を変えない（in_stock のまま。まだ売れていない資産）。
+-- 引き当ては listing_line が持ち、在庫の status には反映しない
+-- （在庫タブ・在庫金額は変わらず、「出品中」は listing_line からの派生表示にする）。
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS listing (
+  mercari_item_id TEXT PRIMARY KEY,          -- m123456789
+  title           TEXT NOT NULL,
+  price           INTEGER NOT NULL,
+  -- active = 出品中 / suspended = 公開停止中 / sold = 売却済み一覧で観測 / ended = 人が取り下げたと記録
+  status          TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active','suspended','sold','ended')),
+  first_seen_at   TEXT NOT NULL,             -- 初めて一覧で見た日 YYYY-MM-DD（出品日の近似）
+  last_seen_at    TEXT NOT NULL,
+  thumb_file      TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 出品と在庫の引き当て（人が確定する。自動確定しない）
+CREATE TABLE IF NOT EXISTS listing_line (
+  id                TEXT PRIMARY KEY,
+  listing_id        TEXT NOT NULL REFERENCES listing(mercari_item_id) ON DELETE CASCADE,
+  inventory_item_id TEXT NOT NULL REFERENCES inventory_item(id),
+  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_listing_line_listing ON listing_line(listing_id);
+CREATE INDEX IF NOT EXISTS idx_listing_line_item    ON listing_line(inventory_item_id);
+
+-- 二重引き当てを禁止：同じ在庫が既に別の active/suspended な出品に引き当て済み、
+-- または在庫が in_stock でなければ挿入を拒否する
+CREATE TRIGGER IF NOT EXISTS trg_listing_line_guard
+BEFORE INSERT ON listing_line
+BEGIN
+  SELECT RAISE(ABORT, '既に別の出品に引き当て済み')
+   WHERE EXISTS (
+     SELECT 1 FROM listing_line ll
+     JOIN listing l ON l.mercari_item_id = ll.listing_id
+     WHERE ll.inventory_item_id = NEW.inventory_item_id
+       AND l.status IN ('active','suspended')
+   );
+  SELECT RAISE(ABORT, '未販売の在庫だけ引き当てられます')
+   WHERE (SELECT status FROM inventory_item WHERE id = NEW.inventory_item_id) != 'in_stock';
 END;
 
 -- ============================================================
@@ -318,6 +368,14 @@ CREATE TABLE IF NOT EXISTS inventory_tag (
   inventory_item_id TEXT NOT NULL REFERENCES inventory_item(id) ON DELETE CASCADE,
   tag_id            TEXT NOT NULL REFERENCES tag(id)            ON DELETE CASCADE,
   PRIMARY KEY (inventory_item_id, tag_id)
+);
+
+-- 仕入に付いたタグ。その仕入から生まれた在庫すべて・その在庫が紐付いた販売に「派生」で見える
+-- （コピーしない。上流で付け外しすれば下流にもそのまま効く）
+CREATE TABLE IF NOT EXISTS purchase_tag (
+  purchase_id TEXT NOT NULL REFERENCES purchase(id) ON DELETE CASCADE,
+  tag_id      TEXT NOT NULL REFERENCES tag(id)      ON DELETE CASCADE,
+  PRIMARY KEY (purchase_id, tag_id)
 );
 
 -- __VIEWS__
@@ -412,13 +470,20 @@ SELECT
   p.fulfillment,
   -- 紐付いた販売のサムネイル（売れた在庫だけ）。1在庫は1販売にしか紐付かない
   -- （sale_line.inventory_item_id が UNIQUE）ので LEFT JOIN で行が増えることはない
-  sale.thumb_file
+  sale.thumb_file,
+  -- 出品への引き当て（active/suspended のみ。trg_listing_line_guard により
+  -- 1在庫につき active/suspended な引き当ては高々1件なので行は増えない）
+  lst.mercari_item_id AS listing_id,
+  lst.price           AS listing_price,
+  lst.status          AS listing_status
 FROM inventory_item i
 LEFT JOIN purchase_line pl ON pl.id = i.purchase_line_id
 LEFT JOIN purchase      p  ON p.id  = pl.purchase_id
 LEFT JOIN shop_account  sa ON sa.id = p.shop_account_id
 LEFT JOIN sale_line     sl ON sl.inventory_item_id = i.id
-LEFT JOIN sale             ON sale.id = sl.sale_id;
+LEFT JOIN sale             ON sale.id = sl.sale_id
+LEFT JOIN listing_line  ll ON ll.inventory_item_id = i.id
+LEFT JOIN listing       lst ON lst.mercari_item_id = ll.listing_id AND lst.status IN ('active','suspended');
 
 -- 型番（バリアント）ごとの実績。ホームの型番ランキングで使う
 DROP VIEW IF EXISTS variant_summary;

@@ -128,11 +128,18 @@ function registerIpc(): void {
   handle('deleteTag', (id) => db.deleteTag(id))
   handle('setSaleTags', (saleId, tagIds) => db.setSaleTags(saleId, tagIds))
   handle('setInventoryTags', (itemId, tagIds) => db.setInventoryTags(itemId, tagIds))
+  handle('setPurchaseTags', (purchaseId, tagIds) => db.setPurchaseTags(purchaseId, tagIds))
   handle('listVariantSummary', (sort) => db.listVariantSummary(sort))
 
   handle('listProducts', (sort) => db.listProducts(sort))
   handle('getProduct', (modelCode) => db.getProduct(modelCode))
   handle('getItemTimeline', (id) => db.getItemTimeline(id))
+
+  handle('listListings', (filter) => db.listListings(filter))
+  handle('reserveInventory', (mercariItemId, ids) => db.reserveInventory(mercariItemId, ids))
+  handle('unreserveInventory', (mercariItemId, id) => db.unreserveInventory(mercariItemId, id))
+  handle('suggestForListing', (mercariItemId, limit) => db.suggestForListing(mercariItemId, limit))
+  handle('endListing', (mercariItemId) => db.endListing(mercariItemId))
 
   handle('listShopAccounts', () => db.listShopAccounts())
   handle('createShopAccount', (name, kind) => db.createShopAccount(name, kind))

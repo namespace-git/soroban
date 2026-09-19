@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { PurchaseSummary, ShopAccount, PurchaseLineInput, AllocMethod, PurchaseInput } from '../../shared/types'
+import type {
+  PurchaseSummary, ShopAccount, PurchaseLineInput, AllocMethod, PurchaseInput, Tag,
+} from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+import TagPicker from '../components/TagPicker.vue'
+import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
 
 const MODEL_CODE_PREVIEW_RE = /【?([A-Z]\d{3}(?:-\d+)?)】?/
@@ -48,6 +52,16 @@ function placeholderChar(p: PurchaseSummary): string {
 /** 下書きを一覧の先頭に（それぞれの中の順序は listPurchases の並びのまま） */
 const sortedPurchases = computed(() =>
   [...purchases.value].sort((a, b) => (a.status === b.status ? 0 : a.status === 'draft' ? -1 : 1)),
+)
+
+// --- 検索（クライアント側で絞る） ---
+
+const searchText = ref('')
+const filteredPurchases = computed(() =>
+  sortedPurchases.value.filter(p => matchesSearch(
+    [p.first_line_name, p.order_no, p.shop_account_name, p.note, ...p.tags.map(t => t.name)],
+    searchText.value,
+  )),
 )
 
 function previewModelCode(line: PurchaseLineInput): string {
@@ -162,6 +176,47 @@ async function editNote(p: PurchaseSummary) {
   if (input === null) return
   await window.soroban.updatePurchaseNote(p.id, input.trim() || null)
   await load()
+}
+
+// --- 仕入タグ：この仕入に直接付ける。在庫・販売には派生（コピーしない）で見える ---
+
+const allTags = ref<Tag[]>([])
+async function loadTags() {
+  allTags.value = await window.soroban.listTags()
+}
+onMounted(loadTags)
+watch(revision, loadTags)
+
+const tagPickerPurchase = ref<PurchaseSummary | null>(null)
+const tagPickerAnchor = ref<HTMLElement | null>(null)
+
+function openPurchaseTagPicker(p: PurchaseSummary, e: MouseEvent) {
+  tagPickerPurchase.value = p
+  tagPickerAnchor.value = e.currentTarget as HTMLElement
+}
+
+function closePurchaseTagPicker() {
+  tagPickerPurchase.value = null
+  tagPickerAnchor.value = null
+}
+
+async function onPurchaseTagChange(tagIds: string[]) {
+  if (!tagPickerPurchase.value) return
+  const id = tagPickerPurchase.value.id
+  await window.soroban.setPurchaseTags(id, tagIds)
+  await load()
+  tagPickerPurchase.value = purchases.value.find(p => p.id === id) ?? null
+}
+
+async function onPurchaseTagCreate(name: string) {
+  if (!tagPickerPurchase.value) return
+  const id = tagPickerPurchase.value.id
+  const newTagId = await window.soroban.createTag(name)
+  await loadTags()
+  const tagIds = [...tagPickerPurchase.value.tags.map(t => t.id), newTagId]
+  await window.soroban.setPurchaseTags(id, tagIds)
+  await load()
+  tagPickerPurchase.value = purchases.value.find(p => p.id === id) ?? null
 }
 
 async function remove(p: PurchaseSummary) {
@@ -281,10 +336,16 @@ async function remove(p: PurchaseSummary) {
       </div>
     </div>
 
+    <div class="toolbar">
+      <SearchBox v-model="searchText" placeholder="代表商品名・注文番号・仕入先・メモを検索" />
+      <span class="grow" />
+      <span class="faint">{{ filteredPurchases.length }}件</span>
+    </div>
+
     <Skeleton v-if="!loaded" :rows="5" />
 
     <template v-else>
-      <div v-if="purchases.length" class="panel table-panel">
+      <div v-if="filteredPurchases.length" class="panel table-panel">
         <table>
           <thead>
             <tr>
@@ -300,7 +361,7 @@ async function remove(p: PurchaseSummary) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="p in sortedPurchases" :key="p.id">
+            <tr v-for="p in filteredPurchases" :key="p.id">
               <td class="faint">{{ p.ordered_at }}</td>
               <td class="thumb-cell">
                 <span class="thumb-placeholder">{{ placeholderChar(p) }}</span>
@@ -318,6 +379,7 @@ async function remove(p: PurchaseSummary) {
                     <StatusChip v-if="p.import_key" tone="neutral" label="自動取得" />
                     <StatusChip v-if="p.fulfillment === 'pending'" tone="neutral" label="未発送" />
                     <StatusChip v-if="p.fulfillment === 'shipped'" tone="info" label="配送中" />
+                    <StatusChip v-for="t in p.tags" :key="t.id" tone="info" :label="t.name" />
                   </div>
                 </div>
                 <div v-if="p.note" class="note-row">
@@ -341,6 +403,7 @@ async function remove(p: PurchaseSummary) {
               </td>
               <td class="actions">
                 <button v-if="p.status === 'draft'" class="sm primary" @click="confirmDraft(p)">確定</button>
+                <button class="sm ghost" @click="openPurchaseTagPicker(p, $event)" title="タグを編集する">タグ</button>
                 <button class="sm ghost" @click="editNote(p)">メモ</button>
                 <button class="icon ghost" aria-label="削除" @click="remove(p)">
                   <Icon name="trash" :size="16" />
@@ -352,6 +415,11 @@ async function remove(p: PurchaseSummary) {
       </div>
 
       <EmptyState
+        v-else-if="searchText"
+        title="検索条件に一致する仕入がありません"
+      />
+
+      <EmptyState
         v-else-if="!showForm"
         title="仕入がまだありません。"
         hint="「仕入を登録」から追加してください。"
@@ -361,6 +429,18 @@ async function remove(p: PurchaseSummary) {
         </template>
       </EmptyState>
     </template>
+
+    <p class="hint-row faint">仕入のタグは、その仕入の在庫と、売れたときの販売にそのまま表示されます</p>
+
+    <TagPicker
+      :open="!!tagPickerPurchase"
+      :anchor="tagPickerAnchor"
+      :all-tags="allTags"
+      :selected="tagPickerPurchase?.tags.map(t => t.id) ?? []"
+      @change="onPurchaseTagChange"
+      @create="onPurchaseTagCreate"
+      @close="closePurchaseTagPicker"
+    />
   </div>
 </template>
 
@@ -370,6 +450,11 @@ async function remove(p: PurchaseSummary) {
   flex-direction: column;
   gap: 14px;
   margin-bottom: 16px;
+}
+
+.hint-row {
+  margin: 12px 0 0;
+  font-size: var(--fs-13);
 }
 
 .lines-table .col-model { width: 96px; }

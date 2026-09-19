@@ -45,11 +45,18 @@ const api: SorobanApi = {
   deleteTag: invoke('deleteTag'),
   setSaleTags: invoke('setSaleTags'),
   setInventoryTags: invoke('setInventoryTags'),
+  setPurchaseTags: invoke('setPurchaseTags'),
   listVariantSummary: invoke('listVariantSummary'),
 
   listProducts: invoke('listProducts'),
   getProduct: invoke('getProduct'),
   getItemTimeline: invoke('getItemTimeline'),
+
+  listListings: invoke('listListings'),
+  reserveInventory: invoke('reserveInventory'),
+  unreserveInventory: invoke('unreserveInventory'),
+  suggestForListing: invoke('suggestForListing'),
+  endListing: invoke('endListing'),
 
   listShopAccounts: invoke('listShopAccounts'),
   createShopAccount: invoke('createShopAccount'),

@@ -1049,7 +1049,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('7')
+      expect(db.getSettings().schema_version).toBe('9')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1170,7 +1170,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('7')
+      expect(db.getSettings().schema_version).toBe('9')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1481,5 +1481,488 @@ describe('db（:memory:）', () => {
     const august = detail.months.find(m => m.month === '2026-08')!
     expect(august.sold).toBe(1)
     expect(august.in_stock).toBe(2) // 仕入3 − 販売1 = 2
+  })
+
+  describe('出品（メルカリの出品中タブ）と在庫の引き当て', () => {
+    it('upsertListings：新規はinsert、既存はactive/suspendedなら更新、sold/endedは戻さない', () => {
+      const r1 = db.upsertListings([
+        { mercariItemId: 'L1', title: '商品A', price: 1000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'L2', title: '商品B', price: 2000, suspended: true, thumbUrl: null },
+      ])
+      expect(r1).toEqual({ inserted: 2, updated: 0 })
+
+      const listings = db.listListings()
+      expect(listings.find(l => l.mercari_item_id === 'L1')!.status).toBe('active')
+      expect(listings.find(l => l.mercari_item_id === 'L2')!.status).toBe('suspended')
+
+      // 既存を更新（価格変更・公開停止解除）
+      const r2 = db.upsertListings([
+        { mercariItemId: 'L1', title: '商品A', price: 1500, suspended: false, thumbUrl: null },
+      ])
+      expect(r2).toEqual({ inserted: 0, updated: 1 })
+      expect(db.listListings().find(l => l.mercari_item_id === 'L1')!.price).toBe(1500)
+
+      // 取り下げたものは一覧に出ていても active へ戻さない（1ページしか読まないため）
+      db.endListing('L2')
+      const r3 = db.upsertListings([
+        { mercariItemId: 'L2', title: '商品B', price: 2000, suspended: false, thumbUrl: null },
+      ])
+      expect(r3).toEqual({ inserted: 0, updated: 0 })
+      expect(db.listListings({ status: ['ended'] })[0].status).toBe('ended')
+    })
+
+    it('reserveInventory：二重引き当て・売却済み在庫の引き当てをトリガーで拒否する', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [
+          { name: '在庫A', unit_price: 1000, quantity: 1 },
+          { name: '在庫B', unit_price: 1000, quantity: 1 },
+        ],
+      })
+      const [itemA, itemB] = db.listInventory('in_stock')
+
+      db.upsertListings([
+        { mercariItemId: 'LA', title: '出品A', price: 3000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'LB', title: '出品B', price: 3500, suspended: false, thumbUrl: null },
+      ])
+
+      db.reserveInventory('LA', [itemA.id])
+      expect(db.listListings().find(l => l.mercari_item_id === 'LA')!.items.map(i => i.id))
+        .toEqual([itemA.id])
+
+      expect(() => db.reserveInventory('LB', [itemA.id])).toThrow('既に別の出品に引き当て済み')
+
+      const saleId = db.createSale({ title: '在庫B手動売却', sold_at: '2026-01-05', price: 2000 })
+      db.linkInventory(saleId, [itemB.id])
+      expect(() => db.reserveInventory('LB', [itemB.id])).toThrow('未販売の在庫だけ引き当てられます')
+    })
+
+    it('unreserveInventory：外すと在庫タブに戻り、他の出品へ引き当て直せる', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '引き当て解除対象', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'LA2', title: '出品A2', price: 3000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'LB2', title: '出品B2', price: 3000, suspended: false, thumbUrl: null },
+      ])
+
+      db.reserveInventory('LA2', [item.id])
+      db.unreserveInventory('LA2', item.id)
+      expect(db.listListings().find(l => l.mercari_item_id === 'LA2')!.items).toEqual([])
+
+      expect(() => db.reserveInventory('LB2', [item.id])).not.toThrow()
+      expect(db.listListings().find(l => l.mercari_item_id === 'LB2')!.items.map(i => i.id))
+        .toEqual([item.id])
+    })
+
+    it('suggestForListing：型番一致 → 引き当て済みの在庫は候補から除く', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'クリームわん【Z080-1】', unit_price: 1000, quantity: 2 }],
+      })
+      const [item1, item2] = db.listInventory('in_stock')
+      db.upsertListings([
+        { mercariItemId: 'LZ', title: 'クリームわん【Z080-1】', price: 3000, suspended: false, thumbUrl: null },
+      ])
+
+      const suggestions = db.suggestForListing('LZ')
+      expect(suggestions.map(s => s.id).sort()).toEqual([item1.id, item2.id].sort())
+
+      db.reserveInventory('LZ', [item1.id])
+      const after = db.suggestForListing('LZ')
+      expect(after.map(s => s.id)).toEqual([item2.id])
+    })
+
+    it('listListings：reserved_cost・expected_profitが引き当てた在庫から出る。未引き当てはnull', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '出品対象', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'LP', title: '出品対象', price: 3000, suspended: false, thumbUrl: null },
+      ])
+
+      const before = db.listListings().find(l => l.mercari_item_id === 'LP')!
+      expect(before.reserved_cost).toBe(0)
+      expect(before.expected_profit).toBeNull()
+
+      db.reserveInventory('LP', [item.id])
+      const after = db.listListings().find(l => l.mercari_item_id === 'LP')!
+      expect(after.reserved_cost).toBe(1000)
+      // fee_rate_bp既定1000(10%) → fee=300、送料は引かない
+      expect(after.expected_profit).toBe(3000 - 300 - 1000)
+
+      expect(db.listListings({ onlyUnallocated: true }).some(l => l.mercari_item_id === 'LP')).toBe(false)
+    })
+
+    it('insertCollected：出品への引き当てをそのまま販売に引き継ぐ（link_source=listing、出品はsoldに）', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '出品済み商品', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'mTakeover', title: '出品済み商品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('mTakeover', [item.id])
+
+      db.insertCollected([
+        { mercariItemId: 'mTakeover', title: '出品済み商品', price: 3000, soldAt: '2026-01-10' },
+      ])
+
+      const sale = db.listSales().find(s => s.mercari_item_id === 'mTakeover')!
+      expect(sale.unmatched).toBe(0)
+      expect(sale.cost).toBe(1000)
+
+      const lines = db.listSaleLines(sale.id)
+      expect(lines.map(l => l.id)).toEqual([item.id])
+
+      // active/suspendedの一覧からは消え、soldとして残る
+      expect(db.listListings().find(l => l.mercari_item_id === 'mTakeover')).toBeUndefined()
+      const sold = db.listListings({ status: ['sold'] }).find(l => l.mercari_item_id === 'mTakeover')
+      expect(sold?.status).toBe('sold')
+    })
+
+    it('型番FIFOの自動確定は、他の出品に引き当て済みの在庫を候補から除く', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'クリームわん【Z080-1】', unit_price: 1000, quantity: 1 }],
+      })
+      const reservedItem = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'LR', title: 'クリームわん【Z080-1】', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LR', [reservedItem.id])
+
+      // 型番一致の在庫はこの1点だけだが、出品に引き当て済みなのでFIFOでは使われない
+      const saleId = db.createSale({ title: 'クリームわん【Z080-1】', sold_at: '2026-01-10', price: 2000 })
+      const sale = db.listSales().find(s => s.id === saleId)!
+      expect(sale.unmatched).toBe(1)
+      expect(sale.auto_linked).toBe(0)
+
+      const suggestions = db.suggestInventory(saleId)
+      expect(suggestions.some(i => i.id === reservedItem.id)).toBe(false)
+    })
+
+    it('endListing：在庫は未出品に戻り（引き当て解除）、出品はendedになる', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '取り下げ対象', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'LE', title: '取り下げ対象', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LE', [item.id])
+
+      db.endListing('LE')
+
+      expect(db.listInventory('in_stock').find(i => i.id === item.id)!.listing).toBeNull()
+      const ended = db.listListings({ status: ['ended'] }).find(l => l.mercari_item_id === 'LE')!
+      expect(ended.status).toBe('ended')
+      expect(ended.items).toEqual([])
+
+      // 取り下げた在庫は別の出品に引き当て直せる
+      db.upsertListings([
+        { mercariItemId: 'LE2', title: '再出品', price: 2500, suspended: false, thumbUrl: null },
+      ])
+      expect(() => db.reserveInventory('LE2', [item.id])).not.toThrow()
+    })
+
+    it('getDashboard().needsListingAllocation：activeで未引き当ての出品数（suspendedは数えない）', () => {
+      db.upsertListings([
+        { mercariItemId: 'NA1', title: '未引き当て1', price: 1000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'NA2', title: '未引き当て2', price: 1000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'NA3', title: '公開停止中', price: 1000, suspended: true, thumbUrl: null },
+      ])
+      expect(db.getDashboard().needsListingAllocation).toBe(2)
+
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '引き当て用', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.reserveInventory('NA1', [item.id])
+      expect(db.getDashboard().needsListingAllocation).toBe(1)
+    })
+
+    it('getItemTimeline：出品への引き当て・出品経由の売却でlistedイベントが「注文」と「売れた」の間に出る', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2020-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'タイムライン出品商品', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'LT', title: 'タイムライン出品商品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LT', [item.id])
+
+      const beforeSale = db.getItemTimeline(item.id)!
+      expect(beforeSale.events.map(e => e.kind)).toEqual(['ordered', 'listed'])
+      const listedEvent = beforeSale.events[1]
+      expect(listedEvent.title).toBe('メルカリに出品')
+      expect(listedEvent.detail).toBe('¥3,000')
+      expect(listedEvent.amount).toBe(3000)
+
+      // 未来日で確実に「今日」より後にする（first_seen_atは今日になるため）
+      db.insertCollected([
+        { mercariItemId: 'LT', title: 'タイムライン出品商品', price: 3000, soldAt: '2099-01-01' },
+      ])
+
+      const afterSale = db.getItemTimeline(item.id)!
+      expect(afterSale.events.map(e => e.kind)).toEqual([
+        'ordered', 'listed', 'sold', 'sale_shipped', 'sale_delivered', 'sale_completed',
+      ])
+    })
+  })
+
+  describe('タグの派生：仕入→在庫→販売はコピーせず「派生」で見える', () => {
+    it('仕入→在庫3点→紐付いた販売、へ派生する。直接タグとは重複せず、上流の付け外しがそのまま効く', () => {
+      const purchaseId = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '派生タグ対象', unit_price: 1000, quantity: 3 }],
+      })
+      const tagA = db.createTag('A')
+      const tagB = db.createTag('B')
+      db.setPurchaseTags(purchaseId, [tagA])
+
+      // 仕入のタグ → その在庫3点すべてに派生する
+      const items = db.listInventory('in_stock')
+      expect(items).toHaveLength(3)
+      for (const item of items) {
+        expect(item.tags).toEqual([])
+        expect(item.inherited_tags.map(t => t.id)).toEqual([tagA])
+      }
+
+      // 1点に直接タグBを付ける（在庫のタグと派生タグは重複しない）
+      const [target, other] = items
+      db.setInventoryTags(target.id, [tagB])
+      const targetAfter = db.listInventory('in_stock').find(i => i.id === target.id)!
+      expect(targetAfter.tags.map(t => t.id)).toEqual([tagB])
+      expect(targetAfter.inherited_tags.map(t => t.id)).toEqual([tagA])
+
+      // その在庫が紐付いた販売には、在庫の直接タグ(B)＋仕入のタグ(A)が両方派生する
+      const saleId = db.createSale({ title: '派生タグ対象', sold_at: '2026-01-05', price: 2000 })
+      db.linkInventory(saleId, [target.id])
+      const sale = db.listSales().find(s => s.id === saleId)!
+      expect(sale.tags).toEqual([])
+      expect(sale.inherited_tags.map(t => t.id).sort()).toEqual([tagA, tagB].sort())
+
+      // 販売に直接タグAを付けると、直接タグに出て、派生タグからは除かれる（重複しない）
+      db.setSaleTags(saleId, [tagA])
+      const withDirect = db.listSales().find(s => s.id === saleId)!
+      expect(withDirect.tags.map(t => t.id)).toEqual([tagA])
+      expect(withDirect.inherited_tags.map(t => t.id)).toEqual([tagB])
+
+      // 紐付けを解除すると派生タグは消える（人が付けた直接タグは残る）
+      db.unlinkInventory(saleId, target.id)
+      const unlinked = db.listSales().find(s => s.id === saleId)!
+      expect(unlinked.tags.map(t => t.id)).toEqual([tagA])
+      expect(unlinked.inherited_tags).toEqual([])
+
+      // 仕入のタグを外すと、まだ紐付いていない在庫からも派生タグが消える
+      db.setPurchaseTags(purchaseId, [])
+      const afterRemove = db.listInventory('in_stock').find(i => i.id === other.id)!
+      expect(afterRemove.inherited_tags).toEqual([])
+    })
+
+    it('autoLinkSale（型番の自動確定）でも在庫・仕入のタグが販売へ派生する（コピーはしない）', () => {
+      const tagId = db.createTag('自動確定タグ')
+      const purchaseId = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'クリームわん【Z080-1】', unit_price: 1000, quantity: 1 }],
+      })
+      db.setPurchaseTags(purchaseId, [tagId])
+
+      const saleId = db.createSale({ title: 'クリームわん【Z080-1】', sold_at: '2026-01-05', price: 2000 })
+      const sale = db.listSales().find(s => s.id === saleId)!
+      expect(sale.auto_linked).toBe(1)
+      expect(sale.tags).toEqual([])
+      expect(sale.inherited_tags.map(t => t.id)).toEqual([tagId])
+    })
+
+    it('出品からの引き継ぎ（insertCollected）でも在庫のタグが販売へ派生する（コピーはしない）', () => {
+      const tagId = db.createTag('出品タグ')
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'タグ付き出品商品', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.setInventoryTags(item.id, [tagId])
+      db.upsertListings([
+        { mercariItemId: 'LTAG', title: 'タグ付き出品商品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LTAG', [item.id])
+
+      db.insertCollected([
+        { mercariItemId: 'LTAG', title: 'タグ付き出品商品', price: 3000, soldAt: '2026-01-10' },
+      ])
+
+      const sale = db.listSales().find(s => s.mercari_item_id === 'LTAG')!
+      expect(sale.tags).toEqual([])
+      expect(sale.inherited_tags.map(t => t.id)).toEqual([tagId])
+    })
+  })
+
+  describe('setPurchaseTags / listPurchases・getPurchase の tags', () => {
+    it('setPurchaseTags：置き換え（丸ごと入れ替え）。listPurchases・getPurchaseの両方に出る', () => {
+      const tagA = db.createTag('A')
+      const tagB = db.createTag('B')
+
+      const purchaseId = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '仕入タグ対象', unit_price: 1000, quantity: 1 }],
+      })
+      db.setPurchaseTags(purchaseId, [tagA, tagB])
+      expect(db.listPurchases().find(p => p.id === purchaseId)!.tags.map(t => t.id).sort())
+        .toEqual([tagA, tagB].sort())
+      expect(db.getPurchase(purchaseId).tags.map(t => t.id).sort()).toEqual([tagA, tagB].sort())
+
+      // 置き換え：Bだけになる
+      db.setPurchaseTags(purchaseId, [tagB])
+      expect(db.listPurchases().find(p => p.id === purchaseId)!.tags.map(t => t.id)).toEqual([tagB])
+      expect(db.getPurchase(purchaseId).tags.map(t => t.id)).toEqual([tagB])
+
+      // 空配列で全部外す
+      db.setPurchaseTags(purchaseId, [])
+      expect(db.listPurchases().find(p => p.id === purchaseId)!.tags).toEqual([])
+    })
+  })
+
+  describe('linkInventory：在庫の状態ガード・出品への引き当ての引き継ぎ', () => {
+    it('in_stock でない在庫（廃棄済み）を紐付けようとするとthrow', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '廃棄済み紐付けガード', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.disposeInventory(item.id, 'テスト理由', 'disposed')
+
+      const saleId = db.createSale({ title: '別の販売', sold_at: '2026-01-05', price: 1000 })
+      expect(() => db.linkInventory(saleId, [item.id]))
+        .toThrow('販売済み・廃棄済みの在庫は紐付けられません')
+    })
+
+    it('出品に引き当て中の在庫は紐付け可。紐付けたらその引き当ては外れる（出品のstatusは変えない）', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '引き当て中の紐付け', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'LMANUAL', title: '引き当て中の紐付け', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LMANUAL', [item.id])
+
+      const saleId = db.createSale({ title: '人が別の販売に決めた', sold_at: '2026-01-05', price: 2000 })
+      expect(() => db.linkInventory(saleId, [item.id])).not.toThrow()
+
+      const sale = db.listSales().find(s => s.id === saleId)!
+      expect(sale.cost).toBe(1000)
+
+      // 出品側の引き当ては外れるが、出品自体は active のまま（未引き当てに戻る）
+      const listing = db.listListings().find(l => l.mercari_item_id === 'LMANUAL')!
+      expect(listing.status).toBe('active')
+      expect(listing.items).toEqual([])
+    })
+  })
+
+  describe('disposeInventory / splitInventory：出品への引き当てが先に外れる', () => {
+    it('disposeInventory：引き当て済み在庫を廃棄すると listListings でその出品が未引き当てに戻る', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '廃棄で引き当て解除', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'LDISPOSE', title: '廃棄で引き当て解除', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LDISPOSE', [item.id])
+
+      db.disposeInventory(item.id, 'テスト理由', 'disposed')
+
+      const listing = db.listListings().find(l => l.mercari_item_id === 'LDISPOSE')!
+      expect(listing.items).toEqual([])
+      expect(db.listListings({ onlyUnallocated: true }).some(l => l.mercari_item_id === 'LDISPOSE'))
+        .toBe(true)
+    })
+
+    it('splitInventory：引き当て済み在庫を分割すると listListings でその出品が未引き当てに戻る', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '分割で引き当て解除', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'LSPLIT', title: '分割で引き当て解除', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LSPLIT', [item.id])
+
+      db.splitInventory(item.id, 2)
+
+      const listing = db.listListings().find(l => l.mercari_item_id === 'LSPLIT')!
+      expect(listing.items).toEqual([])
+    })
+  })
+
+  describe('自動確定は型番の枝番まで完全一致だけ（シリーズのみは候補止まり）', () => {
+    it('枝番あり（Z078-2）は自動確定、枝番なし（A035）は候補止まり、枝番あり（A035-1）は自動確定', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [
+          { name: 'いちごスフレ【Z078-2】', unit_price: 1000, quantity: 1 },
+          { name: 'メロージョイ ミニランド【A035】', unit_price: 1200, quantity: 1 },
+          { name: 'メロージョイ ミニランド【A035-1】', unit_price: 1300, quantity: 1 },
+        ],
+      })
+
+      const saleBranch = db.createSale({ title: '【Z078-2】いちごスフレ', sold_at: '2026-01-10', price: 2000 })
+      expect(db.listSales().find(s => s.id === saleBranch)!.unmatched).toBe(0)
+
+      const saleSeriesOnly = db.createSale({ title: '【A035】メロージョイ ミニランド', sold_at: '2026-01-10', price: 2000 })
+      expect(db.listSales().find(s => s.id === saleSeriesOnly)!.unmatched).toBe(1)
+
+      const saleBranch2 = db.createSale({ title: '【A035-1】メロージョイ ミニランド', sold_at: '2026-01-10', price: 2000 })
+      expect(db.listSales().find(s => s.id === saleBranch2)!.unmatched).toBe(0)
+    })
   })
 })

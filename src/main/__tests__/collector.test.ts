@@ -11,7 +11,8 @@ vi.mock('electron', () => ({
 }))
 
 import {
-  buildUserAgent, extractTotalCount, isChallengeText, parseSoldHtml, parseSoldRow, randomWaitMs,
+  buildUserAgent, extractListingTotal, extractTotalCount, isChallengeText, parseListingsHtml,
+  parseSoldHtml, parseSoldRow, randomWaitMs,
 } from '../collector'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -178,6 +179,46 @@ describe('collector（electronに依存しない部分）', () => {
 
     it('カンマ区切りの件数も読む', () => {
       expect(extractTotalCount('1件～20件（全1,234件）')).toBe(1234)
+    })
+  })
+
+  describe('parseListingsHtml（実DOM抜粋のfixture）', () => {
+    const html = readFileSync(join(__dirname, 'fixtures', 'mercari-listings.html'), 'utf-8')
+    const rows = parseListingsHtml(html)
+
+    it('4件取れる（公開中2・公開停止中2）', () => {
+      expect(rows).toHaveLength(4)
+      expect(rows.filter(r => r.suspended)).toHaveLength(2)
+    })
+
+    it('m47972655197：2,350円・公開中・サムネイルURL付き', () => {
+      const r = rows.find(r => r.mercariItemId === 'm47972655197')!
+      expect(r.price).toBe(2350)
+      expect(r.suspended).toBe(false)
+      expect(r.thumbUrl).toBe('https://static.mercdn.net/thumb/item/jpeg/m47972655197_1.jpg?1789810502')
+      expect(r.title).toContain('メロイアのんびりシリーズ')
+    })
+
+    it('m33032758836：公開停止中', () => {
+      const r = rows.find(r => r.mercariItemId === 'm33032758836')!
+      expect(r.suspended).toBe(true)
+      expect(r.price).toBe(13500)
+    })
+
+    it('メロジョイ以外の出品も同じ形式で拾う', () => {
+      const r = rows.find(r => r.mercariItemId === 'm92531073051')!
+      expect(r.suspended).toBe(true)
+      expect(r.title).toContain('Melty Slime')
+    })
+
+    it('総件数（22件）を抜く', () => {
+      expect(extractListingTotal(html)).toBe(22)
+    })
+  })
+
+  describe('extractListingTotal', () => {
+    it('見つからなければ null', () => {
+      expect(extractListingTotal('該当の記載なし')).toBeNull()
     })
   })
 })

@@ -33,7 +33,14 @@ export type ShopAccountKind = 'mellojoy' | 'tiktok' | 'other'
 /** actual = メルカリの取引詳細から取った実額 / master = 発送方法マスタ / manual = 手入力 */
 export type ShippingSource = 'actual' | 'master' | 'manual'
 /** auto = 型番の完全一致で自動確定 / manual = 人が確定 */
-export type LinkSource = 'auto' | 'manual'
+/** listing = 出品に人が引き当てた在庫を、売れたときにそのまま引き継いだ */
+export type LinkSource = 'auto' | 'manual' | 'listing'
+/**
+ * メルカリの出品の状態。active = 出品中 / suspended = 公開停止中 /
+ * sold = 売却済み一覧で同じ id を観測した / ended = 人が「取り下げた」と記録した。
+ * 一覧から消えただけでは変えない（1 ページしか読まないため）
+ */
+export type ListingStatus = 'active' | 'suspended' | 'sold' | 'ended'
 
 // ------------------------------------------------------------
 // 型番（メロジョイの商品コード）
@@ -63,7 +70,15 @@ export interface ShopAccount {
   is_active: number
 }
 
-/** タグ。販売・在庫に複数付けられる。名前は UNIQUE */
+/**
+ * タグ。仕入・在庫・販売に複数付けられる。名前は UNIQUE。
+ *
+ * 付いた場所から下流へ「派生」で見える（コピーしない）：
+ *   仕入のタグ → その仕入から生まれた在庫すべて → その在庫が紐付いた販売
+ *   在庫のタグ → その在庫が紐付いた販売
+ * 上流で付け外しすれば下流にもそのまま効く。紐付けを解除すれば販売からは消える。
+ * 各型の `tags` は自分に直接付いたもの、`inherited_tags` は上流から派生したもの（重複なし）。
+ */
 export interface Tag {
   id: string
   name: string
@@ -112,8 +127,10 @@ export interface SaleProfit {
   auto_linked: number
   /** collector = メルカリから自動取得 / manual = 手入力 */
   source: SaleSource
-  /** 付いているタグ（名前）。画面表示用。付け外しは setSaleTags */
+  /** 販売に直接付いたタグ。付け外しは setSaleTags */
   tags: Tag[]
+  /** 紐付いた在庫とその仕入から派生したタグ（tags と重複しない）。販売側では外せない */
+  inherited_tags: Tag[]
   /** 取引の進み具合と各日付（YYYY-MM-DD）。取れていなければ null */
   status: SaleStatus | null
   shipped_at: string | null
@@ -197,6 +214,8 @@ export interface PurchaseSummary {
   subtotal: number
   /** 按分後の総原価 */
   total_cost: number
+  /** 仕入に付いたタグ。付け外しは setPurchaseTags。この仕入の在庫・その販売に派生する */
+  tags: Tag[]
 }
 
 export interface PurchaseLine {
@@ -267,11 +286,38 @@ export interface InventoryItem {
   /** 分割で生まれた子なら親の id */
   parent_id: string | null
   note: string | null
+  /** 在庫に直接付いたタグ。付け外しは setInventoryTags */
   tags: Tag[]
+  /** 仕入から派生したタグ（tags と重複しない）。在庫側では外せない */
+  inherited_tags: Tag[]
   /** 仕入元の注文の到着状態。delivered / null 以外は「未着」 */
   fulfillment: Fulfillment | null
   /** 紐付いた販売のサムネイル（売れた在庫だけ）。無ければ null */
   thumb_url: string | null
+  /** 出品に引き当て済みなら、その出品（派生。在庫の status は in_stock のまま） */
+  listing: { mercari_item_id: string; price: number; status: ListingStatus } | null
+}
+
+// ------------------------------------------------------------
+// 出品（メルカリの出品中タブから取り込む）
+// ------------------------------------------------------------
+
+export interface Listing {
+  mercari_item_id: string
+  title: string
+  price: number
+  status: ListingStatus
+  /** 初めて一覧で見た日（＝出品日の近似）／最後に見た日時 */
+  first_seen_at: string
+  last_seen_at: string
+  thumb_url: string | null
+  /** タイトルから抜いた型番（枝番まで）。無ければ空 */
+  model_codes: string[]
+  /** 引き当てた在庫 */
+  items: Array<{ id: string; name: string; model_code: string | null; landed_cost: number }>
+  /** 引き当てた在庫の原価合計と、出品価格から見た見込み粗利（手数料は設定の率、送料は未定なので引かない） */
+  reserved_cost: number
+  expected_profit: number | null
 }
 
 export interface InventoryPatch {
@@ -288,7 +334,7 @@ export interface TimelineEvent {
   /** YYYY-MM-DD。日付が取れていない予定の段は null（UI は薄く出す） */
   date: string | null
   kind:
-    | 'ordered' | 'purchase_shipped' | 'purchase_delivered'
+    | 'ordered' | 'purchase_shipped' | 'purchase_delivered' | 'listed'
     | 'sold' | 'sale_shipped' | 'sale_delivered' | 'sale_completed'
     | 'split' | 'disposed' | 'personal_use'
   /** 見出し。例「メロジョイで注文 #264129」 */
@@ -401,6 +447,8 @@ export interface DashboardStats {
   needsMatch: number
   /** 価格未入力の仕入（下書き）件数 */
   needsPurchaseConfirm: number
+  /** 出品中（active）で在庫が未引き当ての出品の数 */
+  needsListingAllocation: number
   /** 未販売在庫の点数 */
   stockCount: number
   /** 未販売在庫の原価合計（寝ている資金） */
@@ -480,17 +528,29 @@ export interface SorobanApi {
   listTags(): Promise<Tag[]>
   createTag(name: string): Promise<string>
   renameTag(id: string, name: string): Promise<void>
-  /** タグを消すと、付いていた販売・在庫からも外れる */
+  /** タグを消すと、付いていた仕入・在庫・販売からも外れる */
   deleteTag(id: string): Promise<void>
-  /** 販売のタグを丸ごと置き換える（空配列で全部外す） */
+  /** 直接付いたタグを丸ごと置き換える（空配列で全部外す）。派生分は対象外 */
   setSaleTags(saleId: string, tagIds: string[]): Promise<void>
   setInventoryTags(inventoryItemId: string, tagIds: string[]): Promise<void>
+  setPurchaseTags(purchaseId: string, tagIds: string[]): Promise<void>
   listVariantSummary(sort?: 'total_profit' | 'avg_profit' | 'sold'): Promise<VariantSummary[]>
 
   // 商品（型番）ページ・在庫の履歴
   listProducts(sort?: 'total_profit' | 'avg_profit' | 'sold' | 'in_stock' | 'last_purchased_at'): Promise<ProductSummary[]>
   getProduct(modelCode: string): Promise<ProductDetail | null>
   getItemTimeline(inventoryItemId: string): Promise<ItemTimeline | null>
+
+  // 出品（メルカリ）と在庫の引き当て
+  /** status 未指定なら active + suspended。onlyUnallocated で未引き当てだけ */
+  listListings(filter?: { status?: ListingStatus[]; onlyUnallocated?: boolean }): Promise<Listing[]>
+  /** 出品に在庫を引き当てる（追加）。既に他の active な出品に引き当て済み・販売済みの在庫はエラー */
+  reserveInventory(mercariItemId: string, inventoryItemIds: string[]): Promise<void>
+  unreserveInventory(mercariItemId: string, inventoryItemId: string): Promise<void>
+  /** 出品の引き当て候補。型番の完全一致 → シリーズ一致 → 名前の一致の順。引き当て済み・販売済みは除く */
+  suggestForListing(mercariItemId: string, limit?: number): Promise<InventoryItem[]>
+  /** 人が「取り下げた」と記録する。引き当ては外れ、在庫は未出品に戻る */
+  endListing(mercariItemId: string): Promise<void>
 
   // マスタ
   listShopAccounts(): Promise<ShopAccount[]>

@@ -9,6 +9,7 @@ import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
 import TimelineDrawer from '../components/TimelineDrawer.vue'
+import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
@@ -20,6 +21,7 @@ const methods = ref<ShippingMethod[]>([])
 const allTags = ref<Tag[]>([])
 const onlyPending = ref(true)
 const tagFilter = ref('')
+const searchText = ref('')
 const totals = ref<SaleTotals | null>(null)
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
@@ -72,9 +74,12 @@ async function openTimelineForSale(s: SaleProfit) {
   if (items[0]) timelineItemId.value = items[0].id
 }
 
+// 検索中は「未処理のみ」を無視して全件から探す（検索したのに見つからないと誤認させないため）
+const hasSearch = computed(() => !!searchText.value.trim())
+
 function currentFilter(): SaleFilter {
   const filter: SaleFilter = {}
-  if (onlyPending.value) filter.onlyPending = true
+  if (onlyPending.value && !hasSearch.value) filter.onlyPending = true
   if (tagFilter.value) filter.tagId = tagFilter.value
   return filter
 }
@@ -92,13 +97,22 @@ async function loadTags() {
   allTags.value = await window.soroban.listTags()
 }
 
+// --- 検索（クライアント側で絞る） ---
+
+const filteredSales = computed(() =>
+  sales.value.filter(s => matchesSearch(
+    [s.title, s.note, s.buyer, ...s.model_codes, ...s.tags.map(t => t.name), ...s.inherited_tags.map(t => t.name)],
+    searchText.value,
+  )),
+)
+
 onMounted(async () => {
   methods.value = await window.soroban.listShippingMethods()
   await loadTags()
   await load()
 })
 watch(revision, loadTags)
-watch([revision, onlyPending, tagFilter], load)
+watch([revision, onlyPending, tagFilter, hasSearch], load)
 
 // --- 手入力登録 ---
 
@@ -331,9 +345,11 @@ async function remove(sale: SaleProfit) {
         <option value="">すべてのタグ</option>
         <option v-for="t in allTags" :key="t.id" :value="t.id">{{ t.name }}</option>
       </select>
+      <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
+      <span v-if="hasSearch && onlyPending" class="faint search-hint">検索中は未処理以外も表示</span>
       <span class="grow" />
       <button class="sm" @click="autoLinkPending">型番で自動紐付け</button>
-      <span class="faint">{{ sales.length }}件</span>
+      <span class="faint">{{ filteredSales.length }}件</span>
     </div>
 
     <div v-if="tagFilter && totals" class="panel totals-bar">
@@ -350,7 +366,7 @@ async function remove(sale: SaleProfit) {
     <Skeleton v-if="!loaded" :rows="6" />
 
     <template v-else>
-      <div v-if="sales.length" class="panel table-panel">
+      <div v-if="filteredSales.length" class="panel table-panel">
         <table>
           <thead>
             <tr>
@@ -367,7 +383,7 @@ async function remove(sale: SaleProfit) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in sales" :key="s.id">
+            <tr v-for="s in filteredSales" :key="s.id">
               <td class="faint nowrap">{{ s.sold_at.slice(5) }}</td>
 
               <td
@@ -408,6 +424,11 @@ async function remove(sale: SaleProfit) {
                   <StatusChip v-if="s.source === 'collector'" tone="neutral" label="自動取得" />
                   <StatusChip v-for="mc in s.model_codes" :key="mc" tone="neutral" :label="mc" />
                   <StatusChip v-for="t in s.tags" :key="t.id" tone="info" :label="t.name" />
+                  <StatusChip
+                    v-for="t in s.inherited_tags" :key="'inh-' + t.id"
+                    tone="neutral" :label="t.name" class="chip-inherited"
+                    title="仕入／在庫から引き継いだタグ"
+                  />
                 </div>
                 <div v-if="s.note" class="note-row">
                   <Icon name="note" :size="14" class="icon-note" />
@@ -492,6 +513,10 @@ async function remove(sale: SaleProfit) {
         </table>
       </div>
 
+      <EmptyState
+        v-else-if="searchText"
+        title="検索条件に一致する販売がありません"
+      />
       <EmptyState
         v-else
         :title="onlyPending ? '未処理の販売はありません' : '販売がありません'"
@@ -579,6 +604,11 @@ async function remove(sale: SaleProfit) {
   margin-bottom: 16px;
 }
 .field-wide input { width: 320px; }
+
+.search-hint { font-size: var(--fs-12); }
+
+/* 派生タグ（仕入・在庫から引き継いだもの）は直接付けたタグより少し薄く見せる */
+.chip-inherited { opacity: .7; }
 
 .totals-bar {
   display: flex;

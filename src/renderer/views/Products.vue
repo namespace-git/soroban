@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, inject, type Ref } from 'vue'
+import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { ProductSummary, ProductDetail, InventoryItem, SaleProfit } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
@@ -7,6 +7,7 @@ import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import MiniChart from '../components/MiniChart.vue'
 import TimelineDrawer from '../components/TimelineDrawer.vue'
+import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 
 type SortKey = 'total_profit' | 'avg_profit' | 'sold' | 'in_stock' | 'last_purchased_at'
 type ChipInfo = { tone: 'neutral' | 'ok' | 'warn' | 'info'; label: string }
@@ -22,6 +23,7 @@ const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleStr
 const products = ref<ProductSummary[]>([])
 const sortKey = ref<SortKey>('total_profit')
 const loaded = ref(false)
+const searchText = ref('')
 
 async function load() {
   loaded.value = false
@@ -30,6 +32,10 @@ async function load() {
 }
 onMounted(load)
 watch([revision, sortKey], load)
+
+const filteredProducts = computed(() =>
+  products.value.filter(p => matchesSearch([p.model_code, p.name], searchText.value)),
+)
 
 // --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
 
@@ -60,6 +66,9 @@ async function openDetail(modelCode: string) {
 function backToList() {
   detail.value = null
 }
+
+const listedCount = computed(() => detail.value?.items.filter(i => i.listing !== null).length ?? 0)
+const unlistedCount = computed(() => (detail.value?.items.length ?? 0) - listedCount.value)
 
 watch(revision, () => {
   if (detail.value) openDetail(detail.value.model_code)
@@ -121,12 +130,13 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
           <option value="in_stock">在庫数</option>
           <option value="last_purchased_at">最近仕入れた</option>
         </select>
+        <SearchBox v-model="searchText" placeholder="型番・商品名を検索" />
         <span class="grow" />
-        <span class="faint">{{ products.length }}件</span>
+        <span class="faint">{{ filteredProducts.length }}件</span>
       </div>
 
       <Skeleton v-if="!loaded" :rows="6" />
-      <div v-else-if="products.length" class="panel table-panel">
+      <div v-else-if="filteredProducts.length" class="panel table-panel">
         <table>
           <thead>
             <tr>
@@ -143,7 +153,7 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
           </thead>
           <tbody>
             <tr
-              v-for="p in products" :key="p.model_code"
+              v-for="p in filteredProducts" :key="p.model_code"
               class="product-row"
               @click="openDetail(p.model_code)"
             >
@@ -180,6 +190,10 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
         </table>
       </div>
       <EmptyState
+        v-else-if="searchText"
+        title="検索条件に一致する商品がありません"
+      />
+      <EmptyState
         v-else
         title="型番付きの在庫がありません"
         hint="仕入を登録すると、ここに商品ごとの実績が並びます"
@@ -215,6 +229,7 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
           <div class="stat-card">
             <span class="stat-card-label">在庫数</span>
             <span class="stat-card-value">{{ detail.in_stock }}<span class="unit">点</span></span>
+            <span class="stat-card-sub">未出品 {{ unlistedCount }}・出品中 {{ listedCount }}</span>
           </div>
           <div class="stat-card">
             <span class="stat-card-label">仕入合計</span>

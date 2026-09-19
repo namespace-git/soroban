@@ -9,8 +9,8 @@ import { extractCode, extractCodes, extractMaterial } from './code'
 import { thisMonthLocal, todayLocal } from '../shared/date'
 import type {
   AllocMethod, DashboardStats, Fulfillment, InventoryItem, InventoryPatch, InventoryStatus,
-  ItemTimeline, LinkSource, Material, MonthlySummary, ProductDetail, ProductMonthPoint,
-  ProductSummary, PurchaseDetail, PurchaseDraftInput, PurchaseInput,
+  ItemTimeline, LinkSource, Listing, ListingStatus, Material, MonthlySummary, ProductDetail,
+  ProductMonthPoint, ProductSummary, PurchaseDetail, PurchaseDraftInput, PurchaseInput,
   PurchaseLine, PurchaseLineInput, PurchaseStatus, PurchaseSummary, SaleFilter, SaleInput,
   SaleKind, SalePatch, SaleProfit, SaleTotals, ShippingMethod, ShopAccount, ShopAccountKind, Tag,
   TimelineEvent, VariantSummary, CollectorRun, RunStatus, CollectorSource,
@@ -120,7 +120,7 @@ function settingStr(key: string, fallback = ''): string {
  * mercari_keyword を「,」「、」空白（全角/半角）・改行区切りの複数語として解釈する。
  * 前後の空白は除去、空要素は無視、大小文字は無視する。
  */
-function parseKeywords(raw: string): string[] {
+export function parseKeywords(raw: string): string[] {
   return raw
     .split(/[,、\s]+/)
     .map(s => s.trim().toLowerCase())
@@ -128,7 +128,7 @@ function parseKeywords(raw: string): string[] {
 }
 
 /** text がキーワードのどれか1つでも含んでいれば true（大小無視） */
-function matchesAnyKeyword(text: string, keywords: string[]): boolean {
+export function matchesAnyKeyword(text: string, keywords: string[]): boolean {
   const lower = text.toLowerCase()
   return keywords.some(k => lower.includes(k))
 }
@@ -169,8 +169,9 @@ function inventoryHasSplitStatus(): boolean {
 function rebuildInventoryItemForSplit(): void {
   db.pragma('foreign_keys = OFF')
   const tx = db.transaction(() => {
-    // sale_line 側のトリガーが inventory_item を名指しで参照しているため、
-    // DROP TABLE の前に一旦外しておく（残したままだと "no such table" になる）
+    // sale_line・listing_line 側のトリガーが inventory_item を名指しで参照しているため、
+    // DROP TABLE の前に一旦外しておく（残したままだと ALTER TABLE ... RENAME 時に
+    // "no such table" になる。SQLite は RENAME 時に他オブジェクトの参照を検証するため）
     // Phase 1 のビューも inventory_item を参照している。DROP TABLE の前に外す
     // （ビューは migrate() の後に viewsSql が作り直す）
     // inventory_tag も inventory_item を参照する外部キーを持つため、存在するなら
@@ -182,6 +183,7 @@ function rebuildInventoryItemForSplit(): void {
       DROP VIEW IF EXISTS variant_summary;
       DROP TRIGGER IF EXISTS trg_sline_sold;
       DROP TRIGGER IF EXISTS trg_sline_unsold;
+      DROP TRIGGER IF EXISTS trg_listing_line_guard;
       DROP TABLE IF EXISTS inventory_tag;
     `)
 
@@ -222,6 +224,92 @@ function rebuildInventoryItemForSplit(): void {
       CREATE INDEX IF NOT EXISTS idx_inv_acquired ON inventory_item(acquired_at);
       CREATE INDEX IF NOT EXISTS idx_inv_pline    ON inventory_item(purchase_line_id);
       CREATE INDEX IF NOT EXISTS idx_inv_model    ON inventory_item(model_code, status, acquired_at);
+
+      CREATE TRIGGER trg_sline_sold
+      AFTER INSERT ON sale_line
+      BEGIN
+        UPDATE inventory_item
+           SET status = 'sold', updated_at = datetime('now')
+         WHERE id = NEW.inventory_item_id;
+      END;
+
+      CREATE TRIGGER trg_sline_unsold
+      AFTER DELETE ON sale_line
+      BEGIN
+        UPDATE inventory_item
+           SET status = 'in_stock', updated_at = datetime('now')
+         WHERE id = OLD.inventory_item_id;
+      END;
+    `)
+
+    // listing_line が無い（このDBがまだ version<8 に上がっていない）ことがあるため、
+    // 存在するときだけ trg_listing_line_guard を作り直す
+    if (db.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'listing_line'`,
+    ).get()) {
+      db.exec(`
+        CREATE TRIGGER trg_listing_line_guard
+        BEFORE INSERT ON listing_line
+        BEGIN
+          SELECT RAISE(ABORT, '既に別の出品に引き当て済み')
+           WHERE EXISTS (
+             SELECT 1 FROM listing_line ll
+             JOIN listing l ON l.mercari_item_id = ll.listing_id
+             WHERE ll.inventory_item_id = NEW.inventory_item_id
+               AND l.status IN ('active','suspended')
+           );
+          SELECT RAISE(ABORT, '未販売の在庫だけ引き当てられます')
+           WHERE (SELECT status FROM inventory_item WHERE id = NEW.inventory_item_id) != 'in_stock';
+        END;
+      `)
+    }
+  })
+  tx()
+  db.pragma('foreign_keys = ON')
+}
+
+function saleLineHasListingSource(): boolean {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sale_line'`,
+  ).get() as { sql: string } | undefined
+  return !!row && row.sql.includes("'listing'")
+}
+
+/**
+ * sale_line.link_source の CHECK に 'listing' を足す。inventory_item を分割対応に
+ * 作り直したとき（rebuildInventoryItemForSplit）と同じ流儀：ビュー・トリガーを
+ * 先に DROP → 新テーブルへコピー → 旧を DROP → RENAME → トリガー再作成。
+ * データ（既存の紐付け）は一切落とさない。
+ */
+function rebuildSaleLineForListingSource(): void {
+  db.pragma('foreign_keys = OFF')
+  const tx = db.transaction(() => {
+    db.exec(`
+      DROP VIEW IF EXISTS sale_profit;
+      DROP VIEW IF EXISTS monthly_summary;
+      DROP VIEW IF EXISTS inventory_view;
+      DROP VIEW IF EXISTS variant_summary;
+      DROP TRIGGER IF EXISTS trg_sline_sold;
+      DROP TRIGGER IF EXISTS trg_sline_unsold;
+    `)
+
+    db.exec(`
+      CREATE TABLE sale_line_new (
+        id                TEXT PRIMARY KEY,
+        sale_id           TEXT NOT NULL REFERENCES sale(id) ON DELETE CASCADE,
+        inventory_item_id TEXT NOT NULL UNIQUE REFERENCES inventory_item(id),
+        link_source       TEXT NOT NULL DEFAULT 'manual'
+                          CHECK (link_source IN ('auto','manual','listing')),
+        created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      INSERT INTO sale_line_new (id, sale_id, inventory_item_id, link_source, created_at)
+      SELECT id, sale_id, inventory_item_id, link_source, created_at FROM sale_line;
+
+      DROP TABLE sale_line;
+      ALTER TABLE sale_line_new RENAME TO sale_line;
+
+      CREATE INDEX IF NOT EXISTS idx_sline_sale ON sale_line(sale_id);
 
       CREATE TRIGGER trg_sline_sold
       AFTER INSERT ON sale_line
@@ -377,6 +465,72 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '7')
          ON CONFLICT(key) DO UPDATE SET value = '7'`,
+    ).run()
+  }
+
+  if (version < 8) {
+    // 出品（メルカリの出品中タブ）と在庫の引き当て。新規DBは schema.sql（tablesSql）で
+    // 既に作られているので、ここは既存DBを追いつかせるための冪等な処理になる
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS listing (
+        mercari_item_id TEXT PRIMARY KEY,
+        title           TEXT NOT NULL,
+        price           INTEGER NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active','suspended','sold','ended')),
+        first_seen_at   TEXT NOT NULL,
+        last_seen_at    TEXT NOT NULL,
+        thumb_file      TEXT,
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS listing_line (
+        id                TEXT PRIMARY KEY,
+        listing_id        TEXT NOT NULL REFERENCES listing(mercari_item_id) ON DELETE CASCADE,
+        inventory_item_id TEXT NOT NULL REFERENCES inventory_item(id),
+        created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_listing_line_listing ON listing_line(listing_id);
+      CREATE INDEX IF NOT EXISTS idx_listing_line_item    ON listing_line(inventory_item_id);
+      CREATE TRIGGER IF NOT EXISTS trg_listing_line_guard
+      BEFORE INSERT ON listing_line
+      BEGIN
+        SELECT RAISE(ABORT, '既に別の出品に引き当て済み')
+         WHERE EXISTS (
+           SELECT 1 FROM listing_line ll
+           JOIN listing l ON l.mercari_item_id = ll.listing_id
+           WHERE ll.inventory_item_id = NEW.inventory_item_id
+             AND l.status IN ('active','suspended')
+         );
+        SELECT RAISE(ABORT, '未販売の在庫だけ引き当てられます')
+         WHERE (SELECT status FROM inventory_item WHERE id = NEW.inventory_item_id) != 'in_stock';
+      END;
+    `)
+
+    // SQLite は既存の CHECK 制約を ALTER できないため、sale_line.link_source に
+    // 'listing' が無ければテーブルを作り直す
+    if (!saleLineHasListingSource()) rebuildSaleLineForListingSource()
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '8')
+         ON CONFLICT(key) DO UPDATE SET value = '8'`,
+    ).run()
+  }
+
+  if (version < 9) {
+    // 仕入のタグ（purchase_tag）。sale_tag / inventory_tag と同じ流儀。
+    // 新規テーブルなので ALTER 不要。CASCADE で仕入・タグ削除に追従する
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS purchase_tag (
+        purchase_id TEXT NOT NULL REFERENCES purchase(id) ON DELETE CASCADE,
+        tag_id      TEXT NOT NULL REFERENCES tag(id)      ON DELETE CASCADE,
+        PRIMARY KEY (purchase_id, tag_id)
+      );
+    `)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '9')
+         ON CONFLICT(key) DO UPDATE SET value = '9'`,
     ).run()
   }
 
@@ -596,6 +750,7 @@ export function getPurchase(id: string): PurchaseDetail {
 
   const subtotal = lines.reduce((s, l) => s + l.unit_price * l.quantity, 0)
   const total_cost = lines.reduce((s, l) => s + l.unit_price * l.quantity + l.allocated_cost, 0)
+  const tagMap = loadTagsFor('purchase_tag', 'purchase_id', [id])
 
   return {
     id: p.id,
@@ -618,6 +773,7 @@ export function getPurchase(id: string): PurchaseDetail {
     first_model_code: lines[0]?.model_code ?? null,
     subtotal,
     total_cost,
+    tags: tagMap.get(id) ?? [],
     lines,
   }
 }
@@ -716,16 +872,21 @@ const PURCHASE_SUMMARY_SELECT = `
 `
 
 export function listPurchases(): PurchaseSummary[] {
-  return db.prepare(
+  const rows = db.prepare(
     `${PURCHASE_SUMMARY_SELECT} GROUP BY p.id ORDER BY p.ordered_at DESC, p.created_at DESC`,
-  ).all() as PurchaseSummary[]
+  ).all() as Array<Omit<PurchaseSummary, 'tags'>>
+  const tagMap = loadTagsFor('purchase_tag', 'purchase_id', rows.map(r => r.id))
+  return rows.map(r => ({ ...r, tags: tagMap.get(r.id) ?? [] }))
 }
 
 /** 1件分の PurchaseSummary（getItemTimeline が使う）。無ければ undefined */
 function getPurchaseSummary(id: string): PurchaseSummary | undefined {
-  return db.prepare(
+  const row = db.prepare(
     `${PURCHASE_SUMMARY_SELECT} WHERE p.id = ? GROUP BY p.id`,
-  ).get(id) as PurchaseSummary | undefined
+  ).get(id) as Omit<PurchaseSummary, 'tags'> | undefined
+  if (!row) return undefined
+  const tagMap = loadTagsFor('purchase_tag', 'purchase_id', [id])
+  return { ...row, tags: tagMap.get(id) ?? [] }
 }
 
 export function deletePurchase(id: string): void {
@@ -897,18 +1058,18 @@ export function deleteSale(id: string): void {
   db.prepare('DELETE FROM sale WHERE id = ?').run(id)
 }
 
-type SaleProfitRow = Omit<SaleProfit, 'model_codes' | 'tags' | 'thumb_url'> & {
+type SaleProfitRow = Omit<SaleProfit, 'model_codes' | 'tags' | 'inherited_tags' | 'thumb_url'> & {
   model_codes: string
   thumb_file: string | null
 }
 
 /**
- * タグを持つテーブル（sale_tag / inventory_tag）から、対象idごとのタグ配列を
- * まとめて1クエリで引く（N+1にしない）。
+ * タグを持つテーブル（sale_tag / inventory_tag / purchase_tag）から、対象idごとの
+ * タグ配列をまとめて1クエリで引く（N+1にしない）。
  */
 function loadTagsFor(
-  table: 'sale_tag' | 'inventory_tag',
-  column: 'sale_id' | 'inventory_item_id',
+  table: 'sale_tag' | 'inventory_tag' | 'purchase_tag',
+  column: 'sale_id' | 'inventory_item_id' | 'purchase_id',
   ids: string[],
 ): Map<string, Tag[]> {
   const map = new Map<string, Tag[]>()
@@ -931,6 +1092,75 @@ function loadTagsFor(
   return map
 }
 
+/**
+ * 在庫が「派生」で持つタグ（purchase_line → purchase に付いた purchase_tag）を
+ * まとめて1クエリで引く。tags（直接）との重複除去は呼び出し側（attachInventoryTags）で行う。
+ */
+function loadInheritedTagsForInventory(itemIds: string[]): Map<string, Tag[]> {
+  const map = new Map<string, Tag[]>()
+  if (itemIds.length === 0) return map
+
+  const ph = itemIds.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT i.id AS owner_id, t.id, t.name, t.sort_order
+    FROM inventory_item i
+    JOIN purchase_line pl ON pl.id = i.purchase_line_id
+    JOIN purchase_tag  pt ON pt.purchase_id = pl.purchase_id
+    JOIN tag t ON t.id = pt.tag_id
+    WHERE i.id IN (${ph})
+    ORDER BY t.sort_order, t.name
+  `).all(...itemIds) as Array<{ owner_id: string; id: string; name: string; sort_order: number }>
+
+  for (const r of rows) {
+    const arr = map.get(r.owner_id) ?? []
+    arr.push({ id: r.id, name: r.name, sort_order: r.sort_order })
+    map.set(r.owner_id, arr)
+  }
+  return map
+}
+
+/**
+ * 販売が「派生」で持つタグ：紐付いた在庫（sale_line）の inventory_tag ∪
+ * それらの在庫の仕入に付いた purchase_tag。tags（直接）との重複除去は
+ * 呼び出し側（hydrateSaleProfitRows）で行う。
+ */
+function loadInheritedTagsForSales(saleIds: string[]): Map<string, Tag[]> {
+  const map = new Map<string, Tag[]>()
+  if (saleIds.length === 0) return map
+
+  const ph = saleIds.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT owner_id, id, name, sort_order FROM (
+      SELECT sl.sale_id AS owner_id, t.id AS id, t.name AS name, t.sort_order AS sort_order
+      FROM sale_line sl
+      JOIN inventory_tag it ON it.inventory_item_id = sl.inventory_item_id
+      JOIN tag t ON t.id = it.tag_id
+      WHERE sl.sale_id IN (${ph})
+      UNION
+      SELECT sl.sale_id AS owner_id, t.id AS id, t.name AS name, t.sort_order AS sort_order
+      FROM sale_line sl
+      JOIN inventory_item i  ON i.id = sl.inventory_item_id
+      JOIN purchase_line pl ON pl.id = i.purchase_line_id
+      JOIN purchase_tag  pt ON pt.purchase_id = pl.purchase_id
+      JOIN tag t ON t.id = pt.tag_id
+      WHERE sl.sale_id IN (${ph})
+    )
+    ORDER BY sort_order, name
+  `).all(...ids2(saleIds)) as Array<{ owner_id: string; id: string; name: string; sort_order: number }>
+
+  for (const r of rows) {
+    const arr = map.get(r.owner_id) ?? []
+    arr.push({ id: r.id, name: r.name, sort_order: r.sort_order })
+    map.set(r.owner_id, arr)
+  }
+  return map
+}
+
+/** 同じ配列を2回分並べる（UNION の両方の IN (?) に渡す）。可読性のためだけの小ヘルパー */
+function ids2(ids: string[]): string[] {
+  return [...ids, ...ids]
+}
+
 /** listSales / saleTotals 共通の絞り込み。sale_profit ビューに対する WHERE を組み立てる */
 function buildSaleFilterWhere(filter?: SaleFilter): { where: string; vals: unknown[] } {
   const clauses: string[] = []
@@ -943,10 +1173,23 @@ function buildSaleFilterWhere(filter?: SaleFilter): { where: string; vals: unkno
     clauses.push(`(is_shipping_confirmed = 0 OR (unmatched = 1 AND kind = 'resale'))`)
   }
   if (filter?.tagId) {
-    clauses.push(
-      `EXISTS (SELECT 1 FROM sale_tag WHERE sale_tag.sale_id = sale_profit.id AND sale_tag.tag_id = ?)`,
-    )
-    vals.push(filter.tagId)
+    // 直接付いたタグ ∪ 派生タグ（紐付いた在庫のタグ・その仕入のタグ）で一致させる
+    clauses.push(`(
+      EXISTS (SELECT 1 FROM sale_tag WHERE sale_tag.sale_id = sale_profit.id AND sale_tag.tag_id = ?)
+      OR EXISTS (
+        SELECT 1 FROM sale_line sl
+        JOIN inventory_tag it ON it.inventory_item_id = sl.inventory_item_id
+        WHERE sl.sale_id = sale_profit.id AND it.tag_id = ?
+      )
+      OR EXISTS (
+        SELECT 1 FROM sale_line sl
+        JOIN inventory_item i  ON i.id = sl.inventory_item_id
+        JOIN purchase_line pl ON pl.id = i.purchase_line_id
+        JOIN purchase_tag  pt ON pt.purchase_id = pl.purchase_id
+        WHERE sl.sale_id = sale_profit.id AND pt.tag_id = ?
+      )
+    )`)
+    vals.push(filter.tagId, filter.tagId, filter.tagId)
   }
 
   return { where: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', vals }
@@ -957,13 +1200,19 @@ function buildSaleFilterWhere(filter?: SaleFilter): { where: string; vals: unkno
  * listSales / getItemTimeline / getProduct で共通に使う。
  */
 function hydrateSaleProfitRows(rows: SaleProfitRow[]): SaleProfit[] {
-  const tagMap = loadTagsFor('sale_tag', 'sale_id', rows.map(r => r.id))
+  const ids = rows.map(r => r.id)
+  const tagMap = loadTagsFor('sale_tag', 'sale_id', ids)
+  const inheritedMap = loadInheritedTagsForSales(ids)
   return rows.map(r => {
     const { thumb_file, ...rest } = r
+    const tags = tagMap.get(r.id) ?? []
+    const directIds = new Set(tags.map(t => t.id))
+    const inherited_tags = (inheritedMap.get(r.id) ?? []).filter(t => !directIds.has(t.id))
     return {
       ...rest,
       model_codes: JSON.parse(rest.model_codes || '[]') as string[],
-      tags: tagMap.get(r.id) ?? [],
+      tags,
+      inherited_tags,
       thumb_url: toThumbUrl(thumb_file),
     }
   })
@@ -1004,14 +1253,34 @@ export function saleTotals(filter?: SaleFilter): SaleTotals {
 // suggestInventory が候補を返すだけで、確定は人間が行う。
 // ============================================================
 
+/**
+ * 販売に在庫を紐付ける。タグはコピーしない（派生で見える。SaleProfit.inherited_tags）。
+ * in_stock でない在庫（売却済み・廃棄済み・自家消費・分割済み）が混ざっていれば例外。
+ * 出品に引き当て中（listing_line）の在庫は紐付けてよい。人が「この販売に使う」と
+ * 決めたのでその引き当ては優先して外す（出品自体の status は変えない）。
+ */
 export function linkInventory(
   saleId: string, itemIds: string[], source: LinkSource = 'manual',
 ): void {
+  if (itemIds.length > 0) {
+    const ph = itemIds.map(() => '?').join(',')
+    const rows = db.prepare(
+      `SELECT id, status FROM inventory_item WHERE id IN (${ph})`,
+    ).all(...itemIds) as Array<{ id: string; status: InventoryStatus }>
+    if (rows.some(r => r.status !== 'in_stock')) {
+      throw new Error('販売済み・廃棄済みの在庫は紐付けられません')
+    }
+  }
+
   const ins = db.prepare(
     `INSERT INTO sale_line (id, sale_id, inventory_item_id, link_source) VALUES (?, ?, ?, ?)`,
   )
+  const delListing = db.prepare('DELETE FROM listing_line WHERE inventory_item_id = ?')
   const tx = db.transaction(() => {
-    for (const itemId of itemIds) ins.run(randomUUID(), saleId, itemId, source)
+    for (const itemId of itemIds) {
+      ins.run(randomUUID(), saleId, itemId, source)
+      delListing.run(itemId)
+    }
   })
   try {
     tx()
@@ -1030,9 +1299,18 @@ export function unlinkInventory(saleId: string, itemId: string): void {
 }
 
 /**
+ * 型番が枝番（-2 など）まで含むか。CLAUDE.md の原則：自動確定は型番の枝番まで
+ * 完全一致だけ。【A035】のようなシリーズだけのコード（枝番なし）は対象外
+ * （候補提示止まり。suggestInventory には出る）。
+ */
+function hasBranchCode(code: string): boolean {
+  return code.split('-')[0] !== code
+}
+
+/**
  * 販売の型番が model_code と枝番まで完全一致するとき、その型番の未販売在庫を
  * 先入先出（acquired_at 昇順）で1点だけ充てて自動確定する。
- * 条件を満たさない（型番なし・複数・一致在庫なし）場合は何もしない。
+ * 条件を満たさない（型番なし・複数・枝番なし・一致在庫なし）場合は何もしない。
  * 戻り値は確定できたかどうか。
  */
 export function autoLinkSale(saleId: string): boolean {
@@ -1045,12 +1323,19 @@ export function autoLinkSale(saleId: string): boolean {
   if (already.c > 0) return false
 
   const codes = JSON.parse(sale.model_codes || '[]') as string[]
-  if (codes.length !== 1) return false
+  if (codes.length !== 1 || !hasBranchCode(codes[0])) return false
 
+  // 他の active/suspended な出品に引き当て済みの在庫はFIFO候補から外す
+  // （人が出品に予約した意思を、型番一致の自動確定で横取りしない）
   const item = db.prepare(`
-    SELECT id FROM inventory_item
-     WHERE model_code = ? AND status = 'in_stock'
-     ORDER BY acquired_at ASC, created_at ASC
+    SELECT id FROM inventory_item i
+     WHERE i.model_code = ? AND i.status = 'in_stock'
+       AND NOT EXISTS (
+         SELECT 1 FROM listing_line ll
+         JOIN listing l ON l.mercari_item_id = ll.listing_id
+         WHERE ll.inventory_item_id = i.id AND l.status IN ('active','suspended')
+       )
+     ORDER BY i.acquired_at ASC, i.created_at ASC
      LIMIT 1
   `).get(codes[0]) as { id: string } | undefined
   if (!item) return false
@@ -1128,18 +1413,62 @@ function normalizeName(s: string): string {
  * SQL側では正規化できないため、in_stock を全件取ってJS側で並べ替える
  * （規模は月20〜50件程度の想定）。
  */
-/** inventory_view の1行。thumb_url は toThumbUrl で組み立てる前の、生のファイル名 */
-type InventoryRow = Omit<InventoryItem, 'tags' | 'thumb_url'> & { thumb_file: string | null }
+/** inventory_view の1行。thumb_url・listing は組み立てる前の生の列 */
+type InventoryRow = Omit<InventoryItem, 'tags' | 'inherited_tags' | 'thumb_url' | 'listing'> & {
+  thumb_file: string | null
+  listing_id: string | null
+  listing_price: number | null
+  listing_status: ListingStatus | null
+}
 
-/** in_stock（等）を inventory_view から引いた結果に、まとめて引いたタグを付ける */
+/**
+ * in_stock（等）を inventory_view から引いた結果に、まとめて引いた直接タグと
+ * 派生タグ（仕入から。tags と重複するものは除く）を付ける。
+ */
 function attachInventoryTags(items: InventoryRow[]): InventoryItem[] {
-  const tagMap = loadTagsFor('inventory_tag', 'inventory_item_id', items.map(i => i.id))
+  const ids = items.map(i => i.id)
+  const tagMap = loadTagsFor('inventory_tag', 'inventory_item_id', ids)
+  const inheritedMap = loadInheritedTagsForInventory(ids)
   return items.map(i => {
-    const { thumb_file, ...rest } = i
-    return { ...rest, thumb_url: toThumbUrl(thumb_file), tags: tagMap.get(i.id) ?? [] }
+    const { thumb_file, listing_id, listing_price, listing_status, ...rest } = i
+    const tags = tagMap.get(i.id) ?? []
+    const directIds = new Set(tags.map(t => t.id))
+    const inherited_tags = (inheritedMap.get(i.id) ?? []).filter(t => !directIds.has(t.id))
+    return {
+      ...rest,
+      thumb_url: toThumbUrl(thumb_file),
+      tags,
+      inherited_tags,
+      listing: listing_id
+        ? { mercari_item_id: listing_id, price: listing_price!, status: listing_status! }
+        : null,
+    }
   })
 }
 
+/**
+ * 在庫候補の並び順：型番完全一致 → シリーズ一致 → 商品名の類似度
+ * （完全一致 → 前方一致 → 部分一致 → 残り）。suggestInventory / suggestForListing で共通。
+ */
+function rankInventoryMatch(
+  item: InventoryRow, codeSet: Set<string>, seriesCodes: Set<string>, target: string, head: string,
+): number {
+  if (item.model_code && codeSet.has(item.model_code)) return 0
+  if (item.series_code && seriesCodes.has(item.series_code)) return 1
+  const n = normalizeName(item.name)
+  if (n === target) return 2
+  if (head && n.startsWith(head)) return 3
+  if (head && n.includes(head)) return 4
+  return 5
+}
+
+/**
+ * 在庫候補を返す。並びは 型番完全一致 → シリーズ一致 → 商品名の類似度
+ * （完全一致 → 前方一致 → 部分一致 → 残り）。同順位は滞留日数が長い方を先に
+ * （型番一致の中では先入先出と同じ順になる）。
+ * SQL側では正規化できないため、in_stock を全件取ってJS側で並べ替える
+ * （規模は月20〜50件程度の想定）。他の出品に引き当て済みの在庫は候補から除く。
+ */
 export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
   const sale = db.prepare('SELECT title, model_codes FROM sale WHERE id = ?').get(saleId) as
     | { title: string; model_codes: string } | undefined
@@ -1153,26 +1482,230 @@ export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
   const head = target.slice(0, 6)
 
   const items = db.prepare(
-    `SELECT * FROM inventory_view WHERE status = 'in_stock'`,
+    `SELECT * FROM inventory_view WHERE status = 'in_stock' AND listing_id IS NULL`,
   ).all() as InventoryRow[]
 
-  const rank = (item: InventoryRow): number => {
-    if (item.model_code && codeSet.has(item.model_code)) return 0
-    if (item.series_code && seriesCodes.has(item.series_code)) return 1
-    const n = normalizeName(item.name)
-    if (n === target) return 2
-    if (head && n.startsWith(head)) return 3
-    if (head && n.includes(head)) return 4
-    return 5
-  }
-
   const picked = items
-    .map(item => ({ item, r: rank(item) }))
+    .map(item => ({ item, r: rankInventoryMatch(item, codeSet, seriesCodes, target, head) }))
     .sort((a, b) => (a.r !== b.r ? a.r - b.r : b.item.aging_days - a.item.aging_days))
     .slice(0, limit)
     .map(({ item }) => item)
 
   return attachInventoryTags(picked)
+}
+
+// ============================================================
+// 出品（メルカリの出品中タブ）と在庫の引き当て
+//
+// 出品そのものは在庫の status を変えない（in_stock のまま。まだ売れていない資産）。
+// 引き当ては人が行う（自動確定しない）。二重引き当て・売却済み在庫の引き当ては
+// trg_listing_line_guard（schema.sql）が拒否する。
+// ============================================================
+
+/**
+ * 出品中タブの一覧を取り込む。新規は first_seen_at を今日にする。
+ * 既存は title/price/status/last_seen_at を更新するが、sold/ended になったものは
+ * 一覧に出ていても active/suspended へ戻さない（1ページしか読まないため、
+ * 一覧から消えたことと「取り下げた」を区別できない＝ CLAUDE.md のCodexレビュー指摘）。
+ * 一覧に無い listing は何もしない。
+ */
+export function upsertListings(
+  rows: Array<{
+    mercariItemId: string
+    title: string
+    price: number
+    suspended: boolean
+    thumbUrl: string | null
+  }>,
+): { inserted: number; updated: number } {
+  const today = todayLocal()
+  const getExisting = db.prepare('SELECT status FROM listing WHERE mercari_item_id = ?')
+  const insertStmt = db.prepare(`
+    INSERT INTO listing (mercari_item_id, title, price, status, first_seen_at, last_seen_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+  `)
+  const updateStmt = db.prepare(`
+    UPDATE listing SET title = ?, price = ?, status = ?, last_seen_at = datetime('now'),
+           updated_at = datetime('now')
+     WHERE mercari_item_id = ?
+  `)
+
+  let inserted = 0
+  let updated = 0
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      const status: ListingStatus = r.suspended ? 'suspended' : 'active'
+      const existing = getExisting.get(r.mercariItemId) as { status: ListingStatus } | undefined
+      if (!existing) {
+        insertStmt.run(r.mercariItemId, r.title, r.price, status, today)
+        inserted++
+      } else if (existing.status === 'active' || existing.status === 'suspended') {
+        updateStmt.run(r.title, r.price, status, r.mercariItemId)
+        updated++
+      }
+      // sold / ended は一覧に出ていても戻さない
+    }
+  })
+  tx()
+  return { inserted, updated }
+}
+
+type ListingRow = {
+  mercari_item_id: string
+  title: string
+  price: number
+  status: ListingStatus
+  first_seen_at: string
+  last_seen_at: string
+  thumb_file: string | null
+}
+
+function hydrateListing(r: ListingRow, rateBp: number): Listing {
+  const items = db.prepare(`
+    SELECT i.id, i.name, i.model_code, i.landed_cost
+      FROM listing_line ll
+      JOIN inventory_item i ON i.id = ll.inventory_item_id
+     WHERE ll.listing_id = ?
+  `).all(r.mercari_item_id) as Array<
+    { id: string; name: string; model_code: string | null; landed_cost: number }
+  >
+
+  const reserved_cost = items.reduce((s, i) => s + i.landed_cost, 0)
+  // 送料は未定なので引かない。手数料は設定の率で見込む
+  const expected_profit = items.length === 0 ? null : r.price - calcFee(r.price, rateBp) - reserved_cost
+
+  return {
+    mercari_item_id: r.mercari_item_id,
+    title: r.title,
+    price: r.price,
+    status: r.status,
+    first_seen_at: r.first_seen_at,
+    last_seen_at: r.last_seen_at,
+    thumb_url: toThumbUrl(r.thumb_file),
+    model_codes: extractCodes(r.title),
+    items,
+    reserved_cost,
+    expected_profit,
+  }
+}
+
+/** status 未指定なら active + suspended。onlyUnallocated で未引き当てだけ */
+export function listListings(
+  filter?: { status?: ListingStatus[]; onlyUnallocated?: boolean },
+): Listing[] {
+  const statuses = filter?.status ?? ['active', 'suspended']
+  const ph = statuses.map(() => '?').join(',')
+  const rows = db.prepare(
+    `SELECT * FROM listing WHERE status IN (${ph}) ORDER BY first_seen_at DESC, created_at DESC`,
+  ).all(...statuses) as ListingRow[]
+
+  const rateBp = setting('fee_rate_bp', 1000)
+  const listings = rows.map(r => hydrateListing(r, rateBp))
+
+  return filter?.onlyUnallocated ? listings.filter(l => l.items.length === 0) : listings
+}
+
+/** 出品に在庫を引き当てる（追加）。既に他の active な出品に引き当て済み・販売済みの在庫はエラー */
+export function reserveInventory(mercariItemId: string, inventoryItemIds: string[]): void {
+  const ins = db.prepare(
+    `INSERT INTO listing_line (id, listing_id, inventory_item_id) VALUES (?, ?, ?)`,
+  )
+  const tx = db.transaction(() => {
+    for (const itemId of inventoryItemIds) ins.run(randomUUID(), mercariItemId, itemId)
+  })
+  tx()
+}
+
+export function unreserveInventory(mercariItemId: string, inventoryItemId: string): void {
+  db.prepare('DELETE FROM listing_line WHERE listing_id = ? AND inventory_item_id = ?')
+    .run(mercariItemId, inventoryItemId)
+}
+
+/**
+ * 出品の引き当て候補。型番の完全一致 → シリーズ一致 → 名前の一致の順。
+ * 引き当て済み（他の active/suspended な出品）・販売済みは除く。
+ */
+export function suggestForListing(mercariItemId: string, limit = 20): InventoryItem[] {
+  const listing = db.prepare('SELECT title FROM listing WHERE mercari_item_id = ?')
+    .get(mercariItemId) as { title: string } | undefined
+  if (!listing) return []
+
+  const codes = extractCodes(listing.title)
+  const codeSet = new Set(codes)
+  const seriesCodes = new Set(codes.map(c => c.split('-')[0]))
+
+  const target = normalizeName(listing.title)
+  const head = target.slice(0, 6)
+
+  const items = db.prepare(
+    `SELECT * FROM inventory_view WHERE status = 'in_stock' AND listing_id IS NULL`,
+  ).all() as InventoryRow[]
+
+  const picked = items
+    .map(item => ({ item, r: rankInventoryMatch(item, codeSet, seriesCodes, target, head) }))
+    .sort((a, b) => (a.r !== b.r ? a.r - b.r : b.item.aging_days - a.item.aging_days))
+    .slice(0, limit)
+    .map(({ item }) => item)
+
+  return attachInventoryTags(picked)
+}
+
+/** 人が「取り下げた」と記録する。引き当ては外れ、在庫は未出品に戻る */
+export function endListing(mercariItemId: string): void {
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM listing_line WHERE listing_id = ?').run(mercariItemId)
+    db.prepare(
+      `UPDATE listing SET status = 'ended', updated_at = datetime('now') WHERE mercari_item_id = ?`,
+    ).run(mercariItemId)
+  })
+  tx()
+}
+
+/**
+ * 新しく取り込んだ販売の mercari_item_id と同じ出品があり、引き当て（listing_line）が
+ * あれば、それをそのまま sale_line（link_source='listing'）へ移す。出品は sold にし、
+ * listing_line は消す（人の決定をそのまま引き継ぐ。型番一致より優先）。
+ * 出品が無い・引き当てが無ければ何もせず false を返す（呼び出し側が型番FIFOにフォールバック）。
+ */
+function takeOverListing(saleId: string, mercariItemId: string | null): boolean {
+  if (!mercariItemId) return false
+
+  const listing = db.prepare(
+    `SELECT mercari_item_id FROM listing WHERE mercari_item_id = ? AND status IN ('active','suspended')`,
+  ).get(mercariItemId) as { mercari_item_id: string } | undefined
+  if (!listing) return false
+
+  const lines = db.prepare('SELECT inventory_item_id FROM listing_line WHERE listing_id = ?')
+    .all(mercariItemId) as Array<{ inventory_item_id: string }>
+  if (lines.length === 0) return false
+
+  const insLine = db.prepare(
+    `INSERT INTO sale_line (id, sale_id, inventory_item_id, link_source) VALUES (?, ?, ?, 'listing')`,
+  )
+  for (const l of lines) insLine.run(randomUUID(), saleId, l.inventory_item_id)
+
+  db.prepare('DELETE FROM listing_line WHERE listing_id = ?').run(mercariItemId)
+  db.prepare(
+    `UPDATE listing SET status = 'sold', updated_at = datetime('now') WHERE mercari_item_id = ?`,
+  ).run(mercariItemId)
+
+  return true
+}
+
+/** サムネイルをまだ持っていない出品（mercari_item_id）を返す */
+export function listingsWithoutThumb(mercariItemIds: string[]): string[] {
+  if (mercariItemIds.length === 0) return []
+  const ph = mercariItemIds.map(() => '?').join(',')
+  const rows = db.prepare(
+    `SELECT mercari_item_id AS id FROM listing WHERE mercari_item_id IN (${ph}) AND thumb_file IS NULL`,
+  ).all(...mercariItemIds) as Array<{ id: string }>
+  return rows.map(r => r.id)
+}
+
+export function setListingThumb(mercariItemId: string, file: string): void {
+  db.prepare(
+    `UPDATE listing SET thumb_file = ?, updated_at = datetime('now') WHERE mercari_item_id = ?`,
+  ).run(file, mercariItemId)
 }
 
 // ============================================================
@@ -1247,6 +1780,8 @@ export function splitInventory(id: string, count: number): string[] {
       )
       childIds.push(childId)
     }
+    // 引き当て中（出品に予約済み）だった場合、分割で親は売れなくなるので引き当ても外す
+    db.prepare('DELETE FROM listing_line WHERE inventory_item_id = ?').run(id)
     db.prepare(`UPDATE inventory_item SET status = 'split', updated_at = datetime('now') WHERE id = ?`)
       .run(id)
   })
@@ -1267,12 +1802,17 @@ export function disposeInventory(
     throw new Error('販売済みの在庫は外せません')
   }
 
-  db.prepare(
-    `UPDATE inventory_item
-        SET status = ?, disposed_at = date('now'),
-            disposed_note = ?, updated_at = datetime('now')
-      WHERE id = ?`,
-  ).run(status, note, id)
+  const tx = db.transaction(() => {
+    // 引き当て中（出品に予約済み）だった場合、廃棄・自家消費で売れなくなるので引き当ても外す
+    db.prepare('DELETE FROM listing_line WHERE inventory_item_id = ?').run(id)
+    db.prepare(
+      `UPDATE inventory_item
+          SET status = ?, disposed_at = date('now'),
+              disposed_note = ?, updated_at = datetime('now')
+        WHERE id = ?`,
+    ).run(status, note, id)
+  })
+  tx()
 }
 
 // ============================================================
@@ -1555,6 +2095,31 @@ export function getItemTimeline(inventoryItemId: string): ItemTimeline | null {
     })
   }
 
+  // 出品への引き当て（未販売ならitem.listingから）／売れたあとも、その紐付けが
+  // link_source='listing'（出品からの引き継ぎ）なら「出品」イベントを足す
+  let listingInfo: { price: number; first_seen_at: string } | null = null
+  if (item.listing) {
+    listingInfo = db.prepare('SELECT price, first_seen_at FROM listing WHERE mercari_item_id = ?')
+      .get(item.listing.mercari_item_id) as { price: number; first_seen_at: string } | undefined ?? null
+  } else if (sale) {
+    const saleLine = db.prepare(
+      'SELECT link_source FROM sale_line WHERE inventory_item_id = ? AND sale_id = ?',
+    ).get(inventoryItemId, sale.id) as { link_source: LinkSource } | undefined
+    if (saleLine?.link_source === 'listing' && sale.mercari_item_id) {
+      listingInfo = db.prepare('SELECT price, first_seen_at FROM listing WHERE mercari_item_id = ?')
+        .get(sale.mercari_item_id) as { price: number; first_seen_at: string } | undefined ?? null
+    }
+  }
+  if (listingInfo) {
+    events.push({
+      date: listingInfo.first_seen_at,
+      kind: 'listed',
+      title: 'メルカリに出品',
+      detail: yenText(listingInfo.price),
+      amount: listingInfo.price,
+    })
+  }
+
   if (sale) {
     const detailParts = [yenText(sale.price)]
     if (sale.item_count > 1) {
@@ -1615,8 +2180,9 @@ export function getItemTimeline(inventoryItemId: string): ItemTimeline | null {
 // ============================================================
 // タグ
 //
-// 販売・在庫に複数付けられる。名前は一意。消すと CASCADE で
-// 付いていた販売・在庫からも外れる（T-04）
+// 仕入・販売・在庫に複数付けられる。名前は一意。消すと CASCADE で
+// 付いていた仕入・販売・在庫からも外れる（T-04）。
+// 仕入・在庫のタグは下流（在庫・販売）へ「派生」で見える（コピーしない）。
 // ============================================================
 
 export function listTags(): Tag[] {
@@ -1651,7 +2217,7 @@ export function renameTag(id: string, name: string): void {
   if (result.changes === 0) throw new Error('タグが見つかりません')
 }
 
-/** タグを消すと、付いていた販売・在庫からも CASCADE で外れる */
+/** タグを消すと、付いていた仕入・販売・在庫からも CASCADE で外れる */
 export function deleteTag(id: string): void {
   db.prepare('DELETE FROM tag WHERE id = ?').run(id)
 }
@@ -1677,6 +2243,20 @@ export function setInventoryTags(itemId: string, tagIds: string[]): void {
   tx()
 }
 
+/**
+ * 仕入のタグを丸ごと置き換える（空配列で全部外す）。
+ * その仕入から生まれた在庫すべて・その在庫が紐付いた販売に派生で見える（コピーしない）
+ */
+export function setPurchaseTags(purchaseId: string, tagIds: string[]): void {
+  const unique = [...new Set(tagIds)]
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM purchase_tag WHERE purchase_id = ?').run(purchaseId)
+    const ins = db.prepare('INSERT INTO purchase_tag (purchase_id, tag_id) VALUES (?, ?)')
+    for (const tagId of unique) ins.run(purchaseId, tagId)
+  })
+  tx()
+}
+
 export function getDashboard(): DashboardStats {
   const one = <T>(sql: string, ...v: unknown[]) => db.prepare(sql).get(...v) as T
 
@@ -1688,6 +2268,13 @@ export function getDashboard(): DashboardStats {
 
   const needsPurchaseConfirm = one<{ c: number }>(
     `SELECT COUNT(*) AS c FROM purchase WHERE status = 'draft'`).c
+
+  const needsListingAllocation = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM listing l
+     WHERE l.status = 'active' AND NOT EXISTS (
+       SELECT 1 FROM listing_line ll WHERE ll.listing_id = l.mercari_item_id
+     )
+  `).c
 
   const stock = one<{ c: number; v: number }>(
     `SELECT COUNT(*) AS c, COALESCE(SUM(landed_cost),0) AS v
@@ -1711,6 +2298,7 @@ export function getDashboard(): DashboardStats {
     needsShipping,
     needsMatch,
     needsPurchaseConfirm,
+    needsListingAllocation,
     stockCount: stock.c,
     stockValue: stock.v,
     agingCount: aging,
@@ -1937,12 +2525,15 @@ export function insertCollected(
         shippingFee, shippingSource,
       )
       inserted.push({ id, mercariItemId: r.mercariItemId })
+
+      // 出品への引き当てがあれば、そのままそれを引き継ぐ（人の決定が最優先）。
+      // 無ければ今までどおり型番の完全一致でFIFO自動確定する
+      if (!takeOverListing(id, r.mercariItemId)) {
+        autoLinkSale(id)
+      }
     }
   })
   tx()
-
-  // 型番が完全一致する分は自動確定する
-  for (const r of inserted) autoLinkSale(r.id)
 
   return inserted
 }
@@ -2037,6 +2628,9 @@ export function resetData(): void {
     db.exec(`
       DELETE FROM sale_tag;
       DELETE FROM inventory_tag;
+      DELETE FROM purchase_tag;
+      DELETE FROM listing_line;
+      DELETE FROM listing;
       DELETE FROM sale_line;
       DELETE FROM sale;
       DELETE FROM inventory_item;

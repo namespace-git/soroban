@@ -25,6 +25,8 @@ const PARTITION = 'persist:mercari'
 // 販売履歴ページ：商品タイトル・価格・販売手数料・送料・他費用・購入完了日が表で並ぶ。
 // 一覧（/mypage/listings/completed）より情報量が多く、実額の取得源として正とする
 const LISTINGS_URL = 'https://jp.mercari.com/mypage/listings/sold'
+// 出品した商品「出品中」タブ。ここから出品と在庫の引き当てを取り込む
+const MY_LISTINGS_URL = 'https://jp.mercari.com/mypage/listings'
 const LOGIN_URL = 'https://jp.mercari.com/login'
 
 /** 1回の収集で開くページ数の上限（一覧1＋詳細最大5）。超えたら次回に回す */
@@ -163,8 +165,18 @@ export function parseSoldRow(
   }
 }
 
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#39;/g, '\'')
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+}
+
 function stripTags(html: string): string {
-  return html.replace(/<[^>]+>/g, '').trim()
+  return decodeEntities(html.replace(/<[^>]+>/g, '')).trim()
 }
 
 /**
@@ -213,6 +225,74 @@ export function parseSoldHtml(html: string): SoldRow[] {
 /** 「1件～18件（全18件）」のような表示から総件数を抜く。読めなければ null */
 export function extractTotalCount(bodyText: string): number | null {
   const m = /全([\d,]+)件/.exec(bodyText)
+  return m ? parseInt(m[1].replace(/,/g, ''), 10) : null
+}
+
+/** 出品した商品「出品中」タブの1件（parseListingsHtml の要素） */
+export interface ScrapedListing {
+  mercariItemId: string
+  title: string
+  price: number
+  /** 「公開停止中」の表示があるか */
+  suspended: boolean
+  /** 商品サムネイルのURL。取れなければ null */
+  thumbUrl: string | null
+}
+
+/**
+ * 「出品した商品 › 出品中」タブ（`https://jp.mercari.com/mypage/listings`）の
+ * HTML から出品を抜く（jsdom なしの簡易パース。fixture テスト用）。
+ *
+ * ⚠ セレクタは実DOM（fixtures/mercari-listings.html）に基づくが、クラス名はハッシュで
+ *   変わるため使っていない。商品リンク（`a[href*="/item/m"]`、data-testid="listed-item"）
+ *   を起点にし、タイトルは `[data-testid="item-label"]`、価格は `[data-testid="price"]`
+ *   の数字、サムネイルは `img[src]` から拾う。「公開停止中」の文字列があれば suspended。
+ */
+export function parseListingsHtml(html: string): ScrapedListing[] {
+  const listMatch = /<ul\b[^>]*data-testid="listed-item-list"[^>]*>([\s\S]*?)<\/ul>/.exec(html)
+  if (!listMatch) return []
+  const listHtml = listMatch[1]
+
+  const rows: ScrapedListing[] = []
+  const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/g
+  let am: RegExpExecArray | null
+  while ((am = anchorRe.exec(listHtml))) {
+    const attrs = am[1]
+    if (!/data-testid="listed-item"/.test(attrs)) continue
+    const content = am[2]
+
+    const hrefMatch = /href="([^"]*)"/.exec(attrs)
+    const idMatch = hrefMatch ? /m\d{9,}/.exec(hrefMatch[1]) : null
+    if (!idMatch) continue
+
+    const titleMatch = /<p\b[^>]*data-testid="item-label"[^>]*>([\s\S]*?)<\/p>/.exec(content)
+    const title = titleMatch ? stripTags(titleMatch[1]) : ''
+    if (!title) continue
+
+    // 価格は ¥ と数字が別 span のことがある（<span data-testid="price">…<span>¥</span>
+    // <span>2,350</span></span>）。外側の <span> の中身をまるごと拾ってから数字だけ抜く
+    const priceMatch = /<span\b[^>]*data-testid="price"[^>]*>([\s\S]*?)<\/span>\s*<\/span>/.exec(content)
+    const priceDigits = priceMatch ? stripTags(priceMatch[1]).replace(/[^\d]/g, '') : ''
+    if (!priceDigits) continue
+
+    const imgMatch = /<img\b[^>]*\bsrc="([^"]*)"/.exec(content)
+
+    rows.push({
+      mercariItemId: idMatch[0],
+      title,
+      price: parseInt(priceDigits, 10),
+      suspended: /公開停止中/.test(content),
+      thumbUrl: imgMatch ? imgMatch[1] : null,
+    })
+  }
+  return rows
+}
+
+/** 「出品した商品」の総件数（`data-testid="total-item-count"` の「22件」）。読めなければ null */
+export function extractListingTotal(html: string): number | null {
+  const pMatch = /<p\b[^>]*data-testid="total-item-count"[^>]*>([\s\S]*?)<\/p>/.exec(html)
+  if (!pMatch) return null
+  const m = /([\d,]+)件/.exec(pMatch[1])
   return m ? parseInt(m[1].replace(/,/g, ''), 10) : null
 }
 
@@ -395,15 +475,21 @@ function ensureThumbDir(): string {
 }
 
 /**
- * 販売履歴に写っているサムネイルを1枚取得して保存する。書き込み操作ではない（画像のGETのみ）。
- * session.fetch を使うことで、普通のブラウザの画像取得と同じ Cookie/UA に見える。
+ * 一覧に写っているサムネイルを1枚取得してファイルに保存し、ファイル名を返す。
+ * 書き込み操作ではない（画像のGETのみ）。session.fetch を使うことで、
+ * 普通のブラウザの画像取得と同じ Cookie/UA に見える。
  */
-async function downloadThumb(saleId: string, mercariItemId: string, url: string): Promise<void> {
+async function downloadThumbFile(mercariItemId: string, url: string): Promise<string> {
   const res = await session.fromPartition(PARTITION).fetch(url)
   if (!res.ok) throw new Error(`サムネイル取得に失敗しました（${res.status}）: ${url}`)
   const buf = Buffer.from(await res.arrayBuffer())
   const file = `${mercariItemId}.jpg`
   await writeFile(join(ensureThumbDir(), file), buf)
+  return file
+}
+
+async function downloadThumb(saleId: string, mercariItemId: string, url: string): Promise<void> {
+  const file = await downloadThumbFile(mercariItemId, url)
   db.setSaleThumb(saleId, file)
 }
 
@@ -419,6 +505,7 @@ async function downloadThumb(saleId: string, mercariItemId: string, url: string)
 async function saveNewThumbs(
   targets: Array<{ id: string; mercariItemId: string }>,
   scraped: ScrapedSale[],
+  limit = MAX_THUMBS_PER_RUN,
 ): Promise<number> {
   const thumbByItemId = new Map(scraped.map(s => [s.mercariItemId, s.thumbUrl]))
   const seen = new Set<string>()
@@ -427,12 +514,43 @@ async function saveNewThumbs(
     .filter(t => (seen.has(t.id) ? false : (seen.add(t.id), true))) // id重複を除く
     .map(t => ({ ...t, thumbUrl: thumbByItemId.get(t.mercariItemId) ?? null }))
     .filter((t): t is { id: string; mercariItemId: string; thumbUrl: string } => !!t.thumbUrl)
-    .slice(0, MAX_THUMBS_PER_RUN)
+    .slice(0, Math.max(0, limit))
 
   let saved = 0
   for (const t of withUrl) {
     try {
       await downloadThumb(t.id, t.mercariItemId, t.thumbUrl)
+      saved++
+    } catch {
+      // 一度だけの約束を優先。失敗しても再試行しない
+    }
+    await sleep(300 + Math.floor(Math.random() * 500))
+  }
+  return saved
+}
+
+/**
+ * 出品（listing）版のサムネイル保存。saveNewThumbs と同じ約束（一度だけ・連打しない・
+ * 失敗を再試行しない）で、`db.setListingThumb` に書く。予算は呼び出し側が
+ * `saveNewThumbs` と合算で管理する（1回の収集でサムネイルは合計 `MAX_THUMBS_PER_RUN` 枚まで）。
+ */
+async function saveNewListingThumbs(
+  targets: string[],
+  scraped: ScrapedListing[],
+  limit: number,
+): Promise<number> {
+  const thumbByItemId = new Map(scraped.map(l => [l.mercariItemId, l.thumbUrl]))
+
+  const withUrl = targets
+    .map(id => ({ id, thumbUrl: thumbByItemId.get(id) ?? null }))
+    .filter((t): t is { id: string; thumbUrl: string } => !!t.thumbUrl)
+    .slice(0, Math.max(0, limit))
+
+  let saved = 0
+  for (const t of withUrl) {
+    try {
+      const file = await downloadThumbFile(t.id, t.thumbUrl)
+      db.setListingThumb(t.id, file)
       saved++
     } catch {
       // 一度だけの約束を優先。失敗しても再試行しない
@@ -493,6 +611,54 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     const knownWithoutThumb = db.salesWithoutThumb(knownRows.map(r => r.mercariItemId))
     const thumbsSaved = await saveNewThumbs([...insertedRows, ...knownWithoutThumb], sales)
 
+    // 出品した商品「出品中」タブ（1ページ）。売却済みの後に読む。
+    // キーワード設定があればタイトルが一致するものだけ取り込む。0件でも run は ok のまま
+    let listingInserted = 0
+    let listingUpdated = 0
+    let listingThumbsSaved = 0
+    let listingDomBroken = false
+
+    if (pagesOpened < MAX_PAGES_PER_RUN) {
+      await win.loadURL(MY_LISTINGS_URL)
+      pagesOpened++
+      await randomWait()
+
+      if (await isChallenge(win)) {
+        return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
+      }
+
+      const listingsHtml = await win.webContents
+        .executeJavaScript('document.documentElement.outerHTML')
+        .catch(() => '') as string
+      const scrapedListings = parseListingsHtml(listingsHtml)
+
+      if (scrapedListings.length === 0 && !listingsHtml.includes('data-testid="mypage-main-content"')) {
+        // 一覧の入れ物ごと見つからない＝セレクタが壊れている疑い。空を握りつぶさず記録する
+        listingDomBroken = true
+      } else {
+        const keywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
+        const targetListings = keywords.length > 0
+          ? scrapedListings.filter(l => db.matchesAnyKeyword(l.title, keywords))
+          : scrapedListings
+
+        const result = db.upsertListings(targetListings.map(l => ({
+          mercariItemId: l.mercariItemId,
+          title: l.title,
+          price: l.price,
+          suspended: l.suspended,
+          thumbUrl: l.thumbUrl,
+        })))
+        listingInserted = result.inserted
+        listingUpdated = result.updated
+
+        // 残りのサムネイル予算（サムネイルは1回の収集で販売・出品合わせて30枚まで）
+        const listingsNoThumb = db.listingsWithoutThumb(targetListings.map(l => l.mercariItemId))
+        listingThumbsSaved = await saveNewListingThumbs(
+          listingsNoThumb, targetListings, MAX_THUMBS_PER_RUN - thumbsSaved,
+        )
+      }
+    }
+
     // 詳細を開く対象：未紐付けの転売で model_codes が空のものだけ
     // （説明文に型番があれば紐付けを救える）。実額のためには開かない
     const pending = db.listSales({ onlyPending: true })
@@ -525,8 +691,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     }
 
     const parts = [`新規 ${inserted}・更新 ${updated}`]
-    if (thumbsSaved > 0) parts.push(`サムネイル ${thumbsSaved} 枚`)
+    const totalThumbsSaved = thumbsSaved + listingThumbsSaved
+    if (totalThumbsSaved > 0) parts.push(`サムネイル ${totalThumbsSaved} 枚`)
     if (pending.length > 0) parts.push(`型番の追記 ${codesApplied}（詳細 ${detailsRead} 件）`)
+    parts.push(`出品 新規 ${listingInserted}・更新 ${listingUpdated}`)
+    if (listingDomBroken) parts.push('出品中タブの構造が変わっている可能性があります')
     if (totalCount !== null && totalCount !== sales.length) {
       parts.push(`一覧に ${totalCount} 件、取得 ${sales.length} 件`)
     }
