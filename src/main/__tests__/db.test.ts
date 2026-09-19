@@ -1049,7 +1049,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('6')
+      expect(db.getSettings().schema_version).toBe('7')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1170,7 +1170,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('6')
+      expect(db.getSettings().schema_version).toBe('7')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1295,5 +1295,191 @@ describe('db（:memory:）', () => {
     expect(mercariRun.source).toBe('mercari')
     expect(mercariRun.shop_account_id).toBeNull()
     expect(mercariRun.shop_account_name).toBeNull()
+  })
+
+  it('updatePurchaseFulfillment：shipped_at・delivered_atが最初に観測した日で入る（delivered直行ならshipped_atも同時に埋まる）', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-04-01',
+      import_key: 'mellojoy:#date-1',
+      fulfillment: 'pending',
+      lines: [{ name: '日付テスト', unit_price: 1000, quantity: 1 }],
+    })
+    expect(db.listPurchases()[0].shipped_at).toBeNull()
+    expect(db.listPurchases()[0].delivered_at).toBeNull()
+
+    db.updatePurchaseFulfillment('mellojoy:#date-1', 'shipped')
+    const afterShipped = db.listPurchases()[0]
+    expect(afterShipped.shipped_at).not.toBeNull()
+    expect(afterShipped.delivered_at).toBeNull()
+
+    db.updatePurchaseFulfillment('mellojoy:#date-1', 'delivered')
+    const afterDelivered = db.listPurchases()[0]
+    expect(afterDelivered.shipped_at).toBe(afterShipped.shipped_at) // 既に入っていた日は上書きしない
+    expect(afterDelivered.delivered_at).not.toBeNull()
+
+    // delivered へ直行した場合はshipped_atも同時に埋まる
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-04-02',
+      import_key: 'mellojoy:#date-2',
+      fulfillment: 'pending',
+      lines: [{ name: '直行テスト', unit_price: 1000, quantity: 1 }],
+    })
+    db.updatePurchaseFulfillment('mellojoy:#date-2', 'delivered')
+    const direct = db.listPurchases().find(p => p.import_key === 'mellojoy:#date-2')!
+    expect(direct.shipped_at).not.toBeNull()
+    expect(direct.delivered_at).not.toBeNull()
+  })
+
+  it('createPurchase：fulfillmentがshipped/deliveredなら生成時点でshipped_at/delivered_atが入る', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-04-01',
+      fulfillment: 'shipped',
+      lines: [{ name: '生成時shipped', unit_price: 1000, quantity: 1 }],
+    })
+    const shipped = db.listPurchases().find(p => p.first_line_name === '生成時shipped')!
+    expect(shipped.shipped_at).not.toBeNull()
+    expect(shipped.delivered_at).toBeNull()
+
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-04-01',
+      fulfillment: 'delivered',
+      lines: [{ name: '生成時delivered', unit_price: 1000, quantity: 1 }],
+    })
+    const delivered = db.listPurchases().find(p => p.first_line_name === '生成時delivered')!
+    expect(delivered.shipped_at).not.toBeNull()
+    expect(delivered.delivered_at).not.toBeNull()
+  })
+
+  it('getItemTimeline：仕入（送料按分あり）→販売（まとめ売り2点）でeventsの順・detailの数字が合う', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-01',
+      order_no: 'ORDER-9',
+      shipping_fee: 100,
+      lines: [{ name: 'タイムライン商品', unit_price: 1000, quantity: 3 }],
+    })
+    // fulfillment未指定（null）＝手入力扱い。発送・到着イベントは出ない
+    const items = [...db.listInventory('in_stock')].sort((a, b) => a.landed_cost - b.landed_cost)
+    expect(items.map(i => i.landed_cost)).toEqual([1033, 1033, 1034])
+
+    const saleId = db.createSale({ title: 'まとめ売りテスト', sold_at: '2026-01-10', price: 4000 })
+    db.linkInventory(saleId, [items[0].id, items[2].id]) // 1033 と 1034 をまとめ売り
+
+    const timeline = db.getItemTimeline(items[2].id)! // landed_cost 1034（端数が乗った方）
+    expect(timeline).not.toBeNull()
+    expect(timeline.purchase?.order_no).toBe('ORDER-9')
+    expect(timeline.sale?.id).toBe(saleId)
+
+    const kinds = timeline.events.map(e => e.kind)
+    expect(kinds).toEqual(['ordered', 'sold', 'sale_shipped', 'sale_delivered', 'sale_completed'])
+
+    const ordered = timeline.events[0]
+    expect(ordered.date).toBe('2026-01-01')
+    expect(ordered.detail).toBe('¥1,000 ＋送料按分 ¥34 → 原価 ¥1,034')
+    expect(ordered.amount).toBe(1034)
+
+    const sold = timeline.events[1]
+    expect(sold.date).toBe('2026-01-10')
+    expect(sold.detail).toBe('¥4,000 （まとめ売り 2 点、1 点あたり ¥2,000）')
+    expect(sold.amount).toBe(4000)
+
+    // 発送・受取・取引完了はまだ取れていないので日付null（予定）
+    expect(timeline.events[2].date).toBeNull()
+    expect(timeline.events[3].date).toBeNull()
+    const completed = timeline.events[4]
+    expect(completed.date).toBeNull()
+    // fee = floor(4000*1000/10000) = 400、shipping_fee = 0
+    expect(completed.detail).toBe('売上金 ¥3,600 反映')
+  })
+
+  it('getItemTimeline：fulfillmentがpendingなら仕入の発送・到着が日付nullで出る（nullなら出ない）', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-01',
+      shipping_fee: 0,
+      fulfillment: 'pending',
+      import_key: 'mellojoy:#timeline-pending',
+      lines: [{ name: 'pending商品', unit_price: 1000, quantity: 1 }],
+    })
+    const pendingItem = db.listInventory('in_stock')[0]
+    const pendingTimeline = db.getItemTimeline(pendingItem.id)!
+    expect(pendingTimeline.events.map(e => e.kind)).toEqual(['ordered', 'purchase_shipped', 'purchase_delivered'])
+    expect(pendingTimeline.events[1].date).toBeNull()
+    expect(pendingTimeline.events[2].date).toBeNull()
+
+    // fulfillment未指定（null）の仕入では発送・到着イベントが出ない
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-01',
+      shipping_fee: 0,
+      lines: [{ name: 'null商品', unit_price: 1000, quantity: 1 }],
+    })
+    const nullItem = db.listInventory('in_stock').find(i => i.name === 'null商品')!
+    const nullTimeline = db.getItemTimeline(nullItem.id)!
+    expect(nullTimeline.events.map(e => e.kind)).toEqual(['ordered'])
+  })
+
+  it('getItemTimeline：存在しない在庫はnull', () => {
+    expect(db.getItemTimeline('no-such-id')).toBeNull()
+  })
+
+  it('listProducts：purchase_totalがlanded_costの合計と一致し、split親は数えない', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-05-01',
+      shipping_fee: 0,
+      lines: [{ name: 'listProducts商品【Z090-1】', unit_price: 1000, quantity: 1 }],
+    })
+    const parent = db.listInventory('in_stock')[0]
+    db.splitInventory(parent.id, 2) // 500/500 の子2点。親はsplitでpurchase_totalから除外
+
+    const products = db.listProducts()
+    const target = products.find(p => p.model_code === 'Z090-1')!
+    expect(target.purchase_total).toBe(1000) // 親(1000)を含めず、子2点(500+500)の合計
+    expect(target.avg_cost).toBe(500)
+  })
+
+  it('getProduct：月を埋め、in_stockの累積が「仕入3-販売1=2」になる。型番が無ければnull', () => {
+    expect(db.getProduct('no-such-model')).toBeNull()
+
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-06-01',
+      shipping_fee: 0,
+      lines: [{ name: 'getProduct商品【Z091-1】', unit_price: 1000, quantity: 3 }],
+    })
+    const items = db.listInventory('in_stock').filter(i => i.model_code === 'Z091-1')
+    expect(items).toHaveLength(3)
+
+    // タイトルの型番が1つに絞れるので createSale が自動で先入先出で紐付ける（手で linkInventory しない）
+    const saleId = db.createSale({ title: 'getProduct商品【Z091-1】', sold_at: '2026-08-15', price: 2000 })
+    expect(db.listSales().find(s => s.id === saleId)!.unmatched).toBe(0)
+
+    const detail = db.getProduct('Z091-1')!
+    expect(detail.items).toHaveLength(3)
+    expect(detail.sales.map(s => s.id)).toEqual([saleId])
+
+    // 2026-06（仕入3）〜2026-08（売上1）まで、間の2026-07も空月として埋まる
+    const monthKeys = detail.months.map(m => m.month)
+    expect(monthKeys).toContain('2026-06')
+    expect(monthKeys).toContain('2026-07')
+    expect(monthKeys).toContain('2026-08')
+
+    const june = detail.months.find(m => m.month === '2026-06')!
+    expect(june.purchased).toBe(3)
+    expect(june.in_stock).toBe(3)
+
+    const july = detail.months.find(m => m.month === '2026-07')!
+    expect(july.purchased).toBe(0)
+    expect(july.sold).toBe(0)
+    expect(july.in_stock).toBe(3) // 空月も前月の累積を引き継ぐ
+
+    const august = detail.months.find(m => m.month === '2026-08')!
+    expect(august.sold).toBe(1)
+    expect(august.in_stock).toBe(2) // 仕入3 − 販売1 = 2
   })
 })

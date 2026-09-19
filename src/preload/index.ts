@@ -47,6 +47,10 @@ const api: SorobanApi = {
   setInventoryTags: invoke('setInventoryTags'),
   listVariantSummary: invoke('listVariantSummary'),
 
+  listProducts: invoke('listProducts'),
+  getProduct: invoke('getProduct'),
+  getItemTimeline: invoke('getItemTimeline'),
+
   listShopAccounts: invoke('listShopAccounts'),
   createShopAccount: invoke('createShopAccount'),
   updateShopAccount: invoke('updateShopAccount'),

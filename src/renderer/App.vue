@@ -9,18 +9,22 @@ import Dashboard from './views/Dashboard.vue'
 import Sales from './views/Sales.vue'
 import Purchases from './views/Purchases.vue'
 import Inventory from './views/Inventory.vue'
+import Products from './views/Products.vue'
 import Monthly from './views/Monthly.vue'
 import Settings from './views/Settings.vue'
 import type { CollectorRun, DashboardStats } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 
-type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'monthly' | 'settings'
+type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'settings'
+/** goto にタブと一緒に渡す情報。今のところ商品タブへの型番指定だけ */
+export type GotoPayload = { modelCode?: string }
 
 const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [
   { key: 'dashboard', label: 'ホーム', icon: 'home' },
   { key: 'sales', label: '売上', icon: 'sales' },
   { key: 'purchases', label: '仕入', icon: 'purchase' },
   { key: 'inventory', label: '在庫', icon: 'inventory' },
+  { key: 'products', label: '商品', icon: 'product' },
   { key: 'monthly', label: '月次', icon: 'monthly' },
   { key: 'settings', label: '設定', icon: 'settings' },
 ]
@@ -33,7 +37,10 @@ let noticeTimer: ReturnType<typeof setTimeout> | undefined
 // 子からデータ再読み込みを促すためのカウンタ
 const revision = ref(0)
 provide('revision', revision)
-provide('goto', (t: Tab) => { tab.value = t })
+// 直近の goto() 呼び出しに添えられた情報（型番など）。切替先の view が inject して読む
+const gotoPayload = ref<GotoPayload | null>(null)
+provide('gotoPayload', gotoPayload)
+provide('goto', (t: Tab, payload?: GotoPayload) => { tab.value = t; gotoPayload.value = payload ?? null })
 
 // ナビの要対応バッジ・上部バーの取り込み状態はシェル自身も読む
 const stats = ref<DashboardStats | null>(null)
@@ -251,6 +258,7 @@ watch(revision, loadStats)
         <Sales v-else-if="tab === 'sales'" />
         <Purchases v-else-if="tab === 'purchases'" />
         <Inventory v-else-if="tab === 'inventory'" />
+        <Products v-else-if="tab === 'products'" />
         <Monthly v-else-if="tab === 'monthly'" />
         <Settings v-else />
       </main>

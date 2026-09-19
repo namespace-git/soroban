@@ -11,11 +11,12 @@
 
 import type {
   SorobanApi, ShopAccount, ShopAccountKind, ShippingMethod, ShippingSource,
-  SaleProfit, SaleInput, SalePatch, SaleKind, SaleSource, SaleFilter, SaleTotals,
+  SaleProfit, SaleInput, SalePatch, SaleKind, SaleSource, SaleFilter, SaleTotals, SaleStatus,
   PurchaseDetail, PurchaseInput, PurchaseLine,
   InventoryItem, InventoryStatus, InventoryPatch,
   MonthlySummary, DashboardStats, CollectorRun,
   Material, VariantSummary, Tag, Fulfillment,
+  ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 
@@ -48,6 +49,44 @@ function diffDays(dateStr: string): number {
 
 function isoLocal(d: Date): string {
   return `${todayLocal(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`
+}
+
+/** 仕入の到着状態から shipped_at / delivered_at を合成する（実データは main が到着状態の観測日を記録する） */
+function fulfillmentDates(orderedAt: string, fulfillment: Fulfillment | null): { shipped_at: string | null; delivered_at: string | null } {
+  const [y, m, d] = orderedAt.split('-').map(Number)
+  const ordered = new Date(y, m - 1, d)
+  const addDays = (n: number) => todayLocal(new Date(ordered.getTime() + n * 86400000))
+  if (fulfillment === 'shipped') return { shipped_at: addDays(2), delivered_at: null }
+  if (fulfillment === 'delivered') return { shipped_at: addDays(2), delivered_at: addDays(5) }
+  return { shipped_at: null, delivered_at: null }
+}
+
+/** 買い手の伏せ字（'ゆ***' のような表示）。実データはメルカリの取引詳細から取る */
+const BUYER_PREFIXES = ['ゆ', 'み', 'あ', 'た', 'さ', 'は', 'こ', 'の']
+function buyerFor(seed: number): string {
+  return `${BUYER_PREFIXES[seed % BUYER_PREFIXES.length]}***`
+}
+
+/**
+ * 自動取得（collector）の販売のうち、十分に日数が経ったものだけ取引完了まで進んでいることにする。
+ * 手入力（manual）や日が浅いものは status = null（まだ取れていない）のまま。
+ */
+function saleStatusFor(source: SaleSource, soldAt: string): {
+  status: SaleStatus | null; shipped_at: string | null; delivered_at: string | null; completed_at: string | null; buyer: string | null
+} {
+  if (source !== 'collector') return { status: null, shipped_at: null, delivered_at: null, completed_at: null, buyer: null }
+  const k = diffDays(soldAt) // 販売から何日経ったか
+  if (k < 6) return { status: null, shipped_at: null, delivered_at: null, completed_at: null, buyer: null }
+  const [y, m, d] = soldAt.split('-').map(Number)
+  const sold = new Date(y, m - 1, d)
+  const addDays = (n: number) => todayLocal(new Date(sold.getTime() + n * 86400000))
+  return {
+    status: 'completed',
+    shipped_at: addDays(1),
+    delivered_at: addDays(3),
+    completed_at: addDays(5),
+    buyer: buyerFor(k),
+  }
 }
 
 /** 開発中に Skeleton が一瞬見えるよう、擬似的な遅延を入れる */
@@ -210,6 +249,10 @@ let purchases: PurchaseDetail[] = []
 let inventory: InventoryItem[] = []
 /** 在庫アイテム → どの仕入から生まれたか（deletePurchase の判定用） */
 const itemPurchaseId = new Map<string, string>()
+/** 在庫アイテム → 廃棄／自家消費にした日（履歴タイムライン用。実データは main が操作時刻を記録する） */
+const itemDisposedAt = new Map<string, string>()
+/** 在庫アイテム → 分割した日（履歴タイムライン用） */
+const itemSplitAt = new Map<string, string>()
 
 function addConfirmedPurchase(opts: {
   shopId: string
@@ -224,6 +267,7 @@ function addConfirmedPurchase(opts: {
   const purchaseId = uid()
   const orderNo = `MJ-${opts.orderedAt.replace(/-/g, '').slice(0, 6)}-${pad(purchases.length + 1)}`
   const fulfillment = opts.fulfillment ?? null
+  const { shipped_at, delivered_at } = fulfillmentDates(opts.orderedAt, fulfillment)
 
   const bases = opts.lines.map(l => variantOf(l.model).price * l.qty)
   const shares = allocateAmount(bases, opts.shippingFee)
@@ -286,6 +330,8 @@ function addConfirmedPurchase(opts: {
     note: opts.note ?? null,
     import_key: opts.importKey ?? null,
     fulfillment,
+    shipped_at,
+    delivered_at,
     line_count: lines.length,
     first_line_name: lines[0]?.name ?? null,
     first_model_code: lines[0]?.model_code ?? null,
@@ -367,6 +413,8 @@ function addTiktokPurchase(opts: {
     note: null,
     import_key: null,
     fulfillment: null,
+    shipped_at: null,
+    delivered_at: null,
     line_count: lines.length,
     first_line_name: lines[0]?.name ?? null,
     first_model_code: lines[0]?.model_code ?? null,
@@ -412,6 +460,8 @@ function addDraftPurchase(opts: {
     note: '注文履歴から取り込み（価格未入力）',
     import_key: opts.importKey ?? null,
     fulfillment: null,
+    shipped_at: null,
+    delivered_at: null,
     line_count: lines.length,
     first_line_name: lines[0]?.name ?? null,
     first_model_code: lines[0]?.model_code ?? null,
@@ -550,12 +600,13 @@ function buildSaleFixed(opts: {
   const itemCount = opts.items.length
   // 取り込み風・手入力風を半々にする（実際の収集は行わない）
   const source: SaleSource = opts.i % 2 === 0 ? 'collector' : 'manual'
+  const soldAt = soldAtFor(opts.i)
 
   const sale: SaleProfit = {
     id: uid(),
     mercari_item_id: mercariId(),
     thumb_url: thumbUrlFor(opts.i, source),
-    sold_at: soldAtFor(opts.i),
+    sold_at: soldAt,
     title: opts.title,
     kind: opts.kind,
     price,
@@ -574,6 +625,7 @@ function buildSaleFixed(opts: {
     auto_linked: opts.autoLinked ? 1 : 0,
     source,
     tags: [],
+    ...saleStatusFor(source, soldAt),
   }
 
   if (itemCount > 0) {
@@ -803,6 +855,254 @@ function findPurchase(id: string): PurchaseDetail {
   return p
 }
 
+// ------------------------------------------------------------
+// 商品（型番）ページ・在庫の履歴
+// ------------------------------------------------------------
+
+function allModelCodes(): string[] {
+  const models = new Set<string>()
+  for (const it of inventory) if (it.model_code) models.add(it.model_code)
+  return [...models]
+}
+
+/** その在庫アイテムが紐付いている販売（無ければ undefined） */
+function saleForItem(itemId: string): SaleProfit | undefined {
+  for (const [saleId, ids] of saleLines) {
+    if (ids.includes(itemId)) return sales.find(s => s.id === saleId)
+  }
+  return undefined
+}
+
+/** その型番の在庫が実際に紐付いた販売（タイトルの型番一致ではなく、紐付け済みのものだけ） */
+function linkedSalesForModel(model: string): SaleProfit[] {
+  const saleIds = new Set<string>()
+  for (const [saleId, ids] of saleLines) {
+    if (ids.some(itemId => inventory.find(it => it.id === itemId)?.model_code === model)) {
+      saleIds.add(saleId)
+    }
+  }
+  return sales.filter(s => saleIds.has(s.id))
+}
+
+function variantSummaryFor(model: string): VariantSummary {
+  const items = inventory.filter(i => i.model_code === model)
+  const soldItems = items.filter(i => i.status === 'sold')
+  const inStockItems = items.filter(i => i.status === 'in_stock')
+  const relatedSales = sales.filter(s => s.model_codes.includes(model) && s.item_count > 0)
+  const avgPrice = relatedSales.length
+    ? Math.round(relatedSales.reduce((s, x) => s + x.price, 0) / relatedSales.length)
+    : null
+  const avgProfit = relatedSales.length
+    ? Math.round(relatedSales.reduce((s, x) => s + x.gross_profit, 0) / relatedSales.length)
+    : null
+  const sample = items[0]
+
+  return {
+    model_code: model,
+    series_code: sample?.series_code ?? null,
+    material: sample?.material ?? null,
+    name: sample?.name ?? model,
+    purchased: items.length,
+    sold: soldItems.length,
+    in_stock: inStockItems.length,
+    stock_value: inStockItems.reduce((s, i) => s + i.landed_cost, 0),
+    avg_price: avgPrice,
+    avg_profit: avgProfit,
+    total_profit: relatedSales.reduce((s, x) => s + x.gross_profit, 0),
+  }
+}
+
+function buildProductSummary(model: string): ProductSummary {
+  const summary = variantSummaryFor(model)
+  const items = inventory.filter(i => i.model_code === model)
+  const purchaseTotal = items.reduce((s, i) => s + i.landed_cost, 0)
+  const avgCost = items.length ? Math.round(purchaseTotal / items.length) : null
+  const lastPurchasedAt = items.reduce<string | null>(
+    (max, i) => (!max || i.acquired_at > max ? i.acquired_at : max), null,
+  )
+  const linkedSales = linkedSalesForModel(model)
+  const lastSoldAt = linkedSales.reduce<string | null>(
+    (max, s) => (!max || s.sold_at > max ? s.sold_at : max), null,
+  )
+  const thumbUrl = linkedSales.slice().sort((a, b) => b.sold_at.localeCompare(a.sold_at))[0]?.thumb_url ?? null
+
+  return {
+    ...summary,
+    purchase_total: purchaseTotal,
+    avg_cost: avgCost,
+    last_purchased_at: lastPurchasedAt,
+    last_sold_at: lastSoldAt,
+    thumb_url: thumbUrl,
+  }
+}
+
+/** YYYY-MM の from〜to（両端含む）を1か月刻みで列挙する */
+function monthRange(from: string, to: string): string[] {
+  const [fy, fm] = from.split('-').map(Number)
+  const d = new Date(fy, fm - 1, 1)
+  const out: string[] = []
+  while (thisMonthLocal(d) <= to) {
+    out.push(thisMonthLocal(d))
+    d.setMonth(d.getMonth() + 1)
+  }
+  return out
+}
+
+/**
+ * 月ごとの在庫の増減。分割の子（parent_id あり）は独立した仕入ではないので数えない。
+ * 廃棄・自家消費・分割で在庫から抜けた日は追っていないため、仕入月に抜けたものとして扱う（近似）。
+ */
+function buildProductMonths(model: string): ProductMonthPoint[] {
+  const items = inventory.filter(i => i.model_code === model && !i.parent_id)
+  if (items.length === 0) return []
+
+  const firstMonth = items.reduce((min, i) => {
+    const m = i.acquired_at.slice(0, 7)
+    return m < min ? m : min
+  }, items[0].acquired_at.slice(0, 7))
+  const months = monthRange(firstMonth, thisMonthLocal())
+
+  const points = new Map<string, ProductMonthPoint>()
+  for (const mo of months) {
+    points.set(mo, { month: mo, purchased: 0, sold: 0, in_stock: 0, purchase_amount: 0, sales_amount: 0, profit: 0 })
+  }
+  const removedByMonth = new Map<string, number>()
+
+  for (const item of items) {
+    const purchaseMonth = item.acquired_at.slice(0, 7)
+    const bucket = points.get(purchaseMonth)
+    if (bucket) {
+      bucket.purchased += 1
+      bucket.purchase_amount += item.landed_cost
+    }
+
+    if (item.status === 'sold') {
+      const sale = saleForItem(item.id)
+      const soldMonth = sale?.sold_at.slice(0, 7) ?? purchaseMonth
+      const soldBucket = points.get(soldMonth) ?? bucket
+      if (soldBucket) {
+        soldBucket.sold += 1
+        if (sale) {
+          const n = sale.item_count || 1
+          const revenueShare = Math.round(sale.price / n)
+          const feeShare = Math.round(sale.fee / n)
+          const shipShare = Math.round(sale.shipping_fee / n)
+          const packShare = Math.round(sale.packaging_cost / n)
+          soldBucket.sales_amount += revenueShare
+          soldBucket.profit += revenueShare - feeShare - shipShare - packShare - item.landed_cost
+        }
+      }
+    } else if (item.status === 'disposed' || item.status === 'personal_use' || item.status === 'split') {
+      removedByMonth.set(purchaseMonth, (removedByMonth.get(purchaseMonth) ?? 0) + 1)
+    }
+  }
+
+  let running = 0
+  for (const mo of months) {
+    const p = points.get(mo)!
+    running += p.purchased - p.sold - (removedByMonth.get(mo) ?? 0)
+    p.in_stock = Math.max(0, running)
+  }
+
+  return months.map(mo => points.get(mo)!)
+}
+
+/** 在庫 1 点の履歴。仕入→到着→販売→発送→受取→取引完了 を時系列で並べる */
+function buildItemTimeline(item: InventoryItem): ItemTimeline {
+  const events: TimelineEvent[] = []
+  const purchaseId = itemPurchaseId.get(item.id)
+  const purchase = purchaseId ? purchases.find(p => p.id === purchaseId) ?? null : null
+
+  if (purchase) {
+    const line = purchase.lines.find(l => l.model_code === item.model_code) ?? purchase.lines[0] ?? null
+    const detail = line
+      ? `¥${line.unit_price.toLocaleString('ja-JP')} ＋送料按分 ¥${(item.landed_cost - line.unit_price).toLocaleString('ja-JP')} → 原価 ¥${item.landed_cost.toLocaleString('ja-JP')}`
+      : `→ 原価 ¥${item.landed_cost.toLocaleString('ja-JP')}`
+    events.push({
+      date: purchase.ordered_at,
+      kind: 'ordered',
+      title: `メロジョイで注文 ${purchase.order_no ?? '（下書き）'}`,
+      detail,
+      amount: item.landed_cost,
+    })
+
+    if (purchase.fulfillment) {
+      events.push({
+        date: purchase.shipped_at,
+        kind: 'purchase_shipped',
+        title: '発送済み（仕入先）',
+        detail: null,
+        amount: null,
+      })
+      events.push({
+        date: purchase.delivered_at,
+        kind: 'purchase_delivered',
+        title: '到着',
+        detail: null,
+        amount: null,
+      })
+    }
+  }
+
+  const sale = saleForItem(item.id)
+  if (sale) {
+    events.push({
+      date: sale.sold_at,
+      kind: 'sold',
+      title: `メルカリで販売：${sale.title}`,
+      detail: sale.buyer ? `購入者 ${sale.buyer}` : null,
+      amount: sale.price,
+    })
+    events.push({
+      date: sale.shipped_at,
+      kind: 'sale_shipped',
+      title: '発送済み',
+      detail: null,
+      amount: null,
+    })
+    events.push({
+      date: sale.delivered_at,
+      kind: 'sale_delivered',
+      title: '受取済み',
+      detail: null,
+      amount: null,
+    })
+    events.push({
+      date: sale.completed_at,
+      kind: 'sale_completed',
+      title: '取引完了',
+      detail: null,
+      amount: sale.gross_profit,
+    })
+  } else if (item.status === 'disposed') {
+    events.push({
+      date: itemDisposedAt.get(item.id) ?? null,
+      kind: 'disposed',
+      title: '廃棄',
+      detail: null,
+      amount: null,
+    })
+  } else if (item.status === 'personal_use') {
+    events.push({
+      date: itemDisposedAt.get(item.id) ?? null,
+      kind: 'personal_use',
+      title: '自家消費',
+      detail: null,
+      amount: null,
+    })
+  } else if (item.status === 'split') {
+    events.push({
+      date: itemSplitAt.get(item.id) ?? null,
+      kind: 'split',
+      title: '複数点に分割',
+      detail: null,
+      amount: null,
+    })
+  }
+
+  return { item, events, sale: sale ?? null, purchase }
+}
+
 const api: SorobanApi = {
   async getDashboard(): Promise<DashboardStats> {
     const needsShipping = sales.filter(s => !s.is_shipping_confirmed).length
@@ -870,6 +1170,11 @@ const api: SorobanApi = {
       auto_linked: 0,
       source: 'manual',
       tags: [],
+      status: null,
+      shipped_at: null,
+      delivered_at: null,
+      completed_at: null,
+      buyer: null,
     }
     sales.unshift(sale)
 
@@ -1084,6 +1389,7 @@ const api: SorobanApi = {
       note: input.note ?? null,
       import_key: input.import_key ?? null,
       fulfillment: input.fulfillment ?? null,
+      ...fulfillmentDates(input.ordered_at, input.fulfillment ?? null),
       line_count: lines.length,
       first_line_name: lines[0]?.name ?? null,
       first_model_code: lines[0]?.model_code ?? null,
@@ -1166,6 +1472,7 @@ const api: SorobanApi = {
     p.discount = discount
     p.import_key = input.import_key ?? p.import_key
     p.fulfillment = input.fulfillment ?? p.fulfillment
+    Object.assign(p, fulfillmentDates(p.ordered_at, p.fulfillment))
     p.other_cost = otherCost
     p.alloc_method = method
     p.note = input.note ?? p.note
@@ -1244,6 +1551,7 @@ const api: SorobanApi = {
       if (purchaseId) itemPurchaseId.set(childId, purchaseId)
     }
     item.status = 'split' // 過去の原価は動かさない。親はそのまま残す
+    itemSplitAt.set(item.id, todayLocal())
     return wait(childIds)
   },
 
@@ -1252,6 +1560,7 @@ const api: SorobanApi = {
     if (!item) throw new Error('在庫が見つかりません')
     if (item.status !== 'in_stock') throw new Error('販売済みの在庫は外せません')
     item.status = status
+    itemDisposedAt.set(item.id, todayLocal())
     return wait(undefined)
   },
 
@@ -1304,39 +1613,43 @@ const api: SorobanApi = {
   },
 
   async listVariantSummary(sort = 'total_profit') {
-    const models = new Set<string>()
-    for (const it of inventory) if (it.model_code) models.add(it.model_code)
-
-    const rows: VariantSummary[] = [...models].map(model => {
-      const items = inventory.filter(i => i.model_code === model)
-      const soldItems = items.filter(i => i.status === 'sold')
-      const inStockItems = items.filter(i => i.status === 'in_stock')
-      const relatedSales = sales.filter(s => s.model_codes.includes(model) && s.item_count > 0)
-      const avgPrice = relatedSales.length
-        ? Math.round(relatedSales.reduce((s, x) => s + x.price, 0) / relatedSales.length)
-        : null
-      const avgProfit = relatedSales.length
-        ? Math.round(relatedSales.reduce((s, x) => s + x.gross_profit, 0) / relatedSales.length)
-        : null
-      const sample = items[0]
-
-      return {
-        model_code: model,
-        series_code: sample?.series_code ?? null,
-        material: sample?.material ?? null,
-        name: sample?.name ?? model,
-        purchased: items.length,
-        sold: soldItems.length,
-        in_stock: inStockItems.length,
-        stock_value: inStockItems.reduce((s, i) => s + i.landed_cost, 0),
-        avg_price: avgPrice,
-        avg_profit: avgProfit,
-        total_profit: relatedSales.reduce((s, x) => s + x.gross_profit, 0),
-      }
-    })
-
+    const rows = allModelCodes().map(variantSummaryFor)
     rows.sort((a, b) => (b[sort] ?? 0) - (a[sort] ?? 0))
     return wait(rows)
+  },
+
+  async listProducts(sort = 'total_profit') {
+    const rows = allModelCodes().map(buildProductSummary)
+    rows.sort((a, b) => {
+      if (sort === 'last_purchased_at') return (b.last_purchased_at ?? '').localeCompare(a.last_purchased_at ?? '')
+      return (b[sort] ?? 0) - (a[sort] ?? 0)
+    })
+    return wait(rows)
+  },
+
+  async getProduct(modelCode: string) {
+    if (!allModelCodes().includes(modelCode)) return wait(null)
+    const summary = buildProductSummary(modelCode)
+    const items = inventory
+      .filter(i => i.model_code === modelCode)
+      .slice()
+      .sort((a, b) => (a.acquired_at < b.acquired_at ? 1 : a.acquired_at > b.acquired_at ? -1 : 0))
+    const modelSales = linkedSalesForModel(modelCode)
+      .slice()
+      .sort((a, b) => (a.sold_at < b.sold_at ? 1 : a.sold_at > b.sold_at ? -1 : 0))
+    const detail: ProductDetail = {
+      ...summary,
+      months: buildProductMonths(modelCode),
+      items,
+      sales: modelSales,
+    }
+    return wait(detail)
+  },
+
+  async getItemTimeline(inventoryItemId: string) {
+    const item = inventory.find(i => i.id === inventoryItemId)
+    if (!item) return wait(null)
+    return wait(buildItemTimeline(item))
   },
 
   async listShopAccounts() {
@@ -1476,6 +1789,8 @@ const api: SorobanApi = {
     runs = []
     saleLines.clear()
     itemPurchaseId.clear()
+    itemDisposedAt.clear()
+    itemSplitAt.clear()
     return wait(undefined)
   },
 }

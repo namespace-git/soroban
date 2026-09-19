@@ -7,6 +7,7 @@ import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
+import TimelineDrawer from '../components/TimelineDrawer.vue'
 
 const MODEL_CODE_RE = /^[A-Z]\d{3}(-\d+)?$/
 
@@ -33,6 +34,12 @@ function onThumbError(id: string) {
 function placeholderChar(i: InventoryItem): string {
   const c = i.model_code?.[0] ?? i.name.trim().charAt(0)
   return (c || '?').toUpperCase()
+}
+
+// --- 履歴ドロワー ---
+const timelineItemId = ref<string | null>(null)
+function openTimeline(item: InventoryItem) {
+  timelineItemId.value = item.id
 }
 
 async function load() {
@@ -177,7 +184,7 @@ async function editNote(item: InventoryItem) {
         </thead>
         <tbody>
           <tr v-for="i in filteredItems" :key="i.id">
-            <td class="thumb-cell">
+            <td class="thumb-cell clickable" @click="openTimeline(i)" title="履歴を見る">
               <img
                 v-if="showThumb(i)"
                 class="thumb"
@@ -189,7 +196,7 @@ async function editNote(item: InventoryItem) {
               <span v-else class="thumb-placeholder">{{ placeholderChar(i) }}</span>
             </td>
             <td class="item-cell">
-              <div class="item-name" :title="i.name">{{ i.name }}</div>
+              <div class="item-name clickable" :title="i.name" @click="openTimeline(i)">{{ i.name }}</div>
               <div class="chip-row">
                 <StatusChip
                   v-if="i.model_code" tone="neutral" :label="i.model_code"
@@ -240,6 +247,12 @@ async function editNote(item: InventoryItem) {
       @change="onTagsChange"
       @create="onTagCreate"
       @close="closeTagPicker"
+    />
+
+    <TimelineDrawer
+      :open="!!timelineItemId"
+      :inventory-item-id="timelineItemId"
+      @close="timelineItemId = null"
     />
   </div>
 </template>

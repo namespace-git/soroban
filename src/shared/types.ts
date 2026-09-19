@@ -23,6 +23,12 @@ export type PurchaseStatus = 'draft' | 'confirmed'
  * 在庫は確定時に作り、delivered 以外は「未着」として見せる（紐付けは可）
  */
 export type Fulfillment = 'pending' | 'shipped' | 'delivered'
+/**
+ * メルカリの取引状態。waiting_shipment = 発送待ち / shipped = 発送済み /
+ * delivered = 受取済み（評価待ち） / completed = 取引完了（売上金が反映）。
+ * null = まだ取れていない（取引中タブ・取引画面の DOM 確認後に collector が埋める）
+ */
+export type SaleStatus = 'waiting_shipment' | 'shipped' | 'delivered' | 'completed'
 export type ShopAccountKind = 'mellojoy' | 'tiktok' | 'other'
 /** actual = メルカリの取引詳細から取った実額 / master = 発送方法マスタ / manual = 手入力 */
 export type ShippingSource = 'actual' | 'master' | 'manual'
@@ -108,6 +114,13 @@ export interface SaleProfit {
   source: SaleSource
   /** 付いているタグ（名前）。画面表示用。付け外しは setSaleTags */
   tags: Tag[]
+  /** 取引の進み具合と各日付（YYYY-MM-DD）。取れていなければ null */
+  status: SaleStatus | null
+  shipped_at: string | null
+  delivered_at: string | null
+  completed_at: string | null
+  /** 買い手のニックネーム。取れていなければ null */
+  buyer: string | null
 }
 
 export interface SaleInput {
@@ -173,6 +186,9 @@ export interface PurchaseSummary {
   /** null 以外なら注文履歴から自動取得したもの */
   import_key: string | null
   fulfillment: Fulfillment | null
+  /** 到着状態が shipped / delivered になったのを最初に観測した日（YYYY-MM-DD）。それ以前は null */
+  shipped_at: string | null
+  delivered_at: string | null
   line_count: number
   /** 代表の明細（先頭）。一覧で「何を買った注文か」を見せるため。明細が無ければ null */
   first_line_name: string | null
@@ -267,6 +283,65 @@ export interface InventoryPatch {
 }
 
 /** 型番ごとの実績（variant_summary ビュー） */
+/** 在庫 1 点の履歴。仕入→到着→販売→発送→受取→取引完了 を時系列で */
+export interface TimelineEvent {
+  /** YYYY-MM-DD。日付が取れていない予定の段は null（UI は薄く出す） */
+  date: string | null
+  kind:
+    | 'ordered' | 'purchase_shipped' | 'purchase_delivered'
+    | 'sold' | 'sale_shipped' | 'sale_delivered' | 'sale_completed'
+    | 'split' | 'disposed' | 'personal_use'
+  /** 見出し。例「メロジョイで注文 #264129」 */
+  title: string
+  /** 補足。例「¥2,699 ＋送料按分 ¥499 → 原価 ¥3,198」 */
+  detail: string | null
+  /** 関係する金額（表示用。無ければ null） */
+  amount: number | null
+}
+
+export interface ItemTimeline {
+  item: InventoryItem
+  events: TimelineEvent[]
+  /** 販売済みなら販売の要約。未販売なら null */
+  sale: SaleProfit | null
+  /** 仕入の要約（注文番号・仕入先・注文日） */
+  purchase: PurchaseSummary | null
+}
+
+/** 商品（型番）ページの一覧行。variant_summary に仕入額を足したもの */
+export interface ProductSummary extends VariantSummary {
+  /** 仕入合計（按分後原価の合計。廃棄・私物含む） */
+  purchase_total: number
+  /** 平均原価（按分後） */
+  avg_cost: number | null
+  /** 最新の仕入日・販売日 */
+  last_purchased_at: string | null
+  last_sold_at: string | null
+  /** 代表サムネイル（紐付いた販売のもの。無ければ null） */
+  thumb_url: string | null
+}
+
+/** 月ごとの在庫の増減 */
+export interface ProductMonthPoint {
+  /** YYYY-MM */
+  month: string
+  purchased: number
+  sold: number
+  /** 月末時点の在庫数（累積） */
+  in_stock: number
+  purchase_amount: number
+  sales_amount: number
+  profit: number
+}
+
+export interface ProductDetail extends ProductSummary {
+  months: ProductMonthPoint[]
+  /** この型番の在庫 1 点ずつ（新しい順） */
+  items: InventoryItem[]
+  /** この型番が紐付いた販売（新しい順） */
+  sales: SaleProfit[]
+}
+
 export interface VariantSummary {
   model_code: string
   series_code: string | null
@@ -411,6 +486,11 @@ export interface SorobanApi {
   setSaleTags(saleId: string, tagIds: string[]): Promise<void>
   setInventoryTags(inventoryItemId: string, tagIds: string[]): Promise<void>
   listVariantSummary(sort?: 'total_profit' | 'avg_profit' | 'sold'): Promise<VariantSummary[]>
+
+  // 商品（型番）ページ・在庫の履歴
+  listProducts(sort?: 'total_profit' | 'avg_profit' | 'sold' | 'in_stock' | 'last_purchased_at'): Promise<ProductSummary[]>
+  getProduct(modelCode: string): Promise<ProductDetail | null>
+  getItemTimeline(inventoryItemId: string): Promise<ItemTimeline | null>
 
   // マスタ
   listShopAccounts(): Promise<ShopAccount[]>

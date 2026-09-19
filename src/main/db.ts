@@ -6,13 +6,14 @@ import { app } from 'electron'
 import schemaSql from './schema.sql?raw'
 import { allocate, calcFee, splitEvenly } from './money'
 import { extractCode, extractCodes, extractMaterial } from './code'
-import { thisMonthLocal } from '../shared/date'
+import { thisMonthLocal, todayLocal } from '../shared/date'
 import type {
   AllocMethod, DashboardStats, Fulfillment, InventoryItem, InventoryPatch, InventoryStatus,
-  LinkSource, Material, MonthlySummary, PurchaseDetail, PurchaseDraftInput, PurchaseInput,
+  ItemTimeline, LinkSource, Material, MonthlySummary, ProductDetail, ProductMonthPoint,
+  ProductSummary, PurchaseDetail, PurchaseDraftInput, PurchaseInput,
   PurchaseLine, PurchaseLineInput, PurchaseStatus, PurchaseSummary, SaleFilter, SaleInput,
   SaleKind, SalePatch, SaleProfit, SaleTotals, ShippingMethod, ShopAccount, ShopAccountKind, Tag,
-  VariantSummary, CollectorRun, RunStatus, CollectorSource,
+  TimelineEvent, VariantSummary, CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
 
 // ============================================================
@@ -45,6 +46,11 @@ export function getDbPath(): string {
  */
 export function toThumbUrl(file: string | null): string | null {
   return file ? `soroban-thumb://${file}` : null
+}
+
+/** 金額を桁区切りの「¥2,699」形式にする。getItemTimeline の title/detail で使う */
+function yenText(n: number): string {
+  return `¥${n.toLocaleString('ja-JP')}`
 }
 
 export function initDb(path?: string): void {
@@ -348,6 +354,32 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 7) {
+    // 仕入の到着日（到着状態が shipped/delivered になったのを最初に観測した日）
+    addColumnIfMissing('purchase', 'shipped_at', 'TEXT')
+    addColumnIfMissing('purchase', 'delivered_at', 'TEXT')
+    // v5〜v6 で既に到着状態だけ付いている仕入は、状態を観測した日で埋める（履歴を「予定」にしない）
+    db.exec(`
+      UPDATE purchase SET shipped_at = date(fulfillment_updated_at)
+       WHERE shipped_at IS NULL AND fulfillment IN ('shipped','delivered') AND fulfillment_updated_at IS NOT NULL;
+      UPDATE purchase SET delivered_at = date(fulfillment_updated_at)
+       WHERE delivered_at IS NULL AND fulfillment = 'delivered' AND fulfillment_updated_at IS NOT NULL;
+    `)
+
+    // メルカリの取引の進み具合。collector はまだ埋めない（列と配線だけ）
+    addColumnIfMissing('sale', 'status',
+      `TEXT CHECK (status IN ('waiting_shipment','shipped','delivered','completed'))`)
+    addColumnIfMissing('sale', 'shipped_at', 'TEXT')
+    addColumnIfMissing('sale', 'delivered_at', 'TEXT')
+    addColumnIfMissing('sale', 'completed_at', 'TEXT')
+    addColumnIfMissing('sale', 'buyer', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '7')
+         ON CONFLICT(key) DO UPDATE SET value = '7'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -365,6 +397,25 @@ function migrate(): void {
 // 端数は最終行（明細）・最終アイテムに寄せて、配賦総額が必ず一致するようにしている。
 // 純粋な計算部分は money.ts の allocate / splitEvenly を参照。
 // ============================================================
+
+/**
+ * fulfillment の初期値から shipped_at / delivered_at を決める。
+ * shipped 以上なら発送日を今日、delivered なら到着日も今日にする
+ * （updatePurchaseFulfillment と同じ規則。後から追いつく分は null のままにして
+ * updatePurchaseFulfillment 側で最初に観測した日を刻む）。
+ */
+function initialFulfillmentDates(
+  fulfillment: Fulfillment | null | undefined,
+): { shipped_at: string | null; delivered_at: string | null } {
+  if (fulfillment === 'delivered') {
+    const today = todayLocal()
+    return { shipped_at: today, delivered_at: today }
+  }
+  if (fulfillment === 'shipped') {
+    return { shipped_at: todayLocal(), delivered_at: null }
+  }
+  return { shipped_at: null, delivered_at: null }
+}
 
 /** 明細の型番・素材。手で指定されていなければ商品名から自動抽出する */
 function resolveLineCode(l: PurchaseLineInput): {
@@ -452,20 +503,21 @@ export function createPurchase(input: PurchaseInput): string {
   const pool = shippingFee + otherCost - discount
 
   const fulfillment = input.fulfillment ?? null
+  const { shipped_at, delivered_at } = initialFulfillmentDates(fulfillment)
 
   const tx = db.transaction(() => {
     db.prepare(
       `INSERT INTO purchase
          (id, shop_account_id, ordered_at, order_no,
           shipping_fee, discount, other_cost, alloc_method, note, import_key, status,
-          fulfillment, fulfillment_updated_at)
+          fulfillment, fulfillment_updated_at, shipped_at, delivered_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?,
-               CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END)`,
+               CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END, ?, ?)`,
     ).run(
       purchaseId, input.shop_account_id, input.ordered_at,
       input.order_no ?? null, shippingFee, discount, otherCost,
       method, input.note ?? null, input.import_key ?? null,
-      fulfillment, fulfillment,
+      fulfillment, fulfillment, shipped_at, delivered_at,
     )
 
     insertLinesAndItems(purchaseId, input.lines, pool, method, input.ordered_at)
@@ -489,18 +541,19 @@ export function createPurchaseDraft(input: PurchaseDraftInput): string {
   const shippingFee = input.shipping_fee ?? 0
   const discount = input.discount ?? 0
   const fulfillment = input.fulfillment ?? null
+  const { shipped_at, delivered_at } = initialFulfillmentDates(fulfillment)
 
   const tx = db.transaction(() => {
     db.prepare(
       `INSERT INTO purchase
          (id, shop_account_id, ordered_at, order_no, shipping_fee, discount, status, import_key, note,
-          fulfillment, fulfillment_updated_at)
+          fulfillment, fulfillment_updated_at, shipped_at, delivered_at)
        VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?,
-               CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END)`,
+               CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END, ?, ?)`,
     ).run(
       purchaseId, input.shop_account_id, input.ordered_at, input.order_no ?? null,
       shippingFee, discount, input.import_key, input.note ?? null,
-      fulfillment, fulfillment,
+      fulfillment, fulfillment, shipped_at, delivered_at,
     )
 
     const insLine = db.prepare(
@@ -558,6 +611,8 @@ export function getPurchase(id: string): PurchaseDetail {
     note: p.note,
     import_key: p.import_key,
     fulfillment: p.fulfillment,
+    shipped_at: p.shipped_at,
+    delivered_at: p.delivered_at,
     line_count: lines.length,
     first_line_name: lines[0]?.name ?? null,
     first_model_code: lines[0]?.model_code ?? null,
@@ -614,38 +669,63 @@ export function updatePurchaseNote(id: string, note: string | null): void {
 export function updatePurchaseFulfillment(
   importKey: string, fulfillment: Fulfillment | null,
 ): boolean {
-  const cur = db.prepare('SELECT fulfillment FROM purchase WHERE import_key = ?').get(importKey) as
-    | { fulfillment: Fulfillment | null } | undefined
+  const cur = db.prepare(
+    'SELECT fulfillment, shipped_at, delivered_at FROM purchase WHERE import_key = ?',
+  ).get(importKey) as
+    | { fulfillment: Fulfillment | null; shipped_at: string | null; delivered_at: string | null }
+    | undefined
   if (!cur) return false
   if (cur.fulfillment === fulfillment) return false
 
+  // 到着状態が進んだのを最初に観測した日を刻む。既に入っていれば触らない
+  const today = todayLocal()
+  let shippedAt = cur.shipped_at
+  let deliveredAt = cur.delivered_at
+  if (fulfillment === 'shipped' && !shippedAt) shippedAt = today
+  if (fulfillment === 'delivered') {
+    if (!shippedAt) shippedAt = today
+    if (!deliveredAt) deliveredAt = today
+  }
+
   db.prepare(
     `UPDATE purchase
-        SET fulfillment = ?, fulfillment_updated_at = datetime('now'), updated_at = datetime('now')
+        SET fulfillment = ?, fulfillment_updated_at = datetime('now'),
+            shipped_at = ?, delivered_at = ?, updated_at = datetime('now')
       WHERE import_key = ?`,
-  ).run(fulfillment, importKey)
+  ).run(fulfillment, shippedAt, deliveredAt, importKey)
   return true
 }
 
+/** listPurchases / getPurchaseSummary で共通の SELECT（WHERE・ORDER BY は呼び出し側で足す） */
+const PURCHASE_SUMMARY_SELECT = `
+  SELECT
+    p.id, p.status, p.ordered_at, p.order_no, p.shop_account_id,
+    p.shipping_fee, p.discount, p.note, p.import_key, p.fulfillment,
+    p.shipped_at, p.delivered_at,
+    sa.name AS shop_account_name,
+    COUNT(pl.id) AS line_count,
+    COALESCE(SUM(pl.unit_price * pl.quantity), 0) AS subtotal,
+    COALESCE(SUM(pl.unit_price * pl.quantity + pl.allocated_cost), 0) AS total_cost,
+    (SELECT name FROM purchase_line
+      WHERE purchase_id = p.id ORDER BY sort_order, rowid LIMIT 1) AS first_line_name,
+    (SELECT model_code FROM purchase_line
+      WHERE purchase_id = p.id ORDER BY sort_order, rowid LIMIT 1) AS first_model_code
+  FROM purchase p
+  JOIN shop_account sa ON sa.id = p.shop_account_id
+  LEFT JOIN purchase_line pl ON pl.purchase_id = p.id
+`
+
 export function listPurchases(): PurchaseSummary[] {
-  return db.prepare(`
-    SELECT
-      p.id, p.status, p.ordered_at, p.order_no, p.shop_account_id,
-      p.shipping_fee, p.discount, p.note, p.import_key, p.fulfillment,
-      sa.name AS shop_account_name,
-      COUNT(pl.id) AS line_count,
-      COALESCE(SUM(pl.unit_price * pl.quantity), 0) AS subtotal,
-      COALESCE(SUM(pl.unit_price * pl.quantity + pl.allocated_cost), 0) AS total_cost,
-      (SELECT name FROM purchase_line
-        WHERE purchase_id = p.id ORDER BY sort_order, rowid LIMIT 1) AS first_line_name,
-      (SELECT model_code FROM purchase_line
-        WHERE purchase_id = p.id ORDER BY sort_order, rowid LIMIT 1) AS first_model_code
-    FROM purchase p
-    JOIN shop_account sa ON sa.id = p.shop_account_id
-    LEFT JOIN purchase_line pl ON pl.purchase_id = p.id
-    GROUP BY p.id
-    ORDER BY p.ordered_at DESC, p.created_at DESC
-  `).all() as PurchaseSummary[]
+  return db.prepare(
+    `${PURCHASE_SUMMARY_SELECT} GROUP BY p.id ORDER BY p.ordered_at DESC, p.created_at DESC`,
+  ).all() as PurchaseSummary[]
+}
+
+/** 1件分の PurchaseSummary（getItemTimeline が使う）。無ければ undefined */
+function getPurchaseSummary(id: string): PurchaseSummary | undefined {
+  return db.prepare(
+    `${PURCHASE_SUMMARY_SELECT} WHERE p.id = ? GROUP BY p.id`,
+  ).get(id) as PurchaseSummary | undefined
 }
 
 export function deletePurchase(id: string): void {
@@ -872,12 +952,11 @@ function buildSaleFilterWhere(filter?: SaleFilter): { where: string; vals: unkno
   return { where: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', vals }
 }
 
-export function listSales(filter?: SaleFilter): SaleProfit[] {
-  const { where, vals } = buildSaleFilterWhere(filter)
-
-  const sql = `SELECT * FROM sale_profit ${where} ORDER BY sold_at DESC, title`
-  const rows = db.prepare(sql).all(...vals) as SaleProfitRow[]
-
+/**
+ * sale_profit の生行を SaleProfit（タグ・型番配列・サムネイルURL）に直す。
+ * listSales / getItemTimeline / getProduct で共通に使う。
+ */
+function hydrateSaleProfitRows(rows: SaleProfitRow[]): SaleProfit[] {
   const tagMap = loadTagsFor('sale_tag', 'sale_id', rows.map(r => r.id))
   return rows.map(r => {
     const { thumb_file, ...rest } = r
@@ -888,6 +967,15 @@ export function listSales(filter?: SaleFilter): SaleProfit[] {
       thumb_url: toThumbUrl(thumb_file),
     }
   })
+}
+
+export function listSales(filter?: SaleFilter): SaleProfit[] {
+  const { where, vals } = buildSaleFilterWhere(filter)
+
+  const sql = `SELECT * FROM sale_profit ${where} ORDER BY sold_at DESC, title`
+  const rows = db.prepare(sql).all(...vals) as SaleProfitRow[]
+
+  return hydrateSaleProfitRows(rows)
 }
 
 /** 絞り込んだ販売の合計。DB側で集計する（0件なら全部0） */
@@ -1204,6 +1292,324 @@ export function listVariantSummary(
   return db.prepare(
     `SELECT * FROM variant_summary ORDER BY ${col} DESC`,
   ).all() as VariantSummary[]
+}
+
+// ============================================================
+// 商品（型番）ページ・在庫の履歴
+// ============================================================
+
+type ProductSummarySort = 'total_profit' | 'avg_profit' | 'sold' | 'in_stock' | 'last_purchased_at'
+
+type ProductSummaryRow = VariantSummary & {
+  purchase_total: number
+  avg_cost: number | null
+  last_purchased_at: string | null
+  last_sold_at: string | null
+  thumb_file: string | null
+}
+
+/**
+ * variant_summary に仕入額・最新日・サムネイルを足したもの。
+ * purchase_total / avg_cost は split 親を除いた在庫（= variant_summary の purchased と同じ母集団）で計算する。
+ */
+function selectProducts(sort: ProductSummarySort): ProductSummaryRow[] {
+  // SQLite は NULL を最小として扱うため、DESC で並べれば null は自動的に最後に来る
+  const col: Record<ProductSummarySort, string> = {
+    total_profit: 'total_profit',
+    avg_profit: 'avg_profit',
+    sold: 'sold',
+    in_stock: 'in_stock',
+    last_purchased_at: 'last_purchased_at',
+  }
+
+  return db.prepare(`
+    SELECT
+      vs.*,
+      COALESCE(pt.purchase_total, 0)                        AS purchase_total,
+      pt.avg_cost                                           AS avg_cost,
+      pt.last_purchased_at                                  AS last_purchased_at,
+      st.last_sold_at                                       AS last_sold_at,
+      (
+        SELECT sp2.thumb_file
+        FROM inventory_item i2
+        JOIN sale_line   sl2 ON sl2.inventory_item_id = i2.id
+        JOIN sale_profit sp2 ON sp2.id = sl2.sale_id
+        WHERE i2.model_code = vs.model_code
+        ORDER BY sp2.sold_at DESC
+        LIMIT 1
+      ) AS thumb_file
+    FROM variant_summary vs
+    LEFT JOIN (
+      SELECT
+        model_code,
+        SUM(landed_cost)                             AS purchase_total,
+        CAST(ROUND(AVG(landed_cost)) AS INTEGER)      AS avg_cost,
+        MAX(acquired_at)                              AS last_purchased_at
+      FROM inventory_item
+      WHERE model_code IS NOT NULL AND status != 'split'
+      GROUP BY model_code
+    ) pt ON pt.model_code = vs.model_code
+    LEFT JOIN (
+      SELECT i.model_code, MAX(sp.sold_at) AS last_sold_at
+      FROM inventory_item i
+      JOIN sale_line   sl ON sl.inventory_item_id = i.id
+      JOIN sale_profit sp ON sp.id = sl.sale_id
+      GROUP BY i.model_code
+    ) st ON st.model_code = vs.model_code
+    ORDER BY ${col[sort]} DESC
+  `).all() as ProductSummaryRow[]
+}
+
+function toProductSummary(r: ProductSummaryRow): ProductSummary {
+  const { thumb_file, ...rest } = r
+  return { ...rest, thumb_url: toThumbUrl(thumb_file) }
+}
+
+export function listProducts(sort: ProductSummarySort = 'total_profit'): ProductSummary[] {
+  return selectProducts(sort).map(toProductSummary)
+}
+
+/** 'YYYY-MM' を1か月進める */
+function nextMonth(month: string): string {
+  const [y, m] = month.split('-').map(Number)
+  const d = new Date(y, m, 1) // m は1〜12（次の月がそのままDateのmonthインデックスになる）
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+export function getProduct(modelCode: string): ProductDetail | null {
+  const base = selectProducts('total_profit').find(r => r.model_code === modelCode)
+  if (!base) return null
+
+  const purchaseRows = db.prepare(`
+    SELECT acquired_at, landed_cost
+    FROM inventory_item
+    WHERE model_code = ? AND status != 'split'
+  `).all(modelCode) as Array<{ acquired_at: string; landed_cost: number }>
+
+  const soldRows = db.prepare(`
+    SELECT sp.sold_at, sp.price, sp.gross_profit, sp.item_count
+    FROM inventory_item i
+    JOIN sale_line   sl ON sl.inventory_item_id = i.id
+    JOIN sale_profit sp ON sp.id = sl.sale_id
+    WHERE i.model_code = ?
+  `).all(modelCode) as Array<{ sold_at: string; price: number; gross_profit: number; item_count: number }>
+
+  const disposedRows = db.prepare(`
+    SELECT disposed_at
+    FROM inventory_item
+    WHERE model_code = ? AND status IN ('disposed','personal_use') AND disposed_at IS NOT NULL
+  `).all(modelCode) as Array<{ disposed_at: string }>
+
+  const purchaseByMonth = new Map<string, { purchased: number; purchase_amount: number }>()
+  for (const r of purchaseRows) {
+    const m = r.acquired_at.slice(0, 7)
+    const cur = purchaseByMonth.get(m) ?? { purchased: 0, purchase_amount: 0 }
+    cur.purchased += 1
+    cur.purchase_amount += r.landed_cost
+    purchaseByMonth.set(m, cur)
+  }
+
+  const soldByMonth = new Map<string, { sold: number; sales_amount: number; profit: number }>()
+  for (const r of soldRows) {
+    const m = r.sold_at.slice(0, 7)
+    const cur = soldByMonth.get(m) ?? { sold: 0, sales_amount: 0, profit: 0 }
+    cur.sold += 1
+    cur.sales_amount += Math.round(r.price / r.item_count)
+    cur.profit += Math.round(r.gross_profit / r.item_count)
+    soldByMonth.set(m, cur)
+  }
+
+  const disposedByMonth = new Map<string, number>()
+  for (const r of disposedRows) {
+    const m = r.disposed_at.slice(0, 7)
+    disposedByMonth.set(m, (disposedByMonth.get(m) ?? 0) + 1)
+  }
+
+  const knownMonths = [...purchaseByMonth.keys(), ...soldByMonth.keys()].sort()
+  const firstMonth = knownMonths[0] ?? thisMonthLocal()
+  const lastMonth = thisMonthLocal()
+
+  const months: ProductMonthPoint[] = []
+  let cumulative = 0
+  for (let m = firstMonth; m <= lastMonth; m = nextMonth(m)) {
+    const p = purchaseByMonth.get(m) ?? { purchased: 0, purchase_amount: 0 }
+    const s = soldByMonth.get(m) ?? { sold: 0, sales_amount: 0, profit: 0 }
+    const disposed = disposedByMonth.get(m) ?? 0
+    cumulative += p.purchased - s.sold - disposed
+    months.push({
+      month: m,
+      purchased: p.purchased,
+      sold: s.sold,
+      in_stock: cumulative,
+      purchase_amount: p.purchase_amount,
+      sales_amount: s.sales_amount,
+      profit: s.profit,
+    })
+  }
+
+  const items = attachInventoryTags(
+    db.prepare(
+      `SELECT * FROM inventory_view WHERE model_code = ? ORDER BY acquired_at DESC`,
+    ).all(modelCode) as InventoryRow[],
+  )
+
+  const saleRows = db.prepare(`
+    SELECT DISTINCT sp.*
+    FROM sale_profit sp
+    JOIN sale_line     sl ON sl.sale_id = sp.id
+    JOIN inventory_item i ON i.id = sl.inventory_item_id
+    WHERE i.model_code = ?
+    ORDER BY sp.sold_at DESC
+  `).all(modelCode) as SaleProfitRow[]
+
+  return {
+    ...toProductSummary(base),
+    months,
+    items,
+    sales: hydrateSaleProfitRows(saleRows),
+  }
+}
+
+/**
+ * 在庫1点の履歴（仕入→到着→販売→発送→受取→取引完了）。
+ * 在庫が無ければ null。仕入・販売のどちらかが無くても組み立てられる分だけ返す。
+ */
+export function getItemTimeline(inventoryItemId: string): ItemTimeline | null {
+  const itemRow = db.prepare(
+    `SELECT * FROM inventory_view WHERE id = ?`,
+  ).get(inventoryItemId) as InventoryRow | undefined
+  if (!itemRow) return null
+  const item = attachInventoryTags([itemRow])[0]
+
+  const raw = db.prepare(
+    `SELECT purchase_line_id, parent_id, disposed_at, disposed_note FROM inventory_item WHERE id = ?`,
+  ).get(inventoryItemId) as {
+    purchase_line_id: string | null
+    parent_id: string | null
+    disposed_at: string | null
+    disposed_note: string | null
+  }
+
+  let purchase: PurchaseSummary | null = null
+  let lineUnitPrice: number | null = null
+  if (raw.purchase_line_id) {
+    const line = db.prepare(
+      `SELECT unit_price, purchase_id FROM purchase_line WHERE id = ?`,
+    ).get(raw.purchase_line_id) as { unit_price: number; purchase_id: string } | undefined
+    if (line) {
+      lineUnitPrice = line.unit_price
+      purchase = getPurchaseSummary(line.purchase_id) ?? null
+    }
+  }
+
+  const saleRow = db.prepare(`
+    SELECT sp.* FROM sale_line sl
+    JOIN sale_profit sp ON sp.id = sl.sale_id
+    WHERE sl.inventory_item_id = ?
+  `).get(inventoryItemId) as SaleProfitRow | undefined
+  const sale = saleRow ? hydrateSaleProfitRows([saleRow])[0] : null
+
+  const events: TimelineEvent[] = []
+
+  if (purchase && lineUnitPrice !== null) {
+    const allocatedForItem = item.landed_cost - lineUnitPrice
+    const detail = allocatedForItem === 0
+      ? `${yenText(lineUnitPrice)} → 原価 ${yenText(item.landed_cost)}`
+      : `${yenText(lineUnitPrice)} ＋送料按分 ${yenText(allocatedForItem)} → 原価 ${yenText(item.landed_cost)}`
+    events.push({
+      date: purchase.ordered_at,
+      kind: 'ordered',
+      title: `${purchase.shop_account_name}で注文${purchase.order_no ? ' ' + purchase.order_no : ''}`,
+      detail,
+      amount: item.landed_cost,
+    })
+  }
+
+  // fulfillment が null（手入力）なら発送・到着の予定は出さない
+  if (purchase && purchase.fulfillment !== null) {
+    events.push({
+      date: purchase.shipped_at,
+      kind: 'purchase_shipped',
+      title: '仕入先が発送',
+      detail: null,
+      amount: null,
+    })
+    events.push({
+      date: purchase.delivered_at,
+      kind: 'purchase_delivered',
+      title: '到着',
+      detail: null,
+      amount: null,
+    })
+  }
+
+  if (raw.parent_id) {
+    const parent = db.prepare('SELECT name FROM inventory_item WHERE id = ?')
+      .get(raw.parent_id) as { name: string } | undefined
+    events.push({
+      date: item.acquired_at,
+      kind: 'split',
+      title: '分割で生成',
+      detail: parent ? `「${parent.name}」から分割` : null,
+      amount: null,
+    })
+  }
+
+  if (sale) {
+    const detailParts = [yenText(sale.price)]
+    if (sale.item_count > 1) {
+      detailParts.push(
+        `（まとめ売り ${sale.item_count} 点、1 点あたり ${yenText(Math.floor(sale.price / sale.item_count))}）`,
+      )
+    }
+    if (sale.buyer) detailParts.push(`買い手：${sale.buyer}`)
+
+    events.push({
+      date: sale.sold_at,
+      kind: 'sold',
+      title: 'メルカリで売れた',
+      detail: detailParts.join(' '),
+      amount: sale.price,
+    })
+    events.push({
+      date: sale.shipped_at,
+      kind: 'sale_shipped',
+      title: '発送済み',
+      detail: null,
+      amount: null,
+    })
+    events.push({
+      date: sale.delivered_at,
+      kind: 'sale_delivered',
+      title: '受取済み',
+      detail: null,
+      amount: null,
+    })
+    events.push({
+      date: sale.completed_at,
+      kind: 'sale_completed',
+      title: '取引完了',
+      detail: `売上金 ${yenText(sale.price - sale.fee - sale.shipping_fee)} 反映`,
+      amount: null,
+    })
+  }
+
+  if (item.status === 'disposed' || item.status === 'personal_use') {
+    events.push({
+      date: raw.disposed_at,
+      kind: item.status,
+      title: item.status === 'disposed' ? '廃棄' : '自家消費',
+      detail: raw.disposed_note,
+      amount: null,
+    })
+  }
+
+  // 日付昇順。同日（null同士も含む）は上で積んだ順（＝仕様の並び）を保つ
+  // （Array#sort は安定ソートなので、比較が同値なら元の順序が保たれる）
+  const dateKey = (d: string | null) => d ?? '9999-99-99'
+  events.sort((a, b) => dateKey(a.date).localeCompare(dateKey(b.date)))
+
+  return { item, events, sale, purchase }
 }
 
 // ============================================================

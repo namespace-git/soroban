@@ -7,7 +7,7 @@ import Skeleton from '../components/Skeleton.vue'
 
 const stats = ref<DashboardStats | null>(null)
 const revision = inject<Ref<number>>('revision')!
-const goto = inject<(t: string) => void>('goto')!
+const goto = inject<(t: string, payload?: { modelCode?: string }) => void>('goto')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -147,7 +147,11 @@ const runLabel: Record<string, string> = {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="v in variants" :key="v.model_code">
+                <tr
+                  v-for="v in variants" :key="v.model_code"
+                  class="ranking-row"
+                  @click="goto('products', { modelCode: v.model_code })"
+                >
                   <td><StatusChip tone="neutral" :label="v.model_code" /></td>
                   <td class="ranking-name">{{ v.name }}</td>
                   <td class="num">{{ v.in_stock }}</td>
@@ -304,6 +308,7 @@ const runLabel: Record<string, string> = {
 .intake-msg { margin: 4px 0 0; font-size: var(--fs-13); }
 
 .ranking-table { table-layout: fixed; }
+.ranking-row { cursor: pointer; }
 .ranking-name {
   overflow: hidden;
   text-overflow: ellipsis;

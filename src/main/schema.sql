@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS purchase (
   fulfillment          TEXT
                        CHECK (fulfillment IN ('pending','shipped','delivered')),
   fulfillment_updated_at TEXT,
+  -- 到着状態が shipped / delivered になったのを最初に観測した日（YYYY-MM-DD）。それ以前は NULL
+  shipped_at           TEXT,
+  delivered_at         TEXT,
 
   note            TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -206,6 +209,16 @@ CREATE TABLE IF NOT EXISTS sale (
 
   -- タイトル・説明文から抜いた型番（複数可）。JSON配列で持つ
   model_codes        TEXT NOT NULL DEFAULT '[]',
+
+  -- メルカリの取引の進み具合。NULL = まだ取れていない（collector は今のところ埋めない。
+  -- 取引中タブ・取引画面の DOM 確認後に対応する）
+  status             TEXT
+                     CHECK (status IN ('waiting_shipment','shipped','delivered','completed')),
+  shipped_at         TEXT,
+  delivered_at       TEXT,
+  completed_at       TEXT,
+  -- 買い手のニックネーム。取れていなければ NULL
+  buyer              TEXT,
 
   note               TEXT,
   source             TEXT NOT NULL DEFAULT 'collector'
@@ -346,6 +359,11 @@ SELECT
   s.note,
   s.model_codes,
   s.source,
+  s.status,
+  s.shipped_at,
+  s.delivered_at,
+  s.completed_at,
+  s.buyer,
   COALESCE(SUM(i.landed_cost), 0) AS cost,
   s.price - s.fee - s.shipping_fee - s.packaging_cost
     - COALESCE(SUM(i.landed_cost), 0) AS gross_profit,

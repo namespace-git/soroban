@@ -130,6 +130,10 @@ function registerIpc(): void {
   handle('setInventoryTags', (itemId, tagIds) => db.setInventoryTags(itemId, tagIds))
   handle('listVariantSummary', (sort) => db.listVariantSummary(sort))
 
+  handle('listProducts', (sort) => db.listProducts(sort))
+  handle('getProduct', (modelCode) => db.getProduct(modelCode))
+  handle('getItemTimeline', (id) => db.getItemTimeline(id))
+
   handle('listShopAccounts', () => db.listShopAccounts())
   handle('createShopAccount', (name, kind) => db.createShopAccount(name, kind))
   handle('updateShopAccount', (id, patch) => db.updateShopAccount(id, patch))

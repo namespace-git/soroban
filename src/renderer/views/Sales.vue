@@ -8,6 +8,7 @@ import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
+import TimelineDrawer from '../components/TimelineDrawer.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
@@ -58,6 +59,17 @@ function onThumbError(id: string) {
 function placeholderChar(s: SaleProfit): string {
   const c = s.model_codes[0]?.[0] ?? s.title.trim().charAt(0)
   return (c || '?').toUpperCase()
+}
+
+// --- 履歴ドロワー。紐付いていれば最初の在庫を開く。未紐付けは開けない ---
+const timelineItemId = ref<string | null>(null)
+function canOpenTimeline(s: SaleProfit): boolean {
+  return s.item_count > 0
+}
+async function openTimelineForSale(s: SaleProfit) {
+  if (!canOpenTimeline(s)) return
+  const items = await window.soroban.listSaleLines(s.id)
+  if (items[0]) timelineItemId.value = items[0].id
 }
 
 function currentFilter(): SaleFilter {
@@ -358,7 +370,12 @@ async function remove(sale: SaleProfit) {
             <tr v-for="s in sales" :key="s.id">
               <td class="faint nowrap">{{ s.sold_at.slice(5) }}</td>
 
-              <td class="thumb-cell">
+              <td
+                class="thumb-cell"
+                :class="{ clickable: canOpenTimeline(s) }"
+                :title="canOpenTimeline(s) ? '履歴を見る' : undefined"
+                @click="openTimelineForSale(s)"
+              >
                 <img
                   v-if="showThumb(s)"
                   class="thumb"
@@ -371,7 +388,12 @@ async function remove(sale: SaleProfit) {
               </td>
 
               <td class="title-cell">
-                <div class="title-name" :title="s.title">{{ s.title }}</div>
+                <div
+                  class="title-name"
+                  :class="{ clickable: canOpenTimeline(s) }"
+                  :title="s.title"
+                  @click="openTimelineForSale(s)"
+                >{{ s.title }}</div>
                 <div class="chip-row">
                   <button
                     class="kind-toggle"
@@ -540,6 +562,12 @@ async function remove(sale: SaleProfit) {
       @create="onTagCreate"
       @close="closeTagPicker"
     />
+
+    <TimelineDrawer
+      :open="!!timelineItemId"
+      :inventory-item-id="timelineItemId"
+      @close="timelineItemId = null"
+    />
   </div>
 </template>
 
@@ -600,6 +628,8 @@ async function remove(sale: SaleProfit) {
   white-space: normal;
   word-break: break-word;
 }
+
+.clickable { cursor: pointer; }
 
 .table-panel td.actions { white-space: nowrap; text-align: right; }
 .table-panel .actions > * { vertical-align: middle; margin-left: 4px; }
