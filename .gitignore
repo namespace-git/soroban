@@ -1,0 +1,14 @@
+node_modules/
+out/
+release/
+dist/
+
+# ローカルDB・セッション（絶対にコミットしない）
+*.db
+*.db-wal
+*.db-shm
+session/
+
+.DS_Store
+*.log
+.vscode/

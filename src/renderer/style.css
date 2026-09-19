@@ -1,0 +1,155 @@
+/* ============================================================
+   そろばん — デザイントークン
+
+   長時間開く道具ではないが、数字を読む道具ではある。
+   桁が揃うこと、利益の正負が一目で分かることを優先する。
+   ============================================================ */
+
+:root {
+  /* 地：わずかに暖色（そろばんの木） */
+  --bg:            #14130f;
+  --surface:       #1c1b16;
+  --surface-hi:    #262419;
+  --line:          #38352b;
+  --line-soft:     #2a2820;
+
+  --text:          #ece6d8;
+  --text-dim:      #a49a86;
+  --text-faint:    #6f6857;
+
+  /* 数字の色。利益は緑、損は赤、要対応は琥珀 */
+  --profit:        #7ec98f;
+  --loss:          #e08b84;
+  --warn:          #e5b45c;
+  --accent:        #7fb3e0;
+
+  --warn-bg:       #3a2e14;
+  --loss-bg:       #3a1f1e;
+
+  --radius:        8px;
+  --radius-sm:     4px;
+
+  --font: "Hiragino Sans", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  --mono: "SFMono-Regular", "Cascadia Mono", "Menlo", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 金額は必ず桁を揃える */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  text-align: right;
+  white-space: nowrap;
+}
+
+.profit { color: var(--profit); }
+.loss   { color: var(--loss); }
+.dim    { color: var(--text-dim); }
+.faint  { color: var(--text-faint); }
+
+/* --- ボタン --- */
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-hi);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background .12s ease;
+}
+button:hover:not(:disabled) { background: #302d20; }
+button:disabled { opacity: .4; cursor: default; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+button.primary {
+  background: #2c4a63;
+  border-color: #3c6488;
+}
+button.primary:hover:not(:disabled) { background: #345876; }
+
+button.danger { color: var(--loss); }
+button.ghost  { background: transparent; border-color: transparent; color: var(--text-dim); }
+button.ghost:hover:not(:disabled) { background: var(--surface-hi); }
+
+/* --- 入力 --- */
+
+input, select, textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+input[type="number"] { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* --- 表 --- */
+
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: middle;
+}
+tbody tr:hover { background: var(--surface); }
+
+/* --- 部品 --- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.badge.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+.badge.personal { color: var(--accent); border-color: #3c6488; }
+
+.empty {
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.row { display: flex; gap: 8px; align-items: center; }
+.grow { flex: 1; }

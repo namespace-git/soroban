@@ -1,0 +1,68 @@
+{
+  "name": "soroban",
+  "version": "0.1.0",
+  "private": true,
+  "description": "メルカリ転売の利益管理（単一Electronアプリ・ローカルSQLite）",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "vue-tsc --noEmit && electron-vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "start": "electron-vite preview",
+    "postinstall": "electron-builder install-app-deps",
+    "pack:win": "pnpm build && electron-builder --win --dir",
+    "pack:mac": "pnpm build && electron-builder --mac --dir",
+    "dist:win": "pnpm build && electron-builder --win",
+    "dist:mac": "pnpm build && electron-builder --mac",
+    "test": "cross-env ELECTRON_RUN_AS_NODE=1 electron ./node_modules/vitest/vitest.mjs run"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "cross-env": "^10.1.0",
+    "electron": "^32.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^3.2.7",
+    "vue": "^3.5.12",
+    "vue-tsc": "^2.1.10"
+  },
+  "build": {
+    "appId": "jp.namespace.soroban",
+    "productName": "そろばん",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.finance"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  }
+}
