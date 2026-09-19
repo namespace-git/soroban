@@ -42,6 +42,14 @@ CREATE TABLE IF NOT EXISTS shipping_method (
   is_active  INTEGER NOT NULL DEFAULT 1
 );
 
+-- タグ。販売・在庫に複数付けられる。名前は一意
+CREATE TABLE IF NOT EXISTS tag (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- アプリ設定（手数料率など）
 CREATE TABLE IF NOT EXISTS setting (
   key   TEXT PRIMARY KEY,
@@ -269,6 +277,22 @@ CREATE TABLE IF NOT EXISTS collector_run (
 
 CREATE INDEX IF NOT EXISTS idx_run_started ON collector_run(started_at DESC);
 
+-- ============================================================
+-- タグの付け外し（多対多）。tag を消すと CASCADE で外れる（T-04）
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS sale_tag (
+  sale_id TEXT NOT NULL REFERENCES sale(id) ON DELETE CASCADE,
+  tag_id  TEXT NOT NULL REFERENCES tag(id)  ON DELETE CASCADE,
+  PRIMARY KEY (sale_id, tag_id)
+);
+
+CREATE TABLE IF NOT EXISTS inventory_tag (
+  inventory_item_id TEXT NOT NULL REFERENCES inventory_item(id) ON DELETE CASCADE,
+  tag_id            TEXT NOT NULL REFERENCES tag(id)            ON DELETE CASCADE,
+  PRIMARY KEY (inventory_item_id, tag_id)
+);
+
 -- __VIEWS__
 -- db.ts はこのマーカーでファイルを分割し、テーブルの CREATE → migrate() での
 -- 列追加 → ここから先のビュー作成、の順で実行する（ビューが新しい列を参照するため）。
@@ -303,6 +327,7 @@ SELECT
   s.shipping_source,
   s.note,
   s.model_codes,
+  s.source,
   COALESCE(SUM(i.landed_cost), 0) AS cost,
   s.price - s.fee - s.shipping_fee - s.packaging_cost
     - COALESCE(SUM(i.landed_cost), 0) AS gross_profit,

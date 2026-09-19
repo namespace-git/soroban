@@ -1,19 +1,23 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { SaleProfit, ShippingMethod, InventoryItem, SaleKind, SaleInput } from '../../shared/types'
+import type { SaleProfit, ShippingMethod, InventoryItem, SaleKind, SaleInput, SaleFilter, SaleTotals, Tag } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import Drawer from '../components/Drawer.vue'
 import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+import TagPicker from '../components/TagPicker.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 
 const sales = ref<SaleProfit[]>([])
 const methods = ref<ShippingMethod[]>([])
+const allTags = ref<Tag[]>([])
 const onlyPending = ref(true)
+const tagFilter = ref('')
+const totals = ref<SaleTotals | null>(null)
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const loaded = ref(false)
@@ -35,20 +39,39 @@ const candidates = ref<InventoryItem[]>([])
 const picked = ref<Set<string>>(new Set())
 const search = ref('')
 
+// タグピッカーを開いている販売
+const tagPickerSale = ref<SaleProfit | null>(null)
+const tagPickerAnchor = ref<HTMLElement | null>(null)
+
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
+function currentFilter(): SaleFilter {
+  const filter: SaleFilter = {}
+  if (onlyPending.value) filter.onlyPending = true
+  if (tagFilter.value) filter.tagId = tagFilter.value
+  return filter
+}
+
 async function load() {
+  const filter = currentFilter()
   sales.value = await window.soroban.listSales(
-    onlyPending.value ? { onlyPending: true } : undefined,
+    Object.keys(filter).length ? filter : undefined,
   )
+  totals.value = tagFilter.value ? await window.soroban.saleTotals(filter) : null
   loaded.value = true
+}
+
+async function loadTags() {
+  allTags.value = await window.soroban.listTags()
 }
 
 onMounted(async () => {
   methods.value = await window.soroban.listShippingMethods()
+  await loadTags()
   await load()
 })
-watch([revision, onlyPending], load)
+watch(revision, loadTags)
+watch([revision, onlyPending, tagFilter], load)
 
 // --- 手入力登録 ---
 
@@ -109,6 +132,37 @@ async function autoLinkPending() {
   alert(n > 0 ? `${n}件を自動で紐付けました` : '型番が一致する在庫はありませんでした')
   await load()
   changed()
+}
+
+// --- タグ ---
+
+function openTagPicker(sale: SaleProfit, e: MouseEvent) {
+  tagPickerSale.value = sale
+  tagPickerAnchor.value = e.currentTarget as HTMLElement
+}
+
+function closeTagPicker() {
+  tagPickerSale.value = null
+  tagPickerAnchor.value = null
+}
+
+async function onTagChange(tagIds: string[]) {
+  if (!tagPickerSale.value) return
+  const id = tagPickerSale.value.id
+  await window.soroban.setSaleTags(id, tagIds)
+  await load()
+  tagPickerSale.value = sales.value.find(s => s.id === id) ?? null
+}
+
+async function onTagCreate(name: string) {
+  if (!tagPickerSale.value) return
+  const id = tagPickerSale.value.id
+  const newTagId = await window.soroban.createTag(name)
+  await loadTags()
+  const tagIds = [...tagPickerSale.value.tags.map(t => t.id), newTagId]
+  await window.soroban.setSaleTags(id, tagIds)
+  await load()
+  tagPickerSale.value = sales.value.find(s => s.id === id) ?? null
 }
 
 // --- 紐付け ---
@@ -242,9 +296,24 @@ async function remove(sale: SaleProfit) {
         <input type="checkbox" v-model="onlyPending" />
         未処理のみ
       </label>
+      <select v-model="tagFilter">
+        <option value="">すべてのタグ</option>
+        <option v-for="t in allTags" :key="t.id" :value="t.id">{{ t.name }}</option>
+      </select>
       <span class="grow" />
       <button class="sm" @click="autoLinkPending">型番で自動紐付け</button>
       <span class="faint">{{ sales.length }}件</span>
+    </div>
+
+    <div v-if="tagFilter && totals" class="panel totals-bar">
+      <span class="faint">{{ totals.count }}件</span>
+      <span class="num">売上 {{ yen(totals.revenue) }}</span>
+      <span class="num dim">手数料 {{ yen(totals.total_fee) }}</span>
+      <span class="num dim">送料 {{ yen(totals.total_shipping) }}</span>
+      <span class="num dim">原価 {{ yen(totals.total_cost) }}</span>
+      <strong class="num" :class="totals.gross_profit >= 0 ? 'profit' : 'loss'">
+        粗利 {{ yen(totals.gross_profit) }}
+      </strong>
     </div>
 
     <Skeleton v-if="!loaded" :rows="6" />
@@ -267,7 +336,10 @@ async function remove(sale: SaleProfit) {
           </thead>
           <tbody>
             <tr v-for="s in sales" :key="s.id">
-              <td class="faint nowrap">{{ s.sold_at.slice(5) }}</td>
+              <td class="date-cell">
+                <span class="faint nowrap">{{ s.sold_at.slice(5) }}</span>
+                <StatusChip v-if="s.source === 'collector'" tone="neutral" label="自動取得" />
+              </td>
 
               <td class="title-cell">
                 <div class="title-row">
@@ -289,7 +361,12 @@ async function remove(sale: SaleProfit) {
                     />
                   </button>
                 </div>
-                <div v-if="s.note" class="faint note" :title="s.note">{{ s.note }}</div>
+                <div v-if="s.tags.length || s.note" class="meta-row">
+                  <span v-if="s.tags.length" class="tag-chips">
+                    <StatusChip v-for="t in s.tags" :key="t.id" tone="info" :label="t.name" />
+                  </span>
+                  <span v-if="s.note" class="faint note" :title="s.note">{{ s.note }}</span>
+                </div>
               </td>
 
               <td class="num">{{ yen(s.price) }}</td>
@@ -340,7 +417,7 @@ async function remove(sale: SaleProfit) {
                   >
                     {{ yen(s.cost) }}<small class="faint"> ×{{ s.item_count }}</small>
                   </button>
-                  <StatusChip v-if="s.auto_linked" tone="ok" label="自動" />
+                  <StatusChip v-if="s.auto_linked" tone="ok" label="自動紐付け" />
                 </span>
                 <span v-else class="faint">—</span>
               </td>
@@ -357,7 +434,8 @@ async function remove(sale: SaleProfit) {
               </td>
 
               <td class="actions">
-                <button class="sm ghost memo-btn" @click="editNote(s)" title="メモを編集する">メモ</button>
+                <button class="sm ghost fade-btn" @click="openTagPicker(s, $event)" title="タグを編集する">タグ</button>
+                <button class="sm ghost fade-btn" @click="editNote(s)" title="メモを編集する">メモ</button>
                 <button class="icon ghost" aria-label="削除" @click="remove(s)">
                   <Icon name="trash" :size="16" />
                 </button>
@@ -427,6 +505,16 @@ async function remove(sale: SaleProfit) {
         </div>
       </template>
     </Drawer>
+
+    <TagPicker
+      :open="!!tagPickerSale"
+      :anchor="tagPickerAnchor"
+      :all-tags="allTags"
+      :selected="tagPickerSale?.tags.map(t => t.id) ?? []"
+      @change="onTagChange"
+      @create="onTagCreate"
+      @close="closeTagPicker"
+    />
   </div>
 </template>
 
@@ -439,18 +527,34 @@ async function remove(sale: SaleProfit) {
 }
 .field-wide input { width: 320px; }
 
+.totals-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 10px 20px;
+  margin-bottom: 16px;
+  font-size: var(--fs-13);
+}
+
 .table-panel { padding: 0; overflow: hidden; }
 .table-panel table { table-layout: fixed; }
 .table-panel td { padding: 8px 12px; }
 
 .col-date    { width: 72px; }
 .col-title   { min-width: 240px; }
-.col-amt     { width: 92px; }
+.col-amt     { width: 84px; }
 .col-ship    { width: 200px; }
-.col-pack    { width: 80px; }
-.col-actions { width: 76px; }
+.col-pack    { width: 76px; }
+.col-actions { width: 112px; }
 
 .nowrap { white-space: nowrap; }
+
+.date-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
 
 .title-cell { overflow: hidden; }
 .title-row {
@@ -471,8 +575,21 @@ async function remove(sale: SaleProfit) {
   gap: 4px;
   flex-shrink: 0;
 }
-.note {
+.meta-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-top: 2px;
+  min-width: 0;
+}
+.tag-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.note {
+  min-width: 0;
   font-size: var(--fs-12);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -482,12 +599,12 @@ async function remove(sale: SaleProfit) {
 .table-panel .actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
 .table-panel .actions button { white-space: nowrap; }
 
-.memo-btn {
+.fade-btn {
   padding: 3px 6px;
   opacity: .35;
   transition: opacity var(--dur) var(--ease);
 }
-tr:hover .memo-btn { opacity: 1; }
+tr:hover .fade-btn { opacity: 1; }
 
 .kind-toggle {
   flex-shrink: 0;
@@ -509,10 +626,10 @@ tr:hover .memo-btn { opacity: 1; }
 
 /* 1099px 以下：ナビがアイコン帯に畳まれコンテンツ幅が狭くなる（≒910px）。
    販売日・金額列を詰めて商品名の可読幅を確保し、チップは2段に戻す。
-   合計 = 56 + 88*4(352) + 176 + 80 + 76 = 740px。商品列は残り約170px（min 240px 未満。ellipsis で吸収）。 */
+   合計 = 56 + 80*4(320) + 176 + 76 + 112 = 740px。商品列は残り約170px（min 240px 未満。ellipsis で吸収）。 */
 @media (max-width: 1099px) {
   .col-date { width: 56px; }
-  .col-amt  { width: 88px; }
+  .col-amt  { width: 80px; }
   .col-ship { width: 176px; }
 
   .title-row {
@@ -534,8 +651,9 @@ tr:hover .memo-btn { opacity: 1; }
 
 .cost-cell {
   display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
 }
 
 .cost-btn {

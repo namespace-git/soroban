@@ -10,8 +10,8 @@ import { thisMonthLocal } from '../shared/date'
 import type {
   AllocMethod, DashboardStats, InventoryItem, InventoryPatch, InventoryStatus, LinkSource,
   Material, MonthlySummary, PurchaseDetail, PurchaseDraftInput, PurchaseInput, PurchaseLine,
-  PurchaseLineInput, PurchaseStatus, PurchaseSummary, SaleInput, SaleKind, SalePatch,
-  SaleProfit, ShippingMethod, ShopAccount, ShopAccountKind, VariantSummary,
+  PurchaseLineInput, PurchaseStatus, PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch,
+  SaleProfit, SaleTotals, ShippingMethod, ShopAccount, ShopAccountKind, Tag, VariantSummary,
   CollectorRun, RunStatus,
 } from '../shared/types'
 
@@ -158,6 +158,8 @@ function rebuildInventoryItemForSplit(): void {
     // DROP TABLE の前に一旦外しておく（残したままだと "no such table" になる）
     // Phase 1 のビューも inventory_item を参照している。DROP TABLE の前に外す
     // （ビューは migrate() の後に viewsSql が作り直す）
+    // inventory_tag も inventory_item を参照する外部キーを持つため、存在するなら
+    // 先に落としておく（version<3 の段階で作り直される想定。通常は存在しない）
     db.exec(`
       DROP VIEW IF EXISTS sale_profit;
       DROP VIEW IF EXISTS monthly_summary;
@@ -165,6 +167,7 @@ function rebuildInventoryItemForSplit(): void {
       DROP VIEW IF EXISTS variant_summary;
       DROP TRIGGER IF EXISTS trg_sline_sold;
       DROP TRIGGER IF EXISTS trg_sline_unsold;
+      DROP TABLE IF EXISTS inventory_tag;
     `)
 
     db.exec(`
@@ -272,6 +275,34 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '2')
          ON CONFLICT(key) DO UPDATE SET value = '2'`,
+    ).run()
+  }
+
+  if (version < 3) {
+    // タグ（2-I）。tag は新規テーブルなので ALTER 不要。CASCADE で
+    // 販売・在庫からの付け外しが tag 削除に追従する（T-04）
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tag (
+        id         TEXT PRIMARY KEY,
+        name       TEXT NOT NULL UNIQUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS sale_tag (
+        sale_id TEXT NOT NULL REFERENCES sale(id) ON DELETE CASCADE,
+        tag_id  TEXT NOT NULL REFERENCES tag(id)  ON DELETE CASCADE,
+        PRIMARY KEY (sale_id, tag_id)
+      );
+      CREATE TABLE IF NOT EXISTS inventory_tag (
+        inventory_item_id TEXT NOT NULL REFERENCES inventory_item(id) ON DELETE CASCADE,
+        tag_id            TEXT NOT NULL REFERENCES tag(id)            ON DELETE CASCADE,
+        PRIMARY KEY (inventory_item_id, tag_id)
+      );
+    `)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '3')
+         ON CONFLICT(key) DO UPDATE SET value = '3'`,
     ).run()
   }
 
@@ -692,28 +723,88 @@ export function deleteSale(id: string): void {
   db.prepare('DELETE FROM sale WHERE id = ?').run(id)
 }
 
-type SaleProfitRow = Omit<SaleProfit, 'model_codes'> & { model_codes: string }
+type SaleProfitRow = Omit<SaleProfit, 'model_codes' | 'tags'> & { model_codes: string }
 
-export function listSales(filter?: {
-  month?: string
-  kind?: SaleKind
-  onlyPending?: boolean
-}): SaleProfit[] {
-  const where: string[] = []
+/**
+ * タグを持つテーブル（sale_tag / inventory_tag）から、対象idごとのタグ配列を
+ * まとめて1クエリで引く（N+1にしない）。
+ */
+function loadTagsFor(
+  table: 'sale_tag' | 'inventory_tag',
+  column: 'sale_id' | 'inventory_item_id',
+  ids: string[],
+): Map<string, Tag[]> {
+  const map = new Map<string, Tag[]>()
+  if (ids.length === 0) return map
+
+  const ph = ids.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT x.${column} AS owner_id, t.id, t.name, t.sort_order
+    FROM ${table} x
+    JOIN tag t ON t.id = x.tag_id
+    WHERE x.${column} IN (${ph})
+    ORDER BY t.sort_order, t.name
+  `).all(...ids) as Array<{ owner_id: string; id: string; name: string; sort_order: number }>
+
+  for (const r of rows) {
+    const arr = map.get(r.owner_id) ?? []
+    arr.push({ id: r.id, name: r.name, sort_order: r.sort_order })
+    map.set(r.owner_id, arr)
+  }
+  return map
+}
+
+/** listSales / saleTotals 共通の絞り込み。sale_profit ビューに対する WHERE を組み立てる */
+function buildSaleFilterWhere(filter?: SaleFilter): { where: string; vals: unknown[] } {
+  const clauses: string[] = []
   const vals: unknown[] = []
 
-  if (filter?.month) { where.push(`substr(sold_at,1,7) = ?`); vals.push(filter.month) }
-  if (filter?.kind) { where.push(`kind = ?`); vals.push(filter.kind) }
+  if (filter?.month) { clauses.push(`substr(sold_at,1,7) = ?`); vals.push(filter.month) }
+  if (filter?.kind) { clauses.push(`kind = ?`); vals.push(filter.kind) }
   // 未処理＝送料未入力、または（転売なのに）在庫が未紐付け
   if (filter?.onlyPending) {
-    where.push(`(is_shipping_confirmed = 0 OR (unmatched = 1 AND kind = 'resale'))`)
+    clauses.push(`(is_shipping_confirmed = 0 OR (unmatched = 1 AND kind = 'resale'))`)
+  }
+  if (filter?.tagId) {
+    clauses.push(
+      `EXISTS (SELECT 1 FROM sale_tag WHERE sale_tag.sale_id = sale_profit.id AND sale_tag.tag_id = ?)`,
+    )
+    vals.push(filter.tagId)
   }
 
-  const sql = `SELECT * FROM sale_profit
-    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-    ORDER BY sold_at DESC, title`
+  return { where: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', vals }
+}
+
+export function listSales(filter?: SaleFilter): SaleProfit[] {
+  const { where, vals } = buildSaleFilterWhere(filter)
+
+  const sql = `SELECT * FROM sale_profit ${where} ORDER BY sold_at DESC, title`
   const rows = db.prepare(sql).all(...vals) as SaleProfitRow[]
-  return rows.map(r => ({ ...r, model_codes: JSON.parse(r.model_codes || '[]') as string[] }))
+
+  const tagMap = loadTagsFor('sale_tag', 'sale_id', rows.map(r => r.id))
+  return rows.map(r => ({
+    ...r,
+    model_codes: JSON.parse(r.model_codes || '[]') as string[],
+    tags: tagMap.get(r.id) ?? [],
+  }))
+}
+
+/** 絞り込んだ販売の合計。DB側で集計する（0件なら全部0） */
+export function saleTotals(filter?: SaleFilter): SaleTotals {
+  const { where, vals } = buildSaleFilterWhere(filter)
+
+  return db.prepare(`
+    SELECT
+      COUNT(*)                          AS count,
+      COALESCE(SUM(price), 0)           AS revenue,
+      COALESCE(SUM(fee), 0)             AS total_fee,
+      COALESCE(SUM(shipping_fee), 0)    AS total_shipping,
+      COALESCE(SUM(packaging_cost), 0)  AS total_packaging,
+      COALESCE(SUM(cost), 0)            AS total_cost,
+      COALESCE(SUM(gross_profit), 0)    AS gross_profit
+    FROM sale_profit
+    ${where}
+  `).get(...vals) as SaleTotals
 }
 
 // ============================================================
@@ -848,6 +939,12 @@ function normalizeName(s: string): string {
  * SQL側では正規化できないため、in_stock を全件取ってJS側で並べ替える
  * （規模は月20〜50件程度の想定）。
  */
+/** in_stock（等）を inventory_view から引いた結果に、まとめて引いたタグを付ける */
+function attachInventoryTags(items: InventoryItem[]): InventoryItem[] {
+  const tagMap = loadTagsFor('inventory_tag', 'inventory_item_id', items.map(i => i.id))
+  return items.map(i => ({ ...i, tags: tagMap.get(i.id) ?? [] }))
+}
+
 export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
   const sale = db.prepare('SELECT title, model_codes FROM sale WHERE id = ?').get(saleId) as
     | { title: string; model_codes: string } | undefined
@@ -874,11 +971,13 @@ export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
     return 5
   }
 
-  return items
+  const picked = items
     .map(item => ({ item, r: rank(item) }))
     .sort((a, b) => (a.r !== b.r ? a.r - b.r : b.item.aging_days - a.item.aging_days))
     .slice(0, limit)
     .map(({ item }) => item)
+
+  return attachInventoryTags(picked)
 }
 
 // ============================================================
@@ -886,9 +985,10 @@ export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
 // ============================================================
 
 export function listInventory(status: InventoryStatus = 'in_stock'): InventoryItem[] {
-  return db.prepare(
+  const items = db.prepare(
     `SELECT * FROM inventory_view WHERE status = ? ORDER BY aging_days DESC`,
   ).all(status) as InventoryItem[]
+  return attachInventoryTags(items)
 }
 
 /** name/model_code/series_code/material/note のみ変更可能。landed_cost は触らない */
@@ -997,6 +1097,71 @@ export function listVariantSummary(
   return db.prepare(
     `SELECT * FROM variant_summary ORDER BY ${col} DESC`,
   ).all() as VariantSummary[]
+}
+
+// ============================================================
+// タグ
+//
+// 販売・在庫に複数付けられる。名前は一意。消すと CASCADE で
+// 付いていた販売・在庫からも外れる（T-04）
+// ============================================================
+
+export function listTags(): Tag[] {
+  return db.prepare('SELECT id, name, sort_order FROM tag ORDER BY sort_order, name').all() as Tag[]
+}
+
+export function createTag(name: string): string {
+  const trimmed = name.trim()
+  if (!trimmed) throw new Error('タグ名を入力してください')
+
+  const exists = db.prepare('SELECT id FROM tag WHERE name = ?').get(trimmed) as
+    | { id: string } | undefined
+  if (exists) throw new Error('同じ名前のタグがあります')
+
+  const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM tag').get() as
+    { m: number }
+  const id = randomUUID()
+  db.prepare('INSERT INTO tag (id, name, sort_order) VALUES (?, ?, ?)')
+    .run(id, trimmed, maxOrder.m + 1)
+  return id
+}
+
+export function renameTag(id: string, name: string): void {
+  const trimmed = name.trim()
+  if (!trimmed) throw new Error('タグ名を入力してください')
+
+  const exists = db.prepare('SELECT id FROM tag WHERE name = ? AND id != ?').get(trimmed, id) as
+    | { id: string } | undefined
+  if (exists) throw new Error('同じ名前のタグがあります')
+
+  const result = db.prepare('UPDATE tag SET name = ? WHERE id = ?').run(trimmed, id)
+  if (result.changes === 0) throw new Error('タグが見つかりません')
+}
+
+/** タグを消すと、付いていた販売・在庫からも CASCADE で外れる */
+export function deleteTag(id: string): void {
+  db.prepare('DELETE FROM tag WHERE id = ?').run(id)
+}
+
+/** 販売のタグを丸ごと置き換える（空配列で全部外す） */
+export function setSaleTags(saleId: string, tagIds: string[]): void {
+  const unique = [...new Set(tagIds)]
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM sale_tag WHERE sale_id = ?').run(saleId)
+    const ins = db.prepare('INSERT INTO sale_tag (sale_id, tag_id) VALUES (?, ?)')
+    for (const tagId of unique) ins.run(saleId, tagId)
+  })
+  tx()
+}
+
+export function setInventoryTags(itemId: string, tagIds: string[]): void {
+  const unique = [...new Set(tagIds)]
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM inventory_tag WHERE inventory_item_id = ?').run(itemId)
+    const ins = db.prepare('INSERT INTO inventory_tag (inventory_item_id, tag_id) VALUES (?, ?)')
+    for (const tagId of unique) ins.run(itemId, tagId)
+  })
+  tx()
 }
 
 export function getDashboard(): DashboardStats {
@@ -1211,6 +1376,7 @@ export function exportRows(): string {
       sp.sold_at         AS 販売日,
       sp.title           AS 商品名,
       CASE sp.kind WHEN 'resale' THEN '転売' ELSE '私物' END AS 区分,
+      CASE sp.source WHEN 'collector' THEN '自動取得' ELSE '手入力' END AS 取得元,
       sp.price           AS 販売価格,
       sp.fee             AS 販売手数料,
       sp.shipping_fee    AS 送料,
@@ -1220,6 +1386,9 @@ export function exportRows(): string {
       sp.gross_profit    AS 粗利,
       sp.item_count      AS 紐付け点数,
       sp.model_codes     AS 型番,
+      (SELECT GROUP_CONCAT(t.name, '|')
+         FROM sale_tag st JOIN tag t ON t.id = st.tag_id
+        WHERE st.sale_id = sp.id)  AS タグ,
       sp.mercari_item_id AS 取引ID
     FROM sale_profit sp
     ORDER BY sp.sold_at
@@ -1254,13 +1423,14 @@ export function exportRows(): string {
 
 /** その販売に紐付いている在庫（解除・付け替え用） */
 export function listSaleLines(saleId: string): InventoryItem[] {
-  return db.prepare(`
+  const items = db.prepare(`
     SELECT iv.*
     FROM inventory_view iv
     JOIN sale_line sl ON sl.inventory_item_id = iv.id
     WHERE sl.sale_id = ?
     ORDER BY iv.name
   `).all(saleId) as InventoryItem[]
+  return attachInventoryTags(items)
 }
 
 // ============================================================
@@ -1274,6 +1444,8 @@ export function listSaleLines(saleId: string): InventoryItem[] {
 export function resetData(): void {
   const tx = db.transaction(() => {
     db.exec(`
+      DELETE FROM sale_tag;
+      DELETE FROM inventory_tag;
       DELETE FROM sale_line;
       DELETE FROM sale;
       DELETE FROM inventory_item;

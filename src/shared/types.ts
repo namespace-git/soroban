@@ -6,6 +6,8 @@
 // ============================================================
 
 export type SaleKind = 'resale' | 'personal'
+/** 販売の出どころ。collector = 自動取得、manual = 手入力 */
+export type SaleSource = 'collector' | 'manual'
 /** split = ばらして売るために分割した親。子が在庫として残る */
 export type InventoryStatus = 'in_stock' | 'sold' | 'disposed' | 'personal_use' | 'split'
 export type AllocMethod = 'by_amount' | 'by_quantity'
@@ -46,6 +48,13 @@ export interface ShopAccount {
   is_active: number
 }
 
+/** タグ。販売・在庫に複数付けられる。名前は UNIQUE */
+export interface Tag {
+  id: string
+  name: string
+  sort_order: number
+}
+
 export interface ShippingMethod {
   id: string
   name: string
@@ -84,6 +93,10 @@ export interface SaleProfit {
   unmatched: number
   /** 1 なら紐付けのどれかが型番の自動確定 */
   auto_linked: number
+  /** collector = メルカリから自動取得 / manual = 手入力 */
+  source: SaleSource
+  /** 付いているタグ（名前）。画面表示用。付け外しは setSaleTags */
+  tags: Tag[]
 }
 
 export interface SaleInput {
@@ -211,6 +224,7 @@ export interface InventoryItem {
   /** 分割で生まれた子なら親の id */
   parent_id: string | null
   note: string | null
+  tags: Tag[]
 }
 
 export interface InventoryPatch {
@@ -241,6 +255,26 @@ export interface VariantSummary {
 // ------------------------------------------------------------
 // 集計
 // ------------------------------------------------------------
+
+/** 販売の絞り込み条件。listSales と saleTotals で共通 */
+export interface SaleFilter {
+  month?: string
+  kind?: SaleKind
+  onlyPending?: boolean
+  /** このタグが付いた販売だけ */
+  tagId?: string
+}
+
+/** 絞り込んだ販売の合計。DB 側で集計する（画面で足さない） */
+export interface SaleTotals {
+  count: number
+  revenue: number
+  total_fee: number
+  total_shipping: number
+  total_packaging: number
+  total_cost: number
+  gross_profit: number
+}
 
 export interface MonthlySummary {
   month: string
@@ -295,11 +329,9 @@ export interface SorobanApi {
   getDashboard(): Promise<DashboardStats>
 
   // 販売
-  listSales(filter?: {
-    month?: string
-    kind?: SaleKind
-    onlyPending?: boolean
-  }): Promise<SaleProfit[]>
+  listSales(filter?: SaleFilter): Promise<SaleProfit[]>
+  /** 絞り込んだ販売の合計（件数・売上・手数料・送料・原価・粗利） */
+  saleTotals(filter?: SaleFilter): Promise<SaleTotals>
   createSale(input: SaleInput): Promise<string>
   updateSale(id: string, patch: SalePatch): Promise<void>
   deleteSale(id: string): Promise<void>
@@ -333,6 +365,16 @@ export interface SorobanApi {
 
   // 集計
   listMonthly(): Promise<MonthlySummary[]>
+
+  // タグ
+  listTags(): Promise<Tag[]>
+  createTag(name: string): Promise<string>
+  renameTag(id: string, name: string): Promise<void>
+  /** タグを消すと、付いていた販売・在庫からも外れる */
+  deleteTag(id: string): Promise<void>
+  /** 販売のタグを丸ごと置き換える（空配列で全部外す） */
+  setSaleTags(saleId: string, tagIds: string[]): Promise<void>
+  setInventoryTags(inventoryItemId: string, tagIds: string[]): Promise<void>
   listVariantSummary(sort?: 'total_profit' | 'avg_profit' | 'sold'): Promise<VariantSummary[]>
 
   // マスタ

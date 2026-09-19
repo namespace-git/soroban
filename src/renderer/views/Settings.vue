@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, inject, watch, type Ref } from 'vue'
-import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind } from '../../shared/types'
+import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
@@ -14,6 +14,7 @@ const methods = ref<ShippingMethod[]>([])
 const settings = ref<Record<string, string>>({})
 const runs = ref<CollectorRun[]>([])
 const accounts = ref<ShopAccount[]>([])
+const tags = ref<Tag[]>([])
 const saved = ref('')
 const loaded = ref(false)
 
@@ -24,16 +25,18 @@ const kindLabel: Record<ShopAccountKind, string> = {
 }
 
 async function load() {
-  const [methodsRes, settingsRes, runsRes, accountsRes] = await Promise.all([
+  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes] = await Promise.all([
     window.soroban.listShippingMethods(),
     window.soroban.getSettings(),
     window.soroban.listRuns(10),
     window.soroban.listShopAccounts(),
+    window.soroban.listTags(),
   ])
   methods.value = methodsRes
   settings.value = settingsRes
   runs.value = runsRes
   accounts.value = accountsRes
+  tags.value = tagsRes
   loaded.value = true
 }
 onMounted(load)
@@ -108,6 +111,37 @@ async function addShopAccount() {
   const isMellojoy = confirm('メロジョイのアカウントですか？（いいえ = TikTok Shop など）')
   await window.soroban.createShopAccount(name, isMellojoy ? 'mellojoy' : 'other')
   accounts.value = await window.soroban.listShopAccounts()
+  changed()
+}
+
+async function addTag() {
+  const name = await ask('タグの名前', { placeholder: '例：セール' })
+  if (!name) return
+  try {
+    await window.soroban.createTag(name)
+    tags.value = await window.soroban.listTags()
+    changed()
+  } catch (e) {
+    alert((e as Error).message)
+  }
+}
+
+async function renameTag(t: Tag) {
+  const name = await ask('タグの名前', { initial: t.name })
+  if (!name) return
+  try {
+    await window.soroban.renameTag(t.id, name)
+    tags.value = await window.soroban.listTags()
+    changed()
+  } catch (e) {
+    alert((e as Error).message)
+  }
+}
+
+async function deleteTag(t: Tag) {
+  if (!confirm(`「${t.name}」を消しますか？ 付いている販売・在庫からも外れます`)) return
+  await window.soroban.deleteTag(t.id)
+  tags.value = await window.soroban.listTags()
   changed()
 }
 
@@ -301,12 +335,40 @@ const runLabel: Record<string, string> = {
           </tbody>
         </table>
         <p v-if="!accounts.length" class="faint hint">「仕入先を追加」から登録してください</p>
-        <p class="add-account">
+        <p class="add-row">
           <button class="ghost sm" @click="addShopAccount"><Icon name="plus" :size="14" /> 仕入先を追加</button>
         </p>
         <p class="faint hint">
           メロジョイはアカウントごとに別のブラウザプロファイルでログインします。ログイン状態は保存され、次回から入力は不要です。
           パスワードはアプリに保存しません。注文履歴の取り込みは準備中です。
+        </p>
+      </div>
+
+      <!-- タグ -->
+      <div class="panel">
+        <p class="panel-title">タグ</p>
+        <table class="compact">
+          <thead>
+            <tr><th>名前</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="t in tags" :key="t.id">
+              <td><StatusChip tone="info" :label="t.name" /></td>
+              <td class="actions">
+                <button class="sm ghost" @click="renameTag(t)">改名</button>
+                <button class="icon ghost" @click="deleteTag(t)" aria-label="削除">
+                  <Icon name="trash" :size="16" />
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="!tags.length" class="faint">タグはまだありません</p>
+        <p class="add-row">
+          <button class="ghost sm" @click="addTag"><Icon name="plus" :size="14" /> タグを追加</button>
+        </p>
+        <p class="faint hint">
+          販売と在庫に付けて、売上タブで絞り込めます。
         </p>
       </div>
 
@@ -373,8 +435,8 @@ const runLabel: Record<string, string> = {
   border-top: 1px solid var(--line-soft);
 }
 
-.add-account { margin: 12px 0 0; }
-.add-account button { display: inline-flex; align-items: center; gap: 6px; }
+.add-row { margin: 12px 0 0; }
+.add-row button { display: inline-flex; align-items: center; gap: 6px; }
 
 .money-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; width: auto; }
 .money-cell .yen { color: var(--text-dim); font-size: var(--fs-12); }

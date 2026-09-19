@@ -784,6 +784,10 @@ describe('db（:memory:）', () => {
     db.saveShippingMethod({ name: 'テスト発送方法', fee: 300 })
     db.setSetting('fee_rate_bp', '1234')
 
+    const tagId = db.createTag('リセットテスト用')
+    db.setSaleTags(saleId, [tagId])
+    db.setInventoryTags(item.id, [tagId])
+
     // リセット前提の確認
     expect(db.listPurchases()).toHaveLength(1)
     expect(db.listSales()).toHaveLength(1)
@@ -801,15 +805,23 @@ describe('db（:memory:）', () => {
       SELECT
         (SELECT COUNT(*) FROM purchase_line) AS purchase_line,
         (SELECT COUNT(*) FROM sale_line)     AS sale_line,
-        (SELECT COUNT(*) FROM expense)       AS expense
-    `).get() as { purchase_line: number; sale_line: number; expense: number }
-    expect(counts).toEqual({ purchase_line: 0, sale_line: 0, expense: 0 })
+        (SELECT COUNT(*) FROM expense)       AS expense,
+        (SELECT COUNT(*) FROM sale_tag)      AS sale_tag,
+        (SELECT COUNT(*) FROM inventory_tag) AS inventory_tag
+    `).get() as {
+      purchase_line: number; sale_line: number; expense: number
+      sale_tag: number; inventory_tag: number
+    }
+    expect(counts).toEqual({
+      purchase_line: 0, sale_line: 0, expense: 0, sale_tag: 0, inventory_tag: 0,
+    })
 
-    // マスタは残る
+    // マスタは残る（tagも消えない。付け外しの記録だけ消える）
     expect(db.listShopAccounts()).toHaveLength(1)
     expect(db.listShopAccounts()[0].id).toBe(shopId)
     expect(db.listShippingMethods().some(m => m.name === 'テスト発送方法')).toBe(true)
     expect(db.getSettings().fee_rate_bp).toBe('1234')
+    expect(db.listTags().some(t => t.id === tagId)).toBe(true)
 
     // getDashboard が例外なく返り、全部0
     const dash = db.getDashboard()
@@ -821,6 +833,132 @@ describe('db（:memory:）', () => {
     expect(dash.agingCount).toBe(0)
     expect(dash.thisMonth).toBeNull()
     expect(dash.lastRun).toBeNull()
+  })
+
+  it('タグ：作成・重複例外・改名・削除で販売から外れる', () => {
+    const tagId = db.createTag('  セール品  ')
+    expect(db.listTags()).toHaveLength(1)
+    expect(db.listTags()[0].name).toBe('セール品') // 前後の空白は除去
+
+    expect(() => db.createTag('セール品')).toThrow('同じ名前のタグがあります')
+    expect(() => db.createTag('   ')).toThrow()
+
+    db.renameTag(tagId, 'まとめ売り')
+    expect(db.listTags()[0].name).toBe('まとめ売り')
+
+    const otherId = db.createTag('another')
+    expect(() => db.renameTag(otherId, 'まとめ売り')).toThrow('同じ名前のタグがあります')
+
+    const saleId = db.createSale({ title: 'タグ付き商品', sold_at: '2026-01-01', price: 1000 })
+    db.setSaleTags(saleId, [tagId])
+    expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.name)).toEqual(['まとめ売り'])
+
+    db.deleteTag(tagId)
+    expect(db.listTags().map(t => t.id)).toEqual([otherId])
+    // CASCADEで販売からも外れる
+    expect(db.listSales().find(s => s.id === saleId)!.tags).toEqual([])
+  })
+
+  it('setSaleTags / setInventoryTags：タグの置き換え（丸ごと入れ替え）', () => {
+    const tagA = db.createTag('A')
+    const tagB = db.createTag('B')
+
+    const saleId = db.createSale({ title: '商品', sold_at: '2026-01-01', price: 1000 })
+    db.setSaleTags(saleId, [tagA, tagB])
+    expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id).sort())
+      .toEqual([tagA, tagB].sort())
+
+    // 置き換え：Bだけになる
+    db.setSaleTags(saleId, [tagB])
+    expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagB])
+
+    // 空配列で全部外す
+    db.setSaleTags(saleId, [])
+    expect(db.listSales().find(s => s.id === saleId)!.tags).toEqual([])
+
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-01',
+      shipping_fee: 0,
+      lines: [{ name: 'タグ付き在庫', unit_price: 1000, quantity: 1 }],
+    })
+    const item = db.listInventory('in_stock')[0]
+    db.setInventoryTags(item.id, [tagA])
+    expect(db.listInventory('in_stock')[0].tags.map(t => t.id)).toEqual([tagA])
+    db.setInventoryTags(item.id, [tagB])
+    expect(db.listInventory('in_stock')[0].tags.map(t => t.id)).toEqual([tagB])
+  })
+
+  it('listSales({tagId})：タグで絞り込める', () => {
+    const tagId = db.createTag('絞り込み用')
+    const s1 = db.createSale({ title: 'A', sold_at: '2026-01-01', price: 1000 })
+    const s2 = db.createSale({ title: 'B', sold_at: '2026-01-02', price: 1000 })
+    db.setSaleTags(s1, [tagId])
+
+    const filtered = db.listSales({ tagId })
+    expect(filtered.map(s => s.id)).toEqual([s1])
+
+    const all = db.listSales()
+    expect(all.map(s => s.id).sort()).toEqual([s1, s2].sort())
+  })
+
+  it('saleTotals：タグ絞り込みの合計が手計算と一致する。0件なら全部0', () => {
+    const tagId = db.createTag('集計用')
+    const s1 = db.createSale({ title: 'A', sold_at: '2026-01-01', price: 2000 }) // fee 200
+    const s2 = db.createSale({ title: 'B', sold_at: '2026-01-02', price: 3000 }) // fee 300
+    db.createSale({ title: 'C（タグなし）', sold_at: '2026-01-03', price: 5000 })
+    db.setSaleTags(s1, [tagId])
+    db.setSaleTags(s2, [tagId])
+
+    const totals = db.saleTotals({ tagId })
+    expect(totals).toEqual({
+      count: 2,
+      revenue: 2000 + 3000,
+      total_fee: 200 + 300,
+      total_shipping: 0,
+      total_packaging: 0,
+      total_cost: 0,
+      gross_profit: (2000 - 200) + (3000 - 300),
+    })
+
+    const empty = db.saleTotals({ tagId: 'no-such-tag' })
+    expect(empty).toEqual({
+      count: 0, revenue: 0, total_fee: 0, total_shipping: 0,
+      total_packaging: 0, total_cost: 0, gross_profit: 0,
+    })
+  })
+
+  it('source：自動取得(collector)と手入力(manual)がsale_profitに出る', () => {
+    db.insertCollected([{ mercariItemId: 'src1', title: '自動取得の商品', price: 1000, soldAt: '2026-01-01' }])
+    const manualId = db.createSale({ title: '手入力の商品', sold_at: '2026-01-01', price: 1000 })
+
+    expect(db.listSales().find(s => s.mercari_item_id === 'src1')!.source).toBe('collector')
+    expect(db.listSales().find(s => s.id === manualId)!.source).toBe('manual')
+  })
+
+  it('migrate：version2のDB→3でタグ機能が使えるようになる', () => {
+    // version2状態（tag系テーブルが無いだけ）をファイルDB上で作り、initDbで3へ上げる
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-tag-migrate-'))
+    const path = join(dir, 'v2.db')
+    try {
+      db.closeDb()
+      db.initDb(path) // 一旦フルスキーマ（version3）で作ってから、v2相当まで剥がす
+      db.getDb().prepare(`UPDATE setting SET value = '2' WHERE key = 'schema_version'`).run()
+      db.getDb().exec('DROP TABLE inventory_tag; DROP TABLE sale_tag; DROP TABLE tag;')
+      const saleId = db.createSale({ title: '既存の販売', sold_at: '2026-01-01', price: 1000 })
+      db.closeDb()
+
+      expect(() => db.initDb(path)).not.toThrow()
+
+      expect(db.getSettings().schema_version).toBe('3')
+      const tagId = db.createTag('移行後タグ')
+      db.setSaleTags(saleId, [tagId])
+      expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
+
+    } finally {
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('variant_summary：purchased/sold/avg_price/avg_profit/total_profitが手計算と一致する', () => {
@@ -930,10 +1068,16 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('2')
+      expect(db.getSettings().schema_version).toBe('3')
 
-      db.closeDb()
+      // タグ機能（version3）もこの経路で使えるようになっている
+      const tagId = db.createTag('移行後タグ')
+      db.setSaleTags('s1', [tagId])
+      expect(db.listSales().find(s => s.id === 's1')!.tags.map(t => t.id)).toEqual([tagId])
     } finally {
+      // アサーション失敗時もハンドルを解放してから片付ける（EBUSYで本当のエラーが
+      // 隠れないように）
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
       rmSync(dir, { recursive: true, force: true })
     }
   })

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { InventoryItem, InventoryStatus } from '../../shared/types'
+import type { InventoryItem, InventoryStatus, Tag } from '../../shared/types'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+import TagPicker from '../components/TagPicker.vue'
 
 const MODEL_CODE_RE = /^[A-Z]\d{3}(-\d+)?$/
 
@@ -28,6 +29,48 @@ onMounted(load)
 watch([revision, status], load)
 
 const total = computed(() => items.value.reduce((s, i) => s + i.landed_cost, 0))
+
+const allTags = ref<Tag[]>([])
+const tagFilter = ref('')
+async function loadTags() {
+  allTags.value = await window.soroban.listTags()
+}
+onMounted(loadTags)
+watch(revision, loadTags)
+
+const filteredItems = computed(() => {
+  if (!tagFilter.value) return items.value
+  return items.value.filter(i => i.tags.some(t => t.id === tagFilter.value))
+})
+
+const tagPickerForId = ref<string | null>(null)
+const tagPickerAnchor = ref<HTMLElement | null>(null)
+const tagPickerItem = computed(() => items.value.find(i => i.id === tagPickerForId.value) ?? null)
+const tagPickerSelected = computed(() => tagPickerItem.value?.tags.map(t => t.id) ?? [])
+
+function openTagPicker(item: InventoryItem, e: MouseEvent) {
+  tagPickerForId.value = item.id
+  tagPickerAnchor.value = e.currentTarget as HTMLElement
+}
+
+function closeTagPicker() {
+  tagPickerForId.value = null
+  tagPickerAnchor.value = null
+}
+
+async function onTagsChange(tagIds: string[]) {
+  if (!tagPickerForId.value) return
+  await window.soroban.setInventoryTags(tagPickerForId.value, tagIds)
+  await load()
+}
+
+async function onTagCreate(name: string) {
+  const id = await window.soroban.createTag(name)
+  await loadTags()
+  if (!tagPickerForId.value) return
+  await window.soroban.setInventoryTags(tagPickerForId.value, [...tagPickerSelected.value, id])
+  await load()
+}
 
 async function dispose(item: InventoryItem, target: 'disposed' | 'personal_use') {
   const label = target === 'personal_use' ? '自家消費' : '廃棄'
@@ -91,6 +134,10 @@ async function editNote(item: InventoryItem) {
         <option value="personal_use">自家消費</option>
         <option value="split">分割済み</option>
       </select>
+      <select v-model="tagFilter">
+        <option value="">すべてのタグ</option>
+        <option v-for="t in allTags" :key="t.id" :value="t.id">{{ t.name }}</option>
+      </select>
       <span class="grow" />
       <span class="faint">{{ items.length }}点 ／ 原価計 {{ yen(total) }}</span>
     </div>
@@ -109,7 +156,7 @@ async function editNote(item: InventoryItem) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="i in items" :key="i.id">
+          <tr v-for="i in filteredItems" :key="i.id">
             <td class="item-cell">
               <div class="item-row">
                 <StatusChip v-if="i.model_code" tone="neutral" :label="i.model_code" @click="i.status === 'in_stock' && editModelCode(i)" :class="{ clickable: i.status === 'in_stock' }" />
@@ -117,7 +164,10 @@ async function editNote(item: InventoryItem) {
                 <span class="item-name" :title="i.name">{{ i.name }}</span>
                 <span v-if="i.parent_id" class="faint" style="font-size: 12px">分割</span>
               </div>
-              <div v-if="i.note" class="faint note" :title="i.note">{{ i.note }}</div>
+              <div v-if="i.tags.length || i.note" class="item-meta">
+                <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
+                <span v-if="i.note" class="faint note" :title="i.note">{{ i.note }}</span>
+              </div>
             </td>
             <td class="faint">{{ i.shop_account_name ?? '—' }}</td>
             <td class="faint">{{ i.acquired_at }}</td>
@@ -131,6 +181,7 @@ async function editNote(item: InventoryItem) {
             <td class="num">{{ yen(i.landed_cost) }}</td>
             <td class="actions">
               <template v-if="i.status === 'in_stock'">
+                <button class="sm ghost" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
                 <button class="sm ghost" @click="split(i)" title="この在庫を複数点に分ける">分割</button>
                 <button class="sm ghost" @click="editNote(i)" title="メモを編集する">メモ</button>
                 <button class="sm ghost" @click="dispose(i, 'disposed')" title="在庫から外して廃棄にする">廃棄</button>
@@ -142,6 +193,16 @@ async function editNote(item: InventoryItem) {
       </table>
       <EmptyState v-else title="該当する在庫がありません" />
     </div>
+
+    <TagPicker
+      :open="!!tagPickerForId"
+      :anchor="tagPickerAnchor"
+      :all-tags="allTags"
+      :selected="tagPickerSelected"
+      @change="onTagsChange"
+      @create="onTagCreate"
+      @close="closeTagPicker"
+    />
   </div>
 </template>
 
@@ -154,7 +215,7 @@ async function editNote(item: InventoryItem) {
 .table-panel th:nth-child(4) { width: 12%; }
 .table-panel th:nth-child(5) { width: 12%; }
 .table-panel th:last-child,
-.table-panel td.actions { width: 260px; white-space: nowrap; }
+.table-panel td.actions { width: 300px; white-space: nowrap; }
 .table-panel .actions { display: flex; justify-content: flex-end; gap: 4px; }
 .table-panel .actions button { white-space: nowrap; }
 .table-panel .clickable { cursor: pointer; }
@@ -167,7 +228,11 @@ async function editNote(item: InventoryItem) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.table-panel .item-meta { display: flex; align-items: center; gap: 4px; min-width: 0; margin-top: 2px; }
+.table-panel .item-meta > * { flex-shrink: 0; }
 .table-panel .note {
+  flex-shrink: 1;
+  min-width: 0;
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;

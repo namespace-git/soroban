@@ -57,6 +57,7 @@ function registerIpc(): void {
   handle('getDashboard', () => db.getDashboard())
 
   handle('listSales', (filter) => db.listSales(filter))
+  handle('saleTotals', (filter) => db.saleTotals(filter))
   handle('createSale', (input) => db.createSale(input))
   handle('updateSale', (id, patch) => db.updateSale(id, patch))
   handle('deleteSale', (id) => db.deleteSale(id))
@@ -80,6 +81,13 @@ function registerIpc(): void {
   handle('disposeInventory', (id, note, status) => db.disposeInventory(id, note, status))
 
   handle('listMonthly', () => db.listMonthly())
+
+  handle('listTags', () => db.listTags())
+  handle('createTag', (name) => db.createTag(name))
+  handle('renameTag', (id, name) => db.renameTag(id, name))
+  handle('deleteTag', (id) => db.deleteTag(id))
+  handle('setSaleTags', (saleId, tagIds) => db.setSaleTags(saleId, tagIds))
+  handle('setInventoryTags', (itemId, tagIds) => db.setInventoryTags(itemId, tagIds))
   handle('listVariantSummary', (sort) => db.listVariantSummary(sort))
 
   handle('listShopAccounts', () => db.listShopAccounts())

@@ -11,11 +11,11 @@
 
 import type {
   SorobanApi, ShopAccount, ShopAccountKind, ShippingMethod, ShippingSource,
-  SaleProfit, SaleInput, SalePatch, SaleKind,
+  SaleProfit, SaleInput, SalePatch, SaleKind, SaleFilter, SaleTotals,
   PurchaseDetail, PurchaseInput, PurchaseLine,
   InventoryItem, InventoryStatus, InventoryPatch,
   MonthlySummary, DashboardStats, CollectorRun,
-  Material, VariantSummary,
+  Material, VariantSummary, Tag,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 
@@ -137,6 +137,13 @@ const shopAccounts: ShopAccount[] = [
   { id: uid(), name: 'TikTok Shop', kind: 'tiktok', note: null, is_active: 1 },
 ]
 
+/** タグ。deleteTag で配列ごと差し替えるので let */
+let tags: Tag[] = [
+  { id: uid(), name: 'セール', sort_order: 1 },
+  { id: uid(), name: 'まとめ売り', sort_order: 2 },
+  { id: uid(), name: '福袋', sort_order: 3 },
+]
+
 const shippingMethods: ShippingMethod[] = [
   { id: uid(), name: 'ネコポス', carrier: 'らくらくメルカリ便', fee: 210, sort_order: 1, is_active: 1 },
   { id: uid(), name: 'ゆうパケット', carrier: 'ゆうゆうメルカリ便', fee: 230, sort_order: 2, is_active: 1 },
@@ -256,6 +263,7 @@ function addConfirmedPurchase(opts: {
         material: v.material,
         parent_id: null,
         note: null,
+        tags: [],
       })
       itemPurchaseId.set(itemId, purchaseId)
     }
@@ -330,6 +338,7 @@ function addTiktokPurchase(opts: {
         material: null,
         parent_id: null,
         note: null,
+        tags: [],
       })
       itemPurchaseId.set(itemId, purchaseId)
     }
@@ -524,6 +533,9 @@ function buildSaleFixed(opts: {
     item_count: itemCount,
     unmatched: itemCount === 0 ? 1 : 0,
     auto_linked: opts.autoLinked ? 1 : 0,
+    // 取り込み風・手入力風を半々にする（実際の収集は行わない）
+    source: opts.i % 2 === 0 ? 'collector' : 'manual',
+    tags: [],
   }
 
   if (itemCount > 0) {
@@ -729,6 +741,18 @@ function findSale(id: string): SaleProfit {
   return s
 }
 
+/** listSales と saleTotals で共通の絞り込み */
+function filterSales(filter?: SaleFilter): SaleProfit[] {
+  let rows = sales.slice()
+  if (filter?.month) rows = rows.filter(s => s.sold_at.slice(0, 7) === filter.month)
+  if (filter?.kind) rows = rows.filter(s => s.kind === filter.kind)
+  if (filter?.onlyPending) {
+    rows = rows.filter(s => !s.is_shipping_confirmed || (s.kind === 'resale' && s.unmatched === 1))
+  }
+  if (filter?.tagId) rows = rows.filter(s => s.tags.some(t => t.id === filter.tagId))
+  return rows
+}
+
 function findPurchase(id: string): PurchaseDetail {
   const p = purchases.find(x => x.id === id)
   if (!p) throw new Error('仕入が見つかりません')
@@ -752,14 +776,24 @@ const api: SorobanApi = {
   },
 
   async listSales(filter) {
-    let rows = sales.slice()
-    if (filter?.month) rows = rows.filter(s => s.sold_at.slice(0, 7) === filter.month)
-    if (filter?.kind) rows = rows.filter(s => s.kind === filter.kind)
-    if (filter?.onlyPending) {
-      rows = rows.filter(s => !s.is_shipping_confirmed || (s.kind === 'resale' && s.unmatched === 1))
-    }
+    const rows = filterSales(filter)
     rows.sort((a, b) => (a.sold_at < b.sold_at ? 1 : a.sold_at > b.sold_at ? -1 : 0))
     return wait(rows)
+  },
+
+  async saleTotals(filter): Promise<SaleTotals> {
+    const rows = filterSales(filter)
+    const totals = rows.reduce((acc, s) => {
+      acc.count += 1
+      acc.revenue += s.price
+      acc.total_fee += s.fee
+      acc.total_shipping += s.shipping_fee
+      acc.total_packaging += s.packaging_cost
+      acc.total_cost += s.cost
+      acc.gross_profit += s.gross_profit
+      return acc
+    }, { count: 0, revenue: 0, total_fee: 0, total_shipping: 0, total_packaging: 0, total_cost: 0, gross_profit: 0 })
+    return wait(totals)
   },
 
   async createSale(input: SaleInput) {
@@ -789,6 +823,8 @@ const api: SorobanApi = {
       item_count: 0,
       unmatched: 1,
       auto_linked: 0,
+      source: 'manual',
+      tags: [],
     }
     sales.unshift(sale)
 
@@ -973,6 +1009,7 @@ const api: SorobanApi = {
           model_code, series_code, material,
           parent_id: null,
           note: null,
+          tags: [],
         })
         itemPurchaseId.set(itemId, purchaseId)
       }
@@ -1051,6 +1088,7 @@ const api: SorobanApi = {
           model_code, series_code, material,
           parent_id: null,
           note: null,
+          tags: [],
         })
         itemPurchaseId.set(itemId, p.id)
       }
@@ -1131,6 +1169,7 @@ const api: SorobanApi = {
         material: item.material,
         parent_id: item.id,
         note: null,
+        tags: [],
       })
       childIds.push(childId)
       if (purchaseId) itemPurchaseId.set(childId, purchaseId)
@@ -1151,6 +1190,48 @@ const api: SorobanApi = {
     const rows = [...monthlyFromSales(sales), ...extraOlderMonths()]
     rows.sort((a, b) => (a.month !== b.month ? (a.month < b.month ? 1 : -1) : a.kind.localeCompare(b.kind)))
     return wait(rows)
+  },
+
+  async listTags() {
+    return wait(tags.slice().sort((a, b) => a.sort_order - b.sort_order))
+  },
+
+  async createTag(name: string) {
+    if (tags.some(t => t.name === name)) throw new Error('同じ名前のタグがあります')
+    const id = uid()
+    tags.push({ id, name, sort_order: tags.length + 1 })
+    return wait(id)
+  },
+
+  async renameTag(id: string, name: string) {
+    const t = tags.find(x => x.id === id)
+    if (!t) throw new Error('タグが見つかりません')
+    if (tags.some(x => x.id !== id && x.name === name)) throw new Error('同じ名前のタグがあります')
+    t.name = name
+    // 付いている先の表示名（コピー）も揃える
+    for (const s of sales) { const ref = s.tags.find(x => x.id === id); if (ref) ref.name = name }
+    for (const it of inventory) { const ref = it.tags.find(x => x.id === id); if (ref) ref.name = name }
+    return wait(undefined)
+  },
+
+  async deleteTag(id: string) {
+    tags = tags.filter(t => t.id !== id)
+    for (const s of sales) s.tags = s.tags.filter(t => t.id !== id)
+    for (const it of inventory) it.tags = it.tags.filter(t => t.id !== id)
+    return wait(undefined)
+  },
+
+  async setSaleTags(saleId: string, tagIds: string[]) {
+    const sale = findSale(saleId)
+    sale.tags = tagIds.map(id => tags.find(t => t.id === id)).filter((t): t is Tag => !!t)
+    return wait(undefined)
+  },
+
+  async setInventoryTags(inventoryItemId: string, tagIds: string[]) {
+    const item = inventory.find(i => i.id === inventoryItemId)
+    if (!item) throw new Error('在庫が見つかりません')
+    item.tags = tagIds.map(id => tags.find(t => t.id === id)).filter((t): t is Tag => !!t)
+    return wait(undefined)
   },
 
   async listVariantSummary(sort = 'total_profit') {
@@ -1282,7 +1363,8 @@ const api: SorobanApi = {
   },
 
   async resetData() {
-    // 取引データだけ消す。仕入先・発送方法・設定は残す
+    // 取引データだけ消す。仕入先・発送方法・設定・タグ自体は残す。
+    // 販売・在庫を空にすることで、そこに付いていたタグの紐付け（sale_tag/inventory_tag 相当）も一緒に消える
     sales = []
     purchases = []
     inventory = []
@@ -1293,10 +1375,21 @@ const api: SorobanApi = {
   },
 }
 
+/** 販売の1/3、在庫の1/4にタグを付ける（見え方の確認用） */
+function assignInitialTags(): void {
+  sales.forEach((s, i) => {
+    if (i % 3 === 0) s.tags = [tags[i % tags.length]]
+  })
+  inventory.forEach((it, i) => {
+    if (i % 4 === 0) it.tags = [tags[i % tags.length]]
+  })
+}
+
 export function installMock(): void {
   buildInitialPurchasesAndInventory()
   buildInitialSales()
   buildInitialRuns()
+  assignInitialTags()
 
   window.soroban = api
   ;(window as unknown as { sorobanEvents: { onCollectDone(cb: (run: CollectorRun) => void): void } }).sorobanEvents = {
