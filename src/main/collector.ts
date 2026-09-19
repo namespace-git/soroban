@@ -1,5 +1,8 @@
-import { BrowserWindow, session } from 'electron'
+import { BrowserWindow, app, session } from 'electron'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { mkdirSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import * as db from './db'
 import { extractCodes } from './code'
 import type { CollectorRun } from '../shared/types'
@@ -27,6 +30,13 @@ const LOGIN_URL = 'https://jp.mercari.com/login'
 /** 1回の収集で開くページ数の上限（一覧1＋詳細最大5）。超えたら次回に回す */
 const MAX_PAGES_PER_RUN = 6
 
+/**
+ * 1回の収集でサムネイルを保存する上限。新規1件につき画像1枚（ユーザー承認済み）。
+ * 既知の販売では再取得しない＝「一度だけ」の約束。残りは諦めてよく、次回への
+ * 持ち越しはしない（失敗・上限超過を再試行しない）
+ */
+const MAX_THUMBS_PER_RUN = 30
+
 const CHALLENGE_MESSAGE =
   'メルカリが本人確認を求めています。「メルカリにログイン」から画面を開いて、手で進めてください'
 
@@ -41,6 +51,8 @@ export interface ScrapedSale {
   /** 他費用。列は増やさないので raw に残すだけに使う */
   otherCost: number | null
   soldAt: string
+  /** 商品サムネイルのURL。取れなければ null */
+  thumbUrl: string | null
 }
 
 /**
@@ -124,8 +136,11 @@ function parseSoldDateCell(text: string | undefined): string | null {
  * @param titleText リンクの textContent
  * @param cellTexts `<td>` の並び。0=商品タイトル欄, 1=商品価格, 2=販売手数料, 3=送料,
  *   4=他費用, 5=税率, 6=販売利益, 7=寄付, 8=購入完了日（0・5・6・7 は使わない）
+ * @param thumbUrl 行内 `img[src]` から拾ったサムネイルURL。取れなければ null
  */
-export function parseSoldRow(href: string, titleText: string, cellTexts: string[]): SoldRow | null {
+export function parseSoldRow(
+  href: string, titleText: string, cellTexts: string[], thumbUrl: string | null = null,
+): SoldRow | null {
   const idMatch = /m\d{9,}/.exec(href)
   if (!idMatch) return null
 
@@ -144,6 +159,7 @@ export function parseSoldRow(href: string, titleText: string, cellTexts: string[
     shippingFee: parseAmountCell(cellTexts[3]),
     otherCost: parseAmountCell(cellTexts[4]),
     soldAt,
+    thumbUrl,
   }
 }
 
@@ -179,12 +195,16 @@ export function parseSoldHtml(html: string): SoldRow[] {
     const href = hrefMatch ? hrefMatch[1] : ''
     const titleText = stripTags(soldLink[2])
 
+    // サムネイルは <img src="..."> が行内に1つだけある（タイトルのリンクの外、同じ<td>内）
+    const imgMatch = /<img\b[^>]*\bsrc="([^"]*)"/.exec(rowHtml)
+    const thumbUrl = imgMatch ? imgMatch[1] : null
+
     const cellTexts: string[] = []
     const tdRe = /<td[^>]*>([\s\S]*?)<\/td>/g
     let tm: RegExpExecArray | null
     while ((tm = tdRe.exec(rowHtml))) cellTexts.push(stripTags(tm[1]))
 
-    const row = parseSoldRow(href, titleText, cellTexts)
+    const row = parseSoldRow(href, titleText, cellTexts, thumbUrl)
     if (row) rows.push(row)
   }
   return rows
@@ -294,8 +314,14 @@ async function scrape(win: BrowserWindow): Promise<{ sales: ScrapedSale[]; total
         const dm = cellText(8).match(/(\\d{4})\\/(\\d{2})\\/(\\d{2})/);
         const soldAt = dm ? \`\${dm[1]}-\${dm[2]}-\${dm[3]}\` : null;
 
+        const img = tr.querySelector('img[src]');
+        const thumbUrl = img ? img.getAttribute('src') : null;
+
         if (!title || price === null || !soldAt) continue;
-        out.push({ mercariItemId: m[0], title: title.slice(0, 200), price, fee, shippingFee, otherCost, soldAt });
+        out.push({
+          mercariItemId: m[0], title: title.slice(0, 200), price, fee, shippingFee, otherCost, soldAt,
+          thumbUrl,
+        });
       }
 
       const seen = new Set();
@@ -361,12 +387,67 @@ function toRow(s: ScrapedSale): {
   }
 }
 
+/** サムネイル保存先ディレクトリ（無ければ作る） */
+function ensureThumbDir(): string {
+  const dir = join(app.getPath('userData'), 'thumbs')
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/**
+ * 販売履歴に写っているサムネイルを1枚取得して保存する。書き込み操作ではない（画像のGETのみ）。
+ * session.fetch を使うことで、普通のブラウザの画像取得と同じ Cookie/UA に見える。
+ */
+async function downloadThumb(saleId: string, mercariItemId: string, url: string): Promise<void> {
+  const res = await session.fromPartition(PARTITION).fetch(url)
+  if (!res.ok) throw new Error(`サムネイル取得に失敗しました（${res.status}）: ${url}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  const file = `${mercariItemId}.jpg`
+  await writeFile(join(ensureThumbDir(), file), buf)
+  db.setSaleThumb(saleId, file)
+}
+
+/**
+ * サムネイルをまだ持っていない販売（新規に取り込んだ分＋実DBに元からあって今回の
+ * 一覧にも出ている分）に、1枚だけ保存する（対象1件につき画像1枚、ユーザー承認済みの
+ * 追加アクセス）。サムネイルを既に保存済みの販売では再取得しない＝「一度だけ」の約束。
+ * 各画像の間に 300〜800ms 待つ（連打しない）。失敗しても再試行せず、収集全体も失敗にしない。
+ * 上限 `MAX_THUMBS_PER_RUN` を超えた分・失敗した分は諦める。ただし失敗した分は
+ * `thumb_file` が NULL のままなので、その販売が今後も一覧に出ている限りは次回また
+ * 対象になる（一覧から消えれば対象にもならないため、実質は数回の収集で止まる）。
+ */
+async function saveNewThumbs(
+  targets: Array<{ id: string; mercariItemId: string }>,
+  scraped: ScrapedSale[],
+): Promise<number> {
+  const thumbByItemId = new Map(scraped.map(s => [s.mercariItemId, s.thumbUrl]))
+  const seen = new Set<string>()
+
+  const withUrl = targets
+    .filter(t => (seen.has(t.id) ? false : (seen.add(t.id), true))) // id重複を除く
+    .map(t => ({ ...t, thumbUrl: thumbByItemId.get(t.mercariItemId) ?? null }))
+    .filter((t): t is { id: string; mercariItemId: string; thumbUrl: string } => !!t.thumbUrl)
+    .slice(0, MAX_THUMBS_PER_RUN)
+
+  let saved = 0
+  for (const t of withUrl) {
+    try {
+      await downloadThumb(t.id, t.mercariItemId, t.thumbUrl)
+      saved++
+    } catch {
+      // 一度だけの約束を優先。失敗しても再試行しない
+    }
+    await sleep(300 + Math.floor(Math.random() * 500))
+  }
+  return saved
+}
+
 /**
  * 収集を1回実行する。
  * @param silent true なら画面を出さない（起動時の自動実行）
  */
 export async function collect(silent: boolean): Promise<CollectorRun> {
-  const runId = db.startRun()
+  const runId = db.startRun('mercari')
   const win = createWindow(!silent)
   let pagesOpened = 0
 
@@ -400,11 +481,17 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     }
 
     const known = db.existingMercariIds(sales.map(s => s.mercariItemId))
-    const freshRows = sales.filter(s => !known.has(s.mercariItemId)).map(toRow)
+    const freshSales = sales.filter(s => !known.has(s.mercariItemId))
     const knownRows = sales.filter(s => known.has(s.mercariItemId)).map(toRow)
 
-    const inserted = freshRows.length > 0 ? db.insertCollected(freshRows) : 0
+    const insertedRows = freshSales.length > 0 ? db.insertCollected(freshSales.map(toRow)) : []
+    const inserted = insertedRows.length
     const updated = knownRows.length > 0 ? db.updateCollectedActuals(knownRows) : 0
+
+    // サムネイル対象：新規に入れた分 ＋ 今回の一覧に出ていてまだ保存していない既存分。
+    // 実DBに元からあった販売は「新規」ではないので、後者を含めないと永久にサムネが付かない
+    const knownWithoutThumb = db.salesWithoutThumb(knownRows.map(r => r.mercariItemId))
+    const thumbsSaved = await saveNewThumbs([...insertedRows, ...knownWithoutThumb], sales)
 
     // 詳細を開く対象：未紐付けの転売で model_codes が空のものだけ
     // （説明文に型番があれば紐付けを救える）。実額のためには開かない
@@ -438,6 +525,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     }
 
     const parts = [`新規 ${inserted}・更新 ${updated}`]
+    if (thumbsSaved > 0) parts.push(`サムネイル ${thumbsSaved} 枚`)
     if (pending.length > 0) parts.push(`型番の追記 ${codesApplied}（詳細 ${detailsRead} 件）`)
     if (totalCount !== null && totalCount !== sales.length) {
       parts.push(`一覧に ${totalCount} 件、取得 ${sales.length} 件`)
@@ -453,14 +541,6 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
   } finally {
     if (!win.isDestroyed()) win.destroy()
   }
-}
-
-/** 起動時に、前回から十分時間が空いていれば収集する */
-export async function collectIfDue(): Promise<CollectorRun | null> {
-  const settings = db.getSettings()
-  const intervalH = Number(settings.collect_interval_h ?? 1)
-  if (db.hoursSinceLastOk() < intervalH) return null
-  return collect(true)
 }
 
 export function ensureSession(): void {

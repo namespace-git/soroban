@@ -8,11 +8,11 @@ import { allocate, calcFee, splitEvenly } from './money'
 import { extractCode, extractCodes, extractMaterial } from './code'
 import { thisMonthLocal } from '../shared/date'
 import type {
-  AllocMethod, DashboardStats, InventoryItem, InventoryPatch, InventoryStatus, LinkSource,
-  Material, MonthlySummary, PurchaseDetail, PurchaseDraftInput, PurchaseInput, PurchaseLine,
-  PurchaseLineInput, PurchaseStatus, PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch,
-  SaleProfit, SaleTotals, ShippingMethod, ShopAccount, ShopAccountKind, Tag, VariantSummary,
-  CollectorRun, RunStatus,
+  AllocMethod, DashboardStats, Fulfillment, InventoryItem, InventoryPatch, InventoryStatus,
+  LinkSource, Material, MonthlySummary, PurchaseDetail, PurchaseDraftInput, PurchaseInput,
+  PurchaseLine, PurchaseLineInput, PurchaseStatus, PurchaseSummary, SaleFilter, SaleInput,
+  SaleKind, SalePatch, SaleProfit, SaleTotals, ShippingMethod, ShopAccount, ShopAccountKind, Tag,
+  VariantSummary, CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
 
 // ============================================================
@@ -36,6 +36,15 @@ const viewsSql = viewMarkerIndex === -1 ? '' : schemaSql.slice(viewMarkerIndex)
 
 export function getDbPath(): string {
   return join(app.getPath('userData'), 'soroban.db')
+}
+
+/**
+ * 保存したサムネイルのファイル名（例 'm87039845554.jpg'）を、レンダラーが
+ * <img src> にそのまま渡せる soroban-thumb:// URL に直す。DB には file 名だけ持つ
+ * （URL の組み立ては常にここ1か所で行う）。
+ */
+export function toThumbUrl(file: string | null): string | null {
+  return file ? `soroban-thumb://${file}` : null
 }
 
 export function initDb(path?: string): void {
@@ -306,6 +315,39 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 4) {
+    addColumnIfMissing('collector_run', 'source',
+      `TEXT NOT NULL DEFAULT 'mercari' CHECK (source IN ('mercari','mellojoy'))`)
+    addColumnIfMissing('collector_run', 'shop_account_id', 'TEXT REFERENCES shop_account(id)')
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_run_source_started ON collector_run(source, started_at DESC)`)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '4')
+         ON CONFLICT(key) DO UPDATE SET value = '4'`,
+    ).run()
+  }
+
+  if (version < 5) {
+    addColumnIfMissing('purchase', 'fulfillment',
+      `TEXT CHECK (fulfillment IN ('pending','shipped','delivered'))`)
+    addColumnIfMissing('purchase', 'fulfillment_updated_at', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '5')
+         ON CONFLICT(key) DO UPDATE SET value = '5'`,
+    ).run()
+  }
+
+  if (version < 6) {
+    // 販売履歴のサムネイル（ファイル名のみ。URL化は toThumbUrl で行う）
+    addColumnIfMissing('sale', 'thumb_file', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '6')
+         ON CONFLICT(key) DO UPDATE SET value = '6'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -394,6 +436,12 @@ function insertLinesAndItems(
 }
 
 export function createPurchase(input: PurchaseInput): string {
+  if (input.import_key) {
+    const exists = db.prepare('SELECT id FROM purchase WHERE import_key = ?').get(input.import_key) as
+      | { id: string } | undefined
+    if (exists) throw new Error(`同じ注文が既に取り込まれています: ${input.import_key}`)
+  }
+
   const purchaseId = randomUUID()
   const shippingFee = input.shipping_fee ?? 0
   const discount = input.discount ?? 0
@@ -403,16 +451,21 @@ export function createPurchase(input: PurchaseInput): string {
   // 配賦対象額：送料 + その他 − 割引
   const pool = shippingFee + otherCost - discount
 
+  const fulfillment = input.fulfillment ?? null
+
   const tx = db.transaction(() => {
     db.prepare(
       `INSERT INTO purchase
          (id, shop_account_id, ordered_at, order_no,
-          shipping_fee, discount, other_cost, alloc_method, note, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed')`,
+          shipping_fee, discount, other_cost, alloc_method, note, import_key, status,
+          fulfillment, fulfillment_updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?,
+               CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END)`,
     ).run(
       purchaseId, input.shop_account_id, input.ordered_at,
       input.order_no ?? null, shippingFee, discount, otherCost,
-      method, input.note ?? null,
+      method, input.note ?? null, input.import_key ?? null,
+      fulfillment, fulfillment,
     )
 
     insertLinesAndItems(purchaseId, input.lines, pool, method, input.ordered_at)
@@ -423,8 +476,9 @@ export function createPurchase(input: PurchaseInput): string {
 }
 
 /**
- * mellojoy-watch の購入記録から下書きを積む。価格・注文番号はまだ無いので
- * status='draft'、在庫はまだ作らない。同じ import_key が既にあれば飛ばす（''を返す）。
+ * 注文履歴から積む下書き。価格・送料・注文番号は取れていれば入れ、まだなら0のまま
+ * status='draft' で積む。在庫は確定するまで作らない。
+ * 同じ import_key が既にあれば飛ばす（''を返す）。
  */
 export function createPurchaseDraft(input: PurchaseDraftInput): string {
   const exists = db.prepare('SELECT id FROM purchase WHERE import_key = ?').get(input.import_key) as
@@ -432,25 +486,37 @@ export function createPurchaseDraft(input: PurchaseDraftInput): string {
   if (exists) return ''
 
   const purchaseId = randomUUID()
+  const shippingFee = input.shipping_fee ?? 0
+  const discount = input.discount ?? 0
+  const fulfillment = input.fulfillment ?? null
 
   const tx = db.transaction(() => {
     db.prepare(
       `INSERT INTO purchase
-         (id, shop_account_id, ordered_at, status, import_key, note)
-       VALUES (?, ?, ?, 'draft', ?, ?)`,
-    ).run(purchaseId, input.shop_account_id, input.ordered_at, input.import_key, input.note ?? null)
+         (id, shop_account_id, ordered_at, order_no, shipping_fee, discount, status, import_key, note,
+          fulfillment, fulfillment_updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?,
+               CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END)`,
+    ).run(
+      purchaseId, input.shop_account_id, input.ordered_at, input.order_no ?? null,
+      shippingFee, discount, input.import_key, input.note ?? null,
+      fulfillment, fulfillment,
+    )
 
     const insLine = db.prepare(
       `INSERT INTO purchase_line
          (id, purchase_id, name, unit_price, quantity, model_code, series_code, material, sort_order)
-       VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     input.lines.forEach((l, i) => {
       const extracted = extractCode(l.name)
       const model_code = l.model_code !== undefined ? l.model_code : extracted?.model_code ?? null
       const series_code = l.series_code !== undefined ? l.series_code : extracted?.series_code ?? null
       const material = l.material !== undefined ? l.material : extractMaterial(l.name)
-      insLine.run(randomUUID(), purchaseId, l.name, l.quantity, model_code, series_code, material, i)
+      insLine.run(
+        randomUUID(), purchaseId, l.name, l.unit_price ?? 0, l.quantity,
+        model_code, series_code, material, i,
+      )
     })
   })
 
@@ -490,7 +556,11 @@ export function getPurchase(id: string): PurchaseDetail {
     other_cost: p.other_cost,
     alloc_method: p.alloc_method,
     note: p.note,
+    import_key: p.import_key,
+    fulfillment: p.fulfillment,
     line_count: lines.length,
+    first_line_name: lines[0]?.name ?? null,
+    first_model_code: lines[0]?.model_code ?? null,
     subtotal,
     total_cost,
     lines,
@@ -537,15 +607,39 @@ export function updatePurchaseNote(id: string, note: string | null): void {
   db.prepare(`UPDATE purchase SET note = ?, updated_at = datetime('now') WHERE id = ?`).run(note, id)
 }
 
+/**
+ * 仕入元の注文の到着状態を更新する（collector が一覧の表示から更新する）。
+ * import_key で引く。変化が無ければ何もせず false を返す。
+ */
+export function updatePurchaseFulfillment(
+  importKey: string, fulfillment: Fulfillment | null,
+): boolean {
+  const cur = db.prepare('SELECT fulfillment FROM purchase WHERE import_key = ?').get(importKey) as
+    | { fulfillment: Fulfillment | null } | undefined
+  if (!cur) return false
+  if (cur.fulfillment === fulfillment) return false
+
+  db.prepare(
+    `UPDATE purchase
+        SET fulfillment = ?, fulfillment_updated_at = datetime('now'), updated_at = datetime('now')
+      WHERE import_key = ?`,
+  ).run(fulfillment, importKey)
+  return true
+}
+
 export function listPurchases(): PurchaseSummary[] {
   return db.prepare(`
     SELECT
       p.id, p.status, p.ordered_at, p.order_no, p.shop_account_id,
-      p.shipping_fee, p.discount, p.note,
+      p.shipping_fee, p.discount, p.note, p.import_key, p.fulfillment,
       sa.name AS shop_account_name,
       COUNT(pl.id) AS line_count,
       COALESCE(SUM(pl.unit_price * pl.quantity), 0) AS subtotal,
-      COALESCE(SUM(pl.unit_price * pl.quantity + pl.allocated_cost), 0) AS total_cost
+      COALESCE(SUM(pl.unit_price * pl.quantity + pl.allocated_cost), 0) AS total_cost,
+      (SELECT name FROM purchase_line
+        WHERE purchase_id = p.id ORDER BY sort_order, rowid LIMIT 1) AS first_line_name,
+      (SELECT model_code FROM purchase_line
+        WHERE purchase_id = p.id ORDER BY sort_order, rowid LIMIT 1) AS first_model_code
     FROM purchase p
     JOIN shop_account sa ON sa.id = p.shop_account_id
     LEFT JOIN purchase_line pl ON pl.purchase_id = p.id
@@ -723,7 +817,10 @@ export function deleteSale(id: string): void {
   db.prepare('DELETE FROM sale WHERE id = ?').run(id)
 }
 
-type SaleProfitRow = Omit<SaleProfit, 'model_codes' | 'tags'> & { model_codes: string }
+type SaleProfitRow = Omit<SaleProfit, 'model_codes' | 'tags' | 'thumb_url'> & {
+  model_codes: string
+  thumb_file: string | null
+}
 
 /**
  * タグを持つテーブル（sale_tag / inventory_tag）から、対象idごとのタグ配列を
@@ -782,11 +879,15 @@ export function listSales(filter?: SaleFilter): SaleProfit[] {
   const rows = db.prepare(sql).all(...vals) as SaleProfitRow[]
 
   const tagMap = loadTagsFor('sale_tag', 'sale_id', rows.map(r => r.id))
-  return rows.map(r => ({
-    ...r,
-    model_codes: JSON.parse(r.model_codes || '[]') as string[],
-    tags: tagMap.get(r.id) ?? [],
-  }))
+  return rows.map(r => {
+    const { thumb_file, ...rest } = r
+    return {
+      ...rest,
+      model_codes: JSON.parse(rest.model_codes || '[]') as string[],
+      tags: tagMap.get(r.id) ?? [],
+      thumb_url: toThumbUrl(thumb_file),
+    }
+  })
 }
 
 /** 絞り込んだ販売の合計。DB側で集計する（0件なら全部0） */
@@ -939,10 +1040,16 @@ function normalizeName(s: string): string {
  * SQL側では正規化できないため、in_stock を全件取ってJS側で並べ替える
  * （規模は月20〜50件程度の想定）。
  */
+/** inventory_view の1行。thumb_url は toThumbUrl で組み立てる前の、生のファイル名 */
+type InventoryRow = Omit<InventoryItem, 'tags' | 'thumb_url'> & { thumb_file: string | null }
+
 /** in_stock（等）を inventory_view から引いた結果に、まとめて引いたタグを付ける */
-function attachInventoryTags(items: InventoryItem[]): InventoryItem[] {
+function attachInventoryTags(items: InventoryRow[]): InventoryItem[] {
   const tagMap = loadTagsFor('inventory_tag', 'inventory_item_id', items.map(i => i.id))
-  return items.map(i => ({ ...i, tags: tagMap.get(i.id) ?? [] }))
+  return items.map(i => {
+    const { thumb_file, ...rest } = i
+    return { ...rest, thumb_url: toThumbUrl(thumb_file), tags: tagMap.get(i.id) ?? [] }
+  })
 }
 
 export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
@@ -959,9 +1066,9 @@ export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
 
   const items = db.prepare(
     `SELECT * FROM inventory_view WHERE status = 'in_stock'`,
-  ).all() as InventoryItem[]
+  ).all() as InventoryRow[]
 
-  const rank = (item: InventoryItem): number => {
+  const rank = (item: InventoryRow): number => {
     if (item.model_code && codeSet.has(item.model_code)) return 0
     if (item.series_code && seriesCodes.has(item.series_code)) return 1
     const n = normalizeName(item.name)
@@ -987,7 +1094,7 @@ export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
 export function listInventory(status: InventoryStatus = 'in_stock'): InventoryItem[] {
   const items = db.prepare(
     `SELECT * FROM inventory_view WHERE status = ? ORDER BY aging_days DESC`,
-  ).all(status) as InventoryItem[]
+  ).all(status) as InventoryRow[]
   return attachInventoryTags(items)
 }
 
@@ -1191,7 +1298,7 @@ export function getDashboard(): DashboardStats {
   ).get(month) as MonthlySummary | undefined
 
   const lastRun = db.prepare(
-    `SELECT * FROM collector_run ORDER BY started_at DESC LIMIT 1`,
+    `${RUN_SELECT} ORDER BY r.started_at DESC LIMIT 1`,
   ).get() as CollectorRun | undefined
 
   return {
@@ -1244,6 +1351,8 @@ export function deleteShopAccount(id: string): void {
   if (used.c > 0) {
     throw new Error('この仕入先は仕入で使われています。無効にしてください')
   }
+  // 実行記録は残す（FK が張ってあるので先に外す）
+  db.prepare('UPDATE collector_run SET shop_account_id = NULL WHERE shop_account_id = ?').run(id)
   db.prepare('DELETE FROM shop_account WHERE id = ?').run(id)
 }
 
@@ -1287,10 +1396,22 @@ export function setSetting(key: string, value: string): void {
 // 収集の記録
 // ============================================================
 
-export function startRun(): string {
+/** collector_run に shop_account_name を付けて返す共通SELECT。listRuns / finishRun / getDashboard で使う */
+const RUN_SELECT = `
+  SELECT r.*, sa.name AS shop_account_name
+  FROM collector_run r
+  LEFT JOIN shop_account sa ON sa.id = r.shop_account_id
+`
+
+function selectRun(id: string): CollectorRun {
+  return db.prepare(`${RUN_SELECT} WHERE r.id = ?`).get(id) as CollectorRun
+}
+
+export function startRun(source: CollectorSource, shopAccountId: string | null = null): string {
   const id = randomUUID()
-  db.prepare('INSERT INTO collector_run (id, started_at) VALUES (?, ?)')
-    .run(id, new Date().toISOString())
+  db.prepare(
+    'INSERT INTO collector_run (id, started_at, source, shop_account_id) VALUES (?, ?, ?, ?)',
+  ).run(id, new Date().toISOString(), source, shopAccountId)
   return id
 }
 
@@ -1302,12 +1423,12 @@ export function finishRun(
         SET finished_at = ?, status = ?, fetched = ?, inserted = ?, message = ?
       WHERE id = ?`,
   ).run(new Date().toISOString(), status, fetched, inserted, message ?? null, id)
-  return db.prepare('SELECT * FROM collector_run WHERE id = ?').get(id) as CollectorRun
+  return selectRun(id)
 }
 
 export function listRuns(limit = 20): CollectorRun[] {
   return db.prepare(
-    'SELECT * FROM collector_run ORDER BY started_at DESC LIMIT ?',
+    `${RUN_SELECT} ORDER BY r.started_at DESC LIMIT ?`,
   ).all(limit) as CollectorRun[]
 }
 
@@ -1331,6 +1452,33 @@ export function existingMercariIds(ids: string[]): Set<string> {
   return new Set(rows.map(r => r.mercari_item_id))
 }
 
+/**
+ * 渡した mercari_item_id のうち、まだサムネイルを保存していない（thumb_file が NULL）
+ * 既存の販売を返す。実DBに元からあった販売（新規取り込みではない）にも、今回の一覧に
+ * 出ている間にサムネイルを追いつかせるために使う（collector.ts の saveNewThumbs）。
+ */
+export function salesWithoutThumb(
+  mercariItemIds: string[],
+): Array<{ id: string; mercariItemId: string }> {
+  if (mercariItemIds.length === 0) return []
+  const ph = mercariItemIds.map(() => '?').join(',')
+  const rows = db.prepare(
+    `SELECT id, mercari_item_id AS mercariItemId FROM sale
+      WHERE mercari_item_id IN (${ph}) AND thumb_file IS NULL`,
+  ).all(...mercariItemIds) as Array<{ id: string; mercariItemId: string }>
+  return rows
+}
+
+/** 既存の import_key を返す（仕入の注文履歴の差分取得用） */
+export function existingImportKeys(keys: string[]): Set<string> {
+  if (keys.length === 0) return new Set()
+  const ph = keys.map(() => '?').join(',')
+  const rows = db.prepare(
+    `SELECT import_key FROM purchase WHERE import_key IN (${ph})`,
+  ).all(...keys) as Array<{ import_key: string }>
+  return new Set(rows.map(r => r.import_key))
+}
+
 export function insertCollected(
   rows: Array<{
     mercariItemId: string
@@ -1345,7 +1493,7 @@ export function insertCollected(
     /** 他費用。列は増やさない。raw に残すだけ */
     otherCost?: number | null
   }>,
-): number {
+): Array<{ id: string; mercariItemId: string }> {
   const rateBp = setting('fee_rate_bp', 1000)
   // 空なら「型番が抜けるか」で転売/私物を判定。空でなければキーワード（どれか1つでも部分一致・大小無視）で判定
   const keywords = parseKeywords(settingStr('mercari_keyword', ''))
@@ -1358,7 +1506,7 @@ export function insertCollected(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'collector', ?, ?, ?, ?, ?)`,
   )
 
-  const insertedIds: string[] = []
+  const inserted: Array<{ id: string; mercariItemId: string }> = []
   const tx = db.transaction(() => {
     for (const r of rows) {
       const text = r.title + (r.description ? ' ' + r.description : '')
@@ -1382,15 +1530,25 @@ export function insertCollected(
         rateBp, fee, JSON.stringify(r), confirmed, JSON.stringify(codes),
         shippingFee, shippingSource,
       )
-      insertedIds.push(id)
+      inserted.push({ id, mercariItemId: r.mercariItemId })
     }
   })
   tx()
 
   // 型番が完全一致する分は自動確定する
-  for (const id of insertedIds) autoLinkSale(id)
+  for (const r of inserted) autoLinkSale(r.id)
 
-  return rows.length
+  return inserted
+}
+
+/**
+ * サムネイルのファイル名を保存する（collector が、新規に取り込んだ販売について
+ * 画像取得に成功したときだけ呼ぶ）。生成後の landed_cost と違い、サムネイルは
+ * 後から書き込んでも過去の利益には影響しないので updated_at は触らない
+ * （appendModelCodes の「人が手で触ったか」判定を壊さないため）。
+ */
+export function setSaleThumb(saleId: string, file: string): void {
+  db.prepare('UPDATE sale SET thumb_file = ? WHERE id = ?').run(file, saleId)
 }
 
 // ============================================================
@@ -1456,7 +1614,7 @@ export function listSaleLines(saleId: string): InventoryItem[] {
     JOIN sale_line sl ON sl.inventory_item_id = iv.id
     WHERE sl.sale_id = ?
     ORDER BY iv.name
-  `).all(saleId) as InventoryItem[]
+  `).all(saleId) as InventoryRow[]
   return attachInventoryTags(items)
 }
 

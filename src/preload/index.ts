@@ -70,9 +70,9 @@ const api: SorobanApi = {
 
 contextBridge.exposeInMainWorld('soroban', api)
 
-// 起動時の自動収集が終わったら知らせる
+// 起動時の自動収集が終わったら知らせる（メルカリ→仕入先の順の配列）
 contextBridge.exposeInMainWorld('sorobanEvents', {
-  onCollectDone(cb: (run: CollectorRun) => void) {
-    ipcRenderer.on('collect:done', (_e, run: CollectorRun) => cb(run))
+  onCollectDone(cb: (runs: CollectorRun[]) => void) {
+    ipcRenderer.on('collect:done', (_e, runs: CollectorRun[]) => cb(runs))
   },
 })

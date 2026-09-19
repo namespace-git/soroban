@@ -11,6 +11,8 @@ import TagPicker from '../components/TagPicker.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
+const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
+const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 
 const sales = ref<SaleProfit[]>([])
 const methods = ref<ShippingMethod[]>([])
@@ -45,6 +47,19 @@ const tagPickerAnchor = ref<HTMLElement | null>(null)
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
+// --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
+const thumbFailed = ref<Set<string>>(new Set())
+function showThumb(s: SaleProfit): boolean {
+  return !!s.thumb_url && !thumbFailed.value.has(s.id)
+}
+function onThumbError(id: string) {
+  thumbFailed.value = new Set(thumbFailed.value).add(id)
+}
+function placeholderChar(s: SaleProfit): string {
+  const c = s.model_codes[0]?.[0] ?? s.title.trim().charAt(0)
+  return (c || '?').toUpperCase()
+}
+
 function currentFilter(): SaleFilter {
   const filter: SaleFilter = {}
   if (onlyPending.value) filter.onlyPending = true
@@ -76,8 +91,8 @@ watch([revision, onlyPending, tagFilter], load)
 // --- 手入力登録 ---
 
 async function submit() {
-  if (!form.value.title.trim()) { alert('商品名を入力してください'); return }
-  if (!form.value.price || form.value.price <= 0) { alert('価格を入力してください'); return }
+  if (!form.value.title.trim()) { toast('商品名を入力してください', 'warn'); return }
+  if (!form.value.price || form.value.price <= 0) { toast('価格を入力してください', 'warn'); return }
 
   await window.soroban.createSale({
     ...form.value,
@@ -106,19 +121,14 @@ async function setPackaging(sale: SaleProfit, value: number) {
   changed()
 }
 
-/** タイトルに同じ型番が既に含まれているものは表示しない（説明文からだけ拾えたものだけ示す） */
-function extraCodes(sale: SaleProfit) {
-  return sale.model_codes.filter(c => !sale.title.includes(c))
-}
-
 async function setKind(sale: SaleProfit, kind: SaleKind) {
   const label = kind === 'personal' ? '私物' : '転売'
-  if (!confirm(`「${sale.title}」を${label}に変更しますか？`)) return
+  if (!await confirmDialog(`「${sale.title}」を${label}に変更しますか？`, { okLabel: '変更する' })) return
   await window.soroban.updateSale(sale.id, { kind })
   await load()
   changed()
   if (onlyPending.value && !sales.value.some(s => s.id === sale.id)) {
-    alert(`${label}に変更しました。「未処理のみ」を外すと表示されます`)
+    toast(`${label}に変更しました。「未処理のみ」を外すと表示されます`, 'ok')
   }
 }
 
@@ -134,7 +144,11 @@ async function editNote(sale: SaleProfit) {
 
 async function autoLinkPending() {
   const n = await window.soroban.autoLinkPending()
-  alert(n > 0 ? `${n}件を自動で紐付けました` : '型番が一致する在庫はありませんでした')
+  if (n > 0) {
+    toast(`${n}件を自動で紐付けました`, 'ok')
+  } else {
+    toast('型番が一致する在庫はありませんでした', 'warn')
+  }
   await load()
   changed()
 }
@@ -228,7 +242,7 @@ async function confirmMatch() {
     await load()
     changed()
   } catch (e) {
-    alert(e instanceof Error ? e.message : String(e))
+    toast(e instanceof Error ? e.message : String(e), 'warn')
   }
 }
 
@@ -240,12 +254,12 @@ async function unlink(item: InventoryItem) {
     await load()
     changed()
   } catch (e) {
-    alert(e instanceof Error ? e.message : String(e))
+    toast(e instanceof Error ? e.message : String(e), 'warn')
   }
 }
 
 async function remove(sale: SaleProfit) {
-  if (!confirm(`「${sale.title}」を削除しますか？`)) return
+  if (!await confirmDialog(`「${sale.title}」を削除しますか？`, { okLabel: '削除する', danger: true })) return
   await window.soroban.deleteSale(sale.id)
   await load()
   changed()
@@ -329,6 +343,7 @@ async function remove(sale: SaleProfit) {
           <thead>
             <tr>
               <th class="col-date">販売日</th>
+              <th class="col-thumb"></th>
               <th class="col-title">商品</th>
               <th class="num col-amt">価格</th>
               <th class="num col-amt">手数料</th>
@@ -341,36 +356,41 @@ async function remove(sale: SaleProfit) {
           </thead>
           <tbody>
             <tr v-for="s in sales" :key="s.id">
-              <td class="date-cell">
-                <span class="faint nowrap">{{ s.sold_at.slice(5) }}</span>
-                <StatusChip v-if="s.source === 'collector'" tone="neutral" label="自動取得" />
+              <td class="faint nowrap">{{ s.sold_at.slice(5) }}</td>
+
+              <td class="thumb-cell">
+                <img
+                  v-if="showThumb(s)"
+                  class="thumb"
+                  :src="s.thumb_url!"
+                  alt=""
+                  loading="lazy"
+                  @error="onThumbError(s.id)"
+                />
+                <span v-else class="thumb-placeholder">{{ placeholderChar(s) }}</span>
               </td>
 
               <td class="title-cell">
-                <div class="title-row">
-                  <span v-if="extraCodes(s).length" class="model-chips">
-                    <StatusChip
-                      v-for="mc in extraCodes(s)" :key="mc"
-                      tone="neutral" :label="mc"
-                    />
-                  </span>
-                  <span class="title-text" :title="s.title">{{ s.title }}</span>
+                <div class="title-name" :title="s.title">{{ s.title }}</div>
+                <div class="chip-row">
                   <button
                     class="kind-toggle"
                     title="転売／私物を切り替える（確認あり）"
                     @click="setKind(s, s.kind === 'resale' ? 'personal' : 'resale')"
                   >
                     <StatusChip
-                      :tone="s.kind === 'personal' ? 'info' : 'neutral'"
+                      :tone="s.kind === 'personal' ? 'neutral' : 'brand'"
                       :label="s.kind === 'resale' ? '転売' : '私物'"
                     />
                   </button>
+                  <StatusChip v-if="s.source === 'collector'" tone="neutral" label="自動取得" />
+                  <StatusChip v-for="mc in s.model_codes" :key="mc" tone="neutral" :label="mc" />
+                  <StatusChip v-for="t in s.tags" :key="t.id" tone="info" :label="t.name" />
                 </div>
-                <div v-if="s.tags.length || s.note" class="meta-row">
-                  <span v-if="s.tags.length" class="tag-chips">
-                    <StatusChip v-for="t in s.tags" :key="t.id" tone="info" :label="t.name" />
-                  </span>
-                  <span v-if="s.note" class="faint note" :title="s.note">{{ s.note }}</span>
+                <div v-if="s.note" class="note-row">
+                  <Icon name="note" :size="14" class="icon-note" />
+                  <span class="note-label">メモ</span>
+                  <span class="note-text">{{ s.note }}</span>
                 </div>
               </td>
 
@@ -422,7 +442,7 @@ async function remove(sale: SaleProfit) {
                   >
                     {{ yen(s.cost) }}<small class="faint"> ×{{ s.item_count }}</small>
                   </button>
-                  <StatusChip v-if="s.auto_linked" tone="ok" label="自動紐付け" />
+                  <StatusChip v-if="s.auto_linked" tone="neutral" label="自動紐付け" />
                 </span>
                 <span v-else class="faint">—</span>
               </td>
@@ -546,6 +566,7 @@ async function remove(sale: SaleProfit) {
 .table-panel td { padding: 8px 12px; }
 
 .col-date    { width: 72px; }
+.col-thumb   { width: 64px; }
 .col-title   { min-width: 240px; }
 .col-amt     { width: 84px; }
 .col-ship    { width: 200px; }
@@ -554,54 +575,34 @@ async function remove(sale: SaleProfit) {
 
 .nowrap { white-space: nowrap; }
 
-.date-cell {
+.thumb-cell { padding-right: 4px; }
+.thumb, .thumb-placeholder {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.thumb { object-fit: cover; display: block; }
+.thumb-placeholder {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-weight: 700;
+  font-size: var(--fs-14);
 }
 
 .title-cell { overflow: hidden; }
-.title-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.title-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.model-chips {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-.meta-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 2px;
-  min-width: 0;
-}
-.tag-chips {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-.note {
-  min-width: 0;
-  font-size: var(--fs-12);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.title-name {
+  font-size: var(--fs-14);
+  font-weight: 500;
+  white-space: normal;
+  word-break: break-word;
 }
 
-.table-panel .actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
+.table-panel td.actions { white-space: nowrap; text-align: right; }
+.table-panel .actions > * { vertical-align: middle; margin-left: 4px; }
 .table-panel .actions button { white-space: nowrap; }
 
 .fade-btn {
@@ -629,20 +630,14 @@ tr:hover .fade-btn { opacity: 1; }
   text-overflow: ellipsis;
 }
 
-/* 1099px 以下：ナビがアイコン帯に畳まれコンテンツ幅が狭くなる（≒910px）。
-   販売日・金額列を詰めて商品名の可読幅を確保し、チップは2段に戻す。
-   合計 = 56 + 80*4(320) + 176 + 76 + 112 = 740px。商品列は残り約170px（min 240px 未満。ellipsis で吸収）。 */
+/* 1099px 以下：コンテンツ幅が狭くなる（≒910px）。
+   販売日・サムネ・金額列を詰めて商品名の可読幅を確保する。商品名は元々折り返すので追加調整は不要。
+   合計 = 56 + 48 + 80*4(320) + 176 + 76 + 112 = 788px。商品列は残り約120px（min 240px 未満）。 */
 @media (max-width: 1099px) {
-  .col-date { width: 56px; }
-  .col-amt  { width: 80px; }
-  .col-ship { width: 176px; }
-
-  .title-row {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-  }
-  .title-text { width: 100%; }
+  .col-date  { width: 56px; }
+  .col-thumb { width: 48px; }
+  .col-amt   { width: 80px; }
+  .col-ship  { width: 176px; }
 }
 
 .link-btn {

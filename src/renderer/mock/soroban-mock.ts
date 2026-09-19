@@ -11,11 +11,11 @@
 
 import type {
   SorobanApi, ShopAccount, ShopAccountKind, ShippingMethod, ShippingSource,
-  SaleProfit, SaleInput, SalePatch, SaleKind, SaleFilter, SaleTotals,
+  SaleProfit, SaleInput, SalePatch, SaleKind, SaleSource, SaleFilter, SaleTotals,
   PurchaseDetail, PurchaseInput, PurchaseLine,
   InventoryItem, InventoryStatus, InventoryPatch,
   MonthlySummary, DashboardStats, CollectorRun,
-  Material, VariantSummary, Tag,
+  Material, VariantSummary, Tag, Fulfillment,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 
@@ -218,9 +218,12 @@ function addConfirmedPurchase(opts: {
   shippingFee: number
   lines: Array<{ model: string; qty: number }>
   note?: string | null
+  importKey?: string | null
+  fulfillment?: Fulfillment | null
 }): void {
   const purchaseId = uid()
   const orderNo = `MJ-${opts.orderedAt.replace(/-/g, '').slice(0, 6)}-${pad(purchases.length + 1)}`
+  const fulfillment = opts.fulfillment ?? null
 
   const bases = opts.lines.map(l => variantOf(l.model).price * l.qty)
   const shares = allocateAmount(bases, opts.shippingFee)
@@ -264,6 +267,8 @@ function addConfirmedPurchase(opts: {
         parent_id: null,
         note: null,
         tags: [],
+        fulfillment,
+        thumb_url: null,
       })
       itemPurchaseId.set(itemId, purchaseId)
     }
@@ -279,7 +284,11 @@ function addConfirmedPurchase(opts: {
     shipping_fee: opts.shippingFee,
     discount: 0,
     note: opts.note ?? null,
+    import_key: opts.importKey ?? null,
+    fulfillment,
     line_count: lines.length,
+    first_line_name: lines[0]?.name ?? null,
+    first_model_code: lines[0]?.model_code ?? null,
     subtotal,
     total_cost: totalCost,
     other_cost: 0,
@@ -339,6 +348,8 @@ function addTiktokPurchase(opts: {
         parent_id: null,
         note: null,
         tags: [],
+        fulfillment: null,
+        thumb_url: null,
       })
       itemPurchaseId.set(itemId, purchaseId)
     }
@@ -354,7 +365,11 @@ function addTiktokPurchase(opts: {
     shipping_fee: opts.shippingFee,
     discount: 0,
     note: null,
+    import_key: null,
+    fulfillment: null,
     line_count: lines.length,
+    first_line_name: lines[0]?.name ?? null,
+    first_model_code: lines[0]?.model_code ?? null,
     subtotal,
     total_cost: totalCost,
     other_cost: 0,
@@ -369,6 +384,7 @@ function addDraftPurchase(opts: {
   shopName: string
   orderedAt: string
   lines: Array<{ model: string; qty: number }>
+  importKey?: string | null
 }): void {
   const lines: PurchaseLine[] = opts.lines.map(l => {
     const v = variantOf(l.model)
@@ -394,7 +410,11 @@ function addDraftPurchase(opts: {
     shipping_fee: 0,
     discount: 0,
     note: '注文履歴から取り込み（価格未入力）',
+    import_key: opts.importKey ?? null,
+    fulfillment: null,
     line_count: lines.length,
+    first_line_name: lines[0]?.name ?? null,
+    first_model_code: lines[0]?.model_code ?? null,
     subtotal: 0,
     total_cost: 0,
     other_cost: 0,
@@ -409,10 +429,14 @@ function buildInitialPurchasesAndInventory(): void {
   addConfirmedPurchase({
     shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(170)), shippingFee: 900,
     lines: [{ model: 'Z080-1', qty: 4 }, { model: 'Z001-4', qty: 3 }, { model: 'A035', qty: 2 }],
+    importKey: 'mellojoy:#255890',
+    fulfillment: 'pending',
   })
   addConfirmedPurchase({
     shopId: mB.id, shopName: mB.name, orderedAt: todayLocal(daysAgo(150)), shippingFee: 850,
     lines: [{ model: 'Z080-1', qty: 3 }, { model: 'Z056-1', qty: 3 }, { model: 'Z056-2', qty: 3 }],
+    importKey: 'mellojoy:#256112',
+    fulfillment: 'shipped',
   })
   addConfirmedPurchase({
     shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(125)), shippingFee: 950,
@@ -447,10 +471,12 @@ function buildInitialPurchasesAndInventory(): void {
   addDraftPurchase({
     shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(5)),
     lines: [{ model: 'Z045-2', qty: 2 }, { model: 'Z099-1', qty: 1 }],
+    importKey: 'mellojoy:#268526',
   })
   addDraftPurchase({
     shopId: mB.id, shopName: mB.name, orderedAt: todayLocal(daysAgo(2)),
     lines: [{ model: 'A012', qty: 2 }, { model: 'Z012-3', qty: 1 }],
+    importKey: 'mellojoy:#271041',
   })
 }
 
@@ -495,6 +521,16 @@ function mercariId(): string {
   return 'm' + s
 }
 
+/**
+ * 自動取得（collector）の販売のうち半分だけダミーのサムネURLを持たせる。
+ * モックからは実ファイルを読めないので、画面側は @error でプレースホルダに落ちることの確認になる。
+ * 手入力（manual）は常に null。
+ */
+function thumbUrlFor(i: number, source: SaleSource): string | null {
+  if (source !== 'collector') return null
+  return i % 4 === 0 ? `soroban-thumb://m${8000 + i}.jpg` : null
+}
+
 function buildSaleFixed(opts: {
   i: number
   title: string
@@ -512,10 +548,13 @@ function buildSaleFixed(opts: {
   const packaging = opts.packaging ?? 0
   const cost = opts.items.reduce((s, it) => s + it.landed_cost, 0)
   const itemCount = opts.items.length
+  // 取り込み風・手入力風を半々にする（実際の収集は行わない）
+  const source: SaleSource = opts.i % 2 === 0 ? 'collector' : 'manual'
 
   const sale: SaleProfit = {
     id: uid(),
     mercari_item_id: mercariId(),
+    thumb_url: thumbUrlFor(opts.i, source),
     sold_at: soldAtFor(opts.i),
     title: opts.title,
     kind: opts.kind,
@@ -533,14 +572,16 @@ function buildSaleFixed(opts: {
     item_count: itemCount,
     unmatched: itemCount === 0 ? 1 : 0,
     auto_linked: opts.autoLinked ? 1 : 0,
-    // 取り込み風・手入力風を半々にする（実際の収集は行わない）
-    source: opts.i % 2 === 0 ? 'collector' : 'manual',
+    source,
     tags: [],
   }
 
   if (itemCount > 0) {
     saleLines.set(sale.id, opts.items.map(it => it.id))
-    for (const it of opts.items) it.status = 'sold'
+    for (const it of opts.items) {
+      it.status = 'sold'
+      it.thumb_url = sale.thumb_url
+    }
   }
   return sale
 }
@@ -718,6 +759,9 @@ function buildInitialRuns(): void {
       fetched: s.fetched,
       inserted: s.inserted,
       message: s.message,
+      source: 'mercari',
+      shop_account_id: null,
+      shop_account_name: null,
     }
   })
 }
@@ -806,6 +850,7 @@ const api: SorobanApi = {
     const sale: SaleProfit = {
       id,
       mercari_item_id: input.mercari_item_id ?? null,
+      thumb_url: null, // 手入力の販売はサムネイルを持たない
       sold_at: input.sold_at,
       title: input.title,
       kind: input.kind ?? 'resale',
@@ -833,6 +878,7 @@ const api: SorobanApi = {
       const item = takeOldestByModel(modelCodes[0])
       if (item) {
         item.status = 'sold'
+        item.thumb_url = sale.thumb_url
         saleLines.set(id, [item.id])
         sale.auto_linked = 1
         recalcSale(sale)
@@ -880,7 +926,10 @@ const api: SorobanApi = {
     const ids = saleLines.get(id) ?? []
     for (const itemId of ids) {
       const item = inventory.find(it => it.id === itemId)
-      if (item) item.status = 'in_stock'
+      if (item) {
+        item.status = 'in_stock'
+        item.thumb_url = null
+      }
     }
     saleLines.delete(id)
     sales = sales.filter(s => s.id !== id)
@@ -897,7 +946,9 @@ const api: SorobanApi = {
     }
     const current = saleLines.get(saleId) ?? []
     for (const itemId of inventoryItemIds) {
-      inventory.find(it => it.id === itemId)!.status = 'sold'
+      const item = inventory.find(it => it.id === itemId)!
+      item.status = 'sold'
+      item.thumb_url = sale.thumb_url
     }
     saleLines.set(saleId, [...current, ...inventoryItemIds])
     sale.auto_linked = 0 // 人が確定した紐付けなので「自動」チップは外す
@@ -913,6 +964,7 @@ const api: SorobanApi = {
       const item = takeOldestByModel(sale.model_codes[0])
       if (!item) continue
       item.status = 'sold'
+      item.thumb_url = sale.thumb_url
       saleLines.set(sale.id, [item.id])
       sale.auto_linked = 1
       recalcSale(sale)
@@ -926,7 +978,10 @@ const api: SorobanApi = {
     const current = saleLines.get(saleId) ?? []
     saleLines.set(saleId, current.filter(id => id !== inventoryItemId))
     const item = inventory.find(it => it.id === inventoryItemId)
-    if (item) item.status = 'in_stock'
+    if (item) {
+      item.status = 'in_stock'
+      item.thumb_url = null
+    }
     sale.auto_linked = 0
     recalcSale(sale)
     return wait(undefined)
@@ -1010,6 +1065,8 @@ const api: SorobanApi = {
           parent_id: null,
           note: null,
           tags: [],
+          fulfillment: null,
+          thumb_url: null,
         })
         itemPurchaseId.set(itemId, purchaseId)
       }
@@ -1025,7 +1082,11 @@ const api: SorobanApi = {
       shipping_fee: shippingFee,
       discount,
       note: input.note ?? null,
+      import_key: input.import_key ?? null,
+      fulfillment: input.fulfillment ?? null,
       line_count: lines.length,
+      first_line_name: lines[0]?.name ?? null,
+      first_model_code: lines[0]?.model_code ?? null,
       subtotal,
       total_cost: totalCost,
       other_cost: otherCost,
@@ -1089,6 +1150,8 @@ const api: SorobanApi = {
           parent_id: null,
           note: null,
           tags: [],
+          fulfillment: null,
+          thumb_url: null,
         })
         itemPurchaseId.set(itemId, p.id)
       }
@@ -1101,10 +1164,14 @@ const api: SorobanApi = {
     p.shop_account_name = shop?.name ?? p.shop_account_name
     p.shipping_fee = shippingFee
     p.discount = discount
+    p.import_key = input.import_key ?? p.import_key
+    p.fulfillment = input.fulfillment ?? p.fulfillment
     p.other_cost = otherCost
     p.alloc_method = method
     p.note = input.note ?? p.note
     p.line_count = lines.length
+    p.first_line_name = lines[0]?.name ?? null
+    p.first_model_code = lines[0]?.model_code ?? null
     p.subtotal = subtotal
     p.total_cost = totalCost
     p.lines = lines
@@ -1170,6 +1237,8 @@ const api: SorobanApi = {
         parent_id: item.id,
         note: null,
         tags: [],
+        fulfillment: item.fulfillment,
+        thumb_url: null,
       })
       childIds.push(childId)
       if (purchaseId) itemPurchaseId.set(childId, purchaseId)
@@ -1339,10 +1408,11 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
-  async collect(): Promise<CollectorRun> {
+  async collect(): Promise<CollectorRun[]> {
+    // メルカリ→有効な仕入先アカウントの順に直列で走る想定。モックでは1件ずつ合成する
     await new Promise(resolve => setTimeout(resolve, 600))
     const now = new Date()
-    const run: CollectorRun = {
+    const mercariRun: CollectorRun = {
       id: uid(),
       started_at: isoLocal(now),
       finished_at: isoLocal(new Date(now.getTime() + 3000)),
@@ -1350,9 +1420,26 @@ const api: SorobanApi = {
       fetched: 3,
       inserted: 1,
       message: null,
+      source: 'mercari',
+      shop_account_id: null,
+      shop_account_name: null,
     }
-    runs.unshift(run)
-    return run
+    const shopStart = new Date(now.getTime() + 3000)
+    const shop = shopAccounts.find(s => s.kind === 'mellojoy' && s.is_active) ?? null
+    const mellojoyRun: CollectorRun = {
+      id: uid(),
+      started_at: isoLocal(shopStart),
+      finished_at: isoLocal(new Date(shopStart.getTime() + 4000)),
+      status: 'ok',
+      fetched: 2,
+      inserted: 1,
+      message: null,
+      source: 'mellojoy',
+      shop_account_id: shop?.id ?? null,
+      shop_account_name: shop?.name ?? null,
+    }
+    runs.unshift(mellojoyRun, mercariRun)
+    return [mercariRun, mellojoyRun]
   },
 
   async openLogin() {
@@ -1393,6 +1480,12 @@ const api: SorobanApi = {
   },
 }
 
+/** メモ付きの在庫を1件（見え方の確認用。商品名の続きに見えないことを確かめる） */
+function assignInitialNote(): void {
+  const item = inventory.find(i => i.status === 'in_stock' && i.model_code === 'A012')
+  if (item) item.note = '箱に凹みあり。写真を撮って発送前に確認する'
+}
+
 /** 販売の1/3、在庫の1/4にタグを付ける（見え方の確認用） */
 function assignInitialTags(): void {
   sales.forEach((s, i) => {
@@ -1407,10 +1500,11 @@ export function installMock(): void {
   buildInitialPurchasesAndInventory()
   buildInitialSales()
   buildInitialRuns()
+  assignInitialNote()
   assignInitialTags()
 
   window.soroban = api
-  ;(window as unknown as { sorobanEvents: { onCollectDone(cb: (run: CollectorRun) => void): void } }).sorobanEvents = {
+  ;(window as unknown as { sorobanEvents: { onCollectDone(cb: (runs: CollectorRun[]) => void): void } }).sorobanEvents = {
     onCollectDone() {
       // モックでは自動収集イベントを発火しない（collect() は手動呼び出しのみ）
     },

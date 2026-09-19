@@ -2,9 +2,25 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "renderer-review",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "exec",
+        "vite",
+        "--config",
+        "vite.review.config.ts"
+      ],
+      "port": 5199
+    },
+    {
       "name": "renderer",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["exec", "electron-vite", "dev", "--rendererOnly"],
+      "runtimeArgs": [
+        "exec",
+        "electron-vite",
+        "dev",
+        "--rendererOnly"
+      ],
       "port": 5173
     }
   ]

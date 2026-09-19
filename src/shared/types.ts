@@ -12,8 +12,17 @@ export type SaleSource = 'collector' | 'manual'
 export type InventoryStatus = 'in_stock' | 'sold' | 'disposed' | 'personal_use' | 'split'
 export type AllocMethod = 'by_amount' | 'by_quantity'
 export type RunStatus = 'ok' | 'auth_required' | 'failed' | 'empty'
-/** draft = mellojoy-watch から積んだ下書き。価格未入力。在庫は confirmed で生成 */
+/** 収集の対象。mercari = 販売履歴 / mellojoy = 仕入先アカウントの注文履歴 */
+export type CollectorSource = 'mercari' | 'mellojoy'
+/** draft = 注文履歴から積んだ下書き（価格が確定できなかったもの）。在庫は confirmed で生成 */
 export type PurchaseStatus = 'draft' | 'confirmed'
+/**
+ * 注文の到着状態（メロジョイの注文一覧から毎回更新）。
+ * pending = 確認済み（未発送） / shipped = 配達中 / delivered = 配達済み。
+ * null = 分からない（手入力の仕入など）。到着扱い。
+ * 在庫は確定時に作り、delivered 以外は「未着」として見せる（紐付けは可）
+ */
+export type Fulfillment = 'pending' | 'shipped' | 'delivered'
 export type ShopAccountKind = 'mellojoy' | 'tiktok' | 'other'
 /** actual = メルカリの取引詳細から取った実額 / master = 発送方法マスタ / manual = 手入力 */
 export type ShippingSource = 'actual' | 'master' | 'manual'
@@ -72,6 +81,8 @@ export interface ShippingMethod {
 export interface SaleProfit {
   id: string
   mercari_item_id: string | null
+  /** 商品サムネイル。取り込み時に1度だけ保存したもの（`soroban-thumb://<file>`）。無ければ null */
+  thumb_url: string | null
   sold_at: string
   title: string
   kind: SaleKind
@@ -143,6 +154,9 @@ export interface PurchaseInput {
   other_cost?: number
   alloc_method?: AllocMethod
   note?: string | null
+  /** 注文履歴からの取り込みなら注文番号のキー。同じ注文を二度積まない（UNIQUE） */
+  import_key?: string | null
+  fulfillment?: Fulfillment | null
   lines: PurchaseLineInput[]
 }
 
@@ -156,7 +170,13 @@ export interface PurchaseSummary {
   shipping_fee: number
   discount: number
   note: string | null
+  /** null 以外なら注文履歴から自動取得したもの */
+  import_key: string | null
+  fulfillment: Fulfillment | null
   line_count: number
+  /** 代表の明細（先頭）。一覧で「何を買った注文か」を見せるため。明細が無ければ null */
+  first_line_name: string | null
+  first_model_code: string | null
   /** 明細合計（単価×数量の総和） */
   subtotal: number
   /** 按分後の総原価 */
@@ -188,9 +208,16 @@ export interface PurchaseDraftInput {
   import_key: string
   shop_account_id: string
   ordered_at: string
+  order_no?: string | null
+  fulfillment?: Fulfillment | null
+  /** 取れていれば入れる。確定画面に前もって埋まる */
+  shipping_fee?: number
+  discount?: number
   lines: Array<{
     name: string
     quantity: number
+    /** 取れていれば単価。無ければ 0（価格未入力） */
+    unit_price?: number
     model_code?: string | null
     series_code?: string | null
     material?: Material | null
@@ -225,6 +252,10 @@ export interface InventoryItem {
   parent_id: string | null
   note: string | null
   tags: Tag[]
+  /** 仕入元の注文の到着状態。delivered / null 以外は「未着」 */
+  fulfillment: Fulfillment | null
+  /** 紐付いた販売のサムネイル（売れた在庫だけ）。無ければ null */
+  thumb_url: string | null
 }
 
 export interface InventoryPatch {
@@ -318,6 +349,10 @@ export interface CollectorRun {
   fetched: number
   inserted: number
   message: string | null
+  source: CollectorSource
+  /** mellojoy のときだけ。どのアカウントの実行か */
+  shop_account_id: string | null
+  shop_account_name: string | null
 }
 
 // ------------------------------------------------------------
@@ -390,7 +425,8 @@ export interface SorobanApi {
   setSetting(key: string, value: string): Promise<void>
 
   // 収集
-  collect(): Promise<CollectorRun>
+  /** メルカリ→有効な仕入先アカウントの順に直列で走る。1回分がまとめて返る（先頭がメルカリ） */
+  collect(): Promise<CollectorRun[]>
   openLogin(): Promise<void>
   /** 仕入先アカウント（メロジョイ）のログイン画面を開く。アカウントごとに別プロファイル */
   openShopLogin(shopAccountId: string): Promise<void>

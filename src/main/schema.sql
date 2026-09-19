@@ -96,6 +96,13 @@ CREATE TABLE IF NOT EXISTS purchase (
   alloc_method    TEXT NOT NULL DEFAULT 'by_amount'
                   CHECK (alloc_method IN ('by_amount','by_quantity')),
 
+  -- 仕入元の注文の到着状態。pending(確認済み・未発送) / shipped(配達中) / delivered(配達済み)。
+  -- NULL = 不明（手入力）。在庫の生成タイミングは変えない（確定時に作る）。
+  -- 到着まで「未着」として見せるだけで、紐付けは可
+  fulfillment          TEXT
+                       CHECK (fulfillment IN ('pending','shipped','delivered')),
+  fulfillment_updated_at TEXT,
+
   note            TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -272,10 +279,17 @@ CREATE TABLE IF NOT EXISTS collector_run (
               CHECK (status IN ('ok','auth_required','failed','empty')),
   fetched     INTEGER NOT NULL DEFAULT 0,
   inserted    INTEGER NOT NULL DEFAULT 0,
-  message     TEXT
+  message     TEXT,
+
+  -- mercari = 販売履歴 / mellojoy = 仕入先アカウントの注文履歴
+  source          TEXT NOT NULL DEFAULT 'mercari'
+                  CHECK (source IN ('mercari','mellojoy')),
+  -- mellojoy のときだけ。どのアカウントの実行か
+  shop_account_id TEXT REFERENCES shop_account(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_started ON collector_run(started_at DESC);
+-- idx_run_source_started（source列を使う）は __VIEWS__ マーカーの後ろで作る（idx_inv_modelと同じ理由）。
 
 -- ============================================================
 -- タグの付け外し（多対多）。tag を消すと CASCADE で外れる（T-04）
@@ -301,6 +315,9 @@ CREATE TABLE IF NOT EXISTS inventory_tag (
 -- model_code は migrate() で足される列なので、ここ（migrate() の後）で作る。
 CREATE INDEX IF NOT EXISTS idx_inv_model ON inventory_item(model_code, status, acquired_at);
 
+-- source は migrate() で足される列なので、ここ（migrate() の後）で作る。
+CREATE INDEX IF NOT EXISTS idx_run_source_started ON collector_run(source, started_at DESC);
+
 -- ============================================================
 -- ビュー
 --
@@ -315,6 +332,7 @@ CREATE VIEW sale_profit AS
 SELECT
   s.id,
   s.mercari_item_id,
+  s.thumb_file,
   s.sold_at,
   s.title,
   s.kind,
@@ -372,11 +390,17 @@ SELECT
   i.series_code,
   i.material,
   i.parent_id,
-  i.note
+  i.note,
+  p.fulfillment,
+  -- 紐付いた販売のサムネイル（売れた在庫だけ）。1在庫は1販売にしか紐付かない
+  -- （sale_line.inventory_item_id が UNIQUE）ので LEFT JOIN で行が増えることはない
+  sale.thumb_file
 FROM inventory_item i
 LEFT JOIN purchase_line pl ON pl.id = i.purchase_line_id
 LEFT JOIN purchase      p  ON p.id  = pl.purchase_id
-LEFT JOIN shop_account  sa ON sa.id = p.shop_account_id;
+LEFT JOIN shop_account  sa ON sa.id = p.shop_account_id
+LEFT JOIN sale_line     sl ON sl.inventory_item_id = i.id
+LEFT JOIN sale             ON sale.id = sl.sale_id;
 
 -- 型番（バリアント）ごとの実績。ホームの型番ランキングで使う
 DROP VIEW IF EXISTS variant_summary;

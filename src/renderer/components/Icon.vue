@@ -4,7 +4,7 @@ import { computed } from 'vue'
 export type IconName =
   | 'home' | 'sales' | 'purchase' | 'inventory' | 'monthly' | 'settings'
   | 'plus' | 'close' | 'trash' | 'link' | 'unlink' | 'check' | 'alert'
-  | 'search' | 'arrow-right' | 'refresh' | 'login' | 'external' | 'folder' | 'download'
+  | 'search' | 'arrow-right' | 'refresh' | 'login' | 'external' | 'folder' | 'download' | 'note'
 
 const props = withDefaults(defineProps<{ name: IconName; size?: number }>(), {
   size: 20,
@@ -109,6 +109,12 @@ const paths: Record<IconName, string> = {
     <path d="M10 3 V13" />
     <polyline points="6,9 10,13 14,9" />
     <path d="M4 16 H16" />
+  `,
+  note: `
+    <path d="M5 3 H12 L15 6 V17 H5 Z" />
+    <path d="M12 3 V6 H15" />
+    <line x1="7.5" y1="10" x2="12.5" y2="10" />
+    <line x1="7.5" y1="13" x2="11.5" y2="13" />
   `,
 }
 

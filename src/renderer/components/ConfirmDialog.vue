@@ -1,68 +1,62 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
 
-// Electron は window.prompt() を実装していないため、各画面はこれを使う。
-export type PromptOptions = {
-  label?: string
-  initial?: string
-  placeholder?: string
-  multiline?: boolean
-  okLabel?: string
+// OS の confirm() / alert() の代わり。確認の2択にも、複数ボタンの選択にも使う
+export type ConfirmChoice = {
+  label: string
+  value: string
+  tone?: 'primary' | 'danger' | 'ghost'
 }
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   open: boolean
   title: string
-  label?: string
-  initial?: string
-  placeholder?: string
-  multiline?: boolean
-  okLabel?: string
-}>(), {
-  okLabel: '決定',
-})
+  message?: string
+  choices: ConfirmChoice[]
+}>()
 
-const emit = defineEmits<{ submit: [value: string]; cancel: [] }>()
+const emit = defineEmits<{ choose: [value: string]; cancel: [] }>()
 
-const value = ref('')
-const inputEl = ref<HTMLInputElement | HTMLTextAreaElement | null>(null)
+const primaryBtn = ref<HTMLButtonElement | null>(null)
 let lastFocused: HTMLElement | null = null
 
-function submit() {
-  emit('submit', value.value)
+function choose(value: string) {
+  emit('choose', value)
 }
 
 function cancel() {
   emit('cancel')
 }
 
+// 明示指定が無ければ、最後の選択肢を主ボタン（primary）として扱う
+function toneOf(c: ConfirmChoice, isLast: boolean): 'primary' | 'danger' | 'ghost' {
+  return c.tone ?? (isLast ? 'primary' : 'ghost')
+}
+
+function setPrimaryRef(el: Element | null, isLast: boolean) {
+  if (isLast) primaryBtn.value = el as HTMLButtonElement | null
+}
+
 function onKeydown(e: KeyboardEvent) {
-  // 日本語入力の変換中（IME）の Enter / Esc は確定・取消の操作なので、ダイアログは反応しない
   if (e.isComposing || e.keyCode === 229) return
   if (e.key === 'Escape') {
     cancel()
     return
   }
   if (e.key === 'Enter') {
-    if (props.multiline) {
-      if (e.metaKey || e.ctrlKey) {
-        e.preventDefault()
-        submit()
-      }
-    } else {
+    const last = props.choices[props.choices.length - 1]
+    if (last) {
       e.preventDefault()
-      submit()
+      choose(last.value)
     }
   }
 }
 
 watch(() => props.open, async (isOpen) => {
   if (isOpen) {
-    value.value = props.initial ?? ''
     lastFocused = document.activeElement as HTMLElement | null
     await nextTick()
-    inputEl.value?.focus()
-    inputEl.value?.select()
+    primaryBtn.value?.focus()
   } else {
     lastFocused?.focus()
   }
@@ -77,35 +71,27 @@ watch(() => props.open, async (isOpen) => {
           class="panel"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="input-dialog-title"
+          aria-labelledby="confirm-dialog-title"
         >
           <header class="dialog-head">
-            <h2 id="input-dialog-title" class="dialog-title">{{ title }}</h2>
+            <h2 id="confirm-dialog-title" class="dialog-title">{{ title }}</h2>
           </header>
 
-          <div class="dialog-body">
-            <label class="field">
-              <span v-if="label">{{ label }}</span>
-              <textarea
-                v-if="multiline"
-                ref="inputEl"
-                v-model="value"
-                :placeholder="placeholder"
-                rows="4"
-              />
-              <input
-                v-else
-                ref="inputEl"
-                v-model="value"
-                type="text"
-                :placeholder="placeholder"
-              />
-            </label>
+          <div v-if="message" class="dialog-body">
+            <p class="message">{{ message }}</p>
           </div>
 
           <footer class="dialog-footer">
-            <button class="ghost" @click="cancel">キャンセル</button>
-            <button class="primary" @click="submit">{{ okLabel }}</button>
+            <button
+              v-for="(c, i) in choices" :key="c.value"
+              :ref="(el) => setPrimaryRef(el as Element | null, i === choices.length - 1)"
+              :class="{
+                primary: toneOf(c, i === choices.length - 1) === 'primary',
+                ghost: toneOf(c, i === choices.length - 1) === 'ghost',
+                'danger-solid': toneOf(c, i === choices.length - 1) === 'danger',
+              }"
+              @click="choose(c.value)"
+            >{{ c.label }}</button>
           </footer>
         </div>
       </div>
@@ -140,7 +126,7 @@ watch(() => props.open, async (isOpen) => {
 .dialog-title { margin: 0; font-size: var(--fs-16); font-weight: 600; }
 
 .dialog-body { padding: 16px 20px; overflow-y: auto; }
-.dialog-body textarea { resize: vertical; }
+.message { margin: 0; color: var(--text-dim); white-space: pre-line; }
 
 .dialog-footer {
   flex-shrink: 0;
@@ -149,6 +135,18 @@ watch(() => props.open, async (isOpen) => {
   gap: 8px;
   padding: 14px 20px;
   border-top: 1px solid var(--line);
+}
+
+/* button.danger は style.css では地のままの弱い赤文字。確認ダイアログの
+   破壊的操作は主ボタンとして塗りつぶした赤にする */
+.danger-solid {
+  background: var(--loss-solid);
+  border-color: var(--loss-solid);
+  color: #fff;
+}
+.danger-solid:hover:not(:disabled) {
+  background: var(--loss);
+  border-color: var(--loss);
 }
 
 /* 開閉とも 180ms でスクリムのフェード + パネルのスケール */

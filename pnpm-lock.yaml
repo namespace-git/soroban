@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@fontsource-variable/m-plus-2':
+        specifier: ^5.3.0
+        version: 5.3.0
       better-sqlite3:
         specifier: ^11.5.0
         version: 11.10.0
@@ -299,6 +302,9 @@ packages:
     engines: {node: '>=12'}
     cpu: [x64]
     os: [win32]
+
+  '@fontsource-variable/m-plus-2@5.3.0':
+    resolution: {integrity: sha512-Sp0zoiDdITPuGJTAxMMeHXSTg2Cgh2sVHVziX37Z3FCNb08NAqLL5L47wF9sIvjtu/KEropA+sReMpgXJGMy+A==}
 
   '@gar/promisify@1.1.3':
     resolution: {integrity: sha512-k2Ty1JcVojjJFwrg/ThKi2ujJ7XNLYaFGNB/bWT9wGR+oSMJHMa5w+CUq6p/pVrKeNNgA7pCqEcjSnHVoqJQFw==}
@@ -2462,6 +2468,8 @@ snapshots:
 
   '@esbuild/win32-x64@0.21.5':
     optional: true
+
+  '@fontsource-variable/m-plus-2@5.3.0': {}
 
   '@gar/promisify@1.1.3': {}
 

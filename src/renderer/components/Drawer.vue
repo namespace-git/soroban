@@ -80,7 +80,7 @@ watch(() => props.open, async (isOpen) => {
 .scrim {
   position: fixed;
   inset: 0;
-  background: rgba(31, 41, 51, .32);
+  background: rgba(38, 38, 42, .32);
   z-index: 100;
 }
 

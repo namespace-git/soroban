@@ -363,6 +363,38 @@ describe('db（:memory:）', () => {
     expect(purchases[0].subtotal).toBe(subtotal)
   })
 
+  it('listPurchases/getPurchase：first_line_name・first_model_codeは先頭明細（下書きで明細ゼロならnull）', () => {
+    const purchaseId = db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-02',
+      shipping_fee: 0,
+      lines: [
+        { name: 'クリームわん【Z080-1】', unit_price: 1000, quantity: 1 },
+        { name: 'いちごスフレ【Z072-8】', unit_price: 1500, quantity: 1 },
+        { name: 'シーソルト【Z001-4】', unit_price: 900, quantity: 1 },
+      ],
+    })
+
+    const summary = db.listPurchases().find(p => p.id === purchaseId)!
+    expect(summary.first_line_name).toBe('クリームわん【Z080-1】')
+    expect(summary.first_model_code).toBe('Z080-1')
+
+    const detail = db.getPurchase(purchaseId)
+    expect(detail.first_line_name).toBe('クリームわん【Z080-1】')
+    expect(detail.first_model_code).toBe('Z080-1')
+
+    const draftId = db.createPurchaseDraft({
+      import_key: 'empty-draft-1',
+      shop_account_id: shopId,
+      ordered_at: '2026-01-03',
+      lines: [],
+    })
+    const draftSummary = db.listPurchases().find(p => p.id === draftId)!
+    expect(draftSummary.first_line_name).toBeNull()
+    expect(draftSummary.first_model_code).toBeNull()
+    expect(db.getPurchase(draftId).first_line_name).toBeNull()
+  })
+
   it('createSale → linkInventory → listSaleLines / listSales の cost・gross_profit が正しい', () => {
     db.createPurchase({
       shop_account_id: shopId,
@@ -803,7 +835,7 @@ describe('db（:memory:）', () => {
     const saleId = db.createSale({ title: 'リセット対象', sold_at: '2026-01-05', price: 2000 })
     db.linkInventory(saleId, [item.id])
 
-    const runId = db.startRun()
+    const runId = db.startRun('mercari')
     db.finishRun(runId, 'ok', 1, 1)
 
     db.saveShippingMethod({ name: 'テスト発送方法', fee: 300 })
@@ -961,6 +993,48 @@ describe('db（:memory:）', () => {
     expect(db.listSales().find(s => s.id === manualId)!.source).toBe('manual')
   })
 
+  it('setSaleThumb：保存したファイル名が listSales / 紐付いた在庫の listInventory に soroban-thumb:// で出る。未紐付けの在庫はnull', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-01',
+      shipping_fee: 0,
+      lines: [
+        { name: 'クリームわん【Z080-1】', unit_price: 1000, quantity: 1 },
+        { name: 'いちごスフレ【Z088-2】', unit_price: 1200, quantity: 1 },
+      ],
+    })
+    const [linkedItem, otherItem] = db.listInventory('in_stock')
+
+    const saleId = db.createSale({ title: 'サムネイルテスト', sold_at: '2026-01-10', price: 2000 })
+    db.linkInventory(saleId, [linkedItem.id])
+
+    expect(db.listSales().find(s => s.id === saleId)!.thumb_url).toBeNull()
+
+    db.setSaleThumb(saleId, 'm8703.jpg')
+
+    expect(db.listSales().find(s => s.id === saleId)!.thumb_url).toBe('soroban-thumb://m8703.jpg')
+
+    const sold = db.listInventory('sold')
+    expect(sold.find(i => i.id === linkedItem.id)!.thumb_url).toBe('soroban-thumb://m8703.jpg')
+
+    // 未紐付けの在庫（in_stockのまま）は当然null
+    expect(db.listInventory('in_stock').find(i => i.id === otherItem.id)!.thumb_url).toBeNull()
+  })
+
+  it('salesWithoutThumb：thumb_fileがNULLの既存販売だけ返す（実DBに元からあった分にも後追いでサムネを付けるため）', () => {
+    db.insertCollected([
+      { mercariItemId: 'nt1', title: 'サムネ未保存', price: 1000, soldAt: '2026-01-01' },
+      { mercariItemId: 'nt2', title: 'サムネ保存済み', price: 1000, soldAt: '2026-01-02' },
+    ])
+    const withThumbId = db.listSales().find(s => s.mercari_item_id === 'nt2')!.id
+    db.setSaleThumb(withThumbId, 'nt2.jpg')
+
+    const targets = db.salesWithoutThumb(['nt1', 'nt2', 'no-such-id'])
+    expect(targets.map(t => t.mercariItemId)).toEqual(['nt1'])
+
+    expect(db.salesWithoutThumb([])).toEqual([])
+  })
+
   it('migrate：version2のDB→3でタグ機能が使えるようになる', () => {
     // version2状態（tag系テーブルが無いだけ）をファイルDB上で作り、initDbで3へ上げる
     const dir = mkdtempSync(join(tmpdir(), 'soroban-tag-migrate-'))
@@ -975,7 +1049,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('3')
+      expect(db.getSettings().schema_version).toBe('6')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1072,6 +1146,9 @@ describe('db（:memory:）', () => {
       expect(sale.unmatched).toBe(0)
 
       expect(db.listRuns()).toHaveLength(1)
+      // v4で足した列。既存行は既定値 'mercari' になる
+      expect(db.listRuns()[0].source).toBe('mercari')
+      expect(db.listRuns()[0].shop_account_id).toBeNull()
 
       // splitInventory が使える（status CHECK に 'split' が足されている）
       const children = db.splitInventory('i2', 2)
@@ -1093,7 +1170,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('3')
+      expect(db.getSettings().schema_version).toBe('6')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1105,5 +1182,118 @@ describe('db（:memory:）', () => {
       try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('createPurchaseDraft：order_no・shipping_fee・discount・unit_priceが取れていれば確定画面に前もって埋まる', () => {
+    const draftId = db.createPurchaseDraft({
+      import_key: 'order-100',
+      shop_account_id: shopId,
+      ordered_at: '2026-02-01',
+      order_no: 'ORDER-100',
+      shipping_fee: 300,
+      discount: 50,
+      lines: [{ name: 'いちごスフレ【Z072-8】', quantity: 2, unit_price: 800 }],
+    })
+    expect(draftId).not.toBe('')
+
+    const detail = db.getPurchase(draftId)
+    expect(detail.order_no).toBe('ORDER-100')
+    expect(detail.shipping_fee).toBe(300)
+    expect(detail.discount).toBe(50)
+    expect(detail.lines[0].unit_price).toBe(800)
+  })
+
+  it('createPurchase：import_keyが一致すればlistPurchasesに出る。同じkeyの2回目はthrow', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-02-01',
+      import_key: 'order-200',
+      lines: [{ name: '商品', unit_price: 1000, quantity: 1 }],
+    })
+
+    expect(db.listPurchases()[0].import_key).toBe('order-200')
+    expect(db.existingImportKeys(['order-200', 'no-such-key'])).toEqual(new Set(['order-200']))
+
+    expect(() => db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-02-02',
+      import_key: 'order-200',
+      lines: [{ name: '別の商品', unit_price: 500, quantity: 1 }],
+    })).toThrow('同じ注文が既に取り込まれています: order-200')
+
+    // 2回目が弾かれているので仕入は1件のまま
+    expect(db.listPurchases()).toHaveLength(1)
+  })
+
+  it('fulfillment：createPurchaseで指定した到着状態が仕入・在庫の両方に出て、updatePurchaseFulfillmentで更新できる', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-03-01',
+      import_key: 'mellojoy:#111',
+      fulfillment: 'pending',
+      lines: [{ name: '到着状態テスト', unit_price: 1000, quantity: 1 }],
+    })
+
+    expect(db.listPurchases()[0].fulfillment).toBe('pending')
+    expect(db.listInventory('in_stock')[0].fulfillment).toBe('pending')
+
+    // 一覧の状態が進んだら import_key で引いて更新できる（在庫側にも反映される）
+    const changed = db.updatePurchaseFulfillment('mellojoy:#111', 'delivered')
+    expect(changed).toBe(true)
+    expect(db.listPurchases()[0].fulfillment).toBe('delivered')
+    expect(db.listInventory('in_stock')[0].fulfillment).toBe('delivered')
+
+    // 同じ値なら false（変化なし）
+    expect(db.updatePurchaseFulfillment('mellojoy:#111', 'delivered')).toBe(false)
+
+    // 未知の import_key は false
+    expect(db.updatePurchaseFulfillment('mellojoy:#no-such', 'shipped')).toBe(false)
+  })
+
+  it('fulfillment：指定しなければ null。confirmPurchaseはfulfillmentに触らない', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-03-01',
+      lines: [{ name: 'fulfillment未指定', unit_price: 1000, quantity: 1 }],
+    })
+    expect(db.listPurchases()[0].fulfillment).toBeNull()
+
+    const draftId = db.createPurchaseDraft({
+      import_key: 'mellojoy:#222',
+      shop_account_id: shopId,
+      ordered_at: '2026-03-02',
+      fulfillment: 'shipped',
+      lines: [{ name: '下書きfulfillment', quantity: 1 }],
+    })
+    expect(db.getPurchase(draftId).fulfillment).toBe('shipped')
+
+    db.confirmPurchase(draftId, {
+      shop_account_id: shopId,
+      ordered_at: '2026-03-02',
+      shipping_fee: 0,
+      lines: [{ name: '下書きfulfillment', unit_price: 1000, quantity: 1 }],
+    })
+    // 確定時にfulfillmentを渡さなくても、下書きの値が保たれる（確定処理では触らない）
+    expect(db.getPurchase(draftId).fulfillment).toBe('shipped')
+  })
+
+  it('startRun：sourceとshop_account_idを渡すと、finishRun/listRunsにshop_account_nameまで付いて返る', () => {
+    const runId = db.startRun('mellojoy', shopId)
+    const finished = db.finishRun(runId, 'ok', 3, 3)
+    expect(finished.source).toBe('mellojoy')
+    expect(finished.shop_account_id).toBe(shopId)
+    expect(finished.shop_account_name).toBe('メロジョイA')
+
+    const listed = db.listRuns().find(r => r.id === runId)!
+    expect(listed.source).toBe('mellojoy')
+    expect(listed.shop_account_id).toBe(shopId)
+    expect(listed.shop_account_name).toBe('メロジョイA')
+
+    // shop_account_idを省略するとmercari収集と同じくnull
+    const mercariRunId = db.startRun('mercari')
+    const mercariRun = db.finishRun(mercariRunId, 'ok', 1, 1)
+    expect(mercariRun.source).toBe('mercari')
+    expect(mercariRun.shop_account_id).toBeNull()
+    expect(mercariRun.shop_account_name).toBeNull()
   })
 })

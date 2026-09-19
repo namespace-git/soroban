@@ -104,7 +104,14 @@ describe('collector（electronに依存しない部分）', () => {
         shippingFee: 215,
         otherCost: null,
         soldAt: '2026-09-19',
+        thumbUrl: null,
       })
+    })
+
+    it('thumbUrl を渡せばそのまま返す（省略時は null）', () => {
+      const url = 'https://static.mercdn.net/thumb/photos/m87039845554_1.jpg?123'
+      expect(parseSoldRow('/transaction/m87039845554', 'テスト商品', cells, url)?.thumbUrl).toBe(url)
+      expect(parseSoldRow('/transaction/m87039845554', 'テスト商品', cells)?.thumbUrl).toBeNull()
     })
 
     it('「---」は null（他費用）', () => {
@@ -144,6 +151,12 @@ describe('collector（electronに依存しない部分）', () => {
       expect(r.shippingFee).toBe(215)
       expect(r.otherCost).toBeNull()
       expect(r.soldAt).toBe('2026-09-19')
+    })
+
+    it('1行目：サムネイルURLを img[src] から拾う', () => {
+      expect(rows[0].thumbUrl).toBe(
+        'https://static.mercdn.net/thumb/photos/m87039845554_1.jpg?1789188498',
+      )
     })
 
     it('3行目（キャバドレス）は送料 0（着払いの実額）', () => {

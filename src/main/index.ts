@@ -1,10 +1,11 @@
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol } from 'electron'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { writeFileSync, copyFileSync } from 'node:fs'
 import * as db from './db'
 import * as collector from './collector'
 import * as collectorMellojoy from './collector-mellojoy'
-import type { SorobanApi } from '../shared/types'
+import type { CollectorRun, SorobanApi } from '../shared/types'
 
 // ============================================================
 // そろばん — メインプロセス
@@ -12,6 +13,17 @@ import type { SorobanApi } from '../shared/types'
 // 単一Electronアプリ。DBはローカルSQLite、外部サービスなし。
 // 収集は起動時（間隔が空いていれば）と手動ボタンで走る。
 // ============================================================
+
+// 保存したサムネイルを画面（<img src>）から読ませるための独自スキーム。
+// app.whenReady() より前（トップレベル）で登録しないと反映されない。
+// standard: true にするとホスト部が小文字化されるが、ファイル名は
+// `m` + 数字 + `.jpg`（collector.ts が生成）なので影響しない
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'soroban-thumb',
+    privileges: { standard: true, secure: true, supportFetchAPI: false, bypassCSP: false },
+  },
+])
 
 let mainWindow: BrowserWindow | null = null
 
@@ -37,6 +49,34 @@ function createMainWindow(): void {
   }
 
   mainWindow.on('closed', () => { mainWindow = null })
+}
+
+// ------------------------------------------------------------
+// 収集：メルカリ→有効な仕入先アカウント（メロジョイ）の順に直列で走る。
+// 1つが失敗しても次へ進む（例外は畳んで返す設計だが、念のためここでも囲う）。
+// ------------------------------------------------------------
+
+async function collectAll(silent: boolean): Promise<CollectorRun[]> {
+  const runs: CollectorRun[] = []
+
+  try {
+    runs.push(await collector.collect(silent))
+  } catch (e) {
+    console.error('メルカリの収集に失敗しました', e)
+  }
+
+  const shopAccounts = db.listShopAccounts()
+    .filter(a => a.is_active && a.kind === 'mellojoy')
+
+  for (const account of shopAccounts) {
+    try {
+      runs.push(await collectorMellojoy.collectShopOrders(account.id, silent))
+    } catch (e) {
+      console.error(`仕入先「${account.name}」の収集に失敗しました`, e)
+    }
+  }
+
+  return runs
 }
 
 // ------------------------------------------------------------
@@ -103,7 +143,7 @@ function registerIpc(): void {
   handle('getSettings', () => db.getSettings())
   handle('setSetting', (k, v) => db.setSetting(k, v))
 
-  handle('collect', () => collector.collect(false))
+  handle('collect', () => collectAll(false))
   handle('openLogin', () => collector.openLoginWindow())
   handle('openShopLogin', (id) => collectorMellojoy.openShopLoginWindow(id))
   handle('listRuns', (limit) => db.listRuns(limit))
@@ -144,6 +184,32 @@ function registerIpc(): void {
   handle('resetData', () => db.resetData())
 }
 
+/**
+ * soroban-thumb://<file> を userData/thumbs/<file> に対応させる（collector.ts が保存した画像を読む）。
+ *
+ * ファイル名の取り出しは `new URL(req.url).hostname` ではなく文字列操作でやる。
+ * standard スキームは Web の URL パーサに則って解釈されるため、ホスト部は
+ * 仕様上小文字化される（テストでは確かめられない部分）。ファイル名は
+ * collector.ts が `m` + 数字 + `.jpg` の形でしか作らないので実害は無いが、
+ * `req.url.slice(...).split(/[/?#]/)[0]` の方が「大文字小文字化されるURLパーサの癖」に
+ * 依存しない分だけ安全と判断した。
+ */
+function registerThumbProtocol(): void {
+  protocol.handle('soroban-thumb', async (req) => {
+    const file = req.url.slice('soroban-thumb://'.length).split(/[/?#]/)[0]
+    // 親ディレクトリへの脱出やパス区切りを含む名前は拒否する
+    if (!file || file.includes('..') || file.includes('/') || file.includes('\\')) {
+      return new Response(null, { status: 404 })
+    }
+    const filePath = join(app.getPath('userData'), 'thumbs', file)
+    try {
+      return await net.fetch(pathToFileURL(filePath).toString())
+    } catch {
+      return new Response(null, { status: 404 })
+    }
+  })
+}
+
 // ------------------------------------------------------------
 // 起動
 // ------------------------------------------------------------
@@ -161,6 +227,7 @@ app.whenReady().then(async () => {
     return
   }
   collector.ensureSession()
+  registerThumbProtocol()
   registerIpc()
   createMainWindow()
 
@@ -171,9 +238,12 @@ app.whenReady().then(async () => {
 
 async function collectInBackground(): Promise<void> {
   try {
-    const run = await collector.collectIfDue()
-    if (run && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('collect:done', run)
+    const intervalH = Number(db.getSettings().collect_interval_h ?? 1)
+    if (db.hoursSinceLastOk() < intervalH) return
+
+    const runs = await collectAll(true)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('collect:done', runs)
     }
   } catch {
     // 起動を妨げない。失敗は collector_run に残る

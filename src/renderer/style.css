@@ -1,51 +1,68 @@
 /* ============================================================
    そろばん — デザイントークン
 
-   日本の業務SaaS標準（マネーフォワード クラウド級）。
-   ライト。地は寒色グレー、コンテンツは白面、罫で区切る。
+   「Milestone 風」の温かい帳簿。地は温かい薄グレー、コンテンツは
+   白い角丸カード。ブランド色は黄色（バッジ・アクティブ・主役カード）。
+   利益＝緑／損失＝赤／要対応＝橙の意味色は維持する。
    数字は tabular-nums で右端の1本の軸に揃える。
-   16進はここ以外に書かない。意味のある名前で参照する。
+   16進はここ（:root）以外に書かない。意味のある名前で参照する。
    ============================================================ */
 
 :root {
   /* 面 */
-  --canvas:        #f3f5f8;   /* 画面の地。薄い寒色グレー */
+  --canvas:        #f6f6f3;   /* 画面の地。温かい薄グレー */
   --surface:       #ffffff;   /* コンテンツ面 */
-  --surface-hi:    #f7f9fc;   /* hover・選択行・サブ面 */
-  --surface-nav:   #ffffff;   /* サイドナビ（右に1px罫） */
-  --line:          #dfe4ea;   /* 罫 */
-  --line-soft:     #eaeef3;   /* 表の行罫 */
+  --surface-hi:    #f3f2ee;   /* hover・選択行・副ボタン */
+  --surface-nav:   #ffffff;   /* サイドナビ */
+  --line:          #e6e4dd;   /* 罫（表の行・入力枠） */
+  --line-soft:     #efede8;   /* 表の行罫 */
 
-  /* インク（グレー地ではなく地色から導く寒色スレート） */
-  --text:          #1f2933;
-  --text-dim:      #52606d;
-  --text-faint:    #7b8794;
+  /* インク */
+  --text:          #26262a;
+  --text-dim:      #63636a;
+  --text-faint:    #97979e;
 
-  /* ブランド青：主ボタン・選択・フォーカスにだけ */
-  --accent:        #2b62c7;
-  --accent-hover:  #2453ab;
-  --accent-soft:   #e8effb;   /* 選択行・アクティブナビの地 */
+  /* ブランド黄：バッジ・アクティブ・主役カード・帯。文字色には使わない（コントラスト不足） */
+  --brand:         #f5c842;
+  --brand-hover:   #ebb92a;
+  --brand-soft:    #fff6dd;   /* クリーム。副次カード・選択行 */
+  --brand-ink:     #7a5a00;   /* クリーム地の上の文字（4.5:1） */
+
+  /* 主ボタン＝チャコール */
+  --primary:       #2b2b30;
+  --primary-hover: #17171a;
+
+  /* 旧 --accent 系は後方互換で残す（青ではなく黄／黒に寄せる） */
+  --accent:        var(--primary);
+  --accent-hover:  var(--primary-hover);
+  --accent-soft:   var(--brand-soft);
 
   /* 意味色（数字とチップに限定。装飾に使わない） */
-  --profit:        #1e7f47;
-  --profit-bg:     #e6f4ea;
-  --loss:          #c8322b;
-  --loss-bg:       #fbe9e7;
-  --warn:          #9a6700;   /* 琥珀の文字。白地で 4.5:1 を満たす */
-  --warn-bg:       #fff4d6;
-  --warn-line:     #e6b84a;
+  --profit:        #2f9e5a;   /* 文字用 */
+  --profit-bg:     #e6f6ec;
+  --profit-solid:  #3aa25c;   /* ピル（白字） */
+  --loss:          #d9463f;
+  --loss-bg:       #fdeceb;
+  --loss-solid:    #e04a42;
+  --warn:          #b45f06;   /* 要対応＝橙。ブランドの黄と区別する */
+  --warn-bg:       #fff0e0;
+  --warn-line:     #f2b26b;
+  --warn-solid:    #e07a12;
+  --info:          #2f6fcf;
+  --info-bg:       #e8f0fc;
 
-  --radius:        6px;
-  --radius-sm:     4px;
-  --shadow-1:      0 1px 2px rgba(31,41,51,.06);
-  --shadow-2:      0 8px 24px rgba(31,41,51,.14), 0 2px 6px rgba(31,41,51,.08);
+  --radius:        14px;      /* カード */
+  --radius-md:     10px;      /* 入力・小さいカード */
+  --radius-sm:     8px;
+  --shadow-1:      0 2px 10px rgba(40,35,20,.06);
+  --shadow-2:      0 12px 32px rgba(40,35,20,.14), 0 2px 8px rgba(40,35,20,.06);
 
-  --font: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  --font: "M PLUS 2 Variable", "Hiragino Sans", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;  /* 同梱の M PLUS 2（main.ts で import） */
 
-  --fs-12: 12px; --fs-13: 13px; --fs-14: 14px; --fs-16: 16px; --fs-20: 20px; --fs-28: 28px;
+  --fs-11: 11px; --fs-12: 12px; --fs-13: 13px; --fs-14: 14px; --fs-16: 16px; --fs-20: 20px; --fs-28: 28px; --fs-36: 36px; --fs-44: 44px;
 
-  --nav-w:    220px;
-  --topbar-h: 48px;
+  --nav-w:    88px;
+  --topbar-h: 56px;
   --ease:     cubic-bezier(.2,.8,.2,1);
   --dur:      180ms;
 }
@@ -68,7 +85,7 @@ body {
 
 /* --- ブラウザ既定面もテーマする --- */
 
-::selection { background: var(--accent-soft); color: var(--accent-hover); }
+::selection { background: var(--brand-soft); color: var(--brand-ink); }
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -113,8 +130,12 @@ input, textarea { caret-color: var(--accent); }
 /* --- レイアウト --- */
 
 .page {
-  max-width: 1100px;
   padding: 24px 28px;
+}
+
+/* フォーム中心の画面（設定）だけは今までの幅を保つ。他は画面幅に追従する */
+.page.narrow {
+  max-width: 1100px;
 }
 
 .page-head {
@@ -127,7 +148,7 @@ input, textarea { caret-color: var(--accent); }
 
 .page-title {
   font-size: var(--fs-20);
-  font-weight: 600;
+  font-weight: 700;
   margin: 0;
 }
 
@@ -147,9 +168,9 @@ input, textarea { caret-color: var(--accent); }
 
 .panel, .card {
   background: var(--surface);
-  border: 1px solid var(--line);
+  border: none;
   border-radius: var(--radius);
-  padding: 16px 20px;
+  padding: 20px 24px;
   box-shadow: var(--shadow-1);
 }
 .panel + .panel, .card + .card { margin-top: 16px; }
@@ -162,7 +183,7 @@ input, textarea { caret-color: var(--accent); }
   margin: 0 0 12px;
 }
 
-/* --- 統計 --- */
+/* --- 統計（既存の横並び。ホーム等は順次 .stat-card に移行） --- */
 
 .stats {
   display: grid;
@@ -176,34 +197,109 @@ input, textarea { caret-color: var(--accent); }
 .stat-label { font-size: var(--fs-12); color: var(--text-dim); }
 .stat-value {
   font-size: var(--fs-20);
-  font-weight: 600;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 .stat-value.lg { font-size: var(--fs-28); }
 .stat-sub { font-size: var(--fs-12); color: var(--text-faint); }
+
+/* --- 数字のカード（黄／クリームの主役カード） --- */
+
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 20px 22px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+.stat-card-label {
+  font-size: var(--fs-12);
+  color: var(--text-dim);
+}
+.stat-card-value {
+  font-size: var(--fs-36);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  white-space: nowrap;
+}
+.stat-card-sub {
+  font-size: var(--fs-12);
+  color: var(--text-faint);
+}
+.stat-card.brand {
+  background: var(--brand);
+  box-shadow: none;
+}
+.stat-card.brand .stat-card-label,
+.stat-card.brand .stat-card-value,
+.stat-card.brand .stat-card-sub {
+  color: var(--text);
+}
+.stat-card.cream {
+  background: var(--brand-soft);
+  box-shadow: none;
+}
+.stat-card.cream .stat-card-label,
+.stat-card.cream .stat-card-sub {
+  color: var(--brand-ink);
+}
+.stat-card.cream .stat-card-value {
+  color: var(--text);
+}
+
+/* --- セクション見出し（黄色い丸アイコン＋タイトル＋右端アクション） --- */
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.section-head-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--brand);
+  color: var(--text);
+  flex-shrink: 0;
+}
+.section-head-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-16);
+  font-weight: 600;
+  margin: 0;
+}
 
 /* --- ボタン --- */
 
 button {
   font: inherit;
   color: var(--text);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 6px 12px;
-  height: 32px;
+  background: var(--surface-hi);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0 16px;
+  height: 36px;
   cursor: pointer;
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-button:hover:not(:disabled) { background: var(--surface-hi); }
+button:hover:not(:disabled) { background: var(--line-soft); }
 button:disabled { opacity: .45; cursor: default; }
 
 button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--primary);
+  border-color: var(--primary);
   color: #fff;
+  padding: 0 18px;
 }
-button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+button.primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
 
 button.ghost {
   background: transparent;
@@ -215,8 +311,8 @@ button.ghost:hover:not(:disabled) { background: var(--surface-hi); }
 button.danger { color: var(--loss); }
 
 button.sm {
-  padding: 3px 8px;
-  height: auto;
+  padding: 0 10px;
+  height: 28px;
   font-size: var(--fs-13);
 }
 
@@ -236,20 +332,20 @@ input, select, textarea {
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 6px 10px;
-  height: 32px;
+  border-radius: var(--radius-md);
+  padding: 6px 12px;
+  height: 36px;
   transition: border-color var(--dur) var(--ease);
 }
 textarea { height: auto; }
 input:focus, select:focus, textarea:focus {
-  border-color: var(--accent);
+  border-color: var(--brand);
 }
 input[type="number"] { text-align: right; font-variant-numeric: tabular-nums; }
-/* チェックボックスは高さ 32px の枠を継がない。色はブランド青 */
+/* チェックボックスは高さを継がない。色はブランドの黄 */
 input[type="checkbox"], input[type="radio"] {
   width: 14px; height: 14px; padding: 0; margin: 0;
-  accent-color: var(--accent);
+  accent-color: var(--brand);
   flex-shrink: 0;
 }
 
@@ -277,11 +373,11 @@ label.field {
 table { width: 100%; border-collapse: collapse; }
 th {
   text-align: left;
-  font-weight: 500;
+  font-weight: 600;
   font-size: var(--fs-12);
   color: var(--text-dim);
   padding: 8px 12px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--line-soft);
   background: var(--surface);
   position: sticky;
   top: 0;
@@ -305,6 +401,57 @@ tr:hover td.actions { color: var(--text-dim); }
 
 table.compact td { padding: 6px 12px; }
 
+/* 合計行：損益の意味色を帯で強調する */
+.total-row,
+tr.total-row > td {
+  background: var(--profit-bg);
+  color: var(--profit);
+  font-weight: 700;
+}
+.total-row.loss,
+tr.total-row.loss > td {
+  background: var(--loss-bg);
+  color: var(--loss);
+}
+
+/* --- 行内の状態（売上・在庫・仕入で共通）---
+   商品セルは3段：商品名 → 状態チップの列（chip-row）→ メモ（note-row）。
+   意味のまとまりで分けることで、商品名の続きにメモが見えないようにする。 */
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.note-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 4px;
+  min-width: 0;
+}
+.note-row .icon-note {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  margin-top: 1px;
+}
+.note-row .note-label {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-size: var(--fs-12);
+  padding-top: 1px;
+}
+.note-row .note-text {
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-13);
+  white-space: normal;
+  word-break: break-word;
+}
+
 /* --- バッジ / チップ --- */
 
 .badge {
@@ -319,6 +466,19 @@ table.compact td { padding: 6px 12px; }
 .badge.warn     { color: var(--warn); background: var(--warn-bg); }
 .badge.ok       { color: var(--profit); background: var(--profit-bg); }
 .badge.personal { color: var(--accent); background: var(--accent-soft); }
+
+/* 汎用ピル（中立）。プラン名・小さな注記など */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--surface-hi);
+  white-space: nowrap;
+}
 
 /* --- 空状態 --- */
 
@@ -338,13 +498,21 @@ table.compact td { padding: 6px 12px; }
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 16px;
+  padding: 9px 18px;
   font-size: var(--fs-13);
-  border-bottom: 1px solid var(--line);
+  color: #fff;
+  background: var(--primary);
+  border-radius: 999px;
+  box-shadow: var(--shadow-1);
 }
-.toast.ok   { background: var(--profit-bg); color: var(--profit); }
-.toast.warn { background: var(--warn-bg); color: var(--warn); }
-.toast button { margin-left: auto; }
+.toast .toast-warn-icon { color: var(--warn-solid); }
+.toast button {
+  margin-left: auto;
+  color: #fff;
+  background: transparent;
+  border-color: transparent;
+}
+.toast button:hover:not(:disabled) { background: rgba(255,255,255,.16); }
 
 /* --- ナビ --- */
 

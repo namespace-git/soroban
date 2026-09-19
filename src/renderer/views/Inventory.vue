@@ -2,6 +2,7 @@
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
 import type { InventoryItem, InventoryStatus, Tag } from '../../shared/types'
 import type { PromptOptions } from '../components/InputDialog.vue'
+import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
@@ -16,8 +17,23 @@ const loaded = ref(false)
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
+const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
+const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 
 const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
+
+// --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
+const thumbFailed = ref<Set<string>>(new Set())
+function showThumb(i: InventoryItem): boolean {
+  return !!i.thumb_url && !thumbFailed.value.has(i.id)
+}
+function onThumbError(id: string) {
+  thumbFailed.value = new Set(thumbFailed.value).add(id)
+}
+function placeholderChar(i: InventoryItem): string {
+  const c = i.model_code?.[0] ?? i.name.trim().charAt(0)
+  return (c || '?').toUpperCase()
+}
 
 async function load() {
   items.value = await window.soroban.listInventory(status.value)
@@ -74,7 +90,7 @@ async function onTagCreate(name: string) {
 
 async function dispose(item: InventoryItem, target: 'disposed' | 'personal_use') {
   const label = target === 'personal_use' ? '自家消費' : '廃棄'
-  if (!confirm(`「${item.name}」を${label}として在庫から外しますか？`)) return
+  if (!await confirmDialog(`「${item.name}」を${label}として在庫から外しますか？`, { okLabel: `${label}にする` })) return
   await window.soroban.disposeInventory(item.id, label, target)
   await load()
   changed()
@@ -85,13 +101,16 @@ async function split(item: InventoryItem) {
   if (input === null) return
   const n = Number(input)
   if (!Number.isInteger(n) || n < 2) return
-  if (!confirm(`「${item.name}」を${n}点に分割しますか？ 原価 ${yen(item.landed_cost)} を等分します`)) return
+  if (!await confirmDialog(
+    `「${item.name}」を${n}点に分割しますか？`,
+    { message: `原価 ${yen(item.landed_cost)} を等分します`, okLabel: '分割する' },
+  )) return
   try {
     await window.soroban.splitInventory(item.id, n)
     await load()
     changed()
   } catch (e) {
-    alert((e as Error).message)
+    toast((e as Error).message, 'warn')
   }
 }
 
@@ -105,7 +124,7 @@ async function editModelCode(item: InventoryItem) {
     return
   }
   if (!MODEL_CODE_RE.test(trimmed)) {
-    alert('型番の形式が違います（例：Z078-2）')
+    toast('型番の形式が違います（例：Z078-2）', 'warn')
     return
   }
   await window.soroban.updateInventory(item.id, { model_code: trimmed, series_code: trimmed.split('-')[0] })
@@ -147,6 +166,7 @@ async function editNote(item: InventoryItem) {
       <table v-else-if="items.length">
         <thead>
           <tr>
+            <th class="col-thumb"></th>
             <th>商品</th>
             <th>仕入先</th>
             <th>仕入日</th>
@@ -157,16 +177,34 @@ async function editNote(item: InventoryItem) {
         </thead>
         <tbody>
           <tr v-for="i in filteredItems" :key="i.id">
+            <td class="thumb-cell">
+              <img
+                v-if="showThumb(i)"
+                class="thumb"
+                :src="i.thumb_url!"
+                alt=""
+                loading="lazy"
+                @error="onThumbError(i.id)"
+              />
+              <span v-else class="thumb-placeholder">{{ placeholderChar(i) }}</span>
+            </td>
             <td class="item-cell">
-              <div class="item-row">
-                <StatusChip v-if="i.model_code" tone="neutral" :label="i.model_code" @click="i.status === 'in_stock' && editModelCode(i)" :class="{ clickable: i.status === 'in_stock' }" />
+              <div class="item-name" :title="i.name">{{ i.name }}</div>
+              <div class="chip-row">
+                <StatusChip
+                  v-if="i.model_code" tone="neutral" :label="i.model_code"
+                  @click="i.status === 'in_stock' && editModelCode(i)"
+                  :class="{ clickable: i.status === 'in_stock' }"
+                />
                 <button v-else-if="i.status === 'in_stock'" class="sm ghost" @click="editModelCode(i)">型番</button>
-                <span class="item-name" :title="i.name">{{ i.name }}</span>
-                <span v-if="i.parent_id" class="faint" style="font-size: 12px">分割</span>
-              </div>
-              <div v-if="i.tags.length || i.note" class="item-meta">
+                <StatusChip v-if="i.fulfillment === 'pending' || i.fulfillment === 'shipped'" tone="info" label="未着" />
+                <StatusChip v-if="i.parent_id" tone="neutral" label="分割" />
                 <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
-                <span v-if="i.note" class="faint note" :title="i.note">{{ i.note }}</span>
+              </div>
+              <div v-if="i.note" class="note-row">
+                <Icon name="note" :size="14" class="icon-note" />
+                <span class="note-label">メモ</span>
+                <span class="note-text">{{ i.note }}</span>
               </div>
             </td>
             <td class="faint">{{ i.shop_account_name ?? '—' }}</td>
@@ -209,34 +247,40 @@ async function editNote(item: InventoryItem) {
 <style scoped>
 .table-panel { padding: 0; overflow: hidden; }
 .table-panel table { table-layout: fixed; }
-.table-panel th:nth-child(1) { width: 32%; min-width: 260px; }
-.table-panel th:nth-child(2) { width: 18%; }
-.table-panel th:nth-child(3) { width: 14%; }
-.table-panel th:nth-child(4) { width: 12%; }
+.table-panel th.col-thumb { width: 64px; }
+.table-panel th:nth-child(2) { width: 32%; min-width: 260px; }
+.table-panel th:nth-child(3) { width: 18%; }
+.table-panel th:nth-child(4) { width: 14%; }
 .table-panel th:nth-child(5) { width: 12%; }
+.table-panel th:nth-child(6) { width: 12%; }
 .table-panel th:last-child,
 .table-panel td.actions { width: 300px; white-space: nowrap; }
-.table-panel .actions { display: flex; justify-content: flex-end; gap: 4px; }
+.table-panel .actions > * { vertical-align: middle; margin-left: 4px; }
 .table-panel .actions button { white-space: nowrap; }
 .table-panel .clickable { cursor: pointer; }
-.table-panel .item-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.table-panel .item-row > * { flex-shrink: 0; }
 .table-panel .item-name {
-  flex-shrink: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: var(--fs-14);
+  font-weight: 500;
+  white-space: normal;
+  word-break: break-word;
 }
-.table-panel .item-meta { display: flex; align-items: center; gap: 4px; min-width: 0; margin-top: 2px; }
-.table-panel .item-meta > * { flex-shrink: 0; }
-.table-panel .note {
-  flex-shrink: 1;
-  min-width: 0;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+
+.thumb-cell { padding-right: 4px; }
+.thumb, .thumb-placeholder {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.thumb { object-fit: cover; display: block; }
+.thumb-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-weight: 700;
+  font-size: var(--fs-14);
 }
 
 @media (max-width: 1099px) {

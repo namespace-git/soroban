@@ -5,8 +5,12 @@ import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
+import type { ConfirmChoice } from '../components/ConfirmDialog.vue'
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
+const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
+const choose = inject<(title: string, choices: ConfirmChoice[], opts?: { message?: string }) => Promise<string | null>>('choose')!
+const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 
@@ -63,7 +67,7 @@ async function addMethod() {
   if (feeInput === null) return
   const fee = Number(feeInput)
   if (!Number.isFinite(fee)) {
-    alert('送料は数字で入力してください')
+    toast('送料は数字で入力してください', 'warn')
     return
   }
   await window.soroban.saveShippingMethod({ name, fee, sort_order: 50 })
@@ -71,7 +75,7 @@ async function addMethod() {
 }
 
 async function removeMethod(m: ShippingMethod) {
-  if (!confirm(`「${m.name}」を一覧から外しますか？`)) return
+  if (!await confirmDialog(`「${m.name}」を一覧から外しますか？`, { okLabel: '外す', danger: true })) return
   await window.soroban.deleteShippingMethod(m.id)
   await load()
 }
@@ -102,8 +106,13 @@ function openShopLogin(id: string) {
 async function addShopAccount() {
   const name = await ask('仕入先の名前', { placeholder: '例：メロジョイA' })
   if (!name) return
-  const isMellojoy = confirm('メロジョイのアカウントですか？（いいえ = TikTok Shop など）')
-  await window.soroban.createShopAccount(name, isMellojoy ? 'mellojoy' : 'other')
+  const kind = await choose('種別', [
+    { label: 'その他', value: 'other', tone: 'ghost' },
+    { label: 'TikTok Shop', value: 'tiktok', tone: 'ghost' },
+    { label: 'メロジョイ', value: 'mellojoy' },
+  ])
+  if (!kind) return
+  await window.soroban.createShopAccount(name, kind as ShopAccountKind)
   accounts.value = await window.soroban.listShopAccounts()
   changed()
 }
@@ -129,13 +138,17 @@ async function toggleAccountActive(a: ShopAccount) {
 }
 
 async function removeAccount(a: ShopAccount) {
-  if (!confirm(`「${a.name}」を削除しますか？ ログイン状態も消えます`)) return
+  if (!await confirmDialog(`「${a.name}」を削除しますか？`, {
+    message: 'ログイン状態も消えます',
+    okLabel: '削除する',
+    danger: true,
+  })) return
   try {
     await window.soroban.deleteShopAccount(a.id)
     accounts.value = await window.soroban.listShopAccounts()
     changed()
   } catch (e) {
-    alert((e as Error).message)
+    toast((e as Error).message, 'warn')
   }
 }
 
@@ -147,7 +160,7 @@ async function addTag() {
     tags.value = await window.soroban.listTags()
     changed()
   } catch (e) {
-    alert((e as Error).message)
+    toast((e as Error).message, 'warn')
   }
 }
 
@@ -159,12 +172,16 @@ async function renameTag(t: Tag) {
     tags.value = await window.soroban.listTags()
     changed()
   } catch (e) {
-    alert((e as Error).message)
+    toast((e as Error).message, 'warn')
   }
 }
 
 async function deleteTag(t: Tag) {
-  if (!confirm(`「${t.name}」を消しますか？ 付いている販売・在庫からも外れます`)) return
+  if (!await confirmDialog(`「${t.name}」を消しますか？`, {
+    message: '付いている販売・在庫からも外れます',
+    okLabel: '削除する',
+    danger: true,
+  })) return
   await window.soroban.deleteTag(t.id)
   tags.value = await window.soroban.listTags()
   changed()
@@ -174,7 +191,7 @@ async function resetData() {
   const input = await ask('確認のため「初期化」と入力してください', { placeholder: '初期化' })
   if (input !== '初期化') return
   await window.soroban.resetData()
-  alert('取引データを消しました')
+  toast('取引データを消しました', 'ok')
   changed()
 }
 
@@ -184,7 +201,7 @@ const runLabel: Record<string, string> = {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page narrow">
     <div class="page-head">
       <h1 class="page-title">設定</h1>
       <span class="grow" />
@@ -198,7 +215,10 @@ const runLabel: Record<string, string> = {
     <template v-else>
       <!-- 手数料 -->
       <div class="panel">
-        <p class="panel-title">手数料</p>
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
+          <h2 class="section-head-title">手数料</h2>
+        </div>
         <div class="fields">
           <label class="field">
             <span>メルカリ販売手数料（%）</span>
@@ -229,7 +249,10 @@ const runLabel: Record<string, string> = {
 
       <!-- 発送方法 -->
       <div class="panel table-panel">
-        <p class="panel-title">発送方法</p>
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="external" :size="16" /></span>
+          <h2 class="section-head-title">発送方法</h2>
+        </div>
         <table class="compact">
           <thead>
             <tr><th>名前</th><th>配送サービス</th><th class="num">送料</th><th></th></tr>
@@ -262,7 +285,10 @@ const runLabel: Record<string, string> = {
 
       <!-- 在庫 -->
       <div class="panel">
-        <p class="panel-title">在庫</p>
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="inventory" :size="16" /></span>
+          <h2 class="section-head-title">在庫</h2>
+        </div>
         <div class="fields">
           <label class="field">
             <span>長期滞留とみなす日数</span>
@@ -277,7 +303,10 @@ const runLabel: Record<string, string> = {
 
       <!-- 取り込み -->
       <div class="panel">
-        <p class="panel-title">取り込み</p>
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="refresh" :size="16" /></span>
+          <h2 class="section-head-title">取り込み</h2>
+        </div>
         <div class="fields">
           <label class="field">
             <span>自動取り込みの間隔（時間）</span>
@@ -300,11 +329,12 @@ const runLabel: Record<string, string> = {
         <p class="panel-title runs-title">実行履歴</p>
         <table class="compact">
           <thead>
-            <tr><th>日時</th><th>結果</th><th class="num">取得</th><th class="num">追加</th><th>メモ</th></tr>
+            <tr><th>日時</th><th class="col-target">対象</th><th>結果</th><th class="num">取得</th><th class="num">追加</th><th>メモ</th></tr>
           </thead>
           <tbody>
             <tr v-for="r in runs" :key="r.id">
               <td class="faint">{{ new Date(r.started_at).toLocaleString('ja-JP') }}</td>
+              <td class="faint col-target">{{ r.source === 'mercari' ? 'メルカリ' : (r.shop_account_name ?? 'メロジョイ') }}</td>
               <td>
                 <StatusChip
                   :tone="r.status === 'ok' ? 'ok' : 'warn'"
@@ -322,7 +352,10 @@ const runLabel: Record<string, string> = {
 
       <!-- メルカリ -->
       <div class="panel">
-        <p class="panel-title">メルカリ</p>
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="login" :size="16" /></span>
+          <h2 class="section-head-title">メルカリ</h2>
+        </div>
         <div class="row">
           <button @click="openLogin"><Icon name="login" :size="16" /> メルカリにログイン</button>
           <p class="faint">初回だけ。以後はセッションを再利用します</p>
@@ -342,7 +375,10 @@ const runLabel: Record<string, string> = {
 
       <!-- 仕入先 -->
       <div class="panel">
-        <p class="panel-title">仕入先</p>
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="purchase" :size="16" /></span>
+          <h2 class="section-head-title">仕入先</h2>
+        </div>
         <table class="compact accounts-table">
           <thead>
             <tr><th>名前</th><th>種別</th><th></th></tr>
@@ -379,13 +415,16 @@ const runLabel: Record<string, string> = {
         </p>
         <p class="faint hint">
           メロジョイはアカウントごとに別のブラウザプロファイルでログインします。ログイン状態は保存され、次回から入力は不要です。
-          パスワードはアプリに保存しません。注文履歴の取り込みは準備中です。
+          パスワードはアプリに保存しません。「取り込む」でメルカリのあとに注文履歴を読み、合計が合う注文はそのまま仕入に入ります。
         </p>
       </div>
 
       <!-- タグ -->
       <div class="panel">
-        <p class="panel-title">タグ</p>
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="note" :size="16" /></span>
+          <h2 class="section-head-title">タグ</h2>
+        </div>
         <table class="compact">
           <thead>
             <tr><th>名前</th><th></th></tr>
@@ -413,7 +452,10 @@ const runLabel: Record<string, string> = {
 
       <!-- データ -->
       <div class="panel">
-        <p class="panel-title">データ</p>
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="folder" :size="16" /></span>
+          <h2 class="section-head-title">データ</h2>
+        </div>
         <p class="faint hint">
           データはこのPCの中だけにあります。壊れたら戻せないので、
           月に1回はバックアップを取ってください。
@@ -440,6 +482,7 @@ const runLabel: Record<string, string> = {
 
 .table-panel { padding: 0; overflow: hidden; }
 .table-panel .panel-title { padding: 16px 20px 0; margin: 0 0 12px; }
+.table-panel .section-head { padding: 16px 20px 0; margin-bottom: 12px; }
 .table-panel table { margin: 0; }
 
 .table-panel td input {
@@ -467,6 +510,7 @@ const runLabel: Record<string, string> = {
 
 .runs-title { margin-top: 16px; }
 .small { font-size: var(--fs-12); }
+.col-target { width: 96px; }
 
 .danger-zone {
   margin-top: 16px;
@@ -477,7 +521,10 @@ const runLabel: Record<string, string> = {
 .add-row { margin: 12px 0 0; }
 .add-row button { display: inline-flex; align-items: center; gap: 6px; }
 
-.name-cell { display: flex; align-items: center; gap: 8px; }
+/* td は table-cell のまま（display:flex にするとセルとして計算されなくなり、
+   名前セルの位置がずれる）。中身側で縦位置と間隔を合わせる */
+.name-cell > * { vertical-align: middle; }
+.name-cell > * + * { margin-left: 8px; }
 
 .accounts-table select {
   border-color: transparent;

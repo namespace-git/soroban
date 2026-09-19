@@ -15,6 +15,8 @@ const accounts = ref<ShopAccount[]>([])
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
+const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
+const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const showForm = ref(false)
 const loaded = ref(false)
 /** 下書きを確定中の仕入 id。null なら新規登録 */
@@ -33,6 +35,15 @@ const form = ref({
 })
 
 const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
+
+// --- サムネイル。仕入は画像を持たないためプレースホルダのみ
+//     （代表商品の型番の頭文字。無ければ商品名の頭文字、それも無ければ「—」） ---
+function placeholderChar(p: PurchaseSummary): string {
+  if (p.first_model_code) return p.first_model_code.charAt(0)
+  const name = p.first_line_name?.trim()
+  if (name) return name.charAt(0)
+  return '—'
+}
 
 /** 下書きを一覧の先頭に（それぞれの中の順序は listPurchases の並びのまま） */
 const sortedPurchases = computed(() =>
@@ -77,10 +88,10 @@ function removeLine(i: number) {
 
 async function submit() {
   const lines = form.value.lines.filter(l => l.name.trim() && l.quantity > 0)
-  if (!lines.length) { alert('明細を入力してください'); return }
-  if (!form.value.shop_account_id) { alert('仕入先を選んでください'); return }
+  if (!lines.length) { toast('明細を入力してください', 'warn'); return }
+  if (!form.value.shop_account_id) { toast('仕入先を選んでください', 'warn'); return }
   if (editingId.value && lines.some(l => !l.unit_price)) {
-    alert('単価を入力してください')
+    toast('単価を入力してください', 'warn')
     return
   }
 
@@ -154,13 +165,17 @@ async function editNote(p: PurchaseSummary) {
 }
 
 async function remove(p: PurchaseSummary) {
-  if (!confirm(`${p.ordered_at} の仕入を削除しますか？\n生成された在庫も消えます。`)) return
+  if (!await confirmDialog(`${p.ordered_at} の仕入を削除しますか？`, {
+    message: '生成された在庫も消えます。',
+    okLabel: '削除する',
+    danger: true,
+  })) return
   try {
     await window.soroban.deletePurchase(p.id)
     await load()
     changed()
   } catch (e) {
-    alert(e instanceof Error ? e.message : String(e))
+    toast(e instanceof Error ? e.message : String(e), 'warn')
   }
 }
 </script>
@@ -274,8 +289,9 @@ async function remove(p: PurchaseSummary) {
           <thead>
             <tr>
               <th>注文日</th>
+              <th class="col-thumb"></th>
               <th>仕入先</th>
-              <th>注文番号</th>
+              <th>商品</th>
               <th class="num">明細</th>
               <th class="num">商品計</th>
               <th class="num">送料</th>
@@ -286,11 +302,29 @@ async function remove(p: PurchaseSummary) {
           <tbody>
             <tr v-for="p in sortedPurchases" :key="p.id">
               <td class="faint">{{ p.ordered_at }}</td>
+              <td class="thumb-cell">
+                <span class="thumb-placeholder">{{ placeholderChar(p) }}</span>
+              </td>
               <td>{{ p.shop_account_name }}</td>
-              <td>
-                <StatusChip v-if="p.status === 'draft'" tone="warn" label="価格未入力" />
-                <span v-else class="faint">{{ p.order_no ?? '—' }}</span>
-                <div v-if="p.note" class="faint note">{{ p.note }}</div>
+              <td class="product-cell">
+                <div class="product-name">
+                  {{ p.first_line_name ?? '—' }}
+                  <span v-if="p.line_count > 1" class="faint">ほか{{ p.line_count - 1 }}点</span>
+                </div>
+                <div class="order-row">
+                  <span v-if="p.order_no" class="faint">{{ p.order_no }}</span>
+                  <div class="chip-row">
+                    <StatusChip v-if="p.status === 'draft'" tone="warn" label="価格未入力" />
+                    <StatusChip v-if="p.import_key" tone="neutral" label="自動取得" />
+                    <StatusChip v-if="p.fulfillment === 'pending'" tone="neutral" label="未発送" />
+                    <StatusChip v-if="p.fulfillment === 'shipped'" tone="info" label="配送中" />
+                  </div>
+                </div>
+                <div v-if="p.note" class="note-row">
+                  <Icon name="note" :size="14" class="icon-note" />
+                  <span class="note-label">メモ</span>
+                  <span class="note-text">{{ p.note }}</span>
+                </div>
               </td>
               <td class="num">{{ p.line_count }}</td>
               <td class="num">
@@ -354,7 +388,37 @@ async function remove(p: PurchaseSummary) {
   border-radius: var(--radius-sm);
 }
 
+.product-cell { overflow: hidden; }
+.product-name {
+  font-size: var(--fs-14);
+  font-weight: 500;
+  white-space: normal;
+  word-break: break-word;
+}
+.order-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .table-panel { padding: 0; overflow: hidden; }
-.table-panel .actions { display: flex; justify-content: flex-end; gap: 4px; }
-.table-panel .note { font-size: 12px; }
+.table-panel td.actions { white-space: nowrap; text-align: right; }
+.table-panel .actions > * { vertical-align: middle; margin-left: 4px; }
+.table-panel th.col-thumb { width: 64px; }
+
+.thumb-cell { padding-right: 4px; }
+.thumb-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-weight: 700;
+  font-size: var(--fs-14);
+}
 </style>

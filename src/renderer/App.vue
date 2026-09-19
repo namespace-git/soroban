@@ -3,6 +3,8 @@ import { ref, computed, onMounted, watch, provide } from 'vue'
 import Icon from './components/Icon.vue'
 import InputDialog from './components/InputDialog.vue'
 import type { PromptOptions } from './components/InputDialog.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
+import type { ConfirmChoice } from './components/ConfirmDialog.vue'
 import Dashboard from './views/Dashboard.vue'
 import Sales from './views/Sales.vue'
 import Purchases from './views/Purchases.vue'
@@ -74,6 +76,51 @@ function onPromptCancel() {
 
 provide('prompt', ask)
 
+// confirm() / alert() は Electron ではダサい OS ダイアログになるため、ConfirmDialog に統一する
+type ChoiceState = { title: string; message?: string; choices: ConfirmChoice[]; resolve: (v: string | null) => void }
+const choiceState = ref<ChoiceState | null>(null)
+
+function chooseRaw(title: string, choices: ConfirmChoice[], message?: string): Promise<string | null> {
+  choiceState.value?.resolve(null)
+  return new Promise((resolve) => {
+    choiceState.value = { title, message, choices, resolve }
+  })
+}
+
+function onChoose(value: string) {
+  choiceState.value?.resolve(value)
+  choiceState.value = null
+}
+
+function onChooseCancel() {
+  choiceState.value?.resolve(null)
+  choiceState.value = null
+}
+
+// キャンセル／OK の2択。danger なら OK ボタンが赤くなる
+function confirmDialog(
+  title: string,
+  opts: { message?: string; okLabel?: string; danger?: boolean } = {},
+): Promise<boolean> {
+  return chooseRaw(title, [
+    { label: 'キャンセル', value: '__cancel', tone: 'ghost' },
+    { label: opts.okLabel ?? 'OK', value: '__ok', tone: opts.danger ? 'danger' : 'primary' },
+  ], opts.message).then(v => v === '__ok')
+}
+
+// 複数ボタンから1つ選ばせる。キャンセル（Esc・スクリムクリック）は null
+function chooseDialog(
+  title: string,
+  choices: ConfirmChoice[],
+  opts: { message?: string } = {},
+): Promise<string | null> {
+  return chooseRaw(title, choices, opts.message)
+}
+
+provide('confirm', confirmDialog)
+provide('choose', chooseDialog)
+provide('toast', (text: string, kind: 'ok' | 'warn') => showNotice({ text, kind }))
+
 const needsTotal = computed(() => pendingCount.value)
 
 const runLabel: Record<string, string> = {
@@ -92,7 +139,8 @@ function formatRunTime(iso: string): string {
 const runStatusText = computed(() => {
   const run = stats.value?.lastRun
   if (!run) return '取り込み未実施'
-  return `最終取り込み：${runLabel[run.status] ?? run.status} ${formatRunTime(run.started_at)}`
+  const label = run.source === 'mellojoy' ? `メロジョイ(${run.shop_account_name ?? '?'}) ` : ''
+  return `最終取り込み：${label}${runLabel[run.status] ?? run.status} ${formatRunTime(run.started_at)}`
 })
 
 const runIsWarn = computed(() => {
@@ -100,14 +148,26 @@ const runIsWarn = computed(() => {
   return !!run && run.status !== 'ok'
 })
 
-function reportRun(run: CollectorRun) {
-  const messages: Record<string, { text: string; kind: 'ok' | 'warn' }> = {
-    ok: { text: `取り込み ${run.inserted}件（取得 ${run.fetched}件）`, kind: 'ok' },
-    empty: { text: run.message ?? '0件でした', kind: 'warn' },
-    auth_required: { text: run.message ?? 'ログインが必要です', kind: 'warn' },
-    failed: { text: `失敗：${run.message ?? '不明なエラー'}`, kind: 'warn' },
+function runLabelText(run: CollectorRun): string {
+  return run.source === 'mercari' ? 'メルカリ' : (run.shop_account_name ?? 'メロジョイ')
+}
+
+function runMessage(run: CollectorRun): string {
+  const messages: Record<string, string> = {
+    ok: `新規 ${run.inserted}件（取得 ${run.fetched}件）`,
+    empty: run.message ?? '0件でした',
+    auth_required: run.message ?? 'ログインが必要です',
+    failed: `失敗：${run.message ?? '不明なエラー'}`,
   }
-  showNotice(messages[run.status] ?? null)
+  return messages[run.status] ?? run.status
+}
+
+// メルカリ→仕入先アカウントの順で1回分がまとめて返る。1つのトーストにまとめる
+function reportRun(runs: CollectorRun[]) {
+  if (!runs.length) return
+  const text = runs.map(r => `${runLabelText(r)}: ${runMessage(r)}`).join('／')
+  const kind: 'ok' | 'warn' = runs.every(r => r.status === 'ok') ? 'ok' : 'warn'
+  showNotice({ text, kind })
   revision.value++
 }
 
@@ -132,8 +192,8 @@ async function collect() {
 onMounted(() => {
   loadStats()
   // 起動時の自動取り込みが終わったら知らせる
-  ;(window as any).sorobanEvents?.onCollectDone((run: CollectorRun) => {
-    reportRun(run)
+  ;(window as any).sorobanEvents?.onCollectDone((runs: CollectorRun[]) => {
+    reportRun(runs)
     loadStats()
   })
 })
@@ -145,7 +205,10 @@ watch(revision, loadStats)
 <template>
   <div class="shell">
     <aside class="nav">
-      <div class="wordmark"><span class="wordmark-text">そろばん</span></div>
+      <div class="brand-mark">
+        <span class="brand-mark-badge">そ</span>
+        <span class="brand-mark-text">そろばん</span>
+      </div>
       <nav class="nav-list">
         <button
           v-for="t in tabs" :key="t.key"
@@ -155,7 +218,7 @@ watch(revision, loadStats)
           :title="t.label"
           @click="tab = t.key"
         >
-          <Icon :name="t.icon" :size="18" />
+          <Icon :name="t.icon" :size="20" />
           <span class="nav-label">{{ t.label }}</span>
           <span v-if="t.key === 'sales' && needsTotal > 0" class="nav-badge">{{ needsTotal }}</span>
         </button>
@@ -178,6 +241,7 @@ watch(revision, loadStats)
       </header>
 
       <div v-if="notice" class="toast" :class="notice.kind">
+        <Icon v-if="notice.kind === 'warn'" class="toast-warn-icon" name="alert" :size="14" />
         {{ notice.text }}
         <button class="ghost sm" @click="notice = null">閉じる</button>
       </div>
@@ -203,6 +267,15 @@ watch(revision, loadStats)
       @submit="onPromptSubmit"
       @cancel="onPromptCancel"
     />
+
+    <ConfirmDialog
+      :open="!!choiceState"
+      :title="choiceState?.title ?? ''"
+      :message="choiceState?.message"
+      :choices="choiceState?.choices ?? []"
+      @choose="onChoose"
+      @cancel="onChooseCancel"
+    />
   </div>
 </template>
 
@@ -221,15 +294,34 @@ watch(revision, loadStats)
   display: flex;
   flex-direction: column;
   background: var(--surface-nav);
-  border-right: 1px solid var(--line);
-  padding: 12px 12px 16px;
+  box-shadow: var(--shadow-1);
+  padding: 16px 10px;
+  z-index: 1;
 }
 
-.wordmark {
-  padding: 8px 8px 16px;
-  font-size: 16px;
+.brand-mark {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 20px;
+}
+.brand-mark-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: var(--brand);
+  color: var(--text);
+  font-size: var(--fs-16);
+  font-weight: 700;
+}
+.brand-mark-text {
+  font-size: var(--fs-12);
   font-weight: 600;
-  letter-spacing: .04em;
+  letter-spacing: .02em;
   color: var(--text);
 }
 
@@ -242,26 +334,35 @@ watch(revision, loadStats)
 .nav-item {
   position: relative;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  height: 36px;
-  padding: 0 10px;
+  justify-content: center;
+  gap: 4px;
+  height: 64px;
+  padding: 0 4px;
   background: transparent;
   border: none;
   border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  font-size: var(--fs-14);
-  text-align: left;
+  color: var(--text-faint);
+  font-size: var(--fs-11);
+  text-align: center;
   cursor: pointer;
 }
-.nav-item:hover { background: var(--surface-hi); }
-.nav-item.active { background: var(--accent-soft); color: var(--accent); }
+.nav-item:hover { background: var(--surface-hi); color: var(--text-dim); }
+.nav-item.active { color: var(--text); font-weight: 700; }
 
-.nav-label { flex: 1; }
+.nav-label { flex: none; }
+
+.nav-item .nav-badge {
+  position: absolute;
+  top: 4px;
+  right: 12px;
+}
 
 .nav-version {
   padding: 8px;
   font-size: var(--fs-12);
+  text-align: center;
 }
 
 /* --- 上部バー・本文 --- */
@@ -280,9 +381,9 @@ watch(revision, loadStats)
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 20px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
+  padding: 0 24px;
+  background: var(--canvas);
+  border-bottom: none;
 }
 
 .run-status {
@@ -306,15 +407,5 @@ main {
   flex: 1;
   overflow-y: auto;
   background: var(--canvas);
-}
-
-/* --- 1100px 未満：ナビをアイコン帯に畳む --- */
-
-@media (max-width: 1099px) {
-  .nav { width: 56px; padding-left: 8px; padding-right: 8px; }
-  .wordmark-text { display: none; }
-  .nav-item { justify-content: center; padding: 0; }
-  .nav-label { display: none; }
-  .nav-item .nav-badge { position: absolute; margin-left: 14px; margin-top: -14px; }
 }
 </style>
