@@ -975,18 +975,37 @@ function withExpenses(rows: MonthlyBase[]): MonthlySummary[] {
 
 let runs: CollectorRun[] = []
 
+/**
+ * ホームの「要対応」で recentRuns（取り込み元ごとの直近1件）の見本になるよう、
+ * メルカリはok、メロジョイAはok、メロジョイBはauth_requiredにしておく
+ * （db.ts の getDashboard() と同じ考え方：最後の1回だけ見ると他の元の失敗が隠れる）
+ */
 function buildInitialRuns(): void {
-  const specs: Array<{ hoursAgo: number; status: CollectorRun['status']; fetched: number; inserted: number; message: string | null }> = [
-    { hoursAgo: 2, status: 'ok', fetched: 5, inserted: 2, message: null },
-    { hoursAgo: 8, status: 'ok', fetched: 4, inserted: 1, message: null },
-    { hoursAgo: 14, status: 'auth_required', fetched: 0, inserted: 0, message: 'セッション切れ。再ログインが必要です' },
-    { hoursAgo: 20, status: 'ok', fetched: 6, inserted: 3, message: null },
-    { hoursAgo: 32, status: 'empty', fetched: 0, inserted: 0, message: '0件取得（表示待ちの可能性）' },
-    { hoursAgo: 44, status: 'ok', fetched: 3, inserted: 1, message: null },
+  const [mA, mB] = shopAccounts
+  type Spec = {
+    minutesAgo: number
+    status: CollectorRun['status']
+    fetched: number
+    inserted: number
+    message: string | null
+    source?: CollectorRun['source']
+    shopId?: string | null
+    shopName?: string | null
+  }
+  // listRuns はこの配列をそのまま返す（sortしない）ため、minutesAgo昇順＝新しい順に並べておく
+  const specs: Spec[] = [
+    { minutesAgo: 116, status: 'auth_required', fetched: 0, inserted: 0, message: 'ログインが必要です', source: 'mellojoy', shopId: mB.id, shopName: mB.name },
+    { minutesAgo: 118, status: 'ok', fetched: 2, inserted: 1, message: null, source: 'mellojoy', shopId: mA.id, shopName: mA.name },
+    { minutesAgo: 120, status: 'ok', fetched: 5, inserted: 2, message: null },
+    { minutesAgo: 480, status: 'ok', fetched: 4, inserted: 1, message: null },
+    { minutesAgo: 840, status: 'auth_required', fetched: 0, inserted: 0, message: 'セッション切れ。再ログインが必要です' },
+    { minutesAgo: 1200, status: 'ok', fetched: 6, inserted: 3, message: null },
+    { minutesAgo: 1920, status: 'empty', fetched: 0, inserted: 0, message: '0件取得（表示待ちの可能性）' },
+    { minutesAgo: 2640, status: 'ok', fetched: 3, inserted: 1, message: null },
   ]
+  const now = Date.now()
   runs = specs.map(s => {
-    const start = new Date()
-    start.setHours(start.getHours() - s.hoursAgo)
+    const start = new Date(now - s.minutesAgo * 60_000)
     const finish = new Date(start.getTime() + 8000)
     return {
       id: uid(),
@@ -996,11 +1015,33 @@ function buildInitialRuns(): void {
       fetched: s.fetched,
       inserted: s.inserted,
       message: s.message,
-      source: 'mercari',
-      shop_account_id: null,
-      shop_account_name: null,
+      source: s.source ?? 'mercari',
+      shop_account_id: s.shopId ?? null,
+      shop_account_name: s.shopName ?? null,
     }
   })
+}
+
+/** started_at の新しい順。lastRun・recentRuns の両方で使う */
+function sortedRuns(): CollectorRun[] {
+  return runs.slice().sort((a, b) => b.started_at.localeCompare(a.started_at))
+}
+
+/** getDashboard の recentRuns：取り込み元（mercari + 有効なメロジョイ口座）ごとの直近1件 */
+function recentRunsMock(): CollectorRun[] {
+  const sorted = sortedRuns()
+  const out: CollectorRun[] = []
+  const mercari = sorted.find(r => r.source === 'mercari')
+  if (mercari) out.push(mercari)
+  const mellojoyAccounts = shopAccounts
+    .filter(a => a.kind === 'mellojoy' && a.is_active)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+  for (const a of mellojoyAccounts) {
+    const run = sorted.find(r => r.shop_account_id === a.id)
+    if (run) out.push(run)
+  }
+  return out
 }
 
 // ------------------------------------------------------------
@@ -1335,10 +1376,11 @@ const api: SorobanApi = {
     const agingCount = stock.filter(i => i.aging_days > warnDays).length
     const month = thisMonthLocal()
     const thisMonth = withExpenses(monthlyFromSales(sales)).find(m => m.month === month && m.kind === 'resale') ?? null
-    const lastRun = runs[0] ?? null
+    const lastRun = sortedRuns()[0] ?? null
     return wait({
       needsShipping, needsMatch, needsPurchaseConfirm, needsListingAllocation,
       stockCount, stockValue, agingCount, thisMonth, lastRun,
+      recentRuns: recentRunsMock(),
     })
   },
 

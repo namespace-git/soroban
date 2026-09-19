@@ -2502,6 +2502,30 @@ export function getDashboard(): DashboardStats {
     `${RUN_SELECT} ORDER BY r.started_at DESC LIMIT 1`,
   ).get() as CollectorRun | undefined
 
+  // 取り込み元ごとの直近1件（mercari + 有効なメロジョイ口座ごとに1件）。
+  // 最後の1回だけ見ていると、別の取り込み元の成功で他の失敗が隠れるため、
+  // 元ごとに直近の状態をホームの要対応で拾えるようにする
+  const mercariRun = db.prepare(
+    `${RUN_SELECT} WHERE r.source = 'mercari' ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1`,
+  ).get() as CollectorRun | undefined
+
+  const accountRuns = db.prepare(`
+    SELECT sa.id AS account_id
+      FROM shop_account sa
+     WHERE sa.is_active = 1 AND sa.kind = 'mellojoy'
+     ORDER BY sa.name
+  `).all() as { account_id: string }[]
+
+  const accountRunSelect = db.prepare(
+    `${RUN_SELECT} WHERE r.shop_account_id = ? ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1`,
+  )
+  const recentRuns: CollectorRun[] = []
+  if (mercariRun) recentRuns.push(mercariRun)
+  for (const { account_id } of accountRuns) {
+    const run = accountRunSelect.get(account_id) as CollectorRun | undefined
+    if (run) recentRuns.push(run)
+  }
+
   return {
     needsShipping,
     needsMatch,
@@ -2512,6 +2536,7 @@ export function getDashboard(): DashboardStats {
     agingCount: aging,
     thisMonth: thisMonth ?? null,
     lastRun: lastRun ?? null,
+    recentRuns,
   }
 }
 

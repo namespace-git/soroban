@@ -1795,6 +1795,47 @@ describe('db（:memory:）', () => {
       expect(db.getDashboard().needsListingAllocation).toBe(1)
     })
 
+    it('getDashboard().recentRuns：取り込み元ごとの直近1件（mercari + 有効なメロジョイ口座ごと）が状態を隠さず並ぶ', () => {
+      // shopId（beforeEachで作成）はkind未指定＝'other'なので、ここではmellojoy口座を別途作る
+      const mellojoyAId = db.createShopAccount('メロジョイ口座A', 'mellojoy')
+      const mellojoyBId = db.createShopAccount('メロジョイ口座B', 'mellojoy')
+
+      // メルカリ：1回目ok→2回目failed（直近＝failedだけが残る）
+      const m1 = db.startRun('mercari')
+      db.finishRun(m1, 'ok', 3, 1)
+      const m2 = db.startRun('mercari')
+      db.finishRun(m2, 'failed', 0, 0, 'ERR_FAILED loading /account')
+
+      // メロジョイ口座A：ok
+      const a1 = db.startRun('mellojoy', mellojoyAId)
+      db.finishRun(a1, 'ok', 2, 1)
+
+      const recent = db.getDashboard().recentRuns
+      expect(recent).toHaveLength(2)
+      expect(recent[0].source).toBe('mercari')
+      expect(recent[0].status).toBe('failed')
+      expect(recent[0].message).toBe('ERR_FAILED loading /account')
+      expect(recent[1].source).toBe('mellojoy')
+      expect(recent[1].shop_account_id).toBe(mellojoyAId)
+      expect(recent[1].status).toBe('ok')
+
+      // kind='other'（shopId）の実行があっても、メロジョイ口座扱いにはしない
+      const otherRun = db.startRun('mellojoy', shopId)
+      db.finishRun(otherRun, 'ok', 1, 1)
+      expect(db.getDashboard().recentRuns.some(r => r.shop_account_id === shopId)).toBe(false)
+
+      // 無効化した口座の実行は入らない
+      const b1 = db.startRun('mellojoy', mellojoyBId)
+      db.finishRun(b1, 'auth_required', 0, 0, 'ログインが必要です')
+      db.updateShopAccount(mellojoyBId, { is_active: 0 })
+      expect(db.getDashboard().recentRuns.some(r => r.shop_account_id === mellojoyBId)).toBe(false)
+
+      // 有効に戻すと、口座の名前順（A→B）で並ぶ
+      db.updateShopAccount(mellojoyBId, { is_active: 1 })
+      const recent2 = db.getDashboard().recentRuns
+      expect(recent2.map(r => r.shop_account_name)).toEqual([null, 'メロジョイ口座A', 'メロジョイ口座B'])
+    })
+
     it('getItemTimeline：出品への引き当て・出品経由の売却でlistedイベントが「注文」と「売れた」の間に出る', () => {
       db.createPurchase({
         shop_account_id: shopId,

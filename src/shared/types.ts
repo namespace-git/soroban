@@ -508,7 +508,14 @@ export interface DashboardStats {
   agingCount: number
   /** 今月の集計（転売分） */
   thisMonth: MonthlySummary | null
+  /** 直近の実行 1 件（取り込み元を問わない） */
   lastRun: CollectorRun | null
+  /**
+   * 取り込み元ごとの直近の実行（メルカリ 1 件＋有効なメロジョイ口座ごとに 1 件）。
+   * status が ok 以外のものは、ホームの要対応の先頭に「取り込みが失敗」として出す
+   * （最後の 1 回だけ見ていると、別の取り込み元の成功で失敗が隠れるため）
+   */
+  recentRuns: CollectorRun[]
 }
 
 // ------------------------------------------------------------

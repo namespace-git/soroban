@@ -17,6 +17,37 @@ async function load() {
 onMounted(load)
 watch(revision, load)
 
+// 取り込み元ごとの直近1件のうち、ok以外（=要対応の先頭に出す対象）
+const failedRuns = computed(() => (stats.value?.recentRuns ?? []).filter(r => r.status !== 'ok'))
+
+function runSourceLabel(r: { source: string; shop_account_name: string | null }): string {
+  return r.source === 'mercari' ? 'メルカリの取り込み' : `メロジョイ（${r.shop_account_name ?? '不明'}）の取り込み`
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) + '…' : s
+}
+
+// recentRuns はメルカリ・仕入先アカウントの実行をまとめて返すため、取り込み動作自体は1本
+// （collect() が内部でメルカリ→有効な仕入先の順に直列で走る。口座単位の再実行はできない）
+// App.vue のヘッダの「取り込む」があればそれに任せる（通知・件数更新まで面倒を見てくれる）。
+// 無ければ window.soroban.collect() を直接呼ぶ
+const injectedCollect = inject<(() => Promise<void>) | undefined>('collect', undefined)
+const collecting = ref(false)
+async function retryCollect() {
+  collecting.value = true
+  try {
+    if (injectedCollect) {
+      await injectedCollect()
+    } else {
+      await window.soroban.collect()
+      revision.value++
+    }
+  } finally {
+    collecting.value = false
+  }
+}
+
 // 要対応の合計（送料未入力＋未紐付け＋価格未入力の仕入）
 const needsTotal = computed(() => {
   if (!stats.value) return 0
@@ -86,6 +117,22 @@ const runLabel: Record<string, string> = {
             <div class="section-head">
               <span class="section-head-icon"><Icon name="alert" :size="16" /></span>
               <h2 class="section-head-title">要対応</h2>
+              <StatusChip v-if="failedRuns.length" tone="warn" label="取り込みに問題" />
+            </div>
+
+            <div
+              v-for="r in failedRuns" :key="r.id"
+              class="need-row run-need-row"
+            >
+              <StatusChip tone="warn" :label="runLabel[r.status] ?? r.status" />
+              <span class="run-need-text">
+                <span class="need-desc">{{ runSourceLabel(r) }}</span>
+                <span v-if="r.message" class="faint">{{ truncate(r.message, 80) }}</span>
+              </span>
+              <span class="grow" />
+              <button class="sm link-btn" :disabled="collecting" @click="retryCollect">
+                {{ r.status === 'auth_required' ? 'ログインして取り込む' : 'もう一度取り込む' }}
+              </button>
             </div>
 
             <button
@@ -185,19 +232,35 @@ const runLabel: Record<string, string> = {
       </div>
 
       <!-- 取り込み -->
-      <div v-if="stats.lastRun" class="intake">
-        <StatusChip
-          :tone="stats.lastRun.status === 'ok' ? 'ok' : 'warn'"
-          :label="runLabel[stats.lastRun.status] ?? stats.lastRun.status"
-        />
-        <span class="dim">
-          {{ new Date(stats.lastRun.started_at).toLocaleString('ja-JP') }}
-        </span>
-        <span class="faint">
-          取得 {{ stats.lastRun.fetched }}／追加 {{ stats.lastRun.inserted }}
-        </span>
-      </div>
-      <p v-if="stats.lastRun?.message" class="faint intake-msg">{{ stats.lastRun.message }}</p>
+      <template v-if="stats.recentRuns.length">
+        <template v-for="r in stats.recentRuns" :key="r.id">
+          <div class="intake">
+            <StatusChip
+              :tone="r.status === 'ok' ? 'ok' : 'warn'"
+              :label="runLabel[r.status] ?? r.status"
+            />
+            <span class="dim">{{ runSourceLabel(r) }}</span>
+            <span class="dim">{{ new Date(r.started_at).toLocaleString('ja-JP') }}</span>
+            <span class="faint">取得 {{ r.fetched }}／追加 {{ r.inserted }}</span>
+          </div>
+          <p v-if="r.message" class="faint intake-msg">{{ r.message }}</p>
+        </template>
+      </template>
+      <template v-else>
+        <div v-if="stats.lastRun" class="intake">
+          <StatusChip
+            :tone="stats.lastRun.status === 'ok' ? 'ok' : 'warn'"
+            :label="runLabel[stats.lastRun.status] ?? stats.lastRun.status"
+          />
+          <span class="dim">
+            {{ new Date(stats.lastRun.started_at).toLocaleString('ja-JP') }}
+          </span>
+          <span class="faint">
+            取得 {{ stats.lastRun.fetched }}／追加 {{ stats.lastRun.inserted }}
+          </span>
+        </div>
+        <p v-if="stats.lastRun?.message" class="faint intake-msg">{{ stats.lastRun.message }}</p>
+      </template>
       <p v-if="!stats.lastRun" class="dim intake">
         まだ取り込んでいません。右上の「取り込む」を押してください。
       </p>
@@ -307,6 +370,20 @@ const runLabel: Record<string, string> = {
 }
 .need-row.zero .need-count { color: var(--text-faint); }
 .need-desc { font-size: var(--fs-14); }
+
+/* --- 取り込み失敗の行（要対応の先頭）。カウント数字の代わりにStatusChipを置く --- */
+.run-need-row { cursor: default; }
+.run-need-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.run-need-text .faint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .hint { margin: 12px 0 0; font-size: var(--fs-12); }
 
