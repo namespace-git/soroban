@@ -19,18 +19,26 @@ const api: SorobanApi = {
   deleteSale: invoke('deleteSale'),
 
   linkInventory: invoke('linkInventory'),
+  autoLinkPending: invoke('autoLinkPending'),
   unlinkInventory: invoke('unlinkInventory'),
   suggestInventory: invoke('suggestInventory'),
   listSaleLines: invoke('listSaleLines'),
 
   listPurchases: invoke('listPurchases'),
+  getPurchase: invoke('getPurchase'),
   createPurchase: invoke('createPurchase'),
+  confirmPurchase: invoke('confirmPurchase'),
+  updatePurchaseNote: invoke('updatePurchaseNote'),
   deletePurchase: invoke('deletePurchase'),
+  importPurchaseDrafts: invoke('importPurchaseDrafts'),
 
   listInventory: invoke('listInventory'),
+  updateInventory: invoke('updateInventory'),
+  splitInventory: invoke('splitInventory'),
   disposeInventory: invoke('disposeInventory'),
 
   listMonthly: invoke('listMonthly'),
+  listVariantSummary: invoke('listVariantSummary'),
 
   listShopAccounts: invoke('listShopAccounts'),
   createShopAccount: invoke('createShopAccount'),

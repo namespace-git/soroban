@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { writeFileSync, copyFileSync } from 'node:fs'
 import * as db from './db'
 import * as collector from './collector'
+import * as mellojoyWatch from './mellojoy-watch'
 import type { SorobanApi } from '../shared/types'
 
 // ============================================================
@@ -21,7 +22,7 @@ function createMainWindow(): void {
     minWidth: 960,
     minHeight: 600,
     title: 'そろばん',
-    backgroundColor: '#16150f',
+    backgroundColor: '#f3f5f8',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -61,21 +62,29 @@ function registerIpc(): void {
   handle('deleteSale', (id) => db.deleteSale(id))
 
   handle('linkInventory', (saleId, ids) => db.linkInventory(saleId, ids))
+  handle('autoLinkPending', () => db.autoLinkPending())
   handle('unlinkInventory', (saleId, id) => db.unlinkInventory(saleId, id))
   handle('suggestInventory', (saleId, limit) => db.suggestInventory(saleId, limit))
   handle('listSaleLines', (saleId) => db.listSaleLines(saleId))
 
   handle('listPurchases', () => db.listPurchases())
+  handle('getPurchase', (id) => db.getPurchase(id))
   handle('createPurchase', (input) => db.createPurchase(input))
+  handle('confirmPurchase', (id, input) => db.confirmPurchase(id, input))
+  handle('updatePurchaseNote', (id, note) => db.updatePurchaseNote(id, note))
   handle('deletePurchase', (id) => db.deletePurchase(id))
+  handle('importPurchaseDrafts', () => mellojoyWatch.importPurchaseDrafts())
 
   handle('listInventory', (status) => db.listInventory(status))
+  handle('updateInventory', (id, patch) => db.updateInventory(id, patch))
+  handle('splitInventory', (id, count) => db.splitInventory(id, count))
   handle('disposeInventory', (id, note, status) => db.disposeInventory(id, note, status))
 
   handle('listMonthly', () => db.listMonthly())
+  handle('listVariantSummary', (sort) => db.listVariantSummary(sort))
 
   handle('listShopAccounts', () => db.listShopAccounts())
-  handle('createShopAccount', (name) => db.createShopAccount(name))
+  handle('createShopAccount', (name, kind) => db.createShopAccount(name, kind))
   handle('listShippingMethods', () => db.listShippingMethods())
   handle('saveShippingMethod', (m) => db.saveShippingMethod(m))
   handle('deleteShippingMethod', (id) => db.deleteShippingMethod(id))
