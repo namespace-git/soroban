@@ -163,15 +163,6 @@ async function remove(p: PurchaseSummary) {
     alert(e instanceof Error ? e.message : String(e))
   }
 }
-
-async function addAccount() {
-  const name = await ask('仕入先の名前', { placeholder: '例：メロジョイA' })
-  if (!name) return
-  const isMellojoy = confirm('メロジョイのアカウントですか？（いいえ = TikTok Shop など）')
-  await window.soroban.createShopAccount(name, isMellojoy ? 'mellojoy' : 'other')
-  await load()
-  changed()
-}
 </script>
 
 <template>
@@ -179,7 +170,6 @@ async function addAccount() {
     <div class="page-head">
       <h1 class="page-title">仕入</h1>
       <span class="grow" />
-      <button class="ghost" @click="addAccount">仕入先を追加</button>
       <button class="primary" @click="toggleForm">
         <Icon :name="showForm ? 'close' : 'plus'" :size="16" />
         {{ showForm ? '閉じる' : '仕入を登録' }}
@@ -195,6 +185,7 @@ async function addAccount() {
           <select v-model="form.shop_account_id">
             <option v-for="a in accounts" :key="a.id" :value="a.id">{{ a.name }}</option>
           </select>
+          <span v-if="!accounts.length" class="faint">仕入先は設定タブの「仕入先」で登録します</span>
         </label>
         <label class="field">
           <span>注文日</span>

@@ -355,6 +355,8 @@ export interface SorobanApi {
   exportCsv(): Promise<string | null>
   backupDb(): Promise<string | null>
   revealDbFolder(): Promise<void>
+  /** 取引データ（販売・仕入・在庫・紐付け・取り込み履歴・期間費用）を全部消す。設定・仕入先・発送方法は残す */
+  resetData(): Promise<void>
 }
 
 declare global {

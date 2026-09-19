@@ -127,6 +127,8 @@ function registerIpc(): void {
   handle('revealDbFolder', () => {
     shell.showItemInFolder(db.getDbPath())
   })
+
+  handle('resetData', () => db.resetData())
 }
 
 // ------------------------------------------------------------

@@ -8,6 +8,7 @@ import type { PromptOptions } from '../components/InputDialog.vue'
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const revision = inject<Ref<number>>('revision')!
+const changed = inject<() => void>('changed', () => {})
 
 const methods = ref<ShippingMethod[]>([])
 const settings = ref<Record<string, string>>({})
@@ -99,6 +100,23 @@ function openLogin() {
 
 function openShopLogin(id: string) {
   return window.soroban.openShopLogin(id)
+}
+
+async function addShopAccount() {
+  const name = await ask('仕入先の名前', { placeholder: '例：メロジョイA' })
+  if (!name) return
+  const isMellojoy = confirm('メロジョイのアカウントですか？（いいえ = TikTok Shop など）')
+  await window.soroban.createShopAccount(name, isMellojoy ? 'mellojoy' : 'other')
+  accounts.value = await window.soroban.listShopAccounts()
+  changed()
+}
+
+async function resetData() {
+  const input = await ask('確認のため「初期化」と入力してください', { placeholder: '初期化' })
+  if (input !== '初期化') return
+  await window.soroban.resetData()
+  alert('取引データを消しました')
+  changed()
 }
 
 const runLabel: Record<string, string> = {
@@ -282,10 +300,13 @@ const runLabel: Record<string, string> = {
             </tr>
           </tbody>
         </table>
-        <p v-if="!accounts.length" class="faint hint">仕入タブの「仕入先を追加」で登録してください</p>
+        <p v-if="!accounts.length" class="faint hint">「仕入先を追加」から登録してください</p>
+        <p class="add-account">
+          <button class="ghost sm" @click="addShopAccount"><Icon name="plus" :size="14" /> 仕入先を追加</button>
+        </p>
         <p class="faint hint">
-          メロジョイはアカウントごとに別のブラウザプロファイルでログインします。認証情報は保存しません。
-          注文履歴の取り込みは準備中です。
+          メロジョイはアカウントごとに別のブラウザプロファイルでログインします。ログイン状態は保存され、次回から入力は不要です。
+          パスワードはアプリに保存しません。注文履歴の取り込みは準備中です。
         </p>
       </div>
 
@@ -300,6 +321,13 @@ const runLabel: Record<string, string> = {
           <button @click="exportCsv"><Icon name="download" :size="16" /> 売上をCSVで書き出す</button>
           <button @click="backup"><Icon name="download" :size="16" /> データベースをバックアップ</button>
           <button class="ghost" @click="revealFolder"><Icon name="folder" :size="16" /> 保存フォルダを開く</button>
+        </div>
+        <div class="danger-zone">
+          <p class="faint hint">
+            販売・仕入・在庫・取り込み履歴をすべて消します。設定・仕入先・発送方法は残ります。
+            元に戻せないので、先にバックアップを取ってください。
+          </p>
+          <button class="danger" @click="resetData">取引データを初期化</button>
         </div>
       </div>
     </template>
@@ -338,6 +366,15 @@ const runLabel: Record<string, string> = {
 
 .runs-title { margin-top: 16px; }
 .small { font-size: var(--fs-12); }
+
+.danger-zone {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.add-account { margin: 12px 0 0; }
+.add-account button { display: inline-flex; align-items: center; gap: 6px; }
 
 .money-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; width: auto; }
 .money-cell .yen { color: var(--text-dim); font-size: var(--fs-12); }

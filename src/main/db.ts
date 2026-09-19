@@ -1262,3 +1262,27 @@ export function listSaleLines(saleId: string): InventoryItem[] {
     ORDER BY iv.name
   `).all(saleId) as InventoryItem[]
 }
+
+// ============================================================
+// データのリセット（テスト運用開始のやり直し用）
+//
+// 仕入・販売・在庫・収集履歴・期間費用を全部消す。
+// setting（手数料率などの設定）・shop_account・shipping_method は
+// マスタなので残す。外部キーの順に DELETE する
+// ============================================================
+
+export function resetData(): void {
+  const tx = db.transaction(() => {
+    db.exec(`
+      DELETE FROM sale_line;
+      DELETE FROM sale;
+      DELETE FROM inventory_item;
+      DELETE FROM purchase_line;
+      DELETE FROM purchase;
+      DELETE FROM collector_run;
+      DELETE FROM expense;
+    `)
+  })
+  tx()
+  db.pragma('wal_checkpoint(TRUNCATE)')
+}

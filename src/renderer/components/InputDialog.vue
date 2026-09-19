@@ -37,6 +37,8 @@ function cancel() {
 }
 
 function onKeydown(e: KeyboardEvent) {
+  // 日本語入力の変換中（IME）の Enter / Esc は確定・取消の操作なので、ダイアログは反応しない
+  if (e.isComposing || e.keyCode === 229) return
   if (e.key === 'Escape') {
     cancel()
     return

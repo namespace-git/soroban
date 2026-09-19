@@ -55,6 +55,7 @@ const api: SorobanApi = {
   exportCsv: invoke('exportCsv'),
   backupDb: invoke('backupDb'),
   revealDbFolder: invoke('revealDbFolder'),
+  resetData: invoke('resetData'),
 } as SorobanApi
 
 contextBridge.exposeInMainWorld('soroban', api)

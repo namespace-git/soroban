@@ -1280,6 +1280,17 @@ const api: SorobanApi = {
   async revealDbFolder() {
     return wait(undefined)
   },
+
+  async resetData() {
+    // 取引データだけ消す。仕入先・発送方法・設定は残す
+    sales = []
+    purchases = []
+    inventory = []
+    runs = []
+    saleLines.clear()
+    itemPurchaseId.clear()
+    return wait(undefined)
+  },
 }
 
 export function installMock(): void {

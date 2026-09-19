@@ -767,6 +767,62 @@ describe('db（:memory:）', () => {
     }
   })
 
+  it('resetData：仕入・販売・紐付け・runを消す。マスタ（shop_account/shipping_method/setting）は残す', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-01',
+      shipping_fee: 0,
+      lines: [{ name: 'リセット対象', unit_price: 1000, quantity: 1 }],
+    })
+    const item = db.listInventory('in_stock')[0]
+    const saleId = db.createSale({ title: 'リセット対象', sold_at: '2026-01-05', price: 2000 })
+    db.linkInventory(saleId, [item.id])
+
+    const runId = db.startRun()
+    db.finishRun(runId, 'ok', 1, 1)
+
+    db.saveShippingMethod({ name: 'テスト発送方法', fee: 300 })
+    db.setSetting('fee_rate_bp', '1234')
+
+    // リセット前提の確認
+    expect(db.listPurchases()).toHaveLength(1)
+    expect(db.listSales()).toHaveLength(1)
+    expect(db.listRuns()).toHaveLength(1)
+
+    db.resetData()
+
+    // 仕入・在庫・販売・紐付け・runは0件
+    expect(db.listPurchases()).toHaveLength(0)
+    expect(db.listSales()).toHaveLength(0)
+    expect(db.listInventory('in_stock')).toHaveLength(0)
+    expect(db.listInventory('sold')).toHaveLength(0)
+    expect(db.listRuns()).toHaveLength(0)
+    const counts = db.getDb().prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM purchase_line) AS purchase_line,
+        (SELECT COUNT(*) FROM sale_line)     AS sale_line,
+        (SELECT COUNT(*) FROM expense)       AS expense
+    `).get() as { purchase_line: number; sale_line: number; expense: number }
+    expect(counts).toEqual({ purchase_line: 0, sale_line: 0, expense: 0 })
+
+    // マスタは残る
+    expect(db.listShopAccounts()).toHaveLength(1)
+    expect(db.listShopAccounts()[0].id).toBe(shopId)
+    expect(db.listShippingMethods().some(m => m.name === 'テスト発送方法')).toBe(true)
+    expect(db.getSettings().fee_rate_bp).toBe('1234')
+
+    // getDashboard が例外なく返り、全部0
+    const dash = db.getDashboard()
+    expect(dash.needsShipping).toBe(0)
+    expect(dash.needsMatch).toBe(0)
+    expect(dash.needsPurchaseConfirm).toBe(0)
+    expect(dash.stockCount).toBe(0)
+    expect(dash.stockValue).toBe(0)
+    expect(dash.agingCount).toBe(0)
+    expect(dash.thisMonth).toBeNull()
+    expect(dash.lastRun).toBeNull()
+  })
+
   it('variant_summary：purchased/sold/avg_price/avg_profit/total_profitが手計算と一致する', () => {
     db.createPurchase({
       shop_account_id: shopId,
