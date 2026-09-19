@@ -10,6 +10,305 @@ vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 
 import * as db from '../db'
 
+// ============================================================
+// Phase 1 の実物スキーマ（`git show 64f69fd:src/main/schema.sql`）。
+// migrate() のテストは、実機で実際に使われていた形そのままの DB を
+// 用意して検証する（テーブルだけでなくビュー・トリガー・初期設定も含む）。
+// ============================================================
+const PHASE1_SCHEMA_SQL = `
+-- ============================================================
+-- そろばん（Soroban）— メルカリ転売 利益管理
+-- ローカルSQLiteスキーマ
+--
+-- 設計方針：
+--   * 金額はすべて INTEGER（円）。小数を持ち込まない
+--   * inventory_item（在庫1点）が販売可能な最小単位
+--   * 1販売に複数在庫を紐付けられる（まとめ売り対応）
+--   * landed_cost は在庫生成時に確定。後から仕入を直しても過去の利益は動かない
+-- ============================================================
+
+PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+
+-- ============================================================
+-- マスタ
+-- ============================================================
+
+-- 仕入先アカウント（メロジョイA / メロジョイB）
+CREATE TABLE IF NOT EXISTS shop_account (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  note       TEXT,
+  is_active  INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 発送方法。送料は改定されるので編集可能にしておく
+CREATE TABLE IF NOT EXISTS shipping_method (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  carrier    TEXT,
+  fee        INTEGER NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_active  INTEGER NOT NULL DEFAULT 1
+);
+
+-- アプリ設定（手数料率など）
+CREATE TABLE IF NOT EXISTS setting (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- fee_rate_bp: ベーシスポイント。1000 = 10.00%
+-- 小数を避けるため整数で持つ
+INSERT OR IGNORE INTO setting (key, value) VALUES
+  ('fee_rate_bp',        '1000'),
+  ('transfer_fee',       '200'),
+  ('aging_warn_days',    '90'),
+  ('collect_interval_h', '6');
+
+-- ============================================================
+-- 仕入
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS purchase (
+  id              TEXT PRIMARY KEY,
+  shop_account_id TEXT NOT NULL REFERENCES shop_account(id),
+
+  ordered_at      TEXT NOT NULL,              -- YYYY-MM-DD
+  order_no        TEXT,
+
+  shipping_fee    INTEGER NOT NULL DEFAULT 0, -- 仕入時の送料
+  discount        INTEGER NOT NULL DEFAULT 0, -- クーポン等（正の数で保持）
+  other_cost      INTEGER NOT NULL DEFAULT 0,
+
+  -- 按分方式：by_amount（金額按分）/ by_quantity（数量按分）
+  alloc_method    TEXT NOT NULL DEFAULT 'by_amount'
+                  CHECK (alloc_method IN ('by_amount','by_quantity')),
+
+  note            TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+
+  UNIQUE (shop_account_id, order_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_purchase_ordered ON purchase(ordered_at DESC);
+
+CREATE TABLE IF NOT EXISTS purchase_line (
+  id          TEXT PRIMARY KEY,
+  purchase_id TEXT NOT NULL REFERENCES purchase(id) ON DELETE CASCADE,
+
+  name        TEXT NOT NULL,
+  unit_price  INTEGER NOT NULL,              -- 税込単価
+  quantity    INTEGER NOT NULL CHECK (quantity > 0),
+
+  -- 按分結果（登録・再計算時に確定させる）
+  allocated_cost   INTEGER NOT NULL DEFAULT 0, -- この明細に配賦された送料等
+  landed_unit_cost INTEGER NOT NULL DEFAULT 0, -- 1点あたりの按分後原価
+
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pline_purchase ON purchase_line(purchase_id);
+
+-- ============================================================
+-- 在庫（販売可能な1点）
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS inventory_item (
+  id               TEXT PRIMARY KEY,
+  -- NULL 可：仕入記録のない私物を在庫として扱う場合に使う
+  purchase_line_id TEXT REFERENCES purchase_line(id) ON DELETE CASCADE,
+
+  name             TEXT NOT NULL,
+  -- 按分後原価。生成時にコピーし、以後は独立。
+  -- ここを後から書き換えると過去の利益が動いて帳簿が信用できなくなる
+  landed_cost      INTEGER NOT NULL,
+  acquired_at      TEXT NOT NULL,             -- 仕入日 YYYY-MM-DD
+
+  status           TEXT NOT NULL DEFAULT 'in_stock'
+                   CHECK (status IN ('in_stock','sold','disposed','personal_use')),
+  disposed_at      TEXT,
+  disposed_note    TEXT,
+
+  created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_inv_status   ON inventory_item(status);
+CREATE INDEX IF NOT EXISTS idx_inv_acquired ON inventory_item(acquired_at);
+CREATE INDEX IF NOT EXISTS idx_inv_pline    ON inventory_item(purchase_line_id);
+
+-- ============================================================
+-- 販売
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS sale (
+  id                 TEXT PRIMARY KEY,
+
+  mercari_item_id    TEXT UNIQUE,            -- m123456789
+  title              TEXT NOT NULL,
+  sold_at            TEXT NOT NULL,          -- YYYY-MM-DD
+  price              INTEGER NOT NULL,
+
+  -- 転売か私物か。税務上の扱いが異なるので必ず分ける
+  kind               TEXT NOT NULL DEFAULT 'resale'
+                     CHECK (kind IN ('resale','personal')),
+
+  fee_rate_bp        INTEGER NOT NULL DEFAULT 1000,
+  fee                INTEGER NOT NULL DEFAULT 0,  -- 販売手数料（確定値）
+
+  shipping_method_id TEXT REFERENCES shipping_method(id),
+  shipping_fee       INTEGER NOT NULL DEFAULT 0,
+  packaging_cost     INTEGER NOT NULL DEFAULT 0,
+
+  -- collector は送料を取得できない。
+  -- 発送方法を選んだら 1 にする。0 のものを「要入力」として出す
+  is_shipping_confirmed INTEGER NOT NULL DEFAULT 0,
+
+  note               TEXT,
+  source             TEXT NOT NULL DEFAULT 'collector'
+                     CHECK (source IN ('collector','manual')),
+  raw                TEXT,                   -- 取得時の生データ（JSON・デバッグ用）
+
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sale_sold ON sale(sold_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sale_kind ON sale(kind);
+
+-- 販売と在庫の紐付け。1販売に複数在庫（まとめ売り）
+CREATE TABLE IF NOT EXISTS sale_line (
+  id                TEXT PRIMARY KEY,
+  sale_id           TEXT NOT NULL REFERENCES sale(id) ON DELETE CASCADE,
+  -- UNIQUE: 1つの在庫は1回しか売れない
+  inventory_item_id TEXT NOT NULL UNIQUE REFERENCES inventory_item(id),
+  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sline_sale ON sale_line(sale_id);
+
+-- 紐付けたら在庫を sold に、外したら in_stock に戻す
+CREATE TRIGGER IF NOT EXISTS trg_sline_sold
+AFTER INSERT ON sale_line
+BEGIN
+  UPDATE inventory_item
+     SET status = 'sold', updated_at = datetime('now')
+   WHERE id = NEW.inventory_item_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sline_unsold
+AFTER DELETE ON sale_line
+BEGIN
+  UPDATE inventory_item
+     SET status = 'in_stock', updated_at = datetime('now')
+   WHERE id = OLD.inventory_item_id;
+END;
+
+-- ============================================================
+-- 期間費用（振込手数料など、個別の販売に紐付かないもの）
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS expense (
+  id          TEXT PRIMARY KEY,
+  occurred_at TEXT NOT NULL,
+  category    TEXT NOT NULL,   -- transfer_fee | supplies | other
+  amount      INTEGER NOT NULL,
+  note        TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_expense_date ON expense(occurred_at);
+
+-- ============================================================
+-- 収集の実行記録
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS collector_run (
+  id          TEXT PRIMARY KEY,
+  started_at  TEXT NOT NULL,
+  finished_at TEXT,
+  -- empty = 0件。連続したらDOM変更で壊れている疑い
+  -- auth_required = セッション切れ
+  status      TEXT NOT NULL DEFAULT 'ok'
+              CHECK (status IN ('ok','auth_required','failed','empty')),
+  fetched     INTEGER NOT NULL DEFAULT 0,
+  inserted    INTEGER NOT NULL DEFAULT 0,
+  message     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_started ON collector_run(started_at DESC);
+
+-- ============================================================
+-- ビュー：販売ごとの利益
+--
+-- 粗利 = 販売価格 − 手数料 − 送料 − 梱包材 − Σ(紐付けた在庫の按分後原価)
+-- ============================================================
+
+CREATE VIEW IF NOT EXISTS sale_profit AS
+SELECT
+  s.id,
+  s.mercari_item_id,
+  s.sold_at,
+  s.title,
+  s.kind,
+  s.price,
+  s.fee,
+  s.shipping_fee,
+  s.packaging_cost,
+  s.is_shipping_confirmed,
+  s.shipping_method_id,
+  COALESCE(SUM(i.landed_cost), 0) AS cost,
+  s.price - s.fee - s.shipping_fee - s.packaging_cost
+    - COALESCE(SUM(i.landed_cost), 0) AS gross_profit,
+  COUNT(sl.id) AS item_count,
+  CASE WHEN COUNT(sl.id) = 0 THEN 1 ELSE 0 END AS unmatched
+FROM sale s
+LEFT JOIN sale_line      sl ON sl.sale_id = s.id
+LEFT JOIN inventory_item i  ON i.id = sl.inventory_item_id
+GROUP BY s.id;
+
+-- ============================================================
+-- ビュー：月次集計（kind別）
+-- ============================================================
+
+CREATE VIEW IF NOT EXISTS monthly_summary AS
+SELECT
+  substr(sold_at, 1, 7) AS month,
+  kind,
+  COUNT(*)                  AS sales_count,
+  SUM(price)                AS revenue,
+  SUM(fee)                  AS total_fee,
+  SUM(shipping_fee)         AS total_shipping,
+  SUM(packaging_cost)       AS total_packaging,
+  SUM(cost)                 AS total_cost,
+  SUM(gross_profit)         AS gross_profit
+FROM sale_profit
+GROUP BY substr(sold_at, 1, 7), kind;
+
+-- ============================================================
+-- ビュー：在庫（滞留日数つき）
+-- ============================================================
+
+CREATE VIEW IF NOT EXISTS inventory_view AS
+SELECT
+  i.id,
+  i.name,
+  i.landed_cost,
+  i.acquired_at,
+  i.status,
+  CAST(julianday('now') - julianday(i.acquired_at) AS INTEGER) AS aging_days,
+  p.order_no,
+  sa.name AS shop_account_name
+FROM inventory_item i
+LEFT JOIN purchase_line pl ON pl.id = i.purchase_line_id
+LEFT JOIN purchase      p  ON p.id  = pl.purchase_id
+LEFT JOIN shop_account  sa ON sa.id = p.shop_account_id;
+`
+
 describe('db（:memory:）', () => {
   let shopId: string
 
@@ -386,118 +685,87 @@ describe('db（:memory:）', () => {
     expect(summary.total_profit).toBe(700 + 650)
   })
 
-  it('migrate：Phase1形式のDBに新列・splitステータス・新設定が使えるようになる', () => {
+  it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
     const dir = mkdtempSync(join(tmpdir(), 'soroban-migrate-'))
     const path = join(dir, 'legacy.db')
 
     try {
+      // 実機のDBを模す：Phase1の実物スキーマ（ビュー・トリガー・初期設定込み）に
+      // 仕入1件・在庫2点・販売1件・紐付け1件・collector_run 1件を入れる
       const legacy = new BetterSqlite3(path)
-      legacy.exec(`
-        PRAGMA foreign_keys = ON;
+      legacy.exec(PHASE1_SCHEMA_SQL)
 
-        CREATE TABLE shop_account (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, note TEXT,
-          is_active INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE shipping_method (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, carrier TEXT, fee INTEGER NOT NULL,
-          sort_order INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1
-        );
-        CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        INSERT INTO setting (key, value) VALUES
-          ('fee_rate_bp', '1000'), ('transfer_fee', '200'),
-          ('aging_warn_days', '90'), ('collect_interval_h', '6');
-
-        CREATE TABLE purchase (
-          id TEXT PRIMARY KEY, shop_account_id TEXT NOT NULL REFERENCES shop_account(id),
-          ordered_at TEXT NOT NULL, order_no TEXT,
-          shipping_fee INTEGER NOT NULL DEFAULT 0, discount INTEGER NOT NULL DEFAULT 0,
-          other_cost INTEGER NOT NULL DEFAULT 0,
-          alloc_method TEXT NOT NULL DEFAULT 'by_amount' CHECK (alloc_method IN ('by_amount','by_quantity')),
-          note TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-          UNIQUE (shop_account_id, order_no)
-        );
-        CREATE TABLE purchase_line (
-          id TEXT PRIMARY KEY, purchase_id TEXT NOT NULL REFERENCES purchase(id) ON DELETE CASCADE,
-          name TEXT NOT NULL, unit_price INTEGER NOT NULL, quantity INTEGER NOT NULL CHECK (quantity > 0),
-          allocated_cost INTEGER NOT NULL DEFAULT 0, landed_unit_cost INTEGER NOT NULL DEFAULT 0,
-          sort_order INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE inventory_item (
-          id TEXT PRIMARY KEY, purchase_line_id TEXT REFERENCES purchase_line(id) ON DELETE CASCADE,
-          name TEXT NOT NULL, landed_cost INTEGER NOT NULL, acquired_at TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'in_stock'
-                 CHECK (status IN ('in_stock','sold','disposed','personal_use')),
-          disposed_at TEXT, disposed_note TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE sale (
-          id TEXT PRIMARY KEY, mercari_item_id TEXT UNIQUE, title TEXT NOT NULL,
-          sold_at TEXT NOT NULL, price INTEGER NOT NULL,
-          kind TEXT NOT NULL DEFAULT 'resale' CHECK (kind IN ('resale','personal')),
-          fee_rate_bp INTEGER NOT NULL DEFAULT 1000, fee INTEGER NOT NULL DEFAULT 0,
-          shipping_method_id TEXT REFERENCES shipping_method(id),
-          shipping_fee INTEGER NOT NULL DEFAULT 0, packaging_cost INTEGER NOT NULL DEFAULT 0,
-          is_shipping_confirmed INTEGER NOT NULL DEFAULT 0,
-          note TEXT, source TEXT NOT NULL DEFAULT 'collector' CHECK (source IN ('collector','manual')),
-          raw TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE sale_line (
-          id TEXT PRIMARY KEY, sale_id TEXT NOT NULL REFERENCES sale(id) ON DELETE CASCADE,
-          inventory_item_id TEXT NOT NULL UNIQUE REFERENCES inventory_item(id),
-          created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE expense (
-          id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL, category TEXT NOT NULL,
-          amount INTEGER NOT NULL, note TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE collector_run (
-          id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
-          status TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok','auth_required','failed','empty')),
-          fetched INTEGER NOT NULL DEFAULT 0, inserted INTEGER NOT NULL DEFAULT 0, message TEXT
-        );
-      `)
       legacy.prepare(`INSERT INTO shop_account (id, name) VALUES ('shop1', 'メロジョイA')`).run()
       legacy.prepare(`
-        INSERT INTO purchase (id, shop_account_id, ordered_at) VALUES ('p1', 'shop1', '2026-01-01')
+        INSERT INTO purchase (id, shop_account_id, ordered_at, shipping_fee)
+        VALUES ('p1', 'shop1', '2026-01-01', 100)
       `).run()
       legacy.prepare(`
-        INSERT INTO purchase_line (id, purchase_id, name, unit_price, quantity)
-        VALUES ('pl1', 'p1', '旧仕様の商品', 1000, 1)
+        INSERT INTO purchase_line
+          (id, purchase_id, name, unit_price, quantity, allocated_cost, landed_unit_cost)
+        VALUES ('pl1', 'p1', '旧仕様の商品', 1000, 2, 100, 1050)
+      `).run()
+      // 按分後原価1050円の在庫を2点（splitEvenly(100,2)=[50,50] → 1000+50）
+      legacy.prepare(`
+        INSERT INTO inventory_item (id, purchase_line_id, name, landed_cost, acquired_at)
+        VALUES ('i1', 'pl1', '旧仕様の商品', 1050, '2026-01-01')
       `).run()
       legacy.prepare(`
         INSERT INTO inventory_item (id, purchase_line_id, name, landed_cost, acquired_at)
-        VALUES ('i1', 'pl1', '旧仕様の商品', 1000, '2026-01-01')
+        VALUES ('i2', 'pl1', '旧仕様の商品', 1050, '2026-01-01')
+      `).run()
+      legacy.prepare(`
+        INSERT INTO sale (id, title, sold_at, price, fee)
+        VALUES ('s1', '旧仕様の商品', '2026-01-10', 3000, 300)
+      `).run()
+      // トリガー trg_sline_sold により i1 は挿入直後に sold になる（Phase1の実挙動）
+      legacy.prepare(`
+        INSERT INTO sale_line (id, sale_id, inventory_item_id) VALUES ('sl1', 's1', 'i1')
+      `).run()
+      legacy.prepare(`
+        INSERT INTO collector_run (id, started_at, finished_at, status, fetched, inserted)
+        VALUES ('run1', '2026-01-01T00:00:00.000Z', '2026-01-01T00:01:00.000Z', 'ok', 1, 1)
       `).run()
       legacy.close()
 
-      db.initDb(path)
+      // ---- 1回目の initDb：例外なく通ること ----
+      expect(() => db.initDb(path)).not.toThrow()
 
-      // 既存データはそのまま残り、新列はNULLで読める
-      const item = db.listInventory('in_stock').find(i => i.id === 'i1')!
-      expect(item).toBeDefined()
-      expect(item.model_code).toBeNull()
-      expect(db.listPurchases()[0].status).toBe('confirmed')
+      // データが残っている：在庫2点（1つは紐付け済みでsold、もう1つがin_stock）
+      const inStock = db.listInventory('in_stock')
+      expect(inStock).toHaveLength(1)
+      expect(inStock[0].id).toBe('i2')
+      expect(inStock[0].landed_cost).toBe(1050)
 
-      // status の CHECK に split が足されている（テーブル作り直し）
-      const children = db.splitInventory('i1', 2)
+      // 販売の粗利がビュー（sale_profit）経由で読める
+      const sale = db.listSales().find(s => s.id === 's1')!
+      expect(sale.cost).toBe(1050)
+      expect(sale.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
+      expect(sale.unmatched).toBe(0)
+
+      expect(db.listRuns()).toHaveLength(1)
+
+      // splitInventory が使える（status CHECK に 'split' が足されている）
+      const children = db.splitInventory('i2', 2)
       expect(children).toHaveLength(2)
       expect(db.listInventory('split')).toHaveLength(1)
       expect(db.listInventory('in_stock')).toHaveLength(2)
 
-      // 設定：collect_interval_h は 6 → 1 に、新しいキーも入る
-      const settings = db.getSettings()
-      expect(settings.collect_interval_h).toBe('1')
-      expect(settings.mercari_keyword).toBe('')
-      expect(settings.schema_version).toBe('2')
+      // collect_interval_h が 6 → 1 に更新されている
+      expect(db.getSettings().collect_interval_h).toBe('1')
+
+      // ---- 2回目の initDb（同じファイル）：冪等であること ----
+      db.closeDb()
+      expect(() => db.initDb(path)).not.toThrow()
+
+      const inStockAfter = db.listInventory('in_stock')
+      expect(inStockAfter).toHaveLength(2) // 分割した子2点はそのまま残る
+      expect(db.listInventory('split')).toHaveLength(1)
+      const saleAfter = db.listSales().find(s => s.id === 's1')!
+      expect(saleAfter.cost).toBe(1050)
+      expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
+      expect(db.getSettings().collect_interval_h).toBe('1')
+      expect(db.getSettings().schema_version).toBe('2')
 
       db.closeDb()
     } finally {

@@ -134,7 +134,17 @@ function registerIpc(): void {
 // ------------------------------------------------------------
 
 app.whenReady().then(async () => {
-  db.initDb()
+  try {
+    db.initDb()
+  } catch (e) {
+    // DB が開けない・マイグレーションに失敗したら黙って止まらず、理由を出して終了する
+    dialog.showErrorBox(
+      'そろばんを起動できません',
+      `データベースの初期化に失敗しました。\n${e instanceof Error ? e.message : String(e)}\n\n${db.getDbPath()}`,
+    )
+    app.quit()
+    return
+  }
   collector.ensureSession()
   registerIpc()
   createMainWindow()

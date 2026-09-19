@@ -139,7 +139,13 @@ function rebuildInventoryItemForSplit(): void {
   const tx = db.transaction(() => {
     // sale_line 側のトリガーが inventory_item を名指しで参照しているため、
     // DROP TABLE の前に一旦外しておく（残したままだと "no such table" になる）
+    // Phase 1 のビューも inventory_item を参照している。DROP TABLE の前に外す
+    // （ビューは migrate() の後に viewsSql が作り直す）
     db.exec(`
+      DROP VIEW IF EXISTS sale_profit;
+      DROP VIEW IF EXISTS monthly_summary;
+      DROP VIEW IF EXISTS inventory_view;
+      DROP VIEW IF EXISTS variant_summary;
       DROP TRIGGER IF EXISTS trg_sline_sold;
       DROP TRIGGER IF EXISTS trg_sline_unsold;
     `)
