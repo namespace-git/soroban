@@ -2,11 +2,18 @@
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
 import type { SaleProfit, ShippingMethod, InventoryItem, SaleKind, SaleInput } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
+import Icon from '../components/Icon.vue'
+import Drawer from '../components/Drawer.vue'
+import StatusChip from '../components/StatusChip.vue'
+import EmptyState from '../components/EmptyState.vue'
+import Skeleton from '../components/Skeleton.vue'
 
 const sales = ref<SaleProfit[]>([])
 const methods = ref<ShippingMethod[]>([])
 const onlyPending = ref(true)
 const revision = inject<Ref<number>>('revision')!
+const changed = inject<() => void>('changed', () => {})
+const loaded = ref(false)
 
 // 販売の手入力フォーム
 const showForm = ref(false)
@@ -24,12 +31,13 @@ const candidates = ref<InventoryItem[]>([])
 const picked = ref<Set<string>>(new Set())
 const search = ref('')
 
-const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
+const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 async function load() {
   sales.value = await window.soroban.listSales(
     onlyPending.value ? { onlyPending: true } : undefined,
   )
+  loaded.value = true
 }
 
 onMounted(async () => {
@@ -49,6 +57,7 @@ async function submit() {
   form.value = { title: '', sold_at: todayLocal(), price: 0, kind: 'resale' }
   showForm.value = false
   await load()
+  changed()
 }
 
 // --- 送料・梱包材費 ---
@@ -56,17 +65,20 @@ async function submit() {
 async function setShipping(sale: SaleProfit, methodId: string) {
   await window.soroban.updateSale(sale.id, { shipping_method_id: methodId || null })
   await load()
+  changed()
 }
 
 async function setPackaging(sale: SaleProfit, value: number) {
   const packaging_cost = Math.max(0, Math.round(value || 0))
   await window.soroban.updateSale(sale.id, { packaging_cost })
   await load()
+  changed()
 }
 
 async function setKind(sale: SaleProfit, kind: SaleKind) {
   await window.soroban.updateSale(sale.id, { kind })
   await load()
+  changed()
 }
 
 // --- 紐付け ---
@@ -125,6 +137,7 @@ async function confirmMatch() {
     await window.soroban.linkInventory(matching.value.id, [...picked.value])
     matching.value = null
     await load()
+    changed()
   } catch (e) {
     alert(e instanceof Error ? e.message : String(e))
   }
@@ -136,6 +149,7 @@ async function unlink(item: InventoryItem) {
     await window.soroban.unlinkInventory(matching.value.id, item.id)
     await refreshMatchPanel()
     await load()
+    changed()
   } catch (e) {
     alert(e instanceof Error ? e.message : String(e))
   }
@@ -145,39 +159,37 @@ async function remove(sale: SaleProfit) {
   if (!confirm(`「${sale.title}」を削除しますか？`)) return
   await window.soroban.deleteSale(sale.id)
   await load()
+  changed()
 }
 </script>
 
 <template>
-  <div class="wrap">
-    <div class="bar">
+  <div class="page">
+    <div class="page-head">
+      <h1 class="page-title">売上</h1>
+      <span class="grow" />
       <button class="primary" @click="showForm = !showForm">
+        <Icon :name="showForm ? 'close' : 'plus'" :size="16" />
         {{ showForm ? '閉じる' : '販売を登録' }}
       </button>
-      <label class="row">
-        <input type="checkbox" v-model="onlyPending" />
-        未処理のみ
-      </label>
-      <span class="grow" />
-      <span class="faint">{{ sales.length }}件</span>
     </div>
 
     <!-- 登録フォーム -->
-    <div v-if="showForm" class="card form">
-      <div class="head">
-        <label>
+    <div v-if="showForm" class="panel form">
+      <div class="fields">
+        <label class="field field-wide">
           <span>商品名</span>
-          <input v-model="form.title" class="full" placeholder="商品名" />
+          <input v-model="form.title" placeholder="商品名" />
         </label>
-        <label>
+        <label class="field">
           <span>販売日</span>
           <input type="date" v-model="form.sold_at" />
         </label>
-        <label>
+        <label class="field">
           <span>価格</span>
           <input type="number" v-model.number="form.price" />
         </label>
-        <label>
+        <label class="field">
           <span>区分</span>
           <select v-model="form.kind">
             <option value="resale">転売</option>
@@ -191,298 +203,334 @@ async function remove(sale: SaleProfit) {
       </div>
     </div>
 
-    <table v-if="sales.length">
-      <thead>
-        <tr>
-          <th>販売日</th>
-          <th>商品</th>
-          <th class="num">価格</th>
-          <th class="num">手数料</th>
-          <th>発送方法</th>
-          <th class="num dim">梱包</th>
-          <th class="num">原価</th>
-          <th class="num">粗利</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="s in sales" :key="s.id">
-          <td class="faint nowrap">{{ s.sold_at.slice(5) }}</td>
-
-          <td class="title">
-            <div>{{ s.title }}</div>
-            <button
-              class="kind"
-              :class="{ personal: s.kind === 'personal' }"
-              @click="setKind(s, s.kind === 'resale' ? 'personal' : 'resale')"
-              :title="'クリックで切り替え'"
-            >{{ s.kind === 'resale' ? '転売' : '私物' }}</button>
-          </td>
-
-          <td class="num">{{ yen(s.price) }}</td>
-          <td class="num dim">−{{ yen(s.fee) }}</td>
-
-          <td>
-            <select
-              :value="s.shipping_method_id ?? ''"
-              :class="{ unset: !s.is_shipping_confirmed }"
-              @change="setShipping(s, ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="">選択…</option>
-              <option v-for="m in methods" :key="m.id" :value="m.id">
-                {{ m.name }}（{{ m.fee }}円）
-              </option>
-            </select>
-          </td>
-
-          <td class="num dim">
-            <input
-              type="number"
-              class="packaging"
-              :value="s.packaging_cost"
-              min="0"
-              @change="setPackaging(s, ($event.target as HTMLInputElement).valueAsNumber)"
-            />
-          </td>
-
-          <td class="num">
-            <button
-              v-if="s.kind === 'resale' && s.unmatched"
-              class="link-btn"
-              @click="openMatch(s)"
-            >紐付け</button>
-            <button
-              v-else-if="s.item_count"
-              class="cost-btn"
-              @click="openMatch(s)"
-              title="クリックで紐付けを編集"
-            >
-              <span>{{ yen(s.cost) }}</span>
-              <small class="faint"> ×{{ s.item_count }}</small>
-            </button>
-            <span v-else class="faint">—</span>
-          </td>
-
-          <td class="num">
-            <template v-if="s.is_shipping_confirmed && (!s.unmatched || s.kind === 'personal')">
-              <strong :class="s.gross_profit >= 0 ? 'profit' : 'loss'">
-                {{ yen(s.gross_profit) }}
-              </strong>
-            </template>
-            <span v-else class="faint">未確定</span>
-          </td>
-
-          <td>
-            <button class="ghost" @click="remove(s)" title="削除">✕</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-
-    <div v-else class="empty">
-      {{ onlyPending ? '未処理の販売はありません' : '販売がありません' }}
+    <div class="toolbar">
+      <label class="row">
+        <input type="checkbox" v-model="onlyPending" />
+        未処理のみ
+      </label>
+      <span class="grow" />
+      <span class="faint">{{ sales.length }}件</span>
     </div>
 
-    <!-- 紐付けパネル -->
-    <div v-if="matching" class="overlay" @click.self="matching = null">
-      <div class="panel">
-        <header>
-          <div>
-            <h3>{{ matching.title }}</h3>
-            <span class="faint">販売 {{ yen(matching.price) }}</span>
-          </div>
-          <button class="ghost" @click="matching = null">✕</button>
-        </header>
+    <Skeleton v-if="!loaded" :rows="6" />
 
-        <div v-if="matchedItems.length" class="matched">
-          <div class="matched-head faint">紐付け済み</div>
-          <div v-for="m in matchedItems" :key="m.id" class="item matched-item">
-            <span class="grow">{{ m.name }}</span>
-            <span class="faint nowrap">{{ m.aging_days }}日</span>
-            <span class="num">{{ yen(m.landed_cost) }}</span>
-            <button class="ghost small" @click="unlink(m)">解除</button>
-          </div>
+    <template v-else>
+      <div v-if="sales.length" class="panel table-panel">
+        <table>
+          <thead>
+            <tr>
+              <th class="col-date">販売日</th>
+              <th class="col-title">商品</th>
+              <th class="num col-amt">価格</th>
+              <th class="num col-amt">手数料</th>
+              <th class="col-ship">発送方法</th>
+              <th class="num col-pack">梱包</th>
+              <th class="num col-amt">原価</th>
+              <th class="num col-amt">粗利</th>
+              <th class="col-actions"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="s in sales" :key="s.id">
+              <td class="faint nowrap">{{ s.sold_at.slice(5) }}</td>
+
+              <td class="title-cell">
+                <div class="title-row">
+                  <span class="title-text" :title="s.title">{{ s.title }}</span>
+                  <button
+                    class="kind-toggle"
+                    title="クリックで切り替え"
+                    @click="setKind(s, s.kind === 'resale' ? 'personal' : 'resale')"
+                  >
+                    <StatusChip
+                      :tone="s.kind === 'personal' ? 'info' : 'neutral'"
+                      :label="s.kind === 'resale' ? '転売' : '私物'"
+                    />
+                  </button>
+                </div>
+              </td>
+
+              <td class="num">{{ yen(s.price) }}</td>
+              <td class="num dim">−{{ yen(s.fee) }}</td>
+
+              <td>
+                <select
+                  class="ship-select"
+                  :value="s.shipping_method_id ?? ''"
+                  :class="{ invalid: !s.is_shipping_confirmed }"
+                  @change="setShipping(s, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">選択…</option>
+                  <option v-for="m in methods" :key="m.id" :value="m.id">
+                    {{ m.name }}　{{ yen(m.fee) }}
+                  </option>
+                </select>
+              </td>
+
+              <td class="num dim col-pack">
+                <input
+                  type="number"
+                  class="packaging-input"
+                  :value="s.packaging_cost"
+                  min="0"
+                  @change="setPackaging(s, ($event.target as HTMLInputElement).valueAsNumber)"
+                />
+              </td>
+
+              <td class="num">
+                <button
+                  v-if="s.kind === 'resale' && s.unmatched"
+                  class="sm link-btn"
+                  @click="openMatch(s)"
+                >
+                  <Icon name="link" :size="14" /> 紐付け
+                </button>
+                <button
+                  v-else-if="s.item_count"
+                  class="cost-btn"
+                  @click="openMatch(s)"
+                  title="クリックで紐付けを編集"
+                >
+                  {{ yen(s.cost) }}<small class="faint"> ×{{ s.item_count }}</small>
+                </button>
+                <span v-else class="faint">—</span>
+              </td>
+
+              <td class="num">
+                <Transition name="settle" mode="out-in">
+                  <strong
+                    v-if="s.is_shipping_confirmed && (!s.unmatched || s.kind === 'personal')"
+                    :key="'c' + s.gross_profit"
+                    :class="s.gross_profit >= 0 ? 'profit' : 'loss'"
+                  >{{ yen(s.gross_profit) }}</strong>
+                  <span v-else key="u" class="faint">未確定</span>
+                </Transition>
+              </td>
+
+              <td class="actions">
+                <button class="icon ghost" aria-label="削除" @click="remove(s)">
+                  <Icon name="trash" :size="16" />
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <EmptyState
+        v-else
+        :title="onlyPending ? '未処理の販売はありません' : '販売がありません'"
+        :hint="onlyPending ? '全件を表示するには「未処理のみ」を外してください' : undefined"
+      />
+    </template>
+
+    <!-- 紐付けドロワー -->
+    <Drawer :open="!!matching" :title="matching?.title ?? ''" :width="560" @close="matching = null">
+      <template #header-sub>
+        <span class="faint">販売 {{ matching ? yen(matching.price) : '' }}</span>
+      </template>
+
+      <label class="search-field">
+        <Icon name="search" :size="16" />
+        <input v-model="search" placeholder="在庫を検索" />
+      </label>
+
+      <div v-if="matchedItems.length" class="matched-block">
+        <p class="panel-title">紐付け済み</p>
+        <div v-for="m in matchedItems" :key="m.id" class="item matched-item">
+          <span class="grow">{{ m.name }}</span>
+          <span class="faint nowrap">{{ m.aging_days }}日</span>
+          <span class="num">{{ yen(m.landed_cost) }}</span>
+          <button class="sm ghost" @click="unlink(m)">解除</button>
         </div>
+      </div>
 
-        <input
-          v-model="search"
-          placeholder="在庫を検索"
-          class="search"
-        />
+      <div class="candidates">
+        <label
+          v-for="c in filtered" :key="c.id"
+          class="item" :class="{ on: picked.has(c.id) }"
+        >
+          <input
+            type="checkbox"
+            :checked="picked.has(c.id)"
+            @change="toggle(c.id)"
+          />
+          <span class="grow">{{ c.name }}</span>
+          <span class="faint nowrap">{{ c.aging_days }}日</span>
+          <span class="num">{{ yen(c.landed_cost) }}</span>
+        </label>
+        <EmptyState v-if="!filtered.length" title="在庫がありません。先に仕入を登録してください。" />
+      </div>
 
-        <div class="list">
-          <label
-            v-for="c in filtered" :key="c.id"
-            class="item" :class="{ on: picked.has(c.id) }"
-          >
-            <input
-              type="checkbox"
-              :checked="picked.has(c.id)"
-              @change="toggle(c.id)"
-            />
-            <span class="grow">{{ c.name }}</span>
-            <span class="faint nowrap">{{ c.aging_days }}日</span>
-            <span class="num">{{ yen(c.landed_cost) }}</span>
-          </label>
-          <div v-if="!filtered.length" class="empty">
-            在庫がありません。先に仕入を登録してください。
-          </div>
-        </div>
-
-        <footer>
+      <template #footer>
+        <div class="match-footer">
           <div class="calc">
             <span class="faint">{{ matchedItems.length + picked.size }}点</span>
             <span class="num">原価 {{ yen(totalCost) }}</span>
-            <strong
-              class="num"
-              :class="previewProfit >= 0 ? 'profit' : 'loss'"
-            >
+            <strong class="num" :class="previewProfit >= 0 ? 'profit' : 'loss'">
               粗利 {{ yen(previewProfit) }}
             </strong>
           </div>
           <button class="primary" :disabled="!picked.size" @click="confirmMatch">
             紐付ける
           </button>
-        </footer>
-      </div>
-    </div>
+        </div>
+      </template>
+    </Drawer>
   </div>
 </template>
 
 <style scoped>
-.wrap { max-width: 1100px; }
-
-.bar {
+.form {
   display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 12px;
-  font-size: 13px;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 16px;
 }
-.bar label { cursor: pointer; }
+.field-wide input { width: 320px; }
 
-.form { margin-bottom: 16px; display: flex; flex-direction: column; gap: 14px; }
-.head { display: flex; gap: 16px; flex-wrap: wrap; }
-.head label { display: flex; flex-direction: column; gap: 4px; }
-.head span { font-size: 12px; color: var(--text-dim); }
-.full { width: 100%; }
+.table-panel { padding: 0; overflow: hidden; }
+.table-panel table { table-layout: fixed; }
+.table-panel td { padding: 8px 12px; }
+
+.col-date    { width: 72px; }
+.col-title   { min-width: 180px; }
+.col-amt     { width: 100px; }
+.col-ship    { width: 220px; }
+.col-pack    { width: 80px; }
+.col-actions { width: 40px; }
 
 .nowrap { white-space: nowrap; }
-.title div { line-height: 1.4; }
 
-.kind {
-  font-size: 11px;
-  padding: 0 7px;
-  margin-top: 3px;
-  border-radius: 999px;
-  color: var(--text-dim);
+.title-cell { overflow: hidden; }
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
-.kind.personal { color: var(--accent); border-color: #3c6488; }
-
-select.unset {
-  border-color: var(--warn);
-  color: var(--warn);
+.title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.packaging {
-  width: 70px;
+.kind-toggle {
+  flex-shrink: 0;
+  display: block;
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: auto;
+  cursor: pointer;
+}
+.kind-toggle:hover:not(:disabled) { background: transparent; }
+
+.ship-select {
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 1099px 以下：ナビがアイコン帯に畳まれコンテンツ幅が狭くなる（≒910px）。
+   販売日・金額列を詰めて商品名の可読幅を確保し、チップは2段に戻す。
+   合計 = 56 + 88*4(352) + 176 + 80 + 40 = 704px。商品列は残り約206px（min 180px を確保）。 */
+@media (max-width: 1099px) {
+  .col-date { width: 56px; }
+  .col-amt  { width: 88px; }
+  .col-ship { width: 176px; }
+
+  .title-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+  .title-text { width: 100%; }
 }
 
 .link-btn {
-  font-size: 12px;
-  padding: 3px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: var(--warn);
-  border-color: var(--warn);
   background: var(--warn-bg);
+  border-color: var(--warn-line);
 }
 
 .cost-btn {
   background: transparent;
   border-color: transparent;
   padding: 0;
-  color: var(--text);
+  height: auto;
   font: inherit;
+  color: var(--text);
 }
 .cost-btn:hover:not(:disabled) {
   background: transparent;
   text-decoration: underline;
 }
 
-/* --- 紐付けパネル --- */
+.packaging-input { width: 72px; }
 
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,.55);
+/* --- 紐付けドロワー --- */
+
+.search-field {
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 32px;
-}
-
-.panel {
-  background: var(--surface);
+  gap: 8px;
+  padding: 0 10px;
+  margin-bottom: 14px;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  width: 640px;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
 }
-
-.panel header {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 16px;
-  border-bottom: 1px solid var(--line-soft);
-}
-.panel h3 { margin: 0 0 2px; font-size: 15px; font-weight: 500; }
-.panel header button { margin-left: auto; }
-
-.matched {
-  padding: 10px 16px 0;
-  border-bottom: 1px solid var(--line-soft);
-}
-.matched-head {
-  font-size: 12px;
-  margin-bottom: 4px;
-}
-.matched-item {
-  padding: 6px 8px;
-  cursor: default;
-}
-.matched-item .small {
-  font-size: 12px;
-  padding: 2px 8px;
-}
-
-.search { margin: 12px 16px 8px; }
-
-.list {
+.search-field input {
   flex: 1;
-  overflow-y: auto;
-  padding: 0 8px;
+  border: none;
+  padding: 6px 0;
+  background: transparent;
 }
+
+.matched-block {
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.candidates { display: flex; flex-direction: column; gap: 2px; }
 
 .item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px;
+  padding: 6px 8px;
   border-radius: var(--radius-sm);
   cursor: pointer;
+  line-height: 1.3;
 }
 .item:hover { background: var(--surface-hi); }
-.item.on { background: #24332a; }
+.item.on { background: var(--accent-soft); }
+.matched-item { cursor: default; }
 
-.panel footer {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 14px 16px;
-  border-top: 1px solid var(--line-soft);
+/* style.css の input 既定（height:32px 等）がチェックボックスにも
+   かかってしまうため、行の高さに影響しないよう明示的に上書きする */
+.item input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  flex-shrink: 0;
 }
-.calc { display: flex; gap: 14px; align-items: baseline; font-size: 13px; }
-.panel footer button { margin-left: auto; }
+
+.match-footer { display: flex; align-items: center; gap: 16px; }
+.calc { flex: 1; display: flex; gap: 14px; align-items: baseline; font-size: var(--fs-13); }
+
+/* --- 粗利確定の署名アニメーション --- */
+.settle-enter-from  { opacity: 0; transform: translateY(4px); }
+.settle-enter-active {
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.settle-leave-active { transition: opacity 80ms; }
+.settle-leave-to     { opacity: 0; }
 </style>

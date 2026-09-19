@@ -2,11 +2,16 @@
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
 import type { PurchaseSummary, ShopAccount, PurchaseLineInput, AllocMethod } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
+import Icon from '../components/Icon.vue'
+import EmptyState from '../components/EmptyState.vue'
+import Skeleton from '../components/Skeleton.vue'
 
 const purchases = ref<PurchaseSummary[]>([])
 const accounts = ref<ShopAccount[]>([])
 const revision = inject<Ref<number>>('revision')!
+const changed = inject<() => void>('changed', () => {})
 const showForm = ref(false)
+const loaded = ref(false)
 
 const form = ref({
   shop_account_id: '',
@@ -27,6 +32,7 @@ async function load() {
   if (!form.value.shop_account_id && accounts.value.length) {
     form.value.shop_account_id = accounts.value[0].id
   }
+  loaded.value = true
 }
 onMounted(load)
 watch(revision, load)
@@ -64,6 +70,7 @@ async function submit() {
   form.value.lines = [{ name: '', unit_price: 0, quantity: 1 }]
   showForm.value = false
   await load()
+  changed()
 }
 
 async function remove(p: PurchaseSummary) {
@@ -71,6 +78,7 @@ async function remove(p: PurchaseSummary) {
   try {
     await window.soroban.deletePurchase(p.id)
     await load()
+    changed()
   } catch (e) {
     alert(e instanceof Error ? e.message : String(e))
   }
@@ -85,42 +93,44 @@ async function addAccount() {
 </script>
 
 <template>
-  <div class="wrap">
-    <div class="bar">
-      <button class="primary" @click="showForm = !showForm">
-        {{ showForm ? '閉じる' : '仕入を登録' }}
-      </button>
+  <div class="page">
+    <div class="page-head">
+      <h1 class="page-title">仕入</h1>
       <span class="grow" />
       <button class="ghost" @click="addAccount">仕入先を追加</button>
+      <button class="primary" @click="showForm = !showForm">
+        <Icon :name="showForm ? 'close' : 'plus'" :size="16" />
+        {{ showForm ? '閉じる' : '仕入を登録' }}
+      </button>
     </div>
 
     <!-- 登録フォーム -->
-    <div v-if="showForm" class="card form">
-      <div class="head">
-        <label>
+    <div v-if="showForm" class="panel form">
+      <div class="fields">
+        <label class="field">
           <span>仕入先</span>
           <select v-model="form.shop_account_id">
             <option v-for="a in accounts" :key="a.id" :value="a.id">{{ a.name }}</option>
           </select>
         </label>
-        <label>
+        <label class="field">
           <span>注文日</span>
           <input type="date" v-model="form.ordered_at" />
         </label>
-        <label>
+        <label class="field">
           <span>注文番号</span>
           <input v-model="form.order_no" placeholder="任意" />
         </label>
       </div>
 
-      <table class="lines">
+      <table class="compact lines-table">
         <thead>
           <tr>
             <th>商品名</th>
-            <th style="width:110px">単価</th>
-            <th style="width:80px">数量</th>
-            <th style="width:110px">小計</th>
-            <th style="width:36px"></th>
+            <th class="num col-price">単価</th>
+            <th class="num col-qty">数量</th>
+            <th class="num col-subtotal">小計</th>
+            <th class="col-actions"></th>
           </tr>
         </thead>
         <tbody>
@@ -129,27 +139,34 @@ async function addAccount() {
             <td><input type="number" v-model.number="l.unit_price" class="full" /></td>
             <td><input type="number" v-model.number="l.quantity" class="full" min="1" /></td>
             <td class="num dim">{{ yen((l.unit_price || 0) * (l.quantity || 0)) }}</td>
-            <td><button class="ghost" @click="removeLine(i)">✕</button></td>
+            <td class="actions">
+              <button class="icon ghost" aria-label="削除" @click="removeLine(i)">
+                <Icon name="trash" :size="16" />
+              </button>
+            </td>
           </tr>
         </tbody>
       </table>
 
-      <button class="ghost add" @click="addLine">＋ 明細を追加</button>
+      <button class="ghost sm add-line" @click="addLine">
+        <Icon name="plus" :size="14" />
+        明細を追加
+      </button>
 
-      <div class="head">
-        <label>
+      <div class="fields">
+        <label class="field">
           <span>送料</span>
           <input type="number" v-model.number="form.shipping_fee" />
         </label>
-        <label>
+        <label class="field">
           <span>その他費用</span>
           <input type="number" v-model.number="form.other_cost" />
         </label>
-        <label>
+        <label class="field">
           <span>割引・クーポン</span>
           <input type="number" v-model.number="form.discount" />
         </label>
-        <label>
+        <label class="field">
           <span>按分方式</span>
           <select v-model="form.alloc_method">
             <option value="by_amount">金額で按分</option>
@@ -158,9 +175,9 @@ async function addAccount() {
         </label>
       </div>
 
-      <p class="alloc faint">
-        明細合計 {{ yen(subtotal) }} ／ 配賦 {{ yen(pool) }} を
-        {{ totalQty }}点に按分 → 総原価 {{ yen(subtotal + pool) }}
+      <p class="alloc-note faint">
+        明細合計 <strong>{{ yen(subtotal) }}</strong> ／ 配賦 <strong>{{ yen(pool) }}</strong> を
+        {{ totalQty }}点に按分 → 総原価 <strong>{{ yen(subtotal + pool) }}</strong>
       </p>
 
       <div class="row">
@@ -169,61 +186,77 @@ async function addAccount() {
       </div>
     </div>
 
-    <!-- 一覧 -->
-    <table v-if="purchases.length">
-      <thead>
-        <tr>
-          <th>注文日</th>
-          <th>仕入先</th>
-          <th>注文番号</th>
-          <th class="num">明細</th>
-          <th class="num">商品計</th>
-          <th class="num">送料</th>
-          <th class="num">総原価</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="p in purchases" :key="p.id">
-          <td class="faint">{{ p.ordered_at }}</td>
-          <td>{{ p.shop_account_name }}</td>
-          <td class="faint">{{ p.order_no ?? '—' }}</td>
-          <td class="num">{{ p.line_count }}</td>
-          <td class="num">{{ yen(p.subtotal) }}</td>
-          <td class="num dim">{{ yen(p.shipping_fee) }}</td>
-          <td class="num"><strong>{{ yen(p.total_cost) }}</strong></td>
-          <td><button class="ghost" @click="remove(p)">✕</button></td>
-        </tr>
-      </tbody>
-    </table>
+    <Skeleton v-if="!loaded" :rows="5" />
 
-    <div v-else-if="!showForm" class="empty">
-      仕入がまだありません。「仕入を登録」から追加してください。
-    </div>
+    <template v-else>
+      <div v-if="purchases.length" class="panel table-panel">
+        <table>
+          <thead>
+            <tr>
+              <th>注文日</th>
+              <th>仕入先</th>
+              <th>注文番号</th>
+              <th class="num">明細</th>
+              <th class="num">商品計</th>
+              <th class="num">送料</th>
+              <th class="num">総原価</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in purchases" :key="p.id">
+              <td class="faint">{{ p.ordered_at }}</td>
+              <td>{{ p.shop_account_name }}</td>
+              <td class="faint">{{ p.order_no ?? '—' }}</td>
+              <td class="num">{{ p.line_count }}</td>
+              <td class="num">{{ yen(p.subtotal) }}</td>
+              <td class="num dim">{{ yen(p.shipping_fee) }}</td>
+              <td class="num"><strong>{{ yen(p.total_cost) }}</strong></td>
+              <td class="actions">
+                <button class="icon ghost" aria-label="削除" @click="remove(p)">
+                  <Icon name="trash" :size="16" />
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <EmptyState
+        v-else-if="!showForm"
+        title="仕入がまだありません。"
+        hint="「仕入を登録」から追加してください。"
+      >
+        <template #action>
+          <button class="primary" @click="showForm = true">仕入を登録</button>
+        </template>
+      </EmptyState>
+    </template>
   </div>
 </template>
 
 <style scoped>
-.wrap { max-width: 1000px; }
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 16px;
+}
 
-.bar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
-
-.form { margin-bottom: 24px; display: flex; flex-direction: column; gap: 14px; }
-
-.head { display: flex; gap: 16px; flex-wrap: wrap; }
-.head label { display: flex; flex-direction: column; gap: 4px; }
-.head span { font-size: 12px; color: var(--text-dim); }
-
-.lines th { padding: 4px 6px; }
-.lines td { padding: 4px 6px; border-bottom: none; }
+.lines-table .col-price { width: 110px; }
+.lines-table .col-qty { width: 80px; }
+.lines-table .col-subtotal { width: 110px; }
+.lines-table .col-actions { width: 36px; }
 .full { width: 100%; }
 
-.add { align-self: flex-start; font-size: 13px; }
+.add-line { align-self: flex-start; }
 
-.alloc {
-  font-size: 12px;
+.alloc-note {
+  margin: 0;
   padding: 8px 10px;
-  background: var(--bg);
+  background: var(--surface-hi);
   border-radius: var(--radius-sm);
 }
+
+.table-panel { padding: 0; overflow: hidden; }
 </style>

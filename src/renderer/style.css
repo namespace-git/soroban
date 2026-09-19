@@ -1,36 +1,53 @@
 /* ============================================================
    そろばん — デザイントークン
 
-   長時間開く道具ではないが、数字を読む道具ではある。
-   桁が揃うこと、利益の正負が一目で分かることを優先する。
+   日本の業務SaaS標準（マネーフォワード クラウド級）。
+   ライト。地は寒色グレー、コンテンツは白面、罫で区切る。
+   数字は tabular-nums で右端の1本の軸に揃える。
+   16進はここ以外に書かない。意味のある名前で参照する。
    ============================================================ */
 
 :root {
-  /* 地：わずかに暖色（そろばんの木） */
-  --bg:            #14130f;
-  --surface:       #1c1b16;
-  --surface-hi:    #262419;
-  --line:          #38352b;
-  --line-soft:     #2a2820;
+  /* 面 */
+  --canvas:        #f3f5f8;   /* 画面の地。薄い寒色グレー */
+  --surface:       #ffffff;   /* コンテンツ面 */
+  --surface-hi:    #f7f9fc;   /* hover・選択行・サブ面 */
+  --surface-nav:   #ffffff;   /* サイドナビ（右に1px罫） */
+  --line:          #dfe4ea;   /* 罫 */
+  --line-soft:     #eaeef3;   /* 表の行罫 */
 
-  --text:          #ece6d8;
-  --text-dim:      #a49a86;
-  --text-faint:    #6f6857;
+  /* インク（グレー地ではなく地色から導く寒色スレート） */
+  --text:          #1f2933;
+  --text-dim:      #52606d;
+  --text-faint:    #7b8794;
 
-  /* 数字の色。利益は緑、損は赤、要対応は琥珀 */
-  --profit:        #7ec98f;
-  --loss:          #e08b84;
-  --warn:          #e5b45c;
-  --accent:        #7fb3e0;
+  /* ブランド青：主ボタン・選択・フォーカスにだけ */
+  --accent:        #2b62c7;
+  --accent-hover:  #2453ab;
+  --accent-soft:   #e8effb;   /* 選択行・アクティブナビの地 */
 
-  --warn-bg:       #3a2e14;
-  --loss-bg:       #3a1f1e;
+  /* 意味色（数字とチップに限定。装飾に使わない） */
+  --profit:        #1e7f47;
+  --profit-bg:     #e6f4ea;
+  --loss:          #c8322b;
+  --loss-bg:       #fbe9e7;
+  --warn:          #9a6700;   /* 琥珀の文字。白地で 4.5:1 を満たす */
+  --warn-bg:       #fff4d6;
+  --warn-line:     #e6b84a;
 
-  --radius:        8px;
+  --radius:        6px;
   --radius-sm:     4px;
+  --shadow-1:      0 1px 2px rgba(31,41,51,.06);
+  --shadow-2:      0 8px 24px rgba(31,41,51,.14), 0 2px 6px rgba(31,41,51,.08);
 
-  --font: "Hiragino Sans", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
-  --mono: "SFMono-Regular", "Cascadia Mono", "Menlo", monospace;
+  --font: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+
+  --fs-12: 12px; --fs-13: 13px; --fs-14: 14px; --fs-16: 16px; --fs-20: 20px; --fs-28: 28px;
+
+  --nav-w:    220px;
+  --topbar-h: 48px;
+  --ease:     cubic-bezier(.2,.8,.2,1);
+  --dur:      180ms;
 }
 
 * { box-sizing: border-box; }
@@ -41,15 +58,45 @@ html, body, #app {
 }
 
 body {
-  background: var(--bg);
+  background: var(--canvas);
   color: var(--text);
   font-family: var(--font);
-  font-size: 14px;
+  font-size: var(--fs-14);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
 
-/* 金額は必ず桁を揃える */
+/* --- ブラウザ既定面もテーマする --- */
+
+::selection { background: var(--accent-soft); color: var(--accent-hover); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline-offset: -1px;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; }
+
+input, textarea { caret-color: var(--accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0s !important;
+    animation-duration: .001ms !important;
+  }
+}
+
+/* --- 数字 --- */
+
 .num {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
@@ -59,51 +106,171 @@ body {
 
 .profit { color: var(--profit); }
 .loss   { color: var(--loss); }
+.warn   { color: var(--warn); }
 .dim    { color: var(--text-dim); }
 .faint  { color: var(--text-faint); }
+
+/* --- レイアウト --- */
+
+.page {
+  max-width: 1100px;
+  padding: 24px 28px;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.page-head .grow { flex: 1; }
+
+.page-title {
+  font-size: var(--fs-20);
+  font-weight: 600;
+  margin: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: var(--fs-13);
+  color: var(--text-dim);
+}
+
+.row  { display: flex; gap: 8px; align-items: center; }
+.grow { flex: 1; }
+
+/* --- 面 --- */
+
+.panel, .card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  box-shadow: var(--shadow-1);
+}
+.panel + .panel, .card + .card { margin-top: 16px; }
+
+.panel-title {
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: .02em;
+  margin: 0 0 12px;
+}
+
+/* --- 統計 --- */
+
+.stats {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 24px;
+}
+.stat { display: flex; flex-direction: column; gap: 2px; }
+/* 統計の数字はラベルと同じ左端に揃える（右端の軸は表の中だけ） */
+.stat .num { text-align: left; }
+.stat-label { font-size: var(--fs-12); color: var(--text-dim); }
+.stat-value {
+  font-size: var(--fs-20);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.stat-value.lg { font-size: var(--fs-28); }
+.stat-sub { font-size: var(--fs-12); color: var(--text-faint); }
 
 /* --- ボタン --- */
 
 button {
   font: inherit;
   color: var(--text);
-  background: var(--surface-hi);
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: 6px 12px;
+  height: 32px;
   cursor: pointer;
-  transition: background .12s ease;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-button:hover:not(:disabled) { background: #302d20; }
-button:disabled { opacity: .4; cursor: default; }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button:hover:not(:disabled) { background: var(--surface-hi); }
+button:disabled { opacity: .45; cursor: default; }
 
 button.primary {
-  background: #2c4a63;
-  border-color: #3c6488;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
 }
-button.primary:hover:not(:disabled) { background: #345876; }
+button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+button.ghost:hover:not(:disabled) { background: var(--surface-hi); }
 
 button.danger { color: var(--loss); }
-button.ghost  { background: transparent; border-color: transparent; color: var(--text-dim); }
-button.ghost:hover:not(:disabled) { background: var(--surface-hi); }
+
+button.sm {
+  padding: 3px 8px;
+  height: auto;
+  font-size: var(--fs-13);
+}
+
+button.icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 
 /* --- 入力 --- */
 
 input, select, textarea {
   font: inherit;
   color: var(--text);
-  background: var(--bg);
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: 6px 8px;
+  padding: 6px 10px;
+  height: 32px;
+  transition: border-color var(--dur) var(--ease);
 }
+textarea { height: auto; }
 input:focus, select:focus, textarea:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-  border-color: transparent;
+  border-color: var(--accent);
 }
 input[type="number"] { text-align: right; font-variant-numeric: tabular-nums; }
+/* チェックボックスは高さ 32px の枠を継がない。色はブランド青 */
+input[type="checkbox"], input[type="radio"] {
+  width: 14px; height: 14px; padding: 0; margin: 0;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+input.invalid, select.invalid {
+  border-color: var(--warn-line);
+  background: var(--warn-bg);
+}
+
+label.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--fs-12);
+  color: var(--text-dim);
+}
+
+.fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
 
 /* --- 表 --- */
 
@@ -111,39 +278,48 @@ table { width: 100%; border-collapse: collapse; }
 th {
   text-align: left;
   font-weight: 500;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--text-dim);
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
   white-space: nowrap;
 }
 td {
-  padding: 8px 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--line-soft);
   vertical-align: middle;
 }
-tbody tr:hover { background: var(--surface); }
+tbody tr:hover { background: var(--surface-hi); }
+tr.selected { background: var(--accent-soft); }
 
-/* --- 部品 --- */
-
-.card {
-  background: var(--surface);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius);
-  padding: 16px;
+td.actions {
+  text-align: right;
+  color: var(--text-faint);
 }
+td.actions button { color: inherit; }
+tr:hover td.actions { color: var(--text-dim); }
+
+table.compact td { padding: 6px 12px; }
+
+/* --- バッジ / チップ --- */
 
 .badge {
   display: inline-block;
-  font-size: 11px;
-  padding: 1px 7px;
+  font-size: var(--fs-12);
+  padding: 1px 8px;
   border-radius: 999px;
-  border: 1px solid var(--line);
   color: var(--text-dim);
+  background: var(--surface-hi);
   white-space: nowrap;
 }
-.badge.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
-.badge.personal { color: var(--accent); border-color: #3c6488; }
+.badge.warn     { color: var(--warn); background: var(--warn-bg); }
+.badge.ok       { color: var(--profit); background: var(--profit-bg); }
+.badge.personal { color: var(--accent); background: var(--accent-soft); }
+
+/* --- 空状態 --- */
 
 .empty {
   padding: 48px 16px;
@@ -151,5 +327,37 @@ tbody tr:hover { background: var(--surface); }
   color: var(--text-dim);
 }
 
-.row { display: flex; gap: 8px; align-items: center; }
-.grow { flex: 1; }
+/* --- トースト --- */
+
+.toast {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  font-size: var(--fs-13);
+  border-bottom: 1px solid var(--line);
+}
+.toast.ok   { background: var(--profit-bg); color: var(--profit); }
+.toast.warn { background: var(--warn-bg); color: var(--warn); }
+.toast button { margin-left: auto; }
+
+/* --- ナビ --- */
+
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}

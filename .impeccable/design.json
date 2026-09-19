@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-19T00:00:00+09:00",
+  "title": "Design System: そろばん（Soroban）",
+  "extensions": {
+    "colorMeta": {
+      "canvas":       { "role": "neutral",   "displayName": "地（寒色グレー）",   "canonical": "#f3f5f8", "tonalRamp": ["oklch(20% 0.01 245)", "oklch(32% 0.01 245)", "oklch(45% 0.01 245)", "oklch(58% 0.01 245)", "oklch(70% 0.01 245)", "oklch(82% 0.01 245)", "oklch(92% 0.01 245)", "oklch(97% 0.005 245)"] },
+      "surface":      { "role": "neutral",   "displayName": "面（白）",           "canonical": "#ffffff", "tonalRamp": ["oklch(15% 0 0)", "oklch(30% 0 0)", "oklch(45% 0 0)", "oklch(60% 0 0)", "oklch(75% 0 0)", "oklch(88% 0 0)", "oklch(96% 0 0)", "oklch(100% 0 0)"] },
+      "surface-hi":   { "role": "neutral",   "displayName": "サブ面（hover）",    "canonical": "#f7f9fc", "tonalRamp": ["oklch(20% 0.01 250)", "oklch(32% 0.01 250)", "oklch(45% 0.01 250)", "oklch(58% 0.01 250)", "oklch(70% 0.01 250)", "oklch(84% 0.01 250)", "oklch(94% 0.008 250)", "oklch(98% 0.005 250)"] },
+      "surface-nav":  { "role": "neutral",   "displayName": "サイドナビの面",     "canonical": "#ffffff", "tonalRamp": ["oklch(15% 0 0)", "oklch(30% 0 0)", "oklch(45% 0 0)", "oklch(60% 0 0)", "oklch(75% 0 0)", "oklch(88% 0 0)", "oklch(96% 0 0)", "oklch(100% 0 0)"] },
+      "line":         { "role": "neutral",   "displayName": "罫",                 "canonical": "#dfe4ea", "tonalRamp": ["oklch(20% 0.01 245)", "oklch(32% 0.01 245)", "oklch(45% 0.01 245)", "oklch(58% 0.01 245)", "oklch(70% 0.01 245)", "oklch(82% 0.01 245)", "oklch(91% 0.01 245)", "oklch(96% 0.005 245)"] },
+      "line-soft":    { "role": "neutral",   "displayName": "行罫",               "canonical": "#eaeef3", "tonalRamp": ["oklch(20% 0.01 245)", "oklch(32% 0.01 245)", "oklch(45% 0.01 245)", "oklch(58% 0.01 245)", "oklch(70% 0.01 245)", "oklch(84% 0.01 245)", "oklch(94% 0.008 245)", "oklch(97% 0.005 245)"] },
+      "text":         { "role": "neutral",   "displayName": "インク（濃いスレート）", "canonical": "#1f2933", "tonalRamp": ["oklch(15% 0.02 240)", "oklch(26% 0.02 240)", "oklch(38% 0.02 240)", "oklch(50% 0.02 240)", "oklch(62% 0.02 240)", "oklch(75% 0.015 240)", "oklch(87% 0.01 240)", "oklch(95% 0.005 240)"] },
+      "text-dim":     { "role": "neutral",   "displayName": "補助インク",         "canonical": "#52606d", "tonalRamp": ["oklch(15% 0.02 240)", "oklch(26% 0.02 240)", "oklch(38% 0.02 240)", "oklch(48% 0.02 240)", "oklch(62% 0.02 240)", "oklch(75% 0.015 240)", "oklch(87% 0.01 240)", "oklch(95% 0.005 240)"] },
+      "text-faint":   { "role": "neutral",   "displayName": "かすれインク",       "canonical": "#7b8794", "tonalRamp": ["oklch(15% 0.02 240)", "oklch(26% 0.02 240)", "oklch(38% 0.02 240)", "oklch(50% 0.02 240)", "oklch(61% 0.02 240)", "oklch(75% 0.015 240)", "oklch(87% 0.01 240)", "oklch(95% 0.005 240)"] },
+      "accent":       { "role": "primary",   "displayName": "ブランド青",         "canonical": "#2b62c7", "tonalRamp": ["oklch(20% 0.08 262)", "oklch(30% 0.12 262)", "oklch(40% 0.15 262)", "oklch(50% 0.17 262)", "oklch(60% 0.15 262)", "oklch(72% 0.11 262)", "oklch(85% 0.06 262)", "oklch(95% 0.02 262)"] },
+      "accent-hover": { "role": "primary",   "displayName": "ブランド青（hover）", "canonical": "#2453ab", "tonalRamp": ["oklch(20% 0.08 262)", "oklch(30% 0.12 262)", "oklch(40% 0.15 262)", "oklch(46% 0.16 262)", "oklch(60% 0.15 262)", "oklch(72% 0.11 262)", "oklch(85% 0.06 262)", "oklch(95% 0.02 262)"] },
+      "accent-soft":  { "role": "primary",   "displayName": "淡い青（選択の地）", "canonical": "#e8effb", "tonalRamp": ["oklch(20% 0.08 262)", "oklch(30% 0.12 262)", "oklch(40% 0.15 262)", "oklch(50% 0.17 262)", "oklch(60% 0.15 262)", "oklch(72% 0.11 262)", "oklch(85% 0.06 262)", "oklch(95% 0.02 262)"] },
+      "profit":       { "role": "secondary", "displayName": "利益の緑",           "canonical": "#1e7f47", "tonalRamp": ["oklch(18% 0.05 152)", "oklch(28% 0.08 152)", "oklch(38% 0.11 152)", "oklch(50% 0.13 152)", "oklch(62% 0.13 152)", "oklch(75% 0.10 152)", "oklch(87% 0.06 152)", "oklch(95% 0.03 152)"] },
+      "profit-bg":    { "role": "secondary", "displayName": "利益の緑（地）",     "canonical": "#e6f4ea", "tonalRamp": ["oklch(18% 0.05 152)", "oklch(28% 0.08 152)", "oklch(38% 0.11 152)", "oklch(50% 0.13 152)", "oklch(62% 0.13 152)", "oklch(75% 0.10 152)", "oklch(87% 0.06 152)", "oklch(95% 0.03 152)"] },
+      "loss":         { "role": "secondary", "displayName": "損失の赤",           "canonical": "#c8322b", "tonalRamp": ["oklch(20% 0.08 28)", "oklch(32% 0.13 28)", "oklch(42% 0.17 28)", "oklch(52% 0.19 28)", "oklch(63% 0.17 28)", "oklch(75% 0.12 28)", "oklch(87% 0.07 28)", "oklch(95% 0.03 28)"] },
+      "loss-bg":      { "role": "secondary", "displayName": "損失の赤（地・未使用）", "canonical": "#fbe9e7", "tonalRamp": ["oklch(20% 0.08 28)", "oklch(32% 0.13 28)", "oklch(42% 0.17 28)", "oklch(52% 0.19 28)", "oklch(63% 0.17 28)", "oklch(75% 0.12 28)", "oklch(87% 0.07 28)", "oklch(95% 0.03 28)"] },
+      "warn":         { "role": "secondary", "displayName": "要対応の琥珀",       "canonical": "#9a6700", "tonalRamp": ["oklch(20% 0.05 80)", "oklch(32% 0.08 80)", "oklch(42% 0.10 80)", "oklch(53% 0.12 80)", "oklch(65% 0.13 80)", "oklch(78% 0.12 80)", "oklch(89% 0.08 80)", "oklch(96% 0.04 80)"] },
+      "warn-bg":      { "role": "secondary", "displayName": "要対応の琥珀（地）", "canonical": "#fff4d6", "tonalRamp": ["oklch(20% 0.05 80)", "oklch(32% 0.08 80)", "oklch(42% 0.10 80)", "oklch(53% 0.12 80)", "oklch(65% 0.13 80)", "oklch(78% 0.12 80)", "oklch(89% 0.08 80)", "oklch(96% 0.04 80)"] },
+      "warn-line":    { "role": "secondary", "displayName": "要対応の琥珀（枠）", "canonical": "#e6b84a", "tonalRamp": ["oklch(20% 0.05 80)", "oklch(32% 0.08 80)", "oklch(42% 0.10 80)", "oklch(53% 0.12 80)", "oklch(65% 0.13 80)", "oklch(78% 0.12 80)", "oklch(89% 0.08 80)", "oklch(96% 0.04 80)"] }
+    },
+    "typographyMeta": {
+      "display":     { "displayName": "Display（28px）",     "purpose": "ホームの「粗利」1か所。色付き、tabular-nums。" },
+      "headline":    { "displayName": "Headline（20px）",    "purpose": "ページタイトル、統計の数値、要対応の件数。" },
+      "title":       { "displayName": "Title（16px）",       "purpose": "ワードマーク（字間 .04em）、ドロワーのタイトル。" },
+      "body":        { "displayName": "Body（14px）",        "purpose": "本文、表のセル、入力、ボタン、ナビ項目。" },
+      "body-sm":     { "displayName": "Body-sm（13px）",     "purpose": "ツールバー、状態テキスト、トースト、button.sm、計算行。" },
+      "label":       { "displayName": "Label（12px）",       "purpose": "表ヘッダー、フィールドラベル、統計ラベル、チップ、単位。" },
+      "panel-title": { "displayName": "Panel title（13px/600）", "purpose": "白面の中の小見出し。text-dim、字間 .02em。" }
+    },
+    "shadows": [
+      { "name": "shadow-1", "value": "0 1px 2px rgba(31,41,51,.06)", "purpose": "紙1枚。.panel / .card の静止状態。" },
+      { "name": "shadow-2", "value": "0 8px 24px rgba(31,41,51,.14), 0 2px 6px rgba(31,41,51,.08)", "purpose": "浮いた層。ドロワー（将来はポップオーバー）だけ。" },
+      { "name": "scrim", "value": "rgba(31,41,51,.32)", "purpose": "ドロワーの背後。背後の表を読める程度に残す。" }
+    ],
+    "motion": [
+      { "name": "ease", "value": "cubic-bezier(.2,.8,.2,1)", "purpose": "全 transition の既定 ease-out。" },
+      { "name": "dur", "value": "180ms", "purpose": "ボタン／入力の色変化、ドロワーの開閉、粗利セルの settle enter。" },
+      { "name": "settle-leave", "value": "80ms", "purpose": "「未確定」が消える opacity だけの短い退場。" },
+      { "name": "skeleton-pulse", "value": "1.2s ease-in-out infinite (opacity 1 → .55)", "purpose": "Skeleton のバー。reduced-motion では停止して opacity .75。" },
+      { "name": "toast-ok-autohide", "value": "5000ms", "purpose": "ok トーストの自動消滅。warn は手動で閉じる。" }
+    ],
+    "breakpoints": [
+      { "name": "narrow", "value": "max-width: 1099px", "purpose": "ナビを 56px のアイコン帯に畳む。売上表の列幅を詰める。唯一のブレークポイント。" }
+    ],
+    "layout": {
+      "navWidth": "220px",
+      "navWidthNarrow": "56px",
+      "topbarHeight": "48px",
+      "pageMaxWidth": "1100px",
+      "pagePadding": "24px 28px",
+      "drawerWidth": "560px",
+      "drawerMaxWidth": "92vw"
+    },
+    "icons": {
+      "grid": "20px viewBox",
+      "stroke": "1.5px currentColor, round cap/join, fill none",
+      "sizes": { "nav": 18, "button": 16, "inline": 14 },
+      "names": ["home", "sales", "purchase", "inventory", "monthly", "settings", "plus", "close", "trash", "link", "unlink", "check", "alert", "search", "arrow-right", "refresh", "login", "external", "folder", "download"]
+    },
+    "constraints": [
+      "CSP default-src 'self'：外部フォント・CDN・アイコンライブラリ不可。システム日本語書体、SVG はインライン",
+      "金額は integer 円。レンダラーで利益を再計算しない（紐付けプレビューだけ例外）",
+      "意味色（緑／赤／琥珀）は数字・チップ・トースト・invalid 入力の枠に限定",
+      "文字サイズは 12/13/14/16/20/28 の固定スケール。本文 14px 未満を増やさない",
+      "チェックボックス／ラジオは 14px、padding 0、accent-color: accent。高さ 32px の入力既定を継がない",
+      ".num の右揃えは表の中だけ。統計ブロックでは左揃え",
+      "動きは 180ms ease-out、transform+opacity のみ。ドロワーのスライドと粗利セルの settle だけ",
+      "ライトのみ。ダークモードはスコープ外（トークンは意味名なので prefers-color-scheme 層を後から足せる）",
+      "ロゴ・アプリアイコンは未作成。ワードマークはテキストのみ"
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "1画面に1〜2個の主アクション（取り込む／販売を登録／紐付ける）。ブランド青の面、白文字。",
+      "html": "<button class=\"ds-btn ds-btn-primary\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M4 10a6 6 0 0 1 10.5-4\"/><polyline points=\"14.5,2 14.5,6 10.5,6\"/><path d=\"M16 10a6 6 0 0 1-10.5 4\"/><polyline points=\"5.5,18 5.5,14 9.5,14\"/></svg>取り込む</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font, \"Hiragino Sans\", \"Yu Gothic UI\", Meiryo, system-ui, sans-serif); font-size: 14px; line-height: 1.6; color: var(--text, #1f2933); background: var(--surface, #fff); border: 1px solid var(--line, #dfe4ea); border-radius: var(--radius-sm, 4px); padding: 6px 12px; height: 32px; cursor: pointer; white-space: nowrap; transition: background 180ms cubic-bezier(.2,.8,.2,1), border-color 180ms cubic-bezier(.2,.8,.2,1), color 180ms cubic-bezier(.2,.8,.2,1); } .ds-btn:disabled { opacity: .45; cursor: default; } .ds-btn:focus-visible { outline: 2px solid var(--accent, #2b62c7); outline-offset: 2px; } .ds-btn-primary { background: var(--accent, #2b62c7); border-color: var(--accent, #2b62c7); color: #fff; } .ds-btn-primary:hover:not(:disabled) { background: var(--accent-hover, #2453ab); border-color: var(--accent-hover, #2453ab); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "既定のボタン。白面に罫の枠。上部バーの「メルカリにログイン」など。",
+      "html": "<button class=\"ds-btn\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M9 4 H5 A1 1 0 0 0 4 5 V15 A1 1 0 0 0 5 16 H9\"/><line x1=\"8\" y1=\"10\" x2=\"17\" y2=\"10\"/><polyline points=\"13,6 17,10 13,14\"/></svg>メルカリにログイン</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font, \"Hiragino Sans\", \"Yu Gothic UI\", Meiryo, system-ui, sans-serif); font-size: 14px; line-height: 1.6; color: var(--text, #1f2933); background: var(--surface, #fff); border: 1px solid var(--line, #dfe4ea); border-radius: var(--radius-sm, 4px); padding: 6px 12px; height: 32px; cursor: pointer; white-space: nowrap; transition: background 180ms cubic-bezier(.2,.8,.2,1), border-color 180ms cubic-bezier(.2,.8,.2,1), color 180ms cubic-bezier(.2,.8,.2,1); } .ds-btn:hover:not(:disabled) { background: var(--surface-hi, #f7f9fc); } .ds-btn:disabled { opacity: .45; cursor: default; } .ds-btn:focus-visible { outline: 2px solid var(--accent, #2b62c7); outline-offset: 2px; }"
+    },
+    {
+      "name": "Ghost Icon Button",
+      "kind": "button",
+      "refersTo": "button-icon",
+      "description": "行末の削除やドロワーの閉じる。28px、面も枠も透明、hover でサブ面。",
+      "html": "<button class=\"ds-btn-icon\" aria-label=\"削除\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M4 6 H16\"/><path d=\"M7.5 6 V4 H12.5 V6\"/><path d=\"M6 6 L6.8 17 H13.2 L14 6\"/><line x1=\"10\" y1=\"9\" x2=\"10\" y2=\"14\"/></svg></button>",
+      "css": ".ds-btn-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; color: var(--text-faint, #7b8794); background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm, 4px); cursor: pointer; transition: background 180ms cubic-bezier(.2,.8,.2,1), color 180ms cubic-bezier(.2,.8,.2,1); } .ds-btn-icon:hover { background: var(--surface-hi, #f7f9fc); color: var(--text-dim, #52606d); } .ds-btn-icon:focus-visible { outline: 2px solid var(--accent, #2b62c7); outline-offset: 2px; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "高さ 32px の入力。focus で枠がブランド青に。number は右揃え tabular-nums。invalid は琥珀。",
+      "html": "<label class=\"ds-field\"><span>価格</span><input class=\"ds-input ds-input-num\" type=\"number\" value=\"3400\"></label> <label class=\"ds-field\"><span>発送方法</span><select class=\"ds-input ds-input-invalid\"><option>選択…</option></select></label>",
+      "css": ".ds-field { display: inline-flex; flex-direction: column; gap: 4px; font-family: var(--font, \"Hiragino Sans\", \"Yu Gothic UI\", Meiryo, system-ui, sans-serif); font-size: 12px; line-height: 1.6; color: var(--text-dim, #52606d); margin-right: 16px; } .ds-input { font: inherit; font-size: 14px; color: var(--text, #1f2933); background: var(--surface, #fff); border: 1px solid var(--line, #dfe4ea); border-radius: var(--radius-sm, 4px); padding: 6px 10px; height: 32px; caret-color: var(--accent, #2b62c7); transition: border-color 180ms cubic-bezier(.2,.8,.2,1); } .ds-input:focus { border-color: var(--accent, #2b62c7); } .ds-input:focus-visible { outline: 2px solid var(--accent, #2b62c7); outline-offset: -1px; } .ds-input-num { text-align: right; font-variant-numeric: tabular-nums; } .ds-input-invalid { border-color: var(--warn-line, #e6b84a); background: var(--warn-bg, #fff4d6); }"
+    },
+    {
+      "name": "Checkbox Row",
+      "kind": "input",
+      "refersTo": "checkbox",
+      "description": "紐付けドロワーの候補行。14px のチェックボックス、選択で淡い青の地、右に .num。",
+      "html": "<label class=\"ds-item ds-item-on\"><input type=\"checkbox\" class=\"ds-check\" checked><span class=\"ds-item-title\">ラロッシュポゼ UVイデア XL 30ml</span><span class=\"ds-item-age\">160日</span><span class=\"ds-num\">¥2,988</span></label><label class=\"ds-item\"><input type=\"checkbox\" class=\"ds-check\"><span class=\"ds-item-title\">バニラコ クリーンイットゼロ 100ml</span><span class=\"ds-item-age\">160日</span><span class=\"ds-num\">¥1,921</span></label>",
+      "css": ".ds-item { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--radius-sm, 4px); cursor: pointer; font-family: var(--font, \"Hiragino Sans\", \"Yu Gothic UI\", Meiryo, system-ui, sans-serif); font-size: 14px; line-height: 1.3; color: var(--text, #1f2933); } .ds-item:hover { background: var(--surface-hi, #f7f9fc); } .ds-item-on { background: var(--accent-soft, #e8effb); } .ds-check { width: 14px; height: 14px; padding: 0; margin: 0; accent-color: var(--accent, #2b62c7); flex-shrink: 0; } .ds-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-item-age { font-size: 13px; color: var(--text-faint, #7b8794); } .ds-num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; min-width: 64px; }"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "refersTo": "chip-warn",
+      "description": "StatusChip。tone = neutral / info / warn / ok。12px、pill、文字と地の2色で枠なし。",
+      "html": "<span class=\"ds-chip ds-chip-neutral\">転売</span> <span class=\"ds-chip ds-chip-info\">私物</span> <span class=\"ds-chip ds-chip-warn\">0件（要確認）</span> <span class=\"ds-chip ds-chip-ok\">正常</span>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font-family: var(--font, \"Hiragino Sans\", \"Yu Gothic UI\", Meiryo, system-ui, sans-serif); font-size: 12px; line-height: 1.6; white-space: nowrap; margin-right: 6px; } .ds-chip-neutral { background: var(--surface-hi, #f7f9fc); color: var(--text-dim, #52606d); } .ds-chip-info { background: var(--accent-soft, #e8effb); color: var(--accent, #2b62c7); } .ds-chip-warn { background: var(--warn-bg, #fff4d6); color: var(--warn, #9a6700); } .ds-chip-ok { background: var(--profit-bg, #e6f4ea); color: var(--profit, #1e7f47); }"
+    },
+    {
+      "name": "Side Nav",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "220px の白いサイドナビ。項目 36px、active は淡い青の地とブランド青の文字、売上には琥珀の未処理バッジ。",
+      "html": "<aside class=\"ds-nav\"><div class=\"ds-wordmark\">そろばん</div><button class=\"ds-nav-item ds-nav-item-active\" aria-current=\"page\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M4 10 L10 4 L16 10\"/><path d=\"M6 9 V16 H14 V9\"/><path d=\"M8.5 16 V12 H11.5 V16\"/></svg><span class=\"ds-nav-label\">ホーム</span></button><button class=\"ds-nav-item\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><polyline points=\"4,14 8,9.5 11,12.5 16,6\"/><polyline points=\"12,6 16,6 16,10\"/></svg><span class=\"ds-nav-label\">売上</span><span class=\"ds-nav-badge\">5</span></button><button class=\"ds-nav-item\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M8 7 V5 A2 2 0 0 1 12 5 V7\"/><path d=\"M6 7 H14 L13 16 H7 Z\"/></svg><span class=\"ds-nav-label\">仕入</span></button></aside>",
+      "css": ".ds-nav { width: 220px; display: flex; flex-direction: column; gap: 2px; background: var(--surface-nav, #fff); border-right: 1px solid var(--line, #dfe4ea); padding: 12px 12px 16px; font-family: var(--font, \"Hiragino Sans\", \"Yu Gothic UI\", Meiryo, system-ui, sans-serif); } .ds-wordmark { padding: 8px 8px 16px; font-size: 16px; font-weight: 600; letter-spacing: .04em; color: var(--text, #1f2933); } .ds-nav-item { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 10px; background: transparent; border: none; border-radius: var(--radius-sm, 4px); color: var(--text-dim, #52606d); font: inherit; font-size: 14px; text-align: left; cursor: pointer; } .ds-nav-item:hover { background: var(--surface-hi, #f7f9fc); } .ds-nav-item:focus-visible { outline: 2px solid var(--accent, #2b62c7); outline-offset: 2px; } .ds-nav-item-active { background: var(--accent-soft, #e8effb); color: var(--accent, #2b62c7); } .ds-nav-label { flex: 1; } .ds-nav-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--warn-bg, #fff4d6); color: var(--warn, #9a6700); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }"
+    },
+    {
+      "name": "Stats Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "白面のパネルに等幅列の統計。数値 20px、粗利だけ 28px で色付き。統計の .num は左揃え。",
+      "html": "<div class=\"ds-panel\"><p class=\"ds-panel-title\">今月の転売</p><div class=\"ds-stats\"><div class=\"ds-stat\"><span class=\"ds-stat-label\">売上</span><span class=\"ds-stat-value\">¥40,856</span></div><div class=\"ds-stat\"><span class=\"ds-stat-label\">原価</span><span class=\"ds-stat-value ds-dim\">¥18,789</span></div><div class=\"ds-stat\"><span class=\"ds-stat-label\">手数料・送料</span><span class=\"ds-stat-value ds-dim\">¥9,676</span></div><div class=\"ds-stat\"><span class=\"ds-stat-label\">粗利</span><span class=\"ds-stat-value ds-stat-lg ds-profit\">¥11,491</span><span class=\"ds-stat-sub\">13件</span></div></div></div>",
+      "css": ".ds-panel { background: var(--surface, #fff); border: 1px solid var(--line, #dfe4ea); border-radius: var(--radius, 6px); padding: 16px 20px; box-shadow: 0 1px 2px rgba(31,41,51,.06); font-family: var(--font, \"Hiragino Sans\", \"Yu Gothic UI\", Meiryo, system-ui, sans-serif); color: var(--text, #1f2933); line-height: 1.6; } .ds-panel-title { font-size: 13px; font-weight: 600; color: var(--text-dim, #52606d); letter-spacing: .02em; margin: 0 0 12px; } .ds-stats { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 24px; } .ds-stat { display: flex; flex-direction: column; gap: 2px; } .ds-stat-label { font-size: 12px; color: var(--text-dim, #52606d); } .ds-stat-value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: left; } .ds-stat-lg { font-size: 28px; } .ds-stat-sub { font-size: 12px; color: var(--text-faint, #7b8794); } .ds-dim { color: var(--text-dim, #52606d); } .ds-profit { color: var(--profit, #1e7f47); }"
+    },
+    {
+      "name": "Data Table",
+      "kind": "custom",
+      "refersTo": "table-cell",
+      "description": "罫で区切る表。ヘッダー 12px/500 sticky、金額列は .num で右端の軸に揃える。hover でサブ面。",
+      "html": "<div class=\"ds-table-panel\"><table class=\"ds-table\"><thead><tr><th>販売日</th><th>商品</th><th class=\"ds-num\">価格</th><th class=\"ds-num\">手数料</th><th class=\"ds-num\">粗利</th></tr></thead><tbody><tr><td class=\"ds-faint\">09-18</td><td>ラロッシュポゼ UVイデア XL 30ml <span class=\"ds-chip ds-chip-neutral\">転売</span></td><td class=\"ds-num\">¥800</td><td class=\"ds-num ds-dim\">−¥80</td><td class=\"ds-num\"><span class=\"ds-faint\">未確定</span></td></tr><tr><td class=\"ds-faint\">08-28</td><td>ラネージュ リップスリーピングマスク <span class=\"ds-chip ds-chip-neutral\">転売</span></td><td class=\"ds-num\">¥4,700</td><td class=\"ds-num ds-dim\">−¥470</td><td class=\"ds-num\"><strong class=\"ds-profit\">¥1,842</strong></td></tr><tr><td class=\"ds-faint\">08-21</td><td>ダーマトリー シカペア クリーム <span class=\"ds-chip ds-chip-info\">私物</span></td><td class=\"ds-num\">¥6,000</td><td class=\"ds-num ds-dim\">−¥600</td><td class=\"ds-num\"><strong class=\"ds-loss\">−¥320</strong></td></tr></tbody></table></div>",
+      "css": ".ds-table-panel { background: var(--surface, #fff); border: 1px solid var(--line, #dfe4ea); border-radius: var(--radius, 6px); box-shadow: 0 1px 2px rgba(31,41,51,.06); overflow: hidden; font-family: var(--font, \"Hiragino Sans\", \"Yu Gothic UI\", Meiryo, system-ui, sans-serif); font-size: 14px; line-height: 1.6; color: var(--text, #1f2933); } .ds-table { width: 100%; border-collapse: collapse; } .ds-table th { text-align: left; font-weight: 500; font-size: 12px; color: var(--text-dim, #52606d); padding: 8px 12px; border-bottom: 1px solid var(--line, #dfe4ea); background: var(--surface, #fff); white-space: nowrap; } .ds-table td { padding: 8px 12px; border-bottom: 1px solid var(--line-soft, #eaeef3); vertical-align: middle; } .ds-table tbody tr:hover { background: var(--surface-hi, #f7f9fc); } .ds-num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; } .ds-dim { color: var(--text-dim, #52606d); } .ds-faint { color: var(--text-faint, #7b8794); } .ds-profit { color: var(--profit, #1e7f47); } .ds-loss { color: var(--loss, #c8322b); } .ds-chip { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font-size: 12px; line-height: 1.6; white-space: nowrap; margin-left: 8px; } .ds-chip-neutral { background: var(--surface-hi, #f7f9fc); color: var(--text-dim, #52606d); } .ds-chip-info { background: var(--accent-soft, #e8effb); color: var(--accent, #2b62c7); }"
+    },
+    {
+      "name": "Drawer",
+      "kind": "custom",
+      "refersTo": "drawer",
+      "description": "右から 180ms でスライドする 560px の白面。ヘッダー／本文／フッターを罫で分け、shadow-2 で浮く。",
+      "html": "<div class=\"ds-drawer-demo\"><div class=\"ds-drawer\"><header class=\"ds-drawer-head\"><div class=\"ds-drawer-head-main\"><h2 class=\"ds-drawer-title\">ラロッシュポゼ UVイデア XL 30ml</h2><div class=\"ds-drawer-sub\">販売 ¥800</div></div><button class=\"ds-btn-icon\" aria-label=\"閉じる\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><line x1=\"5\" y1=\"5\" x2=\"15\" y2=\"15\"/><line x1=\"15\" y1=\"5\" x2=\"5\" y2=\"15\"/></svg></button></header><div class=\"ds-drawer-body\"><label class=\"ds-search\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"8.5\" cy=\"8.5\" r=\"5\"/><line x1=\"12.5\" y1=\"12.5\" x2=\"17\" y2=\"17\"/></svg><input placeholder=\"在庫を検索\"></label></div><footer class=\"ds-drawer-foot\"><div class=\"ds-calc\"><span>1点</span><span>原価 ¥2,988</span><span class=\"ds-loss\">粗利 −¥2,268</span></div><button class=\"ds-btn ds-btn-primary\">紐付ける</button></footer></div></div>",
+      "css": ".ds-drawer-demo { position: relative; height: 320px; background: rgba(31,41,51,.32); border-radius: 6px; overflow: hidden; font-family: var(--font, \"Hiragino Sans\", \"Yu Gothic UI\", Meiryo, system-ui, sans-serif); font-size: 14px; line-height: 1.6; color: var(--text, #1f2933); } .ds-drawer { position: absolute; top: 0; right: 0; height: 100%; width: 360px; max-width: 92%; background: var(--surface, #fff); box-shadow: 0 8px 24px rgba(31,41,51,.14), 0 2px 6px rgba(31,41,51,.08); display: flex; flex-direction: column; animation: ds-slide 180ms cubic-bezier(.2,.8,.2,1); } @keyframes ds-slide { from { transform: translateX(100%); } to { transform: none; } } .ds-drawer-head { display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line, #dfe4ea); } .ds-drawer-head-main { flex: 1; min-width: 0; } .ds-drawer-title { margin: 0; font-size: 16px; font-weight: 600; } .ds-drawer-sub { margin-top: 4px; color: var(--text-faint, #7b8794); } .ds-drawer-body { flex: 1; padding: 16px 20px; overflow-y: auto; } .ds-search { display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line, #dfe4ea); border-radius: var(--radius-sm, 4px); color: var(--text-faint, #7b8794); } .ds-search input { flex: 1; border: none; padding: 6px 0; background: transparent; font: inherit; color: var(--text, #1f2933); outline: none; } .ds-drawer-foot { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-top: 1px solid var(--line, #dfe4ea); } .ds-calc { flex: 1; display: flex; gap: 14px; align-items: baseline; font-size: 13px; } .ds-loss { color: var(--loss, #c8322b); font-weight: 600; } .ds-btn { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 14px; border-radius: var(--radius-sm, 4px); padding: 6px 12px; height: 32px; cursor: pointer; white-space: nowrap; } .ds-btn-primary { background: var(--accent, #2b62c7); border: 1px solid var(--accent, #2b62c7); color: #fff; } .ds-btn-primary:hover { background: var(--accent-hover, #2453ab); } .ds-btn-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; color: var(--text-dim, #52606d); background: transparent; border: none; border-radius: 4px; cursor: pointer; } .ds-btn-icon:hover { background: var(--surface-hi, #f7f9fc); } @media (prefers-reduced-motion: reduce) { .ds-drawer { animation: none; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "帳簿係の机上",
+    "overview": "そろばんは、日本の業務SaaS標準（品質基準：マネーフォワード クラウド）を5画面で正確に演じる道具である。寒色グレーの地の上に白い面を置き、1px の罫で区切る。奇をてらった配置はどこにもなく、代わりに数字の桁揃え、罫の階調（line と line-soft の2段）、状態語彙の一貫性といった細部の精度で「汎用テンプレート」から自分を引き離す。開いた瞬間に「今日やることが何件か」が読め、売上表の行内で発送方法を選び、右ドロワーで在庫にチェックを入れるだけで粗利が確定する。家族が説明なしにこの2操作を終えられることが、すべての視覚判断の基準になる。\n\n密度は「ノートPC 13〜15インチで読む帳簿」。本文 14px、表のセルは 10px/12px のパディング、コンテンツ幅は最大 1100px。色は意味を持つ場所（利益＝緑／損失＝赤／要対応＝琥珀）と操作を持つ場所（ブランド青）にしか現れず、面や罫は無彩色に近い寒色スレートで統一する。書体は日本語システム系1族を見出しから数字まで通し、外部フォントは CSP（default-src 'self'）により読めない。\n\nこの世界が拒むもの（direction contract で確認済み）：同サイズのアイコン＋見出し＋本文カードの並び、hero-metric テンプレート、カード内カード、モーダル頼み、絵文字・Unicode 記号のアイコン。",
+    "keyCharacteristics": [
+      "寒色グレーの地（canvas）＋白面（surface）＋1px 罫。影は面ではなく「浮いた層」（ドロワー）にだけ",
+      "ブランド青は主ボタン・選択・フォーカス・アクティブナビの4か所だけ",
+      "意味色（緑／赤／琥珀）は数字とチップとトーストに限定。装飾には使わない",
+      "固定タイプスケール 12/13/14/16/20/28px、行間 1.6、ウェイトは 400/500/600 の3段",
+      "金額は integer 円、¥ 付き 3桁区切り、tabular-nums。表の中では右端の1本の軸に揃える",
+      "動くのは2つだけ：ドロワーのスライドと、粗利セルの「未確定→数字」の入れ替わり（180ms ease-out）",
+      "アイコンは authored SVG 1系統（20px グリッド、1.5px ストローク、currentColor）"
+    ],
+    "rules": [
+      { "name": "The Four Doors Rule", "body": "ブランド青が現れてよいのは、主ボタン・選択状態・フォーカス・アクティブナビの4か所だけ。見出しやリンク装飾に青を使わない。", "section": "colors" },
+      { "name": "The Numbers-and-Chips Rule", "body": "緑／赤／琥珀は数字・チップ・トースト・その入力の枠にだけ塗る。面全体やアイコン飾りには使わない。ホームの琥珀は「件数の数字」だけが色付きで、続く文言はインク色のまま。", "section": "colors" },
+      { "name": "The No-Hex-Elsewhere Rule", "body": "16進の色値は style.css の :root 以外に書かない。コンポーネントは var(--name) で参照する。唯一の例外はドロワーのスクリム rgba(31,41,51,.32)（インク色の透過）。", "section": "colors" },
+      { "name": "The Fixed Ladder Rule", "body": "サイズは 12/13/14/16/20/28 の6段だけ。clamp() や rem 比率を持ち込まない。本文 14px 未満の文字を増やさない（12/13 はラベル・補助にのみ）。", "section": "typography" },
+      { "name": "The One Axis Rule", "body": ".num は tabular-nums ＋ 右揃え ＋ nowrap。表の中では金額列すべてが右端の1本の軸に揃う。統計ブロック（.stat）の中では .num は左揃えに戻し、ラベルと同じ左端に並べる。右端の軸は表の中だけの規律。", "section": "typography" },
+      { "name": "The Signed Yen Rule", "body": "金額は ¥ ＋ 3桁区切り。負の値は全角マイナス「−」を前置し（−¥2,268）、控除項目（手数料）は表の中でも「−」付きで薄く出す。単位「点」「件」「×2」は 12px の text-faint で数字の後ろに添える。", "section": "typography" },
+      { "name": "The One Lift Rule", "body": "影の段は2つだけで、shadow-2 を使ってよいのは画面の上に一時的に浮く層（ドロワー・ポップオーバー）に限る。ボタン、カード、hover に影を足さない。オフセットの硬い影（neobrutalist 型）はこの世界にない。", "section": "elevation" }
+    ],
+    "dos": [
+      "Do 色は style.css の :root にだけ定義し、コンポーネントは var(--name) で参照する。トークン名は意味（canvas / surface / text-dim / warn）で付け、後から prefers-color-scheme 層を足せる形を保つ。",
+      "Do 金額は integer 円のまま ¥ ＋ 3桁区切りで表示し、.num（tabular-nums、右揃え、nowrap）を表のセルと th に付ける。負は全角「−」。",
+      "Do 統計ブロックでは .stat .num { text-align: left } を守り、右端の軸は表の中だけにする。",
+      "Do 文字サイズは 12/13/14/16/20/28 の6段から選ぶ。本文と操作部品は 14px。",
+      "Do ボタンと入力は高さ 32px、4px 角丸、1px 枠で1列に揃える。チェックボックスは 14px、accent-color を青にする。",
+      "Do 状態は hover（surface-hi）／focus-visible（青 2px）／disabled（opacity .45）／loading（Skeleton）／empty（EmptyState の教えるコピー）／error（トースト warn）の6語彙で表す。",
+      "Do アイコンは Icon.vue の 20 種から選び、必要なら同じ規格（20px グリッド、1.5px、round）で追加する。",
+      "Do 動きは --dur 180ms ＋ --ease の ease-out、transform と opacity だけ。prefers-reduced-motion で即時にする。",
+      "Do 要対応・未入力・0件は琥珀で目立たせ、「正常に見える異常」を作らない。"
+    ],
+    "donts": [
+      "Don't 外部フォント・CDN・アイコンライブラリを読み込まない（CSP default-src 'self'）。書体はシステム日本語1族、SVG はインライン。",
+      "Don't ブランド青を主ボタン・選択・フォーカス・アクティブナビ以外に使わない。見出しやリンクを青くしない。",
+      "Don't 緑／赤／琥珀を面全体や装飾に塗らない。数字・チップ・トースト・invalid 入力の枠に限る。",
+      "Don't ボタンやカードや hover に影を付けない。shadow-2 はドロワー・ポップオーバーだけ。",
+      "Don't カード内カード、hero-metric テンプレート、同サイズのアイコン＋見出し＋本文カードの並びを作らない。",
+      "Don't モーダルで解決しない。編集はインライン展開か右ドロワー。",
+      "Don't 絵文字・Unicode 記号・アイコンフォントをアイコンに使わない。",
+      "Don't 14px 未満の本文を増やさない。12/13px はラベル・補助・チップに限る。",
+      "Don't 1099px 以外にブレークポイントを足さない。外部モニタや縦長画面のための調整は行わない。",
+      "Don't レンダラーで利益を再計算しない（紐付けプレビューだけ例外）。表示の色分けは DB のビューが返した値の符号で決める。",
+      "Don't ダークモードを部分的に実装しない。今回スコープ外。足すときは :root の意味トークンに prefers-color-scheme 層を重ねる。"
+    ]
+  }
+}

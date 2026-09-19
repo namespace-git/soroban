@@ -15,3 +15,9 @@ session/
 
 # Claude Code の個人設定（フック等。環境固有のパスを含む）
 .claude/settings.local.json
+
+# Impeccable（デザイン作業の一時物。DESIGN.md・design.json・surfaces は残す）
+.impeccable/review/
+.impeccable/questions/
+.impeccable/hook.cache.json
+.impeccable/config.local.json

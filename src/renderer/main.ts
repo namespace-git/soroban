@@ -1,5 +1,15 @@
+/// <reference types="vite/client" />
 import { createApp } from 'vue'
 import App from './App.vue'
 import './style.css'
 
-createApp(App).mount('#app')
+async function boot() {
+  // 開発時に Electron 外（素のブラウザ）で開いたときだけモックを差す。
+  // import.meta.env.DEV が false の本番ビルドではツリーシェイクされて含まれない
+  if (import.meta.env.DEV && !window.soroban) {
+    const { installMock } = await import('./mock/soroban-mock')
+    installMock()
+  }
+  createApp(App).mount('#app')
+}
+boot()
