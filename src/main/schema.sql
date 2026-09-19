@@ -7,6 +7,10 @@
 --   * inventory_item（在庫1点）が販売可能な最小単位
 --   * 1販売に複数在庫を紐付けられる（まとめ売り対応）
 --   * landed_cost は在庫生成時に確定。後から仕入を直しても過去の利益は動かない
+--
+-- 新規DBはこのファイルで完成形を作る。既存DBには db.ts の migrate() が
+-- 列を後から足す（SQLite は既存の CHECK 制約を ALTER できないため、
+-- inventory_item.status のように制約自体を変える場合はテーブルを作り直す）。
 -- ============================================================
 
 PRAGMA foreign_keys = ON;
@@ -16,10 +20,13 @@ PRAGMA journal_mode = WAL;
 -- マスタ
 -- ============================================================
 
--- 仕入先アカウント（メロジョイA / メロジョイB）
+-- 仕入先アカウント（メロジョイA / メロジョイB / TikTok 等）
 CREATE TABLE IF NOT EXISTS shop_account (
   id         TEXT PRIMARY KEY,
   name       TEXT NOT NULL,
+  -- mellojoy = メロジョイ本体 / tiktok = TikTok Shop / other = その他手動登録
+  kind       TEXT NOT NULL DEFAULT 'other'
+             CHECK (kind IN ('mellojoy','tiktok','other')),
   note       TEXT,
   is_active  INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -43,11 +50,22 @@ CREATE TABLE IF NOT EXISTS setting (
 
 -- fee_rate_bp: ベーシスポイント。1000 = 10.00%
 -- 小数を避けるため整数で持つ
+-- collect_interval_h: 2026-09-19 に 6 時間から 1 時間へ変更（既存DBは migrate() で更新）
+-- mercari_keyword: 空なら「型番が抜けるか」で転売/私物を判定する
+-- mellojoy_watch_dir: 空なら %APPDATA%/mellojoy-watch/debug 相当を main 側が補う
+-- mellojoy_default_account_id: 下書きに付ける仕入先。空なら kind='mellojoy' の最初のアカウント
+--
+-- schema_version はここに入れない。migrate() がバージョン判定に使う値なので、
+-- ここで先に既定値を入れてしまうと「未マイグレーションの既存DB」でも
+-- version=2 に見えてしまい、列追加が一切走らなくなる（migrate() 側でだけ設定する）
 INSERT OR IGNORE INTO setting (key, value) VALUES
-  ('fee_rate_bp',        '1000'),
-  ('transfer_fee',       '200'),
-  ('aging_warn_days',    '90'),
-  ('collect_interval_h', '6');
+  ('fee_rate_bp',                 '1000'),
+  ('transfer_fee',                '200'),
+  ('aging_warn_days',             '90'),
+  ('collect_interval_h',          '1'),
+  ('mercari_keyword',             ''),
+  ('mellojoy_watch_dir',          ''),
+  ('mellojoy_default_account_id', '');
 
 -- ============================================================
 -- 仕入
@@ -56,6 +74,12 @@ INSERT OR IGNORE INTO setting (key, value) VALUES
 CREATE TABLE IF NOT EXISTS purchase (
   id              TEXT PRIMARY KEY,
   shop_account_id TEXT NOT NULL REFERENCES shop_account(id),
+
+  -- draft = mellojoy-watch から積んだ下書き。価格未入力。在庫は confirmed で生成
+  status          TEXT NOT NULL DEFAULT 'confirmed'
+                  CHECK (status IN ('draft','confirmed')),
+  -- mellojoy-watch の記録フォルダ名など。同じものを二度積まないためのキー
+  import_key      TEXT UNIQUE,
 
   ordered_at      TEXT NOT NULL,              -- YYYY-MM-DD
   order_no        TEXT,
@@ -82,8 +106,13 @@ CREATE TABLE IF NOT EXISTS purchase_line (
   purchase_id TEXT NOT NULL REFERENCES purchase(id) ON DELETE CASCADE,
 
   name        TEXT NOT NULL,
-  unit_price  INTEGER NOT NULL,              -- 税込単価
+  unit_price  INTEGER NOT NULL,              -- 税込単価。下書きは 0
   quantity    INTEGER NOT NULL CHECK (quantity > 0),
+
+  -- 型番（メロジョイの商品コード）。手動登録でも商品名から自動抽出し、手で直せる
+  model_code  TEXT,
+  series_code TEXT,
+  material    TEXT,
 
   -- 按分結果（登録・再計算時に確定させる）
   allocated_cost   INTEGER NOT NULL DEFAULT 0, -- この明細に配賦された送料等
@@ -110,8 +139,17 @@ CREATE TABLE IF NOT EXISTS inventory_item (
   landed_cost      INTEGER NOT NULL,
   acquired_at      TEXT NOT NULL,             -- 仕入日 YYYY-MM-DD
 
+  -- 型番。親（purchase_line）から継ぐが、分割時に手で直せる
+  model_code       TEXT,
+  series_code      TEXT,
+  material         TEXT,
+  -- 分割で生まれた子ならここに親の id
+  parent_id        TEXT REFERENCES inventory_item(id),
+  note             TEXT,
+
+  -- split = ばらして売るために分割した親。子が在庫として残る（過去の原価は動かさない）
   status           TEXT NOT NULL DEFAULT 'in_stock'
-                   CHECK (status IN ('in_stock','sold','disposed','personal_use')),
+                   CHECK (status IN ('in_stock','sold','disposed','personal_use','split')),
   disposed_at      TEXT,
   disposed_note    TEXT,
 
@@ -122,6 +160,9 @@ CREATE TABLE IF NOT EXISTS inventory_item (
 CREATE INDEX IF NOT EXISTS idx_inv_status   ON inventory_item(status);
 CREATE INDEX IF NOT EXISTS idx_inv_acquired ON inventory_item(acquired_at);
 CREATE INDEX IF NOT EXISTS idx_inv_pline    ON inventory_item(purchase_line_id);
+-- idx_inv_model（model_code列を使う）は __VIEWS__ マーカーの後ろで作る。
+-- 既存DBは migrate() で model_code 列を足すまでこの列が無いため、
+-- テーブル作成と同じタイミングで作ると未migrateのDBでコケる。
 
 -- ============================================================
 -- 販売
@@ -145,10 +186,15 @@ CREATE TABLE IF NOT EXISTS sale (
   shipping_method_id TEXT REFERENCES shipping_method(id),
   shipping_fee       INTEGER NOT NULL DEFAULT 0,
   packaging_cost     INTEGER NOT NULL DEFAULT 0,
+  -- actual = メルカリの取引詳細から取った実額 / master = 発送方法マスタ / manual = 手入力
+  shipping_source    TEXT CHECK (shipping_source IN ('actual','master','manual')),
 
   -- collector は送料を取得できない。
-  -- 発送方法を選んだら 1 にする。0 のものを「要入力」として出す
+  -- 発送方法を選ぶ・実額が取れたら 1 にする。0 のものを「要入力」として出す
   is_shipping_confirmed INTEGER NOT NULL DEFAULT 0,
+
+  -- タイトル・説明文から抜いた型番（複数可）。JSON配列で持つ
+  model_codes        TEXT NOT NULL DEFAULT '[]',
 
   note               TEXT,
   source             TEXT NOT NULL DEFAULT 'collector'
@@ -168,6 +214,9 @@ CREATE TABLE IF NOT EXISTS sale_line (
   sale_id           TEXT NOT NULL REFERENCES sale(id) ON DELETE CASCADE,
   -- UNIQUE: 1つの在庫は1回しか売れない
   inventory_item_id TEXT NOT NULL UNIQUE REFERENCES inventory_item(id),
+  -- auto = 型番の完全一致で自動確定 / manual = 人が確定
+  link_source       TEXT NOT NULL DEFAULT 'manual'
+                    CHECK (link_source IN ('auto','manual')),
   created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -224,13 +273,25 @@ CREATE TABLE IF NOT EXISTS collector_run (
 
 CREATE INDEX IF NOT EXISTS idx_run_started ON collector_run(started_at DESC);
 
+-- __VIEWS__
+-- db.ts はこのマーカーでファイルを分割し、テーブルの CREATE → migrate() での
+-- 列追加 → ここから先のビュー作成、の順で実行する（ビューが新しい列を参照するため）。
+
+-- 型番の先入先出（自動紐付け）と型番ランキング集計に使う。
+-- model_code は migrate() で足される列なので、ここ（migrate() の後）で作る。
+CREATE INDEX IF NOT EXISTS idx_inv_model ON inventory_item(model_code, status, acquired_at);
+
 -- ============================================================
--- ビュー：販売ごとの利益
+-- ビュー
 --
--- 粗利 = 販売価格 − 手数料 − 送料 − 梱包材 − Σ(紐付けた在庫の按分後原価)
+-- CREATE VIEW IF NOT EXISTS だと定義変更が既存DBに反映されないため、
+-- 毎起動 DROP → CREATE で作り直す。
 -- ============================================================
 
-CREATE VIEW IF NOT EXISTS sale_profit AS
+-- 販売ごとの利益
+-- 粗利 = 販売価格 − 手数料 − 送料 − 梱包材 − Σ(紐付けた在庫の按分後原価)
+DROP VIEW IF EXISTS sale_profit;
+CREATE VIEW sale_profit AS
 SELECT
   s.id,
   s.mercari_item_id,
@@ -243,21 +304,24 @@ SELECT
   s.packaging_cost,
   s.is_shipping_confirmed,
   s.shipping_method_id,
+  s.shipping_source,
+  s.note,
+  s.model_codes,
   COALESCE(SUM(i.landed_cost), 0) AS cost,
   s.price - s.fee - s.shipping_fee - s.packaging_cost
     - COALESCE(SUM(i.landed_cost), 0) AS gross_profit,
   COUNT(sl.id) AS item_count,
-  CASE WHEN COUNT(sl.id) = 0 THEN 1 ELSE 0 END AS unmatched
+  CASE WHEN COUNT(sl.id) = 0 THEN 1 ELSE 0 END AS unmatched,
+  -- 1 なら紐付けのどれかが型番の自動確定
+  COALESCE(MAX(CASE WHEN sl.link_source = 'auto' THEN 1 ELSE 0 END), 0) AS auto_linked
 FROM sale s
 LEFT JOIN sale_line      sl ON sl.sale_id = s.id
 LEFT JOIN inventory_item i  ON i.id = sl.inventory_item_id
 GROUP BY s.id;
 
--- ============================================================
--- ビュー：月次集計（kind別）
--- ============================================================
-
-CREATE VIEW IF NOT EXISTS monthly_summary AS
+-- 月次集計（kind別）
+DROP VIEW IF EXISTS monthly_summary;
+CREATE VIEW monthly_summary AS
 SELECT
   substr(sold_at, 1, 7) AS month,
   kind,
@@ -271,11 +335,9 @@ SELECT
 FROM sale_profit
 GROUP BY substr(sold_at, 1, 7), kind;
 
--- ============================================================
--- ビュー：在庫（滞留日数つき）
--- ============================================================
-
-CREATE VIEW IF NOT EXISTS inventory_view AS
+-- 在庫（滞留日数つき）
+DROP VIEW IF EXISTS inventory_view;
+CREATE VIEW inventory_view AS
 SELECT
   i.id,
   i.name,
@@ -284,8 +346,64 @@ SELECT
   i.status,
   CAST(julianday('now') - julianday(i.acquired_at) AS INTEGER) AS aging_days,
   p.order_no,
-  sa.name AS shop_account_name
+  sa.name AS shop_account_name,
+  i.model_code,
+  i.series_code,
+  i.material,
+  i.parent_id,
+  i.note
 FROM inventory_item i
 LEFT JOIN purchase_line pl ON pl.id = i.purchase_line_id
 LEFT JOIN purchase      p  ON p.id  = pl.purchase_id
 LEFT JOIN shop_account  sa ON sa.id = p.shop_account_id;
+
+-- 型番（バリアント）ごとの実績。ホームの型番ランキングで使う
+DROP VIEW IF EXISTS variant_summary;
+CREATE VIEW variant_summary AS
+WITH linked AS (
+  -- 1販売の価格・粗利を、紐付けた点数で割って1点あたりに直す（まとめ売り対応）
+  SELECT
+    i.model_code,
+    CAST(sp.price AS REAL) / sp.item_count        AS price_share,
+    CAST(sp.gross_profit AS REAL) / sp.item_count AS profit_share
+  FROM inventory_item i
+  JOIN sale_line   sl ON sl.inventory_item_id = i.id
+  JOIN sale_profit sp ON sp.id = sl.sale_id
+  WHERE i.model_code IS NOT NULL
+),
+agg AS (
+  SELECT
+    model_code,
+    AVG(price_share)  AS avg_price,
+    AVG(profit_share) AS avg_profit,
+    SUM(profit_share) AS total_profit
+  FROM linked
+  GROUP BY model_code
+),
+base AS (
+  SELECT DISTINCT model_code FROM inventory_item WHERE model_code IS NOT NULL
+)
+SELECT
+  base.model_code,
+  (SELECT i2.series_code FROM inventory_item i2
+     WHERE i2.model_code = base.model_code
+     ORDER BY i2.acquired_at DESC, i2.created_at DESC LIMIT 1) AS series_code,
+  (SELECT i2.material FROM inventory_item i2
+     WHERE i2.model_code = base.model_code
+     ORDER BY i2.acquired_at DESC, i2.created_at DESC LIMIT 1) AS material,
+  (SELECT i2.name FROM inventory_item i2
+     WHERE i2.model_code = base.model_code
+     ORDER BY i2.acquired_at DESC, i2.created_at DESC LIMIT 1) AS name,
+  (SELECT COUNT(*) FROM inventory_item i2
+     WHERE i2.model_code = base.model_code AND i2.status != 'split') AS purchased,
+  (SELECT COUNT(*) FROM inventory_item i2
+     WHERE i2.model_code = base.model_code AND i2.status = 'sold') AS sold,
+  (SELECT COUNT(*) FROM inventory_item i2
+     WHERE i2.model_code = base.model_code AND i2.status = 'in_stock') AS in_stock,
+  (SELECT COALESCE(SUM(i2.landed_cost), 0) FROM inventory_item i2
+     WHERE i2.model_code = base.model_code AND i2.status = 'in_stock') AS stock_value,
+  CAST(ROUND(agg.avg_price) AS INTEGER)                  AS avg_price,
+  CAST(ROUND(agg.avg_profit) AS INTEGER)                 AS avg_profit,
+  CAST(ROUND(COALESCE(agg.total_profit, 0)) AS INTEGER)  AS total_profit
+FROM base
+LEFT JOIN agg ON agg.model_code = base.model_code;
