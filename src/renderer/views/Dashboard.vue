@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, inject, type Ref } from 'vue'
-import type { DashboardStats } from '../../shared/types'
+import type { DashboardStats, VariantSummary } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
@@ -16,6 +16,20 @@ async function load() {
 }
 onMounted(load)
 watch(revision, load)
+
+// 型番ランキング
+const variants = ref<VariantSummary[]>([])
+const variantsLoaded = ref(false)
+const variantSort = ref<'total_profit' | 'avg_profit' | 'sold'>('total_profit')
+
+async function loadVariants() {
+  variantsLoaded.value = false
+  variants.value = (await window.soroban.listVariantSummary(variantSort.value)).slice(0, 8)
+  variantsLoaded.value = true
+}
+onMounted(loadVariants)
+watch(revision, loadVariants)
+watch(variantSort, loadVariants)
 
 const runLabel: Record<string, string> = {
   ok: '正常',
@@ -34,7 +48,7 @@ const runLabel: Record<string, string> = {
     <template v-if="stats">
       <!-- 要対応。ここが0になるまでが毎日の作業 -->
       <div class="panel">
-        <template v-if="stats.needsShipping || stats.needsMatch">
+        <template v-if="stats.needsShipping || stats.needsMatch || stats.needsPurchaseConfirm">
           <p class="panel-title">要対応</p>
           <button v-if="stats.needsShipping" class="todo-row" @click="goto('sales')">
             <span class="num warn">{{ stats.needsShipping }}</span>
@@ -45,6 +59,12 @@ const runLabel: Record<string, string> = {
           <button v-if="stats.needsMatch" class="todo-row" @click="goto('sales')">
             <span class="num warn">{{ stats.needsMatch }}</span>
             <span>件 仕入が未紐付け</span>
+            <span class="grow" />
+            <Icon name="arrow-right" :size="16" />
+          </button>
+          <button v-if="stats.needsPurchaseConfirm" class="todo-row" @click="goto('purchases')">
+            <span class="num warn">{{ stats.needsPurchaseConfirm }}</span>
+            <span>件 価格未入力の仕入</span>
             <span class="grow" />
             <Icon name="arrow-right" :size="16" />
           </button>
@@ -110,6 +130,50 @@ const runLabel: Record<string, string> = {
         </div>
       </div>
 
+      <!-- 型番ランキング -->
+      <div class="panel">
+        <div class="ranking-head">
+          <p class="panel-title">型番ランキング</p>
+          <span class="grow" />
+          <select v-model="variantSort">
+            <option value="total_profit">粗利合計</option>
+            <option value="avg_profit">平均粗利</option>
+            <option value="sold">販売数</option>
+          </select>
+        </div>
+        <Skeleton v-if="!variantsLoaded" :rows="4" />
+        <table v-else-if="variants.length" class="compact ranking-table">
+          <thead>
+            <tr>
+              <th>型番</th>
+              <th>商品</th>
+              <th class="num">在庫</th>
+              <th class="num">販売</th>
+              <th class="num">平均売価</th>
+              <th class="num">平均粗利</th>
+              <th class="num">粗利計</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="v in variants" :key="v.model_code">
+              <td><StatusChip tone="neutral" :label="v.model_code" /></td>
+              <td class="ranking-name">{{ v.name }}</td>
+              <td class="num">{{ v.in_stock }}</td>
+              <td class="num">{{ v.sold }}</td>
+              <td class="num">{{ v.avg_price != null ? yen(v.avg_price) : '—' }}</td>
+              <td
+                class="num"
+                :class="v.avg_profit != null ? (v.avg_profit >= 0 ? 'profit' : 'loss') : ''"
+              >{{ v.avg_profit != null ? yen(v.avg_profit) : '—' }}</td>
+              <td class="num">
+                <strong :class="v.total_profit >= 0 ? 'profit' : 'loss'">{{ yen(v.total_profit) }}</strong>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="dim">型番付きの在庫・販売が増えると、ここに実績が並びます</p>
+      </div>
+
       <!-- 取り込み -->
       <div v-if="stats.lastRun" class="intake">
         <StatusChip
@@ -141,6 +205,10 @@ const runLabel: Record<string, string> = {
       <div class="panel">
         <p class="panel-title">在庫</p>
         <Skeleton kind="stats" />
+      </div>
+      <div class="panel">
+        <p class="panel-title">型番ランキング</p>
+        <Skeleton :rows="4" />
       </div>
     </template>
   </div>
@@ -193,4 +261,18 @@ const runLabel: Record<string, string> = {
   font-size: var(--fs-13);
 }
 .intake-msg { margin: 4px 0 0; font-size: var(--fs-13); }
+
+.ranking-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.ranking-head .panel-title { margin: 0; }
+.ranking-table { table-layout: fixed; }
+.ranking-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 </style>

@@ -300,6 +300,7 @@ td.actions {
   color: var(--text-faint);
 }
 td.actions button { color: inherit; }
+td.actions button.primary { color: #fff; }
 tr:hover td.actions { color: var(--text-dim); }
 
 table.compact td { padding: 6px 12px; }

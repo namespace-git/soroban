@@ -5,6 +5,8 @@ import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 
+const MODEL_CODE_RE = /^[A-Z]\d{3}(-\d+)?$/
+
 const items = ref<InventoryItem[]>([])
 const status = ref<InventoryStatus>('in_stock')
 const warnDays = ref(90)
@@ -32,6 +34,45 @@ async function dispose(item: InventoryItem, target: 'disposed' | 'personal_use')
   await load()
   changed()
 }
+
+async function split(item: InventoryItem) {
+  const input = prompt('何点に分けますか', '2')
+  if (input === null) return
+  const n = Number(input)
+  if (!Number.isInteger(n) || n < 2) return
+  if (!confirm(`「${item.name}」を${n}点に分割しますか？ 原価 ${yen(item.landed_cost)} を等分します`)) return
+  try {
+    await window.soroban.splitInventory(item.id, n)
+    await load()
+    changed()
+  } catch (e) {
+    alert((e as Error).message)
+  }
+}
+
+async function editModelCode(item: InventoryItem) {
+  const input = prompt('型番（例：Z078-2）', item.model_code ?? '')
+  if (input === null) return
+  const trimmed = input.trim().toUpperCase()
+  if (trimmed === '') {
+    await window.soroban.updateInventory(item.id, { model_code: null, series_code: null })
+    await load()
+    return
+  }
+  if (!MODEL_CODE_RE.test(trimmed)) {
+    alert('型番の形式が違います（例：Z078-2）')
+    return
+  }
+  await window.soroban.updateInventory(item.id, { model_code: trimmed, series_code: trimmed.split('-')[0] })
+  await load()
+}
+
+async function editNote(item: InventoryItem) {
+  const input = prompt('メモ', item.note ?? '')
+  if (input === null) return
+  await window.soroban.updateInventory(item.id, { note: input })
+  await load()
+}
 </script>
 
 <template>
@@ -46,6 +87,7 @@ async function dispose(item: InventoryItem, target: 'disposed' | 'personal_use')
         <option value="sold">販売済み</option>
         <option value="disposed">廃棄</option>
         <option value="personal_use">自家消費</option>
+        <option value="split">分割済み</option>
       </select>
       <span class="grow" />
       <span class="faint">{{ items.length }}点 ／ 原価計 {{ yen(total) }}</span>
@@ -66,7 +108,15 @@ async function dispose(item: InventoryItem, target: 'disposed' | 'personal_use')
         </thead>
         <tbody>
           <tr v-for="i in items" :key="i.id">
-            <td>{{ i.name }}</td>
+            <td class="item-cell">
+              <div class="item-row">
+                <StatusChip v-if="i.model_code" tone="neutral" :label="i.model_code" @click="i.status === 'in_stock' && editModelCode(i)" :class="{ clickable: i.status === 'in_stock' }" />
+                <button v-else-if="i.status === 'in_stock'" class="sm ghost" @click="editModelCode(i)">型番</button>
+                <span class="item-name" :title="i.name">{{ i.name }}</span>
+                <span v-if="i.parent_id" class="faint" style="font-size: 12px">分割</span>
+              </div>
+              <div v-if="i.note" class="faint note" :title="i.note">{{ i.note }}</div>
+            </td>
             <td class="faint">{{ i.shop_account_name ?? '—' }}</td>
             <td class="faint">{{ i.acquired_at }}</td>
             <td class="num">
@@ -79,6 +129,8 @@ async function dispose(item: InventoryItem, target: 'disposed' | 'personal_use')
             <td class="num">{{ yen(i.landed_cost) }}</td>
             <td class="actions">
               <template v-if="i.status === 'in_stock'">
+                <button class="sm ghost" @click="split(i)" title="この在庫を複数点に分ける">分割</button>
+                <button class="sm ghost" @click="editNote(i)" title="メモを編集する">メモ</button>
                 <button class="sm ghost" @click="dispose(i, 'disposed')" title="在庫から外して廃棄にする">廃棄</button>
                 <button class="sm ghost" @click="dispose(i, 'personal_use')" title="在庫から外して自家消費にする">自家消費</button>
               </template>
@@ -94,13 +146,33 @@ async function dispose(item: InventoryItem, target: 'disposed' | 'personal_use')
 <style scoped>
 .table-panel { padding: 0; overflow: hidden; }
 .table-panel table { table-layout: fixed; }
-.table-panel th:nth-child(1) { width: 32%; }
+.table-panel th:nth-child(1) { width: 32%; min-width: 260px; }
 .table-panel th:nth-child(2) { width: 18%; }
 .table-panel th:nth-child(3) { width: 14%; }
 .table-panel th:nth-child(4) { width: 12%; }
 .table-panel th:nth-child(5) { width: 12%; }
 .table-panel th:last-child,
-.table-panel td.actions { width: 150px; white-space: nowrap; }
+.table-panel td.actions { width: 260px; white-space: nowrap; }
 .table-panel .actions { display: flex; justify-content: flex-end; gap: 4px; }
 .table-panel .actions button { white-space: nowrap; }
+.table-panel .clickable { cursor: pointer; }
+.table-panel .item-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.table-panel .item-row > * { flex-shrink: 0; }
+.table-panel .item-name {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.table-panel .note {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1099px) {
+  .table-panel { overflow-x: auto; }
+}
 </style>

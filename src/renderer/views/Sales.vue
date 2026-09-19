@@ -22,6 +22,7 @@ const form = ref<SaleInput>({
   sold_at: todayLocal(),
   price: 0,
   kind: 'resale',
+  note: '',
 })
 
 // 紐付けパネルを開いている販売
@@ -52,9 +53,13 @@ async function submit() {
   if (!form.value.title.trim()) { alert('商品名を入力してください'); return }
   if (!form.value.price || form.value.price <= 0) { alert('価格を入力してください'); return }
 
-  await window.soroban.createSale({ ...form.value, title: form.value.title.trim() })
+  await window.soroban.createSale({
+    ...form.value,
+    title: form.value.title.trim(),
+    note: form.value.note?.trim() || null,
+  })
 
-  form.value = { title: '', sold_at: todayLocal(), price: 0, kind: 'resale' }
+  form.value = { title: '', sold_at: todayLocal(), price: 0, kind: 'resale', note: '' }
   showForm.value = false
   await load()
   changed()
@@ -75,8 +80,30 @@ async function setPackaging(sale: SaleProfit, value: number) {
   changed()
 }
 
+/** タイトルに同じ型番が既に含まれているものは表示しない（説明文からだけ拾えたものだけ示す） */
+function extraCodes(sale: SaleProfit) {
+  return sale.model_codes.filter(c => !sale.title.includes(c))
+}
+
 async function setKind(sale: SaleProfit, kind: SaleKind) {
   await window.soroban.updateSale(sale.id, { kind })
+  await load()
+  changed()
+}
+
+async function editNote(sale: SaleProfit) {
+  const v = prompt('メモ', sale.note ?? '')
+  if (v === null) return
+  await window.soroban.updateSale(sale.id, { note: v.trim() || null })
+  await load()
+  changed()
+}
+
+// --- 型番で自動紐付け ---
+
+async function autoLinkPending() {
+  const n = await window.soroban.autoLinkPending()
+  alert(n > 0 ? `${n}件を自動で紐付けました` : '型番が一致する在庫はありませんでした')
   await load()
   changed()
 }
@@ -196,6 +223,10 @@ async function remove(sale: SaleProfit) {
             <option value="personal">私物</option>
           </select>
         </label>
+        <label class="field field-wide">
+          <span>メモ</span>
+          <input v-model="form.note" placeholder="任意" />
+        </label>
       </div>
       <div class="row">
         <span class="grow" />
@@ -209,6 +240,7 @@ async function remove(sale: SaleProfit) {
         未処理のみ
       </label>
       <span class="grow" />
+      <button class="sm" @click="autoLinkPending">型番で自動紐付け</button>
       <span class="faint">{{ sales.length }}件</span>
     </div>
 
@@ -236,6 +268,12 @@ async function remove(sale: SaleProfit) {
 
               <td class="title-cell">
                 <div class="title-row">
+                  <span v-if="extraCodes(s).length" class="model-chips">
+                    <StatusChip
+                      v-for="mc in extraCodes(s)" :key="mc"
+                      tone="neutral" :label="mc"
+                    />
+                  </span>
                   <span class="title-text" :title="s.title">{{ s.title }}</span>
                   <button
                     class="kind-toggle"
@@ -248,13 +286,19 @@ async function remove(sale: SaleProfit) {
                     />
                   </button>
                 </div>
+                <div v-if="s.note" class="faint note" :title="s.note">{{ s.note }}</div>
               </td>
 
               <td class="num">{{ yen(s.price) }}</td>
               <td class="num dim">−{{ yen(s.fee) }}</td>
 
               <td>
+                <span v-if="s.shipping_source === 'actual'" class="shipping-actual">
+                  {{ yen(s.shipping_fee) }}
+                  <StatusChip tone="ok" label="実額" />
+                </span>
                 <select
+                  v-else
                   class="ship-select"
                   :value="s.shipping_method_id ?? ''"
                   :class="{ invalid: !s.is_shipping_confirmed }"
@@ -285,14 +329,16 @@ async function remove(sale: SaleProfit) {
                 >
                   <Icon name="link" :size="14" /> 紐付け
                 </button>
-                <button
-                  v-else-if="s.item_count"
-                  class="cost-btn"
-                  @click="openMatch(s)"
-                  title="クリックで紐付けを編集"
-                >
-                  {{ yen(s.cost) }}<small class="faint"> ×{{ s.item_count }}</small>
-                </button>
+                <span v-else-if="s.item_count" class="cost-cell">
+                  <button
+                    class="cost-btn"
+                    @click="openMatch(s)"
+                    title="クリックで紐付けを編集"
+                  >
+                    {{ yen(s.cost) }}<small class="faint"> ×{{ s.item_count }}</small>
+                  </button>
+                  <StatusChip v-if="s.auto_linked" tone="ok" label="自動" />
+                </span>
                 <span v-else class="faint">—</span>
               </td>
 
@@ -308,6 +354,7 @@ async function remove(sale: SaleProfit) {
               </td>
 
               <td class="actions">
+                <button class="sm ghost memo-btn" @click="editNote(s)" title="メモを編集する">メモ</button>
                 <button class="icon ghost" aria-label="削除" @click="remove(s)">
                   <Icon name="trash" :size="16" />
                 </button>
@@ -394,11 +441,11 @@ async function remove(sale: SaleProfit) {
 .table-panel td { padding: 8px 12px; }
 
 .col-date    { width: 72px; }
-.col-title   { min-width: 180px; }
-.col-amt     { width: 100px; }
-.col-ship    { width: 220px; }
+.col-title   { min-width: 240px; }
+.col-amt     { width: 92px; }
+.col-ship    { width: 200px; }
 .col-pack    { width: 80px; }
-.col-actions { width: 40px; }
+.col-actions { width: 76px; }
 
 .nowrap { white-space: nowrap; }
 
@@ -415,6 +462,29 @@ async function remove(sale: SaleProfit) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.model-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.note {
+  margin-top: 2px;
+  font-size: var(--fs-12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-panel .actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
+.table-panel .actions button { white-space: nowrap; }
+
+.memo-btn {
+  padding: 3px 6px;
+  opacity: .35;
+  transition: opacity var(--dur) var(--ease);
+}
+tr:hover .memo-btn { opacity: 1; }
 
 .kind-toggle {
   flex-shrink: 0;
@@ -436,7 +506,7 @@ async function remove(sale: SaleProfit) {
 
 /* 1099px 以下：ナビがアイコン帯に畳まれコンテンツ幅が狭くなる（≒910px）。
    販売日・金額列を詰めて商品名の可読幅を確保し、チップは2段に戻す。
-   合計 = 56 + 88*4(352) + 176 + 80 + 40 = 704px。商品列は残り約206px（min 180px を確保）。 */
+   合計 = 56 + 88*4(352) + 176 + 80 + 76 = 740px。商品列は残り約170px（min 240px 未満。ellipsis で吸収）。 */
 @media (max-width: 1099px) {
   .col-date { width: 56px; }
   .col-amt  { width: 88px; }
@@ -459,6 +529,12 @@ async function remove(sale: SaleProfit) {
   border-color: var(--warn-line);
 }
 
+.cost-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .cost-btn {
   background: transparent;
   border-color: transparent;
@@ -470,6 +546,13 @@ async function remove(sale: SaleProfit) {
 .cost-btn:hover:not(:disabled) {
   background: transparent;
   text-decoration: underline;
+}
+
+.shipping-actual {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
 }
 
 .packaging-input { width: 72px; }

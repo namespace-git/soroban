@@ -239,6 +239,57 @@ describe('db（:memory:）', () => {
     expect(salesWithKeyword.find(s => s.mercari_item_id === 'm4')!.kind).toBe('personal')
   })
 
+  it('appendModelCodes：説明文から拾った型番を追記し、resaleに戻して自動紐付けする', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-01',
+      shipping_fee: 0,
+      lines: [{ name: 'クリームわん【Z080-1】', unit_price: 1000, quantity: 1 }],
+    })
+
+    // タイトルに型番が無いので私物扱いで取り込まれる
+    db.insertCollected([
+      { mercariItemId: 'm10', title: '素敵な商品です', price: 2000, soldAt: '2026-01-05' },
+    ])
+    const saleId = db.listSales().find(s => s.mercari_item_id === 'm10')!.id
+    expect(db.listSales().find(s => s.id === saleId)!.kind).toBe('personal')
+
+    const changed = db.appendModelCodes(saleId, ['Z080-1'])
+    expect(changed).toBe(true)
+
+    const sale = db.listSales().find(s => s.id === saleId)!
+    expect(sale.kind).toBe('resale')
+    expect(sale.model_codes).toEqual(['Z080-1'])
+    expect(sale.auto_linked).toBe(1)
+    expect(sale.cost).toBe(1000)
+    expect(sale.unmatched).toBe(0)
+  })
+
+  it('appendModelCodes：同じ型番を足しても変化なしなら false', () => {
+    const saleId = db.createSale({ title: '【Z080-1】クリームわん', sold_at: '2026-01-05', price: 2000 })
+    expect(db.appendModelCodes(saleId, ['Z080-1'])).toBe(false)
+  })
+
+  it('appendModelCodes：人が手でpersonalにした販売はresaleに戻さない', () => {
+    // タイトルに型番があるので取り込み時点ではresale
+    db.insertCollected([
+      { mercariItemId: 'm11', title: '【Z080-1】掘り出し物', price: 2000, soldAt: '2026-01-05' },
+    ])
+    const saleId = db.listSales().find(s => s.mercari_item_id === 'm11')!.id
+
+    // 人が手でpersonalに変更した状態を模す（updated_atがcreated_atから進む）
+    db.getDb().prepare(
+      `UPDATE sale SET kind = 'personal', updated_at = datetime('now', '+1 minute') WHERE id = ?`,
+    ).run(saleId)
+
+    const changed = db.appendModelCodes(saleId, ['Z088-2'])
+    expect(changed).toBe(true)
+
+    const sale = db.listSales().find(s => s.id === saleId)!
+    expect(sale.kind).toBe('personal')
+    expect(sale.model_codes.sort()).toEqual(['Z080-1', 'Z088-2'])
+  })
+
   it('下書き→確定：在庫は確定するまで作られず、按分後原価の合計が明細合計+送料と一致する', () => {
     const draftId = db.createPurchaseDraft({
       import_key: 'mellojoy-watch/2026-01-01-001',

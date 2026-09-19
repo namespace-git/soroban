@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import type { ShippingMethod, CollectorRun } from '../../shared/types'
+import { ref, computed, onMounted } from 'vue'
+import type { ShippingMethod, CollectorRun, ShopAccount } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
@@ -8,13 +8,23 @@ import Skeleton from '../components/Skeleton.vue'
 const methods = ref<ShippingMethod[]>([])
 const settings = ref<Record<string, string>>({})
 const runs = ref<CollectorRun[]>([])
+const accounts = ref<ShopAccount[]>([])
 const saved = ref('')
 const loaded = ref(false)
 
+const mellojoyAccounts = computed(() => accounts.value.filter((a) => a.kind === 'mellojoy'))
+
 async function load() {
-  methods.value = await window.soroban.listShippingMethods()
-  settings.value = await window.soroban.getSettings()
-  runs.value = await window.soroban.listRuns(10)
+  const [methodsRes, settingsRes, runsRes, accountsRes] = await Promise.all([
+    window.soroban.listShippingMethods(),
+    window.soroban.getSettings(),
+    window.soroban.listRuns(10),
+    window.soroban.listShopAccounts(),
+  ])
+  methods.value = methodsRes
+  settings.value = settingsRes
+  runs.value = runsRes
+  accounts.value = accountsRes
   loaded.value = true
 }
 onMounted(load)
@@ -124,7 +134,7 @@ const runLabel: Record<string, string> = {
               <td class="num">
                 <span class="num money-cell">
                   <span class="yen">¥</span>
-                  <input type="number" v-model.number="m.fee" @change="saveMethod(m)" style="width:56px" />
+                  <input type="number" v-model.number="m.fee" @change="saveMethod(m)" style="width:72px" />
                 </span>
               </td>
               <td class="actions">
@@ -151,7 +161,7 @@ const runLabel: Record<string, string> = {
             <span>自動取り込みの間隔（時間）</span>
             <input
               type="number" style="width:120px"
-              :value="settings.collect_interval_h ?? 6"
+              :value="settings.collect_interval_h ?? 1"
               @change="saveSetting('collect_interval_h', ($event.target as HTMLInputElement).value)"
             />
           </label>
@@ -167,6 +177,46 @@ const runLabel: Record<string, string> = {
         <p class="faint hint">
           アプリ起動時、前回から指定時間が空いていれば裏で取り込みます。
           頻度を上げすぎないでください。
+        </p>
+        <p class="faint hint">
+          収集は人間と同じ速度で数ページだけ読みます。本人確認が出たら止まるので、
+          「メルカリにログイン」から手で進めてください。
+        </p>
+
+        <div class="fields">
+          <label class="field">
+            <span>転売と判定するキーワード</span>
+            <input
+              style="width:240px"
+              :value="settings.mercari_keyword ?? ''"
+              @change="saveSetting('mercari_keyword', ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label class="field">
+            <span>mellojoy-watch の記録フォルダ</span>
+            <input
+              style="width:360px"
+              :value="settings.mellojoy_watch_dir ?? ''"
+              placeholder="空なら既定の場所（AppData/mellojoy-watch/debug）"
+              @change="saveSetting('mellojoy_watch_dir', ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label class="field">
+            <span>メロジョイの取り込み先アカウント</span>
+            <select
+              :value="settings.mellojoy_default_account_id ?? ''"
+              @change="saveSetting('mellojoy_default_account_id', ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">（最初のメロジョイ アカウント）</option>
+              <option v-for="a in mellojoyAccounts" :key="a.id" :value="a.id">{{ a.name }}</option>
+            </select>
+          </label>
+        </div>
+        <p class="faint hint">
+          空なら、タイトルに型番【Z078-2】があるものを転売、無いものを私物として取り込みます。
+        </p>
+        <p v-if="!mellojoyAccounts.length" class="faint hint">
+          仕入タブで「仕入先を追加」→ メロジョイのアカウントとして登録してください
         </p>
 
         <p class="panel-title runs-title">実行履歴</p>

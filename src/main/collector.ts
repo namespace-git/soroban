@@ -1,6 +1,7 @@
 import { BrowserWindow, session } from 'electron'
 import { setTimeout as sleep } from 'node:timers/promises'
 import * as db from './db'
+import { extractCodes } from './code'
 import type { CollectorRun } from '../shared/types'
 import { todayLocal } from '../shared/date'
 
@@ -287,14 +288,22 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     const fresh = sales.filter(s => !known.has(s.mercariItemId))
     const inserted = fresh.length > 0 ? db.insertCollected(fresh) : 0
 
-    // 未入力（送料未確定）の販売に限って詳細を開き、実額を取りにいく。
-    // 差分取得の一環：既に確定済みの販売は開かない
-    const pending = db.listSales({ onlyPending: true })
-      .filter(s => s.is_shipping_confirmed === 0 && s.mercari_item_id)
-      .slice(0, Math.max(0, MAX_PAGES_PER_RUN - pagesOpened))
+    // 詳細を開く対象：送料未確定（実額を救える）を優先し、
+    // 次に「未紐付けの転売で model_codes が空」（説明文に型番があれば救える）。
+    // どちらも既知・確定済みの販売は開かない（差分取得）
+    const candidates = db.listSales({ onlyPending: true })
+      .filter(s => s.mercari_item_id && (
+        s.is_shipping_confirmed === 0
+        || (s.kind === 'resale' && s.unmatched === 1 && s.model_codes.length === 0)
+      ))
+    const pending = [
+      ...candidates.filter(s => s.is_shipping_confirmed === 0),
+      ...candidates.filter(s => s.is_shipping_confirmed !== 0),
+    ].slice(0, Math.max(0, MAX_PAGES_PER_RUN - pagesOpened))
 
     let detailsRead = 0
     let actualsApplied = 0
+    let codesApplied = 0
 
     for (const s of pending) {
       if (pagesOpened >= MAX_PAGES_PER_RUN) break
@@ -318,12 +327,17 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
         db.applySaleActuals(s.id, actuals)
         actualsApplied++
       }
-      // 説明文からの型番追記（extractCodes）は、db.ts に追記用の関数が
-      // ないため今回は未実装。次の波で appendModelCodes 相当を足してから対応する
+
+      if (detail.description) {
+        const codes = extractCodes(detail.description)
+        if (codes.length > 0 && db.appendModelCodes(s.id, codes)) {
+          codesApplied++
+        }
+      }
     }
 
     const message = pending.length > 0
-      ? `詳細 ${detailsRead} 件を読み、実額 ${actualsApplied} 件を反映しました`
+      ? `詳細 ${detailsRead} 件を読み、実額 ${actualsApplied} 件、型番の追記 ${codesApplied} 件`
       : undefined
 
     return db.finishRun(runId, 'ok', sales.length, inserted, message)

@@ -717,6 +717,48 @@ export function autoLinkPending(): number {
   return count
 }
 
+/**
+ * 説明文から後追いで見つかった型番を model_codes に追記する（collector が使う）。
+ * 既存の配列と結合し重複除去（出現順は既存が先）。変化がなければ false。
+ *
+ * 追記後、型番が1つに絞れたら autoLinkSale を試みる。また、タイトルに型番が無く
+ * 説明文にだけあったせいで私物扱いになっていた販売は resale に戻す（keyword 判定を
+ * 使っていない場合のみ）。ただし人が手で personal にした販売（一度でも更新された
+ * 販売）は戻さない。
+ */
+export function appendModelCodes(saleId: string, codes: string[]): boolean {
+  const sale = db.prepare(
+    'SELECT kind, source, model_codes, created_at, updated_at FROM sale WHERE id = ?',
+  ).get(saleId) as
+    | { kind: SaleKind; source: string; model_codes: string; created_at: string; updated_at: string }
+    | undefined
+  if (!sale) return false
+
+  const existing = JSON.parse(sale.model_codes || '[]') as string[]
+  const seen = new Set(existing)
+  const merged = [...existing]
+  for (const c of codes) {
+    if (!seen.has(c)) {
+      seen.add(c)
+      merged.push(c)
+    }
+  }
+  if (merged.length === existing.length) return false
+
+  const keyword = settingStr('mercari_keyword', '')
+  // source='collector' かつ一度も更新されていない（=人が手で触っていない）ときだけ救済する
+  const untouched = sale.source === 'collector' && sale.updated_at === sale.created_at
+  const kind: SaleKind =
+    sale.kind === 'personal' && !keyword && merged.length > 0 && untouched ? 'resale' : sale.kind
+
+  db.prepare(
+    `UPDATE sale SET model_codes = ?, kind = ?, updated_at = datetime('now') WHERE id = ?`,
+  ).run(JSON.stringify(merged), kind, saleId)
+
+  autoLinkSale(saleId)
+  return true
+}
+
 /** 記号と空白を落として比較用のキーを作る */
 function normalizeName(s: string): string {
   return s.replace(/[\s　【】\[\]（）()／/・,、。]/g, '').toLowerCase()

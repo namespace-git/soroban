@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { PurchaseSummary, ShopAccount, PurchaseLineInput, AllocMethod } from '../../shared/types'
+import type { PurchaseSummary, ShopAccount, PurchaseLineInput, AllocMethod, PurchaseInput } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
+import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+
+const MODEL_CODE_PREVIEW_RE = /【?([A-Z]\d{3}(?:-\d+)?)】?/
 
 const purchases = ref<PurchaseSummary[]>([])
 const accounts = ref<ShopAccount[]>([])
@@ -12,6 +15,9 @@ const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const showForm = ref(false)
 const loaded = ref(false)
+const importing = ref(false)
+/** 下書きを確定中の仕入 id。null なら新規登録 */
+const editingId = ref<string | null>(null)
 
 const form = ref({
   shop_account_id: '',
@@ -21,10 +27,22 @@ const form = ref({
   other_cost: 0,
   discount: 0,
   alloc_method: 'by_amount' as AllocMethod,
+  note: '' as string,
   lines: [{ name: '', unit_price: 0, quantity: 1 }] as PurchaseLineInput[],
 })
 
 const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
+
+/** 下書きを一覧の先頭に（それぞれの中の順序は listPurchases の並びのまま） */
+const sortedPurchases = computed(() =>
+  [...purchases.value].sort((a, b) => (a.status === b.status ? 0 : a.status === 'draft' ? -1 : 1)),
+)
+
+function previewModelCode(line: PurchaseLineInput): string {
+  if (line.model_code) return line.model_code
+  const m = line.name.match(MODEL_CODE_PREVIEW_RE)
+  return m ? m[1] : ''
+}
 
 async function load() {
   purchases.value = await window.soroban.listPurchases()
@@ -60,17 +78,94 @@ async function submit() {
   const lines = form.value.lines.filter(l => l.name.trim() && l.quantity > 0)
   if (!lines.length) { alert('明細を入力してください'); return }
   if (!form.value.shop_account_id) { alert('仕入先を選んでください'); return }
+  if (editingId.value && lines.some(l => !l.unit_price)) {
+    alert('単価を入力してください')
+    return
+  }
 
-  await window.soroban.createPurchase({ ...form.value, lines })
+  const input: PurchaseInput = {
+    shop_account_id: form.value.shop_account_id,
+    ordered_at: form.value.ordered_at,
+    order_no: form.value.order_no || null,
+    shipping_fee: form.value.shipping_fee,
+    other_cost: form.value.other_cost,
+    discount: form.value.discount,
+    alloc_method: form.value.alloc_method,
+    note: form.value.note || null,
+    lines,
+  }
 
+  if (editingId.value) {
+    await window.soroban.confirmPurchase(editingId.value, input)
+  } else {
+    await window.soroban.createPurchase(input)
+  }
+
+  editingId.value = null
   form.value.order_no = ''
   form.value.shipping_fee = 0
   form.value.other_cost = 0
   form.value.discount = 0
+  form.value.note = ''
   form.value.lines = [{ name: '', unit_price: 0, quantity: 1 }]
   showForm.value = false
   await load()
   changed()
+}
+
+/** 下書きを確定フォームに読み込む。既存の登録フォームを編集モードで開く */
+async function confirmDraft(p: PurchaseSummary) {
+  const detail = await window.soroban.getPurchase(p.id)
+  editingId.value = detail.id
+  form.value.shop_account_id = detail.shop_account_id
+  form.value.ordered_at = detail.ordered_at
+  form.value.order_no = ''
+  form.value.shipping_fee = 0
+  form.value.other_cost = 0
+  form.value.discount = 0
+  form.value.alloc_method = 'by_amount'
+  form.value.note = detail.note ?? ''
+  form.value.lines = detail.lines.map(l => ({
+    name: l.name,
+    unit_price: 0,
+    quantity: l.quantity,
+    model_code: l.model_code,
+    series_code: l.series_code,
+    material: l.material,
+  }))
+  showForm.value = true
+}
+
+function toggleForm() {
+  if (showForm.value) {
+    editingId.value = null
+    showForm.value = false
+  } else {
+    showForm.value = true
+  }
+}
+
+async function importDrafts() {
+  importing.value = true
+  try {
+    const res = await window.soroban.importPurchaseDrafts()
+    let msg = `${res.created}件を下書きに追加しました（既知 ${res.skipped}件）`
+    if (res.errors.length) {
+      msg += '\n' + res.errors.slice(0, 3).join('\n')
+    }
+    alert(msg)
+    await load()
+    changed()
+  } finally {
+    importing.value = false
+  }
+}
+
+async function editNote(p: PurchaseSummary) {
+  const input = prompt('メモ', p.note ?? '')
+  if (input === null) return
+  await window.soroban.updatePurchaseNote(p.id, input.trim() || null)
+  await load()
 }
 
 async function remove(p: PurchaseSummary) {
@@ -87,7 +182,8 @@ async function remove(p: PurchaseSummary) {
 async function addAccount() {
   const name = prompt('仕入先の名前（例：メロジョイA）')
   if (!name) return
-  await window.soroban.createShopAccount(name)
+  const isMellojoy = confirm('メロジョイのアカウントですか？（いいえ = TikTok Shop など）')
+  await window.soroban.createShopAccount(name, isMellojoy ? 'mellojoy' : 'other')
   await load()
 }
 </script>
@@ -97,8 +193,12 @@ async function addAccount() {
     <div class="page-head">
       <h1 class="page-title">仕入</h1>
       <span class="grow" />
+      <button class="ghost" :disabled="importing" @click="importDrafts">
+        <Icon name="download" :size="16" />
+        メロジョイの購入記録を取り込む
+      </button>
       <button class="ghost" @click="addAccount">仕入先を追加</button>
-      <button class="primary" @click="showForm = !showForm">
+      <button class="primary" @click="toggleForm">
         <Icon :name="showForm ? 'close' : 'plus'" :size="16" />
         {{ showForm ? '閉じる' : '仕入を登録' }}
       </button>
@@ -106,6 +206,7 @@ async function addAccount() {
 
     <!-- 登録フォーム -->
     <div v-if="showForm" class="panel form">
+      <p v-if="editingId" class="panel-title">下書きを確定</p>
       <div class="fields">
         <label class="field">
           <span>仕入先</span>
@@ -121,12 +222,17 @@ async function addAccount() {
           <span>注文番号</span>
           <input v-model="form.order_no" placeholder="任意" />
         </label>
+        <label class="field">
+          <span>メモ</span>
+          <input v-model="form.note" placeholder="任意" />
+        </label>
       </div>
 
       <table class="compact lines-table">
         <thead>
           <tr>
             <th>商品名</th>
+            <th class="col-model">型番</th>
             <th class="num col-price">単価</th>
             <th class="num col-qty">数量</th>
             <th class="num col-subtotal">小計</th>
@@ -136,6 +242,7 @@ async function addAccount() {
         <tbody>
           <tr v-for="(l, i) in form.lines" :key="i">
             <td><input v-model="l.name" class="full" placeholder="商品名" /></td>
+            <td class="faint">{{ previewModelCode(l) }}</td>
             <td><input type="number" v-model.number="l.unit_price" class="full" /></td>
             <td><input type="number" v-model.number="l.quantity" class="full" min="1" /></td>
             <td class="num dim">{{ yen((l.unit_price || 0) * (l.quantity || 0)) }}</td>
@@ -182,7 +289,7 @@ async function addAccount() {
 
       <div class="row">
         <span class="grow" />
-        <button class="primary" @click="submit">登録して在庫を作る</button>
+        <button class="primary" @click="submit">{{ editingId ? '確定して在庫を作る' : '登録して在庫を作る' }}</button>
       </div>
     </div>
 
@@ -204,15 +311,30 @@ async function addAccount() {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="p in purchases" :key="p.id">
+            <tr v-for="p in sortedPurchases" :key="p.id">
               <td class="faint">{{ p.ordered_at }}</td>
               <td>{{ p.shop_account_name }}</td>
-              <td class="faint">{{ p.order_no ?? '—' }}</td>
+              <td>
+                <StatusChip v-if="p.status === 'draft'" tone="warn" label="価格未入力" />
+                <span v-else class="faint">{{ p.order_no ?? '—' }}</span>
+                <div v-if="p.note" class="faint note">{{ p.note }}</div>
+              </td>
               <td class="num">{{ p.line_count }}</td>
-              <td class="num">{{ yen(p.subtotal) }}</td>
-              <td class="num dim">{{ yen(p.shipping_fee) }}</td>
-              <td class="num"><strong>{{ yen(p.total_cost) }}</strong></td>
+              <td class="num">
+                <span v-if="p.status === 'draft'" class="faint">—</span>
+                <template v-else>{{ yen(p.subtotal) }}</template>
+              </td>
+              <td class="num dim">
+                <span v-if="p.status === 'draft'" class="faint">—</span>
+                <template v-else>{{ yen(p.shipping_fee) }}</template>
+              </td>
+              <td class="num">
+                <strong v-if="p.status !== 'draft'">{{ yen(p.total_cost) }}</strong>
+                <span v-else class="faint">—</span>
+              </td>
               <td class="actions">
+                <button v-if="p.status === 'draft'" class="sm primary" @click="confirmDraft(p)">確定</button>
+                <button class="sm ghost" @click="editNote(p)">メモ</button>
                 <button class="icon ghost" aria-label="削除" @click="remove(p)">
                   <Icon name="trash" :size="16" />
                 </button>
@@ -243,6 +365,7 @@ async function addAccount() {
   margin-bottom: 16px;
 }
 
+.lines-table .col-model { width: 96px; }
 .lines-table .col-price { width: 110px; }
 .lines-table .col-qty { width: 80px; }
 .lines-table .col-subtotal { width: 110px; }
@@ -259,4 +382,6 @@ async function addAccount() {
 }
 
 .table-panel { padding: 0; overflow: hidden; }
+.table-panel .actions { display: flex; justify-content: flex-end; gap: 4px; }
+.table-panel .note { font-size: 12px; }
 </style>
