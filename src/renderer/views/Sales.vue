@@ -112,9 +112,14 @@ function extraCodes(sale: SaleProfit) {
 }
 
 async function setKind(sale: SaleProfit, kind: SaleKind) {
+  const label = kind === 'personal' ? '私物' : '転売'
+  if (!confirm(`「${sale.title}」を${label}に変更しますか？`)) return
   await window.soroban.updateSale(sale.id, { kind })
   await load()
   changed()
+  if (onlyPending.value && !sales.value.some(s => s.id === sale.id)) {
+    alert(`${label}に変更しました。「未処理のみ」を外すと表示されます`)
+  }
 }
 
 async function editNote(sale: SaleProfit) {
@@ -352,7 +357,7 @@ async function remove(sale: SaleProfit) {
                   <span class="title-text" :title="s.title">{{ s.title }}</span>
                   <button
                     class="kind-toggle"
-                    title="クリックで切り替え"
+                    title="転売／私物を切り替える（確認あり）"
                     @click="setKind(s, s.kind === 'resale' ? 'personal' : 'resale')"
                   >
                     <StatusChip
