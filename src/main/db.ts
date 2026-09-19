@@ -101,6 +101,23 @@ function settingStr(key: string, fallback = ''): string {
   return r ? r.value : fallback
 }
 
+/**
+ * mercari_keyword を「,」「、」空白（全角/半角）・改行区切りの複数語として解釈する。
+ * 前後の空白は除去、空要素は無視、大小文字は無視する。
+ */
+function parseKeywords(raw: string): string[] {
+  return raw
+    .split(/[,、\s]+/)
+    .map(s => s.trim().toLowerCase())
+    .filter(s => s.length > 0)
+}
+
+/** text がキーワードのどれか1つでも含んでいれば true（大小無視） */
+function matchesAnyKeyword(text: string, keywords: string[]): boolean {
+  const lower = text.toLowerCase()
+  return keywords.some(k => lower.includes(k))
+}
+
 // ============================================================
 // マイグレーション
 //
@@ -251,16 +268,19 @@ function migrate(): void {
       ).run()
     }
     db.prepare(`INSERT OR IGNORE INTO setting (key, value) VALUES ('mercari_keyword', '')`).run()
-    db.prepare(`INSERT OR IGNORE INTO setting (key, value) VALUES ('mellojoy_watch_dir', '')`).run()
-    db.prepare(
-      `INSERT OR IGNORE INTO setting (key, value) VALUES ('mellojoy_default_account_id', '')`,
-    ).run()
 
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '2')
          ON CONFLICT(key) DO UPDATE SET value = '2'`,
     ).run()
   }
+
+  // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
+  // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
+  // バージョンに関係なく毎回消しておく
+  db.exec(
+    `DELETE FROM setting WHERE key IN ('mellojoy_watch_dir', 'mellojoy_default_account_id')`,
+  )
 }
 
 // ============================================================
@@ -594,29 +614,78 @@ export function updateSale(id: string, patch: SalePatch): void {
 }
 
 /**
- * メルカリの取引詳細から取れた実額で上書きする（次の波の収集が使う。IPCには出さない）。
+ * メルカリの取引詳細・販売履歴ページから取れた実額で上書きする
+ * （collector が使う。IPCには出さない）。
  * shipping_fee が取れたときだけ shipping_source を 'actual' にして確定扱いにする。
+ *
+ * allowZero を立てない限り 0 は「未取得」とみなして無視する（詳細ページのスクレイピング
+ * 失敗時に 0 で潰さないため）。販売履歴ページの「¥0」（着払い）のような、0 自体が
+ * 確定した実額であるケースでは allowZero: true を渡す。
+ *
+ * sold_at は source='collector' の販売にだけ反映する。手入力の日付は上書きしない
+ * （一覧の取得日を仮の販売日として保存していたものを、本当の購入完了日に直すため）。
  */
 export function applySaleActuals(
   id: string,
-  actuals: { fee?: number; shipping_fee?: number },
+  actuals: { fee?: number | null; shipping_fee?: number | null; sold_at?: string },
+  opts?: { allowZero?: boolean },
 ): void {
+  const allowZero = opts?.allowZero ?? false
+  const hasValue = (v: number | null | undefined): v is number =>
+    v !== undefined && v !== null && (allowZero || v !== 0)
+
   const sets: string[] = []
   const vals: unknown[] = []
 
-  if (actuals.fee !== undefined) {
+  if (hasValue(actuals.fee)) {
     sets.push('fee = ?')
     vals.push(actuals.fee)
   }
-  if (actuals.shipping_fee !== undefined) {
+  if (hasValue(actuals.shipping_fee)) {
     sets.push('shipping_fee = ?', `shipping_source = 'actual'`, 'is_shipping_confirmed = 1')
     vals.push(actuals.shipping_fee)
+  }
+  if (actuals.sold_at !== undefined) {
+    sets.push(`sold_at = CASE WHEN source = 'collector' THEN ? ELSE sold_at END`)
+    vals.push(actuals.sold_at)
   }
   if (sets.length === 0) return
 
   sets.push(`updated_at = datetime('now')`)
   vals.push(id)
   db.prepare(`UPDATE sale SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
+}
+
+/**
+ * メルカリの販売履歴ページ（一覧）から取れた実額・本当の購入完了日で、
+ * 既知の取引を更新する。既に shipping_source='actual' かつ sold_at が一致していれば
+ * 何もしない（差分適用）。kind・紐付けには触らない。戻り値は更新した件数。
+ */
+export function updateCollectedActuals(
+  rows: Array<{
+    mercariItemId: string
+    soldAt: string
+    fee?: number | null
+    shippingFee?: number | null
+  }>,
+): number {
+  let updated = 0
+  for (const r of rows) {
+    const sale = db.prepare(
+      'SELECT id, shipping_source, sold_at FROM sale WHERE mercari_item_id = ?',
+    ).get(r.mercariItemId) as { id: string; shipping_source: string | null; sold_at: string } | undefined
+    if (!sale) continue
+
+    if (sale.shipping_source === 'actual' && sale.sold_at === r.soldAt) continue
+
+    applySaleActuals(
+      sale.id,
+      { fee: r.fee, shipping_fee: r.shippingFee, sold_at: r.soldAt },
+      { allowZero: true },
+    )
+    updated++
+  }
+  return updated
 }
 
 export function deleteSale(id: string): void {
@@ -751,11 +820,13 @@ export function appendModelCodes(saleId: string, codes: string[]): boolean {
   }
   if (merged.length === existing.length) return false
 
-  const keyword = settingStr('mercari_keyword', '')
+  const keywords = parseKeywords(settingStr('mercari_keyword', ''))
   // source='collector' かつ一度も更新されていない（=人が手で触っていない）ときだけ救済する
   const untouched = sale.source === 'collector' && sale.updated_at === sale.created_at
   const kind: SaleKind =
-    sale.kind === 'personal' && !keyword && merged.length > 0 && untouched ? 'resale' : sale.kind
+    sale.kind === 'personal' && keywords.length === 0 && merged.length > 0 && untouched
+      ? 'resale'
+      : sale.kind
 
   db.prepare(
     `UPDATE sale SET model_codes = ?, kind = ?, updated_at = datetime('now') WHERE id = ?`,
@@ -1072,20 +1143,27 @@ export function insertCollected(
   rows: Array<{
     mercariItemId: string
     title: string
-    description?: string
     price: number
     soldAt: string
+    description?: string
+    /** 販売手数料の実額。undefined/null なら従来どおり料率で計算 */
+    fee?: number | null
+    /** 送料の実額。0も正当な値（着払い＝出品者負担なし）。undefined/null なら未確定のまま */
+    shippingFee?: number | null
+    /** 他費用。列は増やさない。raw に残すだけ */
+    otherCost?: number | null
   }>,
 ): number {
   const rateBp = setting('fee_rate_bp', 1000)
-  // 空なら「型番が抜けるか」で転売/私物を判定。空でなければキーワード（部分一致・大小無視）で判定
-  const keyword = settingStr('mercari_keyword', '')
+  // 空なら「型番が抜けるか」で転売/私物を判定。空でなければキーワード（どれか1つでも部分一致・大小無視）で判定
+  const keywords = parseKeywords(settingStr('mercari_keyword', ''))
 
   const ins = db.prepare(
     `INSERT INTO sale
        (id, mercari_item_id, title, sold_at, price, kind,
-        fee_rate_bp, fee, source, raw, is_shipping_confirmed, model_codes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'collector', ?, 0, ?)`,
+        fee_rate_bp, fee, source, raw, is_shipping_confirmed, model_codes,
+        shipping_fee, shipping_source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'collector', ?, ?, ?, ?, ?)`,
   )
 
   const insertedIds: string[] = []
@@ -1093,14 +1171,24 @@ export function insertCollected(
     for (const r of rows) {
       const text = r.title + (r.description ? ' ' + r.description : '')
       const codes = extractCodes(text)
-      const kind: SaleKind = keyword
-        ? (text.toLowerCase().includes(keyword.toLowerCase()) ? 'resale' : 'personal')
+      const kind: SaleKind = keywords.length > 0
+        ? (matchesAnyKeyword(text, keywords) ? 'resale' : 'personal')
         : (codes.length > 0 ? 'resale' : 'personal')
+
+      const hasFee = typeof r.fee === 'number'
+      const fee = hasFee ? (r.fee as number) : calcFee(r.price, rateBp)
+
+      // shippingFee は 0 も「確定した実額」として扱う。undefined/null だけが未確定
+      const hasShippingFee = typeof r.shippingFee === 'number'
+      const shippingFee = hasShippingFee ? (r.shippingFee as number) : 0
+      const shippingSource = hasShippingFee ? 'actual' : null
+      const confirmed = hasShippingFee ? 1 : 0
 
       const id = randomUUID()
       ins.run(
         id, r.mercariItemId, r.title, r.soldAt, r.price, kind,
-        rateBp, calcFee(r.price, rateBp), JSON.stringify(r), JSON.stringify(codes),
+        rateBp, fee, JSON.stringify(r), confirmed, JSON.stringify(codes),
+        shippingFee, shippingSource,
       )
       insertedIds.push(id)
     }

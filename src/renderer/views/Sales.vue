@@ -7,6 +7,9 @@ import Drawer from '../components/Drawer.vue'
 import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+import type { PromptOptions } from '../components/InputDialog.vue'
+
+const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 
 const sales = ref<SaleProfit[]>([])
 const methods = ref<ShippingMethod[]>([])
@@ -92,7 +95,7 @@ async function setKind(sale: SaleProfit, kind: SaleKind) {
 }
 
 async function editNote(sale: SaleProfit) {
-  const v = prompt('メモ', sale.note ?? '')
+  const v = await ask('メモ', { initial: sale.note ?? '', multiline: true })
   if (v === null) return
   await window.soroban.updateSale(sale.id, { note: v.trim() || null })
   await load()

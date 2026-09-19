@@ -538,6 +538,21 @@ describe('db（:memory:）', () => {
     expect(salesWithKeyword.find(s => s.mercari_item_id === 'm4')!.kind).toBe('personal')
   })
 
+  it('私物判定：mercari_keywordは , 、 空白 改行区切りの複数語として扱い、どれか1つ含めばresale', () => {
+    db.setSetting('mercari_keyword', 'メロジョイ, Mellojoy、ジョイ')
+    db.insertCollected([
+      { mercariItemId: 'k1', title: 'メロジョイ限定コラボ', price: 1000, soldAt: '2026-01-01' },
+      { mercariItemId: 'k2', title: 'Mellojoyのグッズ', price: 1000, soldAt: '2026-01-02' },
+      { mercariItemId: 'k3', title: 'かわいいジョイちゃん', price: 1000, soldAt: '2026-01-03' },
+      { mercariItemId: 'k4', title: 'ぜんぜん関係ない商品', price: 1000, soldAt: '2026-01-04' },
+    ])
+    const sales = db.listSales()
+    expect(sales.find(s => s.mercari_item_id === 'k1')!.kind).toBe('resale')
+    expect(sales.find(s => s.mercari_item_id === 'k2')!.kind).toBe('resale')
+    expect(sales.find(s => s.mercari_item_id === 'k3')!.kind).toBe('resale')
+    expect(sales.find(s => s.mercari_item_id === 'k4')!.kind).toBe('personal')
+  })
+
   it('appendModelCodes：説明文から拾った型番を追記し、resaleに戻して自動紐付けする', () => {
     db.createPurchase({
       shop_account_id: shopId,
@@ -656,6 +671,100 @@ describe('db（:memory:）', () => {
     expect(sale.fee).toBe(180)
     expect(sale.shipping_fee).toBe(300)
     expect(sale.gross_profit).toBe(2000 - 180 - 300 - 0 - 0)
+  })
+
+  it('insertCollected：販売履歴ページの実額（fee/shippingFee/soldAt）をそのまま確定値として保存する', () => {
+    db.insertCollected([{
+      mercariItemId: 'h1',
+      title: '実額つきの商品',
+      price: 8999,
+      soldAt: '2026-09-19', // collector側で '2026/09/19' 形式から変換済みという想定
+      fee: 899,
+      shippingFee: 215,
+    }])
+
+    const sale = db.listSales().find(s => s.mercari_item_id === 'h1')!
+    expect(sale.fee).toBe(899)
+    expect(sale.shipping_fee).toBe(215)
+    expect(sale.is_shipping_confirmed).toBe(1)
+    expect(sale.shipping_source).toBe('actual')
+    expect(sale.sold_at).toBe('2026-09-19')
+    expect(sale.gross_profit).toBe(8999 - 899 - 215 - 0 - sale.cost)
+  })
+
+  it('insertCollected：shippingFeeが0でも確定扱い（着払い）', () => {
+    db.insertCollected([{
+      mercariItemId: 'h2', title: '着払いの商品', price: 1000, soldAt: '2026-09-19', shippingFee: 0,
+    }])
+    const sale = db.listSales().find(s => s.mercari_item_id === 'h2')!
+    expect(sale.shipping_fee).toBe(0)
+    expect(sale.is_shipping_confirmed).toBe(1)
+    expect(sale.shipping_source).toBe('actual')
+  })
+
+  it('updateCollectedActuals：既存の（料率計算・未確定・仮日付の）販売を実額と本当の日付に置き換える。手入力の日付は変えない', () => {
+    // collector が仮の取得日で先に積んだ販売（料率計算・未確定）
+    db.insertCollected([{ mercariItemId: 'u1', title: '後で実額が来る商品', price: 3000, soldAt: '2026-09-01' }])
+    const before = db.listSales().find(s => s.mercari_item_id === 'u1')!
+    expect(before.shipping_source).toBeNull()
+    expect(before.is_shipping_confirmed).toBe(0)
+    expect(before.fee).toBe(300) // 料率10%で計算された仮の値
+
+    // 手入力の販売（同じ mercari_item_id を持つケースを模す）
+    const manualId = db.createSale({
+      title: '手入力の商品', sold_at: '2026-01-01', price: 1000, mercari_item_id: 'u2',
+    })
+
+    const updated = db.updateCollectedActuals([
+      { mercariItemId: 'u1', soldAt: '2026-08-15', fee: 250, shippingFee: 0 },
+      { mercariItemId: 'u2', soldAt: '2026-08-20', fee: 90, shippingFee: 0 },
+      { mercariItemId: 'does-not-exist', soldAt: '2026-08-20' },
+    ])
+    expect(updated).toBe(2)
+
+    const after = db.listSales().find(s => s.mercari_item_id === 'u1')!
+    expect(after.sold_at).toBe('2026-08-15')
+    expect(after.fee).toBe(250)
+    expect(after.shipping_fee).toBe(0)
+    expect(after.shipping_source).toBe('actual')
+    expect(after.is_shipping_confirmed).toBe(1)
+
+    // 手入力の販売：sold_at は変わらない
+    const manual = db.listSales().find(s => s.id === manualId)!
+    expect(manual.sold_at).toBe('2026-01-01')
+
+    // 既に actual & 同じ sold_at のものは再適用しても更新0件
+    const noop = db.updateCollectedActuals([
+      { mercariItemId: 'u1', soldAt: '2026-08-15', fee: 250, shippingFee: 0 },
+    ])
+    expect(noop).toBe(0)
+  })
+
+  it('mellojoy_watch_dir / mellojoy_default_account_id はmigrateのたびに消される（取り込み取りやめ）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-watch-'))
+    const path = join(dir, 'test.db')
+    try {
+      db.initDb(path)
+      db.getDb().prepare(
+        `INSERT OR REPLACE INTO setting (key, value) VALUES ('mellojoy_watch_dir', '/tmp/x')`,
+      ).run()
+      db.getDb().prepare(
+        `INSERT OR REPLACE INTO setting (key, value) VALUES ('mellojoy_default_account_id', 'abc')`,
+      ).run()
+      expect(db.getSettings().mellojoy_watch_dir).toBe('/tmp/x')
+
+      // 再起動を模す
+      db.closeDb()
+      db.initDb(path)
+
+      const settings = db.getSettings()
+      expect(settings.mellojoy_watch_dir).toBeUndefined()
+      expect(settings.mellojoy_default_account_id).toBeUndefined()
+
+      db.closeDb()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('variant_summary：purchased/sold/avg_price/avg_profit/total_profitが手計算と一致する', () => {

@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { join, dirname } from 'node:path'
 
 // collector.ts は electron（BrowserWindow・session）に依存する。
 // ここで検証するのは electron に依存しない純粋関数だけなので、import を通すために潰しておく
@@ -8,8 +11,10 @@ vi.mock('electron', () => ({
 }))
 
 import {
-  buildUserAgent, isChallengeText, parseDetailText, randomWaitMs,
+  buildUserAgent, extractTotalCount, isChallengeText, parseSoldHtml, parseSoldRow, randomWaitMs,
 } from '../collector'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 describe('collector（electronに依存しない部分）', () => {
   describe('randomWaitMs', () => {
@@ -45,53 +50,121 @@ describe('collector（electronに依存しない部分）', () => {
       expect(isChallengeText('https://jp.mercari.com/captcha?x=1', '')).toBe(true)
     })
 
-    it('本文に「本人確認」が含まれれば true', () => {
-      expect(isChallengeText('https://jp.mercari.com/mypage', 'ご本人確認をお願いします')).toBe(true)
+    it('URLにchallenge / verify / /auth/ が含まれれば true', () => {
+      expect(isChallengeText('https://jp.mercari.com/challenge', '')).toBe(true)
+      expect(isChallengeText('https://jp.mercari.com/verify', '')).toBe(true)
+      expect(isChallengeText('https://jp.mercari.com/auth/callback', '')).toBe(true)
     })
 
-    it('本文に「ロボットではありません」が含まれれば true', () => {
+    it('hasCaptchaFrame が true なら常に true', () => {
+      expect(isChallengeText('https://jp.mercari.com/mypage', '短い', true)).toBe(true)
+    })
+
+    it('本文が短く「ロボットではありません」を含めば true', () => {
       expect(isChallengeText('https://jp.mercari.com/mypage', '私はロボットではありません')).toBe(true)
     })
 
+    it('本文が短く「認証コード」を含めば true', () => {
+      expect(isChallengeText('https://jp.mercari.com/mypage', '認証コードを入力してください')).toBe(true)
+    })
+
     it('大文字小文字を無視する（CAPTCHA）', () => {
-      expect(isChallengeText('https://jp.mercari.com/CAPTCHA', '')).toBe(true)
+      expect(isChallengeText('https://jp.mercari.com/mypage', 'CAPTCHA')).toBe(true)
+    })
+
+    it('マイページ本文（長文、「本人確認前」を含む）では false（本人確認だけでは止めない）', () => {
+      const longBody = '本人確認前 '.repeat(300) + 'ここはマイページの通常の本文です'
+      expect(longBody.length).toBeGreaterThanOrEqual(1500)
+      expect(isChallengeText('https://jp.mercari.com/mypage/listings/sold', longBody)).toBe(false)
+    })
+
+    it('本文が長ければ「ロボットではありません」等が混ざっていても止めない', () => {
+      const longBody = 'x'.repeat(1500) + 'ロボットではありません'
+      expect(isChallengeText('https://jp.mercari.com/mypage/listings/sold', longBody)).toBe(false)
     })
 
     it('通常のページでは false', () => {
       expect(isChallengeText(
-        'https://jp.mercari.com/mypage/listings/completed',
-        '売却済みの商品一覧です',
+        'https://jp.mercari.com/mypage/listings/sold',
+        '販売履歴の一覧です',
       )).toBe(false)
     })
   })
 
-  describe('parseDetailText', () => {
-    it('「販売手数料 ¥390」から390を抜く', () => {
-      expect(parseDetailText('販売手数料 ¥390').fee).toBe(390)
+  describe('parseSoldRow', () => {
+    const cells = ['タイトル欄', '¥8999', '¥899', '¥215', '---', '10%', '¥7885', '---', '2026/09/19']
+
+    it('href から mercariItemId を抜き、¥ 表記の金額を数値に直す', () => {
+      const row = parseSoldRow('/transaction/m87039845554', 'テスト商品', cells)
+      expect(row).toEqual({
+        mercariItemId: 'm87039845554',
+        title: 'テスト商品',
+        price: 8999,
+        fee: 899,
+        shippingFee: 215,
+        otherCost: null,
+        soldAt: '2026-09-19',
+      })
     })
 
-    it('「送料210円」から210を抜く', () => {
-      expect(parseDetailText('送料210円').shippingFee).toBe(210)
+    it('「---」は null（他費用）', () => {
+      expect(parseSoldRow('/transaction/m87039845554', 'テスト商品', cells)?.otherCost).toBeNull()
     })
 
-    it('両方を同時に抜く', () => {
-      const r = parseDetailText('商品代金 ¥3,900 販売手数料 ¥390 送料 700円 合計')
-      expect(r.fee).toBe(390)
-      expect(r.shippingFee).toBe(700)
+    it('送料 ¥0 は null ではなく 0（着払いの正当な実額）', () => {
+      const zeroCells = [...cells]
+      zeroCells[3] = '¥0'
+      expect(parseSoldRow('/transaction/m87039845554', 'テスト商品', zeroCells)?.shippingFee).toBe(0)
     })
 
-    it('見つからなければ null（feeもshippingFeeも）', () => {
-      const r = parseDetailText('説明文だけのテキストです')
-      expect(r.fee).toBeNull()
-      expect(r.shippingFee).toBeNull()
+    it('href に商品IDがなければ null', () => {
+      expect(parseSoldRow('/mypage/listings/sold', 'テスト商品', cells)).toBeNull()
     })
 
-    it('0円は実額として返さない（null）', () => {
-      expect(parseDetailText('送料 ¥0（送料込み）').shippingFee).toBeNull()
+    it('価格または購入完了日が読めなければ null', () => {
+      const noDate = [...cells]
+      noDate[8] = '---'
+      expect(parseSoldRow('/transaction/m87039845554', 'テスト商品', noDate)).toBeNull()
+    })
+  })
+
+  describe('parseSoldHtml（実DOM抜粋のfixture）', () => {
+    const html = readFileSync(join(__dirname, 'fixtures', 'mercari-sold.html'), 'utf-8')
+    const rows = parseSoldHtml(html)
+
+    it('3行取れる', () => {
+      expect(rows).toHaveLength(3)
     })
 
-    it('カンマ区切りの金額も数値に直す', () => {
-      expect(parseDetailText('販売手数料 ¥1,234').fee).toBe(1234)
+    it('1行目：m87039845554 / 8999 / 899 / 215 / 2026-09-19', () => {
+      const r = rows[0]
+      expect(r.mercariItemId).toBe('m87039845554')
+      expect(r.price).toBe(8999)
+      expect(r.fee).toBe(899)
+      expect(r.shippingFee).toBe(215)
+      expect(r.otherCost).toBeNull()
+      expect(r.soldAt).toBe('2026-09-19')
+    })
+
+    it('3行目（キャバドレス）は送料 0（着払いの実額）', () => {
+      const r = rows[2]
+      expect(r.mercariItemId).toBe('m43306721545')
+      expect(r.shippingFee).toBe(0)
+      expect(r.soldAt).toBe('2020-04-16')
+    })
+
+    it('総件数（全18件）を抜く', () => {
+      expect(extractTotalCount(html)).toBe(18)
+    })
+  })
+
+  describe('extractTotalCount', () => {
+    it('見つからなければ null', () => {
+      expect(extractTotalCount('該当の記載なし')).toBeNull()
+    })
+
+    it('カンマ区切りの件数も読む', () => {
+      expect(extractTotalCount('1件～20件（全1,234件）')).toBe(1234)
     })
   })
 })

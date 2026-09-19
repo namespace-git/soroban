@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, provide } from 'vue'
 import Icon from './components/Icon.vue'
+import InputDialog from './components/InputDialog.vue'
+import type { PromptOptions } from './components/InputDialog.vue'
 import Dashboard from './views/Dashboard.vue'
 import Sales from './views/Sales.vue'
 import Purchases from './views/Purchases.vue'
@@ -47,6 +49,30 @@ async function loadStats() {
 
 // 子の view がデータを変更したら呼ぶ。バッジと取り込み状態を再読み込みする
 provide('changed', () => { loadStats() })
+
+// window.prompt() は Electron では動かないため、入力ダイアログを共通で用意する
+type PromptState = { title: string; opts: PromptOptions; resolve: (v: string | null) => void }
+const promptState = ref<PromptState | null>(null)
+
+function ask(title: string, opts: PromptOptions = {}): Promise<string | null> {
+  // 連続呼び出しは前のものを cancel 扱いにする
+  promptState.value?.resolve(null)
+  return new Promise((resolve) => {
+    promptState.value = { title, opts, resolve }
+  })
+}
+
+function onPromptSubmit(value: string) {
+  promptState.value?.resolve(value)
+  promptState.value = null
+}
+
+function onPromptCancel() {
+  promptState.value?.resolve(null)
+  promptState.value = null
+}
+
+provide('prompt', ask)
 
 const needsTotal = computed(() => pendingCount.value)
 
@@ -103,11 +129,6 @@ async function collect() {
   }
 }
 
-async function login() {
-  await window.soroban.openLogin()
-  showNotice({ text: 'ログイン画面を閉じました。取り込みを試してください', kind: 'ok' })
-}
-
 onMounted(() => {
   loadStats()
   // 起動時の自動取り込みが終わったら知らせる
@@ -150,10 +171,6 @@ watch(revision, loadStats)
           <Icon v-if="runIsWarn" name="alert" :size="14" />
           {{ runStatusText }}
         </span>
-        <button @click="login">
-          <Icon name="login" :size="16" />
-          メルカリにログイン
-        </button>
         <button class="primary" :disabled="collecting" @click="collect">
           <Icon name="refresh" :size="16" />
           {{ collecting ? '取り込み中…' : '取り込む' }}
@@ -174,6 +191,18 @@ watch(revision, loadStats)
         <Settings v-else />
       </main>
     </div>
+
+    <InputDialog
+      :open="!!promptState"
+      :title="promptState?.title ?? ''"
+      :label="promptState?.opts.label"
+      :initial="promptState?.opts.initial"
+      :placeholder="promptState?.opts.placeholder"
+      :multiline="promptState?.opts.multiline"
+      :ok-label="promptState?.opts.okLabel"
+      @submit="onPromptSubmit"
+      @cancel="onPromptCancel"
+    />
   </div>
 </template>
 

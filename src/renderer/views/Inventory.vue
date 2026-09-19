@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
 import type { InventoryItem, InventoryStatus } from '../../shared/types'
+import type { PromptOptions } from '../components/InputDialog.vue'
 import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
@@ -13,6 +14,7 @@ const warnDays = ref(90)
 const loaded = ref(false)
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
+const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 
 const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
 
@@ -36,7 +38,7 @@ async function dispose(item: InventoryItem, target: 'disposed' | 'personal_use')
 }
 
 async function split(item: InventoryItem) {
-  const input = prompt('何点に分けますか', '2')
+  const input = await ask('何点に分けますか', { initial: '2', placeholder: '例：3' })
   if (input === null) return
   const n = Number(input)
   if (!Number.isInteger(n) || n < 2) return
@@ -51,7 +53,7 @@ async function split(item: InventoryItem) {
 }
 
 async function editModelCode(item: InventoryItem) {
-  const input = prompt('型番（例：Z078-2）', item.model_code ?? '')
+  const input = await ask('型番', { initial: item.model_code ?? '', placeholder: '例：Z078-2' })
   if (input === null) return
   const trimmed = input.trim().toUpperCase()
   if (trimmed === '') {
@@ -68,7 +70,7 @@ async function editModelCode(item: InventoryItem) {
 }
 
 async function editNote(item: InventoryItem) {
-  const input = prompt('メモ', item.note ?? '')
+  const input = await ask('メモ', { initial: item.note ?? '', multiline: true })
   if (input === null) return
   await window.soroban.updateInventory(item.id, { note: input })
   await load()

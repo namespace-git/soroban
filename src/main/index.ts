@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { writeFileSync, copyFileSync } from 'node:fs'
 import * as db from './db'
 import * as collector from './collector'
-import * as mellojoyWatch from './mellojoy-watch'
+import * as collectorMellojoy from './collector-mellojoy'
 import type { SorobanApi } from '../shared/types'
 
 // ============================================================
@@ -73,7 +73,6 @@ function registerIpc(): void {
   handle('confirmPurchase', (id, input) => db.confirmPurchase(id, input))
   handle('updatePurchaseNote', (id, note) => db.updatePurchaseNote(id, note))
   handle('deletePurchase', (id) => db.deletePurchase(id))
-  handle('importPurchaseDrafts', () => mellojoyWatch.importPurchaseDrafts())
 
   handle('listInventory', (status) => db.listInventory(status))
   handle('updateInventory', (id, patch) => db.updateInventory(id, patch))
@@ -93,6 +92,7 @@ function registerIpc(): void {
 
   handle('collect', () => collector.collect(false))
   handle('openLogin', () => collector.openLoginWindow())
+  handle('openShopLogin', (id) => collectorMellojoy.openShopLoginWindow(id))
   handle('listRuns', (limit) => db.listRuns(limit))
 
   // --- バックアップ ---

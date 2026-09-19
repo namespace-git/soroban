@@ -6,6 +6,7 @@ import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+import type { PromptOptions } from '../components/InputDialog.vue'
 
 const MODEL_CODE_PREVIEW_RE = /【?([A-Z]\d{3}(?:-\d+)?)】?/
 
@@ -13,9 +14,9 @@ const purchases = ref<PurchaseSummary[]>([])
 const accounts = ref<ShopAccount[]>([])
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
+const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const showForm = ref(false)
 const loaded = ref(false)
-const importing = ref(false)
 /** 下書きを確定中の仕入 id。null なら新規登録 */
 const editingId = ref<string | null>(null)
 
@@ -145,24 +146,8 @@ function toggleForm() {
   }
 }
 
-async function importDrafts() {
-  importing.value = true
-  try {
-    const res = await window.soroban.importPurchaseDrafts()
-    let msg = `${res.created}件を下書きに追加しました（既知 ${res.skipped}件）`
-    if (res.errors.length) {
-      msg += '\n' + res.errors.slice(0, 3).join('\n')
-    }
-    alert(msg)
-    await load()
-    changed()
-  } finally {
-    importing.value = false
-  }
-}
-
 async function editNote(p: PurchaseSummary) {
-  const input = prompt('メモ', p.note ?? '')
+  const input = await ask('メモ', { initial: p.note ?? '', multiline: true })
   if (input === null) return
   await window.soroban.updatePurchaseNote(p.id, input.trim() || null)
   await load()
@@ -180,11 +165,12 @@ async function remove(p: PurchaseSummary) {
 }
 
 async function addAccount() {
-  const name = prompt('仕入先の名前（例：メロジョイA）')
+  const name = await ask('仕入先の名前', { placeholder: '例：メロジョイA' })
   if (!name) return
   const isMellojoy = confirm('メロジョイのアカウントですか？（いいえ = TikTok Shop など）')
   await window.soroban.createShopAccount(name, isMellojoy ? 'mellojoy' : 'other')
   await load()
+  changed()
 }
 </script>
 
@@ -193,10 +179,6 @@ async function addAccount() {
     <div class="page-head">
       <h1 class="page-title">仕入</h1>
       <span class="grow" />
-      <button class="ghost" :disabled="importing" @click="importDrafts">
-        <Icon name="download" :size="16" />
-        メロジョイの購入記録を取り込む
-      </button>
       <button class="ghost" @click="addAccount">仕入先を追加</button>
       <button class="primary" @click="toggleForm">
         <Icon :name="showForm ? 'close' : 'plus'" :size="16" />

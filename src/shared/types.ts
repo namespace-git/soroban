@@ -169,9 +169,9 @@ export interface PurchaseDetail extends PurchaseSummary {
   lines: PurchaseLine[]
 }
 
-/** mellojoy-watch の購入記録1件から積む下書き。価格はまだ無い */
+/** 取り込みで積む仕入の下書き。価格はまだ無い */
 export interface PurchaseDraftInput {
-  /** 記録フォルダ名など。同じものを二度積まないためのキー（UNIQUE） */
+  /** 注文番号など。同じものを二度積まないためのキー（UNIQUE） */
   import_key: string
   shop_account_id: string
   ordered_at: string
@@ -322,8 +322,6 @@ export interface SorobanApi {
   confirmPurchase(id: string, input: PurchaseInput): Promise<void>
   updatePurchaseNote(id: string, note: string | null): Promise<void>
   deletePurchase(id: string): Promise<void>
-  /** mellojoy-watch の購入記録を読んで下書きを積む（既知のものは飛ばす） */
-  importPurchaseDrafts(): Promise<ImportResult>
 
   // 在庫
   listInventory(status?: InventoryStatus): Promise<InventoryItem[]>
@@ -349,6 +347,8 @@ export interface SorobanApi {
   // 収集
   collect(): Promise<CollectorRun>
   openLogin(): Promise<void>
+  /** 仕入先アカウント（メロジョイ）のログイン画面を開く。アカウントごとに別プロファイル */
+  openShopLogin(shopAccountId: string): Promise<void>
   listRuns(limit?: number): Promise<CollectorRun[]>
 
   // バックアップ

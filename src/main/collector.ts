@@ -3,10 +3,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import * as db from './db'
 import { extractCodes } from './code'
 import type { CollectorRun } from '../shared/types'
-import { todayLocal } from '../shared/date'
 
 // ============================================================
-// メルカリの売却済み一覧を読み取る
+// メルカリの販売履歴を読み取る
 //
 // 約束：
 //   * 認証情報は保存しない。保存するのは persist パーティション（Cookie）だけ
@@ -15,11 +14,14 @@ import { todayLocal } from '../shared/date'
 //   * 取得0件は「成功」ではなく empty（異常の疑い）として記録する
 //   * 普通の Chrome として見える（UA・Accept-Language・通常ウィンドウ）。
 //     自動化を示すものは足さない
-//   * CAPTCHA・本人確認が出たら即座に止めて人に渡す。自動突破はしない
+//   * CAPTCHA・本人確認の「本物の兆候」が出たら即座に止めて人に渡す。
+//     ただし「本人確認前」のような通常のマイページ文言では止めない
 // ============================================================
 
 const PARTITION = 'persist:mercari'
-const LISTINGS_URL = 'https://jp.mercari.com/mypage/listings/completed'
+// 販売履歴ページ：商品タイトル・価格・販売手数料・送料・他費用・購入完了日が表で並ぶ。
+// 一覧（/mypage/listings/completed）より情報量が多く、実額の取得源として正とする
+const LISTINGS_URL = 'https://jp.mercari.com/mypage/listings/sold'
 const LOGIN_URL = 'https://jp.mercari.com/login'
 
 /** 1回の収集で開くページ数の上限（一覧1＋詳細最大5）。超えたら次回に回す */
@@ -28,16 +30,16 @@ const MAX_PAGES_PER_RUN = 6
 const CHALLENGE_MESSAGE =
   'メルカリが本人確認を求めています。「メルカリにログイン」から画面を開いて、手で進めてください'
 
-/** CAPTCHA・本人確認を示す語。URL・本文どちらに出ても止める */
-const CHALLENGE_WORDS = [
-  'captcha', 'recaptcha', 'hcaptcha', 'challenge',
-  '本人確認', '認証コード', 'ロボットではありません',
-]
-
 export interface ScrapedSale {
   mercariItemId: string
   title: string
   price: number
+  /** 販売手数料。取れなければ null */
+  fee: number | null
+  /** 送料。0（着払い等）も正当な実額。取れなければ（'---'）null */
+  shippingFee: number | null
+  /** 他費用。列は増やさないので raw に残すだけに使う */
+  otherCost: number | null
   soldAt: string
 }
 
@@ -68,39 +70,130 @@ export function buildUserAgent(platform: NodeJS.Platform, chromeMajor: string): 
 }
 
 /**
- * URL・本文テキストから CAPTCHA・本人確認の兆候を判定する（大文字小文字無視）。
+ * URL・本文テキストから CAPTCHA・本人確認の「本物の兆候」を判定する。
+ *
+ * マイページの本文には（サイドメニューやバッジで）「本人確認」という語が
+ * 普通に出るため、その語だけでは止めない。締めた条件：
+ *   * URL に captcha / challenge / verify / /auth/ が含まれる
+ *   * CAPTCHA の iframe・data-sitekey が DOM にある（hasCaptchaFrame。isChallenge(win) 側で判定）
+ *   * 本文が短い（1500文字未満）かつ「ロボットではありません」「captcha」「認証コード」を含む
+ *     （本文が長い通常のマイページで、これらの語がノイズとして混ざるのを避ける）
+ *
  * electron に依存しない純粋関数。
  */
-export function isChallengeText(url: string, bodyText: string): boolean {
-  const haystack = `${url} ${bodyText}`.toLowerCase()
-  return CHALLENGE_WORDS.some(w => haystack.includes(w.toLowerCase()))
+export function isChallengeText(url: string, bodyText: string, hasCaptchaFrame = false): boolean {
+  if (hasCaptchaFrame) return true
+
+  if (/captcha|challenge|verify|\/auth\//i.test(url)) return true
+
+  if (bodyText.length < 1500) {
+    const lower = bodyText.toLowerCase()
+    if (lower.includes('ロボットではありません') || lower.includes('captcha') || lower.includes('認証コード')) {
+      return true
+    }
+  }
+
+  return false
+}
+
+/** 販売履歴テーブルの1行（parseSoldHtml の要素） */
+export type SoldRow = ScrapedSale
+
+/**
+ * 金額セルのテキストから整数を抜く。「---」は未確定（null）、それ以外の数字は
+ * 0 を含めてそのまま実額として扱う（送料 ¥0 ＝着払いは正当な値）。
+ */
+function parseAmountCell(text: string | undefined): number | null {
+  if (!text) return null
+  if (text.includes('---')) return null
+  const digits = text.replace(/[^\d]/g, '')
+  return digits ? parseInt(digits, 10) : null
+}
+
+/** 'YYYY/MM/DD' → 'YYYY-MM-DD'。読めなければ null */
+function parseSoldDateCell(text: string | undefined): string | null {
+  const m = text ? /(\d{4})\/(\d{2})\/(\d{2})/.exec(text) : null
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null
 }
 
 /**
- * 販売詳細のテキストから手数料・送料の実額を抜く。
- * `販売手数料 ¥390` `送料 210円` のような、ラベルの近くにある金額を拾う。
- * 見つからなければ null（0 を実額として返さない）。
- * electron に依存しない純粋関数。
+ * 販売履歴テーブルの1行を組み立てる。ブラウザ内 JS（scrape）と同じロジックを
+ * 文字列ベースで再現したもの。fixture のテストに使う。
+ *
+ * @param href 商品リンクの href（`/transaction/mXXXXXXXXXX`）
+ * @param titleText リンクの textContent
+ * @param cellTexts `<td>` の並び。0=商品タイトル欄, 1=商品価格, 2=販売手数料, 3=送料,
+ *   4=他費用, 5=税率, 6=販売利益, 7=寄付, 8=購入完了日（0・5・6・7 は使わない）
  */
-export function parseDetailText(text: string): { fee: number | null; shippingFee: number | null } {
+export function parseSoldRow(href: string, titleText: string, cellTexts: string[]): SoldRow | null {
+  const idMatch = /m\d{9,}/.exec(href)
+  if (!idMatch) return null
+
+  const title = titleText.trim()
+  if (!title) return null
+
+  const price = parseAmountCell(cellTexts[1])
+  const soldAt = parseSoldDateCell(cellTexts[8])
+  if (price === null || !soldAt) return null
+
   return {
-    fee: amountAfterLabel(text, /販売手数料/),
-    shippingFee: amountAfterLabel(text, /送料/),
+    mercariItemId: idMatch[0],
+    title,
+    price,
+    fee: parseAmountCell(cellTexts[2]),
+    shippingFee: parseAmountCell(cellTexts[3]),
+    otherCost: parseAmountCell(cellTexts[4]),
+    soldAt,
   }
 }
 
+function stripTags(html: string): string {
+  return html.replace(/<[^>]+>/g, '').trim()
+}
+
 /**
- * ラベル（例：「販売手数料」）が現れた直後の狭い範囲から ¥1,234 / 1,234円 の
- * どちらの表記でも金額を拾う。見つからない・0円は null（実額として扱わない）。
+ * 販売履歴ページの HTML から行を抜く（jsdom なしの簡易パース）。
+ * 実ブラウザの DOM 構造とは別経路だが、fixture を使ったテストのために用意する。
+ * クラス名は使わず、data-testid・href・列の並びだけに依存する。
  */
-function amountAfterLabel(text: string, label: RegExp): number | null {
-  const m = label.exec(text)
-  if (!m) return null
-  const rest = text.slice(m.index, m.index + 30)
-  const am = rest.match(/[¥￥]\s?([\d,]+)/) || rest.match(/([\d,]+)\s?円/)
-  if (!am) return null
-  const n = parseInt(am[1].replace(/,/g, ''), 10)
-  return Number.isFinite(n) && n > 0 ? n : null
+export function parseSoldHtml(html: string): SoldRow[] {
+  const bodyMatch = /<tbody>([\s\S]*?)<\/tbody>/.exec(html)
+  if (!bodyMatch) return []
+  const tbodyHtml = bodyMatch[1]
+
+  const rows: SoldRow[] = []
+  const trRe = /<tr>([\s\S]*?)<\/tr>/g
+  let trMatch: RegExpExecArray | null
+  while ((trMatch = trRe.exec(tbodyHtml))) {
+    const rowHtml = trMatch[1]
+
+    const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/g
+    let soldLink: RegExpExecArray | null = null
+    let am: RegExpExecArray | null
+    while ((am = anchorRe.exec(rowHtml))) {
+      if (/data-testid="sold-item-link"/.test(am[1])) { soldLink = am; break }
+    }
+    if (!soldLink) continue
+
+    const hrefMatch = /href="([^"]*)"/.exec(soldLink[1])
+    const href = hrefMatch ? hrefMatch[1] : ''
+    const titleText = stripTags(soldLink[2])
+
+    const cellTexts: string[] = []
+    const tdRe = /<td[^>]*>([\s\S]*?)<\/td>/g
+    let tm: RegExpExecArray | null
+    while ((tm = tdRe.exec(rowHtml))) cellTexts.push(stripTags(tm[1]))
+
+    const row = parseSoldRow(href, titleText, cellTexts)
+    if (row) rows.push(row)
+  }
+  return rows
+}
+
+/** 「1件～18件（全18件）」のような表示から総件数を抜く。読めなければ null */
+export function extractTotalCount(bodyText: string): number | null {
+  const m = /全([\d,]+)件/.exec(bodyText)
+  return m ? parseInt(m[1].replace(/,/g, ''), 10) : null
 }
 
 function createWindow(show: boolean): BrowserWindow {
@@ -151,84 +244,85 @@ async function isChallenge(win: BrowserWindow): Promise<boolean> {
   const bodyText = await win.webContents
     .executeJavaScript(`document.body ? document.body.innerText : ''`)
     .catch(() => '') as string
-  return isChallengeText(url, bodyText)
+  const hasCaptchaFrame = await win.webContents.executeJavaScript(`
+    !!document.querySelector(
+      'iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="arkose"], [data-sitekey]'
+    )
+  `).catch(() => false) as boolean
+  return isChallengeText(url, bodyText, hasCaptchaFrame)
 }
 
 /**
- * 売却済み一覧から取引を抽出する。
+ * 販売履歴（表）から取引と、ページ上部の総件数を抽出する。
  *
- * ⚠ セレクタは推測を含む。初回導入時に DevTools で実際のDOMを確認し、
- *   ここを必ず調整すること。
+ * ⚠ セレクタは実DOM（fixtures/mercari-sold.html）に基づくが、クラス名はハッシュで
+ *   変わるため使っていない。data-testid・href・列の並びが変わったら要調整。
  *
  * 方針：
- *   * 商品リンク（/item/m...）を起点にする。クラス名に依存しない
- *   * タイトルは img[alt] から取る。これが最も安定している
- *   * 価格は正規表現で拾う（¥1,234 と 1,234円 の両方）
+ *   * 商品リンクは `a[data-testid="sold-item-link"]` を起点にする
+ *   * 列の並び（価格・手数料・送料・他費用・購入完了日）はヘッダの順で固定と仮定する
+ *   * 金額セルは ¥ と数字が別 span のことがあるため textContent から数字だけを拾う。
+ *     「---」は null（送料 ¥0 は正当な実額として 0 を返す）
  */
-async function scrape(win: BrowserWindow): Promise<ScrapedSale[]> {
-  const raw = await win.webContents.executeJavaScript(`
+async function scrape(win: BrowserWindow): Promise<{ sales: ScrapedSale[]; totalCount: number | null }> {
+  const result = await win.webContents.executeJavaScript(`
     (() => {
-      const out = [];
-      const anchors = Array.from(
-        document.querySelectorAll('a[href*="/item/m"], a[href*="/transaction/"]')
-      );
+      const parseAmount = (text) => {
+        if (!text || text.includes('---')) return null;
+        const digits = text.replace(/[^\\d]/g, '');
+        return digits ? parseInt(digits, 10) : null;
+      };
 
-      for (const a of anchors) {
+      const rows = Array.from(document.querySelectorAll('table tbody tr'));
+      const out = [];
+      for (const tr of rows) {
+        const a = tr.querySelector('a[data-testid="sold-item-link"]');
+        if (!a) continue;
         const href = a.getAttribute('href') || '';
         const m = href.match(/m\\d{9,}/);
         if (!m) continue;
 
-        const root = a.closest('li, article, [data-testid]') || a;
-        const text = (root.textContent || '').replace(/\\s+/g, ' ').trim();
+        const title = (a.textContent || '').trim();
+        const tds = Array.from(tr.querySelectorAll('td'));
+        const cellText = (i) => (tds[i] ? (tds[i].textContent || '').trim() : '');
 
-        const pm = text.match(/[¥￥]\\s?([\\d,]+)/) || text.match(/([\\d,]+)\\s?円/);
-        const price = pm ? parseInt(pm[1].replace(/,/g, ''), 10) : null;
+        const price = parseAmount(cellText(1));
+        const fee = parseAmount(cellText(2));
+        const shippingFee = parseAmount(cellText(3));
+        const otherCost = parseAmount(cellText(4));
 
-        const img = root.querySelector('img[alt]');
-        const title = img
-          ? img.getAttribute('alt')
-          : (a.getAttribute('aria-label') || a.textContent || '').trim();
+        const dm = cellText(8).match(/(\\d{4})\\/(\\d{2})\\/(\\d{2})/);
+        const soldAt = dm ? \`\${dm[1]}-\${dm[2]}-\${dm[3]}\` : null;
 
-        if (!price || !title) continue;
-        out.push({ mercariItemId: m[0], title: String(title).slice(0, 200), price });
+        if (!title || price === null || !soldAt) continue;
+        out.push({ mercariItemId: m[0], title: title.slice(0, 200), price, fee, shippingFee, otherCost, soldAt });
       }
 
       const seen = new Set();
-      return out.filter(x => {
+      const sales = out.filter(x => {
         if (seen.has(x.mercariItemId)) return false;
         seen.add(x.mercariItemId);
         return true;
       });
-    })()
-  `) as Array<{ mercariItemId: string; title: string; price: number }>
 
-  // 一覧に販売日は出ないことが多いので、取得日で代用する。
-  // 正確な日付が必要なら取引画面を個別に開く必要があるが、
-  // アクセス回数が増えるのでここではやらない
-  const today = todayLocal()
-  return raw.map(r => ({ ...r, soldAt: today }))
+      const bodyText = document.body ? document.body.innerText : '';
+      const tm = bodyText.match(/全([\\d,]+)件/);
+      const totalCount = tm ? parseInt(tm[1].replace(/,/g, ''), 10) : null;
+
+      return { sales, totalCount };
+    })()
+  `) as { sales: ScrapedSale[]; totalCount: number | null }
+
+  return result
 }
 
 /**
- * 販売詳細ページから手数料・送料の実額と説明文を読む。
+ * 販売詳細ページから説明文だけを読む（型番救済のため）。
+ * 実額はここでは取らない（販売履歴の表を正とする）。
  *
- * ⚠ セレクタ・キーワードは未検証。DevTools で実際のDOMを確認して調整すること。
- *
- * 方針：
- *   * 本文テキストから「販売手数料」「送料」の近くの金額を正規表現で拾う
- *   * 説明文は description 系のテスト属性・section・article のうち最も長いテキストを採る
- *   * 取れなければ null（空や0を実額として保存しない）
+ * ⚠ セレクタは未検証。DevTools で実際のDOMを確認して調整すること。
  */
-async function scrapeDetail(
-  win: BrowserWindow,
-): Promise<{ fee: number | null; shippingFee: number | null; description: string | null } | null> {
-  const bodyText = await win.webContents
-    .executeJavaScript(`document.body ? document.body.innerText : ''`)
-    .catch(() => null) as string | null
-  if (!bodyText) return null
-
-  const { fee, shippingFee } = parseDetailText(bodyText)
-
+async function scrapeDetail(win: BrowserWindow): Promise<{ description: string | null } | null> {
   const description = await win.webContents.executeJavaScript(`
     (() => {
       const els = Array.from(
@@ -243,7 +337,28 @@ async function scrapeDetail(
     })()
   `).catch(() => null) as string | null
 
-  return { fee, shippingFee, description }
+  if (description === null) return null
+  return { description }
+}
+
+function toRow(s: ScrapedSale): {
+  mercariItemId: string
+  title: string
+  price: number
+  soldAt: string
+  fee?: number | null
+  shippingFee?: number | null
+  otherCost?: number | null
+} {
+  return {
+    mercariItemId: s.mercariItemId,
+    title: s.title,
+    price: s.price,
+    soldAt: s.soldAt,
+    fee: s.fee,
+    shippingFee: s.shippingFee,
+    otherCost: s.otherCost,
+  }
 }
 
 /**
@@ -273,7 +388,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       )
     }
 
-    const sales = await scrape(win)
+    const { sales, totalCount } = await scrape(win)
 
     if (sales.length === 0) {
       // 0件を成功にしない。DOM変更で壊れたとき静かに欠損すると
@@ -285,24 +400,20 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     }
 
     const known = db.existingMercariIds(sales.map(s => s.mercariItemId))
-    const fresh = sales.filter(s => !known.has(s.mercariItemId))
-    const inserted = fresh.length > 0 ? db.insertCollected(fresh) : 0
+    const freshRows = sales.filter(s => !known.has(s.mercariItemId)).map(toRow)
+    const knownRows = sales.filter(s => known.has(s.mercariItemId)).map(toRow)
 
-    // 詳細を開く対象：送料未確定（実額を救える）を優先し、
-    // 次に「未紐付けの転売で model_codes が空」（説明文に型番があれば救える）。
-    // どちらも既知・確定済みの販売は開かない（差分取得）
-    const candidates = db.listSales({ onlyPending: true })
-      .filter(s => s.mercari_item_id && (
-        s.is_shipping_confirmed === 0
-        || (s.kind === 'resale' && s.unmatched === 1 && s.model_codes.length === 0)
-      ))
-    const pending = [
-      ...candidates.filter(s => s.is_shipping_confirmed === 0),
-      ...candidates.filter(s => s.is_shipping_confirmed !== 0),
-    ].slice(0, Math.max(0, MAX_PAGES_PER_RUN - pagesOpened))
+    const inserted = freshRows.length > 0 ? db.insertCollected(freshRows) : 0
+    const updated = knownRows.length > 0 ? db.updateCollectedActuals(knownRows) : 0
+
+    // 詳細を開く対象：未紐付けの転売で model_codes が空のものだけ
+    // （説明文に型番があれば紐付けを救える）。実額のためには開かない
+    const pending = db.listSales({ onlyPending: true })
+      .filter(s => s.mercari_item_id
+        && s.kind === 'resale' && s.unmatched === 1 && s.model_codes.length === 0)
+      .slice(0, Math.max(0, MAX_PAGES_PER_RUN - pagesOpened))
 
     let detailsRead = 0
-    let actualsApplied = 0
     let codesApplied = 0
 
     for (const s of pending) {
@@ -318,29 +429,21 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
 
       const detail = await scrapeDetail(win)
       detailsRead++
-      if (!detail) continue
+      if (!detail?.description) continue
 
-      const actuals: { fee?: number; shipping_fee?: number } = {}
-      if (detail.fee !== null) actuals.fee = detail.fee
-      if (detail.shippingFee !== null) actuals.shipping_fee = detail.shippingFee
-      if (Object.keys(actuals).length > 0) {
-        db.applySaleActuals(s.id, actuals)
-        actualsApplied++
-      }
-
-      if (detail.description) {
-        const codes = extractCodes(detail.description)
-        if (codes.length > 0 && db.appendModelCodes(s.id, codes)) {
-          codesApplied++
-        }
+      const codes = extractCodes(detail.description)
+      if (codes.length > 0 && db.appendModelCodes(s.id, codes)) {
+        codesApplied++
       }
     }
 
-    const message = pending.length > 0
-      ? `詳細 ${detailsRead} 件を読み、実額 ${actualsApplied} 件、型番の追記 ${codesApplied} 件`
-      : undefined
+    const parts = [`新規 ${inserted}・更新 ${updated}`]
+    if (pending.length > 0) parts.push(`型番の追記 ${codesApplied}（詳細 ${detailsRead} 件）`)
+    if (totalCount !== null && totalCount !== sales.length) {
+      parts.push(`一覧に ${totalCount} 件、取得 ${sales.length} 件`)
+    }
 
-    return db.finishRun(runId, 'ok', sales.length, inserted, message)
+    return db.finishRun(runId, 'ok', sales.length, inserted, parts.join('。'))
 
   } catch (e) {
     return db.finishRun(

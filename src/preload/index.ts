@@ -30,7 +30,6 @@ const api: SorobanApi = {
   confirmPurchase: invoke('confirmPurchase'),
   updatePurchaseNote: invoke('updatePurchaseNote'),
   deletePurchase: invoke('deletePurchase'),
-  importPurchaseDrafts: invoke('importPurchaseDrafts'),
 
   listInventory: invoke('listInventory'),
   updateInventory: invoke('updateInventory'),
@@ -50,6 +49,7 @@ const api: SorobanApi = {
 
   collect: invoke('collect'),
   openLogin: invoke('openLogin'),
+  openShopLogin: invoke('openShopLogin'),
   listRuns: invoke('listRuns'),
 
   exportCsv: invoke('exportCsv'),

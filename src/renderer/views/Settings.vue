@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import type { ShippingMethod, CollectorRun, ShopAccount } from '../../shared/types'
+import { ref, onMounted, inject, watch, type Ref } from 'vue'
+import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
+import type { PromptOptions } from '../components/InputDialog.vue'
+
+const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
+const revision = inject<Ref<number>>('revision')!
 
 const methods = ref<ShippingMethod[]>([])
 const settings = ref<Record<string, string>>({})
@@ -12,7 +16,11 @@ const accounts = ref<ShopAccount[]>([])
 const saved = ref('')
 const loaded = ref(false)
 
-const mellojoyAccounts = computed(() => accounts.value.filter((a) => a.kind === 'mellojoy'))
+const kindLabel: Record<ShopAccountKind, string> = {
+  mellojoy: 'メロジョイ',
+  tiktok: 'TikTok Shop',
+  other: 'その他',
+}
 
 async function load() {
   const [methodsRes, settingsRes, runsRes, accountsRes] = await Promise.all([
@@ -28,6 +36,11 @@ async function load() {
   loaded.value = true
 }
 onMounted(load)
+
+// 仕入タブでアカウントを増やしたら、こちらの一覧も追従させる
+watch(revision, async () => {
+  accounts.value = await window.soroban.listShopAccounts()
+})
 
 function flash(msg: string) {
   saved.value = msg
@@ -46,9 +59,15 @@ async function saveMethod(m: ShippingMethod) {
 }
 
 async function addMethod() {
-  const name = prompt('発送方法の名前')
+  const name = await ask('発送方法の名前')
   if (!name) return
-  const fee = Number(prompt('送料（円）', '0') ?? 0)
+  const feeInput = await ask('送料（円）', { initial: '0', placeholder: '例：210' })
+  if (feeInput === null) return
+  const fee = Number(feeInput)
+  if (!Number.isFinite(fee)) {
+    alert('送料は数字で入力してください')
+    return
+  }
   await window.soroban.saveShippingMethod({ name, fee, sort_order: 50 })
   await load()
 }
@@ -72,6 +91,14 @@ async function backup() {
 // テンプレートから window は参照できないので包む
 function revealFolder() {
   return window.soroban.revealDbFolder()
+}
+
+function openLogin() {
+  return window.soroban.openLogin()
+}
+
+function openShopLogin(id: string) {
+  return window.soroban.openShopLogin(id)
 }
 
 const runLabel: Record<string, string> = {
@@ -115,6 +142,9 @@ const runLabel: Record<string, string> = {
           </label>
         </div>
         <p class="faint hint">
+          月1回の振込として、月次の費用に計上します。
+        </p>
+        <p class="faint hint">
           手数料率を変えても、登録済みの販売は再計算されません。
           過去の利益を動かさないためです。
         </p>
@@ -153,6 +183,21 @@ const runLabel: Record<string, string> = {
         </div>
       </div>
 
+      <!-- 在庫 -->
+      <div class="panel">
+        <p class="panel-title">在庫</p>
+        <div class="fields">
+          <label class="field">
+            <span>長期滞留とみなす日数</span>
+            <input
+              type="number" style="width:120px"
+              :value="settings.aging_warn_days ?? 90"
+              @change="saveSetting('aging_warn_days', ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+        </div>
+      </div>
+
       <!-- 取り込み -->
       <div class="panel">
         <p class="panel-title">取り込み</p>
@@ -165,14 +210,6 @@ const runLabel: Record<string, string> = {
               @change="saveSetting('collect_interval_h', ($event.target as HTMLInputElement).value)"
             />
           </label>
-          <label class="field">
-            <span>長期滞留とみなす日数</span>
-            <input
-              type="number" style="width:120px"
-              :value="settings.aging_warn_days ?? 90"
-              @change="saveSetting('aging_warn_days', ($event.target as HTMLInputElement).value)"
-            />
-          </label>
         </div>
         <p class="faint hint">
           アプリ起動時、前回から指定時間が空いていれば裏で取り込みます。
@@ -181,42 +218,6 @@ const runLabel: Record<string, string> = {
         <p class="faint hint">
           収集は人間と同じ速度で数ページだけ読みます。本人確認が出たら止まるので、
           「メルカリにログイン」から手で進めてください。
-        </p>
-
-        <div class="fields">
-          <label class="field">
-            <span>転売と判定するキーワード</span>
-            <input
-              style="width:240px"
-              :value="settings.mercari_keyword ?? ''"
-              @change="saveSetting('mercari_keyword', ($event.target as HTMLInputElement).value)"
-            />
-          </label>
-          <label class="field">
-            <span>mellojoy-watch の記録フォルダ</span>
-            <input
-              style="width:360px"
-              :value="settings.mellojoy_watch_dir ?? ''"
-              placeholder="空なら既定の場所（AppData/mellojoy-watch/debug）"
-              @change="saveSetting('mellojoy_watch_dir', ($event.target as HTMLInputElement).value)"
-            />
-          </label>
-          <label class="field">
-            <span>メロジョイの取り込み先アカウント</span>
-            <select
-              :value="settings.mellojoy_default_account_id ?? ''"
-              @change="saveSetting('mellojoy_default_account_id', ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="">（最初のメロジョイ アカウント）</option>
-              <option v-for="a in mellojoyAccounts" :key="a.id" :value="a.id">{{ a.name }}</option>
-            </select>
-          </label>
-        </div>
-        <p class="faint hint">
-          空なら、タイトルに型番【Z078-2】があるものを転売、無いものを私物として取り込みます。
-        </p>
-        <p v-if="!mellojoyAccounts.length" class="faint hint">
-          仕入タブで「仕入先を追加」→ メロジョイのアカウントとして登録してください
         </p>
 
         <p class="panel-title runs-title">実行履歴</p>
@@ -240,6 +241,52 @@ const runLabel: Record<string, string> = {
           </tbody>
         </table>
         <p v-if="!runs.length" class="dim">まだ実行していません</p>
+      </div>
+
+      <!-- メルカリ -->
+      <div class="panel">
+        <p class="panel-title">メルカリ</p>
+        <div class="row">
+          <button @click="openLogin"><Icon name="login" :size="16" /> メルカリにログイン</button>
+          <p class="faint">初回だけ。以後はセッションを再利用します</p>
+        </div>
+        <div class="fields">
+          <label class="field">
+            <span>転売と判定するキーワード（カンマ区切りで複数可）</span>
+            <input
+              style="width:320px"
+              placeholder="例：メロジョイ, Mellojoy"
+              :value="settings.mercari_keyword ?? ''"
+              @change="saveSetting('mercari_keyword', ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+        </div>
+      </div>
+
+      <!-- 仕入先 -->
+      <div class="panel">
+        <p class="panel-title">仕入先</p>
+        <table class="compact">
+          <thead>
+            <tr><th>名前</th><th>種別</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="a in accounts" :key="a.id">
+              <td>{{ a.name }}</td>
+              <td><StatusChip tone="neutral" :label="kindLabel[a.kind]" /></td>
+              <td class="actions">
+                <button v-if="a.kind === 'mellojoy'" class="sm" @click="openShopLogin(a.id)">
+                  <Icon name="login" :size="14" /> ログイン
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="!accounts.length" class="faint hint">仕入タブの「仕入先を追加」で登録してください</p>
+        <p class="faint hint">
+          メロジョイはアカウントごとに別のブラウザプロファイルでログインします。認証情報は保存しません。
+          注文履歴の取り込みは準備中です。
+        </p>
       </div>
 
       <!-- データ -->

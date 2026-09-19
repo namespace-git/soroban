@@ -1,0 +1,76 @@
+<!doctype html>
+<!--
+  メルカリ 販売履歴（/mypage/listings/sold）の実DOM抜粋。2026-09-19 にユーザーが DevTools から取得。
+  クラス名はハッシュで毎デプロイ変わる。安定なのは data-testid / href / 列の並び。
+  行を3件に間引き、個人情報を含まない部分だけ残した。
+-->
+<html lang="ja"><head><meta charset="utf-8"><title>出品した商品 - メルカリ</title></head>
+<body>
+<main id="main">
+<div id="my-page-side-menu"><ul><li><a href="/mypage/personal_info">個人情報設定</a></li></ul>
+<p>本人確認前</p>
+</div>
+<div data-testid="mypage-main-content" id="my-page-main-content"><div><div><div><div>
+<div data-testid="listing-container">
+<h1>出品した商品</h1>
+<nav aria-label="出品した商品"><ul>
+<li><a href="/mypage/listings" data-location="tab:listings" data-testid="tab-to-listing">出品中</a></li>
+<li><a href="/mypage/listings/in_progress" data-location="tab:in_progress" data-testid="tab-to-in-progress">取引中</a></li>
+<li><a href="/mypage/listings/completed" data-location="tab:completed" data-testid="tab-to-completed">売却済み</a></li>
+<li><a href="/mypage/listings/sold" data-location="tab:sold" aria-current="page">販売履歴</a></li>
+</ul></nav>
+<div><p id="_r_132_">表示期間</p>
+<select aria-labelledby="_r_132_" data-testid="filter-by-year-select"><option value="">全期間</option><option value="2026">2026年</option></select></div>
+<div tabindex="0">
+<table>
+<thead><tr>
+<th><p>商品タイトル</p></th><th><p>商品価格</p></th><th><p>販売手数料</p><div><div><p>(税込)</p></div></div></th>
+<th><p>送料</p><div><div><p>(税込)</p></div></div></th><th><p>他費用</p><div><div><p>(税込)</p></div></div></th>
+<th><p>税率</p></th><th><p>販売利益</p></th><th><p>寄付</p></th><th><p>購入完了日</p></th>
+</tr></thead>
+<tbody>
+<tr>
+<td><div><span><picture><img height="32" width="32" alt="Mellojoy メロジョイ ミニランド 未開封 2個セットのサムネイル" src="https://static.mercdn.net/thumb/photos/m87039845554_1.jpg?1789188498"></picture></span>
+<div><a href="/transaction/m87039845554" data-location="link" data-testid="sold-item-link"><span>Mellojoy メロジョイ ミニランド 未開封 2個セット</span></a></div></div></td>
+<td><div><span><span>¥</span><span>8999</span></span></div></td>
+<td><div><span><span>¥</span><span>899</span></span></div></td>
+<td><div><span><span>¥</span><span>215</span></span></div></td>
+<td><div>---</div></td>
+<td><div>10%</div></td>
+<td><div><span><span>¥</span><span>7885</span></span></div></td>
+<td><div>---</div></td>
+<td><div>2026/09/19</div></td>
+</tr>
+<tr>
+<td><div><span><picture><img height="32" width="32" alt="メロジョイ クリーミークリーム 贅沢スフレ Lサイズのサムネイル" src="https://static.mercdn.net/thumb/photos/m84307165710_1.jpg?1788916416"></picture></span>
+<div><a href="/transaction/m84307165710" data-location="link" data-testid="sold-item-link"><span>メロジョイ クリーミークリーム 贅沢スフレ Lサイズ</span></a></div></div></td>
+<td><div><span><span>¥</span><span>5855</span></span></div></td>
+<td><div><span><span>¥</span><span>585</span></span></div></td>
+<td><div><span><span>¥</span><span>450</span></span></div></td>
+<td><div>---</div></td>
+<td><div>10%</div></td>
+<td><div><span><span>¥</span><span>4820</span></span></div></td>
+<td><div>---</div></td>
+<td><div>2026/09/13</div></td>
+</tr>
+<tr>
+<td><div><span><span aria-hidden="true"></span><picture><img height="32" width="32" alt="ワンピース キャバドレスのサムネイル" src="https://static.mercdn.net/thumb/photos/m43306721545_1.jpg?1579853591"></picture></span>
+<div><a href="/transaction/m43306721545" data-location="link" data-testid="sold-item-link"><span>ワンピース キャバドレス</span></a></div></div></td>
+<td><div><span><span>¥</span><span>2500</span></span></div></td>
+<td><div><span><span>¥</span><span>250</span></span></div></td>
+<td><div><span><span>¥</span><span>0</span></span></div></td>
+<td><div>---</div></td>
+<td><div>10%</div></td>
+<td><div><span><span>¥</span><span>2250</span></span></div></td>
+<td><div>---</div></td>
+<td><div>2020/04/16</div></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>1件～18件（全18件）</p>
+<div><p><span>※ 販売履歴は他のユーザーに見えません</span></p><p><span>※ 取引が完了すると販売履歴に追加されます</span></p><p><span>※ 2020年以降のデータを参照可能です</span></p></div>
+</div>
+</div></div></div></div></div>
+</main>
+</body></html>

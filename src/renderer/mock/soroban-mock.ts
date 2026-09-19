@@ -15,7 +15,7 @@ import type {
   PurchaseDetail, PurchaseInput, PurchaseLine,
   InventoryItem, InventoryStatus, InventoryPatch,
   MonthlySummary, DashboardStats, CollectorRun,
-  Material, VariantSummary, ImportResult,
+  Material, VariantSummary,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 
@@ -152,7 +152,6 @@ let settings: Record<string, string> = {
   collect_interval_h: '1',
   aging_warn_days: '90',
   mercari_keyword: '【',
-  mellojoy_watch_dir: 'C:/Users/suito/AppData/Roaming/mellojoy-watch/debug',
 }
 
 // ------------------------------------------------------------
@@ -385,7 +384,7 @@ function addDraftPurchase(opts: {
     shop_account_name: opts.shopName,
     shipping_fee: 0,
     discount: 0,
-    note: 'mellojoy-watch から自動取込（価格未入力）',
+    note: '注文履歴から取り込み（価格未入力）',
     line_count: lines.length,
     subtotal: 0,
     total_cost: 0,
@@ -1090,16 +1089,6 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
-  async importPurchaseDrafts(): Promise<ImportResult> {
-    await new Promise(resolve => setTimeout(resolve, 600))
-    const mA = shopAccounts[0]
-    addDraftPurchase({
-      shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(1)),
-      lines: [{ model: 'Z001-4', qty: 2 }],
-    })
-    return { scanned: 3, created: 1, skipped: 2, errors: [] }
-  },
-
   async listInventory(status: InventoryStatus = 'in_stock') {
     const rows = inventory.filter(i => i.status === status).sort((a, b) => b.aging_days - a.aging_days)
     return wait(rows)
@@ -1268,6 +1257,10 @@ const api: SorobanApi = {
   },
 
   async openLogin() {
+    return wait(undefined)
+  },
+
+  async openShopLogin(_shopAccountId: string) {
     return wait(undefined)
   },
 

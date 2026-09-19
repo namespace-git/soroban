@@ -51,9 +51,7 @@ CREATE TABLE IF NOT EXISTS setting (
 -- fee_rate_bp: ベーシスポイント。1000 = 10.00%
 -- 小数を避けるため整数で持つ
 -- collect_interval_h: 2026-09-19 に 6 時間から 1 時間へ変更（既存DBは migrate() で更新）
--- mercari_keyword: 空なら「型番が抜けるか」で転売/私物を判定する
--- mellojoy_watch_dir: 空なら %APPDATA%/mellojoy-watch/debug 相当を main 側が補う
--- mellojoy_default_account_id: 下書きに付ける仕入先。空なら kind='mellojoy' の最初のアカウント
+-- mercari_keyword: 転売と判定するキーワード（, 、 空白 区切りで複数可）。空なら型番の有無で判定する
 --
 -- schema_version はここに入れない。migrate() がバージョン判定に使う値なので、
 -- ここで先に既定値を入れてしまうと「未マイグレーションの既存DB」でも
@@ -63,9 +61,7 @@ INSERT OR IGNORE INTO setting (key, value) VALUES
   ('transfer_fee',                '200'),
   ('aging_warn_days',             '90'),
   ('collect_interval_h',          '1'),
-  ('mercari_keyword',             ''),
-  ('mellojoy_watch_dir',          ''),
-  ('mellojoy_default_account_id', '');
+  ('mercari_keyword',             '');
 
 -- ============================================================
 -- 仕入
