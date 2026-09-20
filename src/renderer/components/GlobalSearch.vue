@@ -36,8 +36,9 @@ function statusTone(label: string): 'info' | 'ok' | 'warn' | 'neutral' {
   return 'neutral'
 }
 
-function placeholderChar(title: string): string {
-  return (title.trim().charAt(0) || '?').toUpperCase()
+function placeholderChar(h: SearchHit): string {
+  const c = h.model_code?.[0] ?? h.title.replace(/【[^】]*】/g, '').replace(/\s+/g, '').charAt(0)
+  return (c || '?').toUpperCase()
 }
 
 // --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
@@ -62,7 +63,7 @@ function onThumbError(h: SearchHit) {
     <EmptyState v-if="!loading && !hits.length" title="見つかりません" />
 
     <div v-for="g in groups" :key="g.kind" class="group">
-      <p class="panel-title">{{ g.label }} {{ g.hits.length }}</p>
+      <p class="section-head">{{ g.label }} {{ g.hits.length }}</p>
       <button
         v-for="h in g.hits" :key="rowKey(h)"
         type="button"
@@ -74,10 +75,10 @@ function onThumbError(h: SearchHit) {
           class="thumb" :src="h.thumb_url!" alt=""
           @error="onThumbError(h)"
         />
-        <span v-else class="thumb-placeholder">{{ placeholderChar(h.title) }}</span>
+        <span v-else class="thumb-placeholder">{{ placeholderChar(h) }}</span>
 
         <span class="hit-main">
-          <span class="hit-title">{{ h.title }}</span>
+          <span class="hit-title" :title="h.title">{{ h.title }}</span>
           <span class="chip-row">
             <StatusChip v-if="h.model_code" tone="neutral" :label="h.model_code" />
             <StatusChip :tone="statusTone(h.status_label)" :label="h.status_label" />
@@ -85,21 +86,34 @@ function onThumbError(h: SearchHit) {
         </span>
 
         <span class="hit-amount num">{{ yen(h.amount) }}</span>
-        <span class="faint nowrap hit-date">{{ h.date }}</span>
+        <span class="faint hit-date">{{ h.date }}</span>
       </button>
     </div>
   </Drawer>
 </template>
 
 <style scoped>
-.group + .group { margin-top: 18px; }
+.group + .group { margin-top: 12px; }
+
+.section-head {
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: .02em;
+  margin: 0 0 6px;
+}
 
 .hit-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 40px 1fr auto auto;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 8px 4px;
+  height: auto;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
   border-radius: var(--radius-sm);
   background: transparent;
   border: none;
@@ -112,7 +126,6 @@ function onThumbError(h: SearchHit) {
   width: 40px;
   height: 40px;
   border-radius: var(--radius-sm);
-  flex-shrink: 0;
 }
 .thumb { object-fit: cover; display: block; }
 .thumb-placeholder {
@@ -126,19 +139,21 @@ function onThumbError(h: SearchHit) {
 }
 
 .hit-main {
-  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 .hit-title {
   font-size: var(--fs-14);
   font-weight: 500;
   color: var(--text);
-  white-space: normal;
-  word-break: break-word;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
-.hit-amount { flex-shrink: 0; }
-.hit-date { flex-shrink: 0; width: 76px; text-align: right; }
+.hit-amount { white-space: nowrap; }
+.hit-date { white-space: nowrap; font-variant-numeric: tabular-nums; text-align: right; }
 </style>

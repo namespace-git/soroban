@@ -165,13 +165,8 @@ function inventorySearchStatusLabel(i: InventoryItem): string {
 function saleSearchStatusLabel(s: SaleProfit): string {
   if (!s.is_shipping_confirmed) return '送料未入力'
   if (s.kind === 'resale' && s.unmatched) return '未紐付け'
-  switch (s.status) {
-    case 'waiting_shipment': return '発送待ち'
-    case 'shipped': return '発送済み'
-    case 'delivered': return '受取済み'
-    case 'completed': return '完了'
-    default: return '確定'
-  }
+  if (s.kind === 'personal') return '私物'
+  return '完了'
 }
 
 // ------------------------------------------------------------
