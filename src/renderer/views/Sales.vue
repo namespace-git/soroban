@@ -684,8 +684,8 @@ async function remove(sale: SaleProfit) {
             >
               <td class="date-cell" :title="rowDateTitle(r)">
                 <div class="faint nowrap">{{ rowDateDisplay(r).slice(5) }}</div>
-                <div v-if="r.kind === 'listing' && r.listing" class="faint nowrap seen-note">
-                  最終確認 {{ formatSeen(r.listing.last_seen_at) }}
+                <div v-if="r.kind === 'listing' && r.listing" class="faint nowrap seen-note" title="最後に出品中タブで見た日時">
+                  確認 {{ formatSeen(r.listing.last_seen_at) }}
                 </div>
               </td>
 
@@ -1039,7 +1039,8 @@ async function remove(sale: SaleProfit) {
 .nowrap { white-space: nowrap; }
 
 .date-cell { display: flex; flex-direction: column; gap: 2px; }
-.seen-note { font-size: var(--fs-12); }
+.seen-note { font-size: var(--fs-12); overflow: hidden; text-overflow: ellipsis; }
+.date-cell { overflow: hidden; }
 
 /* 横断検索・要対応から来たときに該当行を一時的に示す */
 tr.focused { background: var(--brand-soft); }

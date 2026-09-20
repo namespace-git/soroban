@@ -7,31 +7,31 @@ beforeEach(() => { db.initDb(':memory:') })
 
 // ペルソナ19：TikTokで仕入れる人。
 // メロジョイ以外の仕入先（kind='tiktok'）を作り、手入力で仕入れる。
-// 型番はタイトルから自動抽出され、メルカリ取り込みで枝番まで一致するものだけ
-// 自動紐付けされるはず（CLAUDE.mdの原則）。
+// 型番はタイトルから自動抽出され、抽出した型番が在庫のmodel_codeと文字列として
+// 完全一致するものだけ自動紐付けされるはず（枝番の有無は問わない。CLAUDE.mdの原則）。
 describe('ペルソナ19：TikTokで仕入れる人', () => {
-  it('手入力仕入→型番自動抽出→枝番一致は自動紐付け、シリーズのみは候補止まりのはず', () => {
+  it('手入力仕入→型番自動抽出→在庫と完全一致は自動紐付け、シリーズのみ（在庫と不一致）は候補止まりのはず', () => {
     const tiktokId = db.createShopAccount('TikTok仕入れ', 'tiktok')
 
-    // 手入力仕入：タイトルから【A035】（枝番なし＝シリーズのみ）と
-    // 【Z001-3】（枝番まで完全一致）を自動抽出させる
+    // 手入力仕入：タイトルから【A035-1】（枝番あり）と
+    // 【Z001-3】（枝番あり）を自動抽出させる。どちらも枝番付きで在庫化される
     db.createPurchase({
       shop_account_id: tiktokId,
       ordered_at: todayLocal(),
       lines: [
-        { name: 'メロジョイ【A035】メロージョイ ミニランド', unit_price: 1500, quantity: 1 },
+        { name: 'メロジョイ【A035-1】メロージョイ ミニランド', unit_price: 1500, quantity: 1 },
         { name: 'メロジョイ【Z001-3】抹茶スフレ-クリーミークリーム', unit_price: 1200, quantity: 1 },
       ],
     })
 
-    const a035 = db.listInventory('in_stock').find(i => i.model_code === 'A035')
+    const a0351 = db.listInventory('in_stock').find(i => i.model_code === 'A035-1')
     const z0013 = db.listInventory('in_stock').find(i => i.model_code === 'Z001-3')
-    expect(a035).toBeDefined()
+    expect(a0351).toBeDefined()
     expect(z0013).toBeDefined()
-    expect(a035!.series_code).toBe('A035')
+    expect(a0351!.series_code).toBe('A035')
     expect(z0013!.series_code).toBe('Z001')
 
-    // メルカリ取り込み：【Z001-3】は枝番まで完全一致 → 自動紐付け
+    // メルカリ取り込み：【Z001-3】は在庫のmodel_codeと文字列完全一致 → 自動紐付け
     const inserted = db.insertCollected([
       { mercariItemId: 'm-z0013', title: '【Z001-3】抹茶スフレ 新品未開封', price: 2500, soldAt: todayLocal() },
       { mercariItemId: 'm-a035', title: '【A035】メロージョイ ミニランド 新品', price: 1800, soldAt: todayLocal() },
@@ -42,15 +42,15 @@ describe('ペルソナ19：TikTokで仕入れる人', () => {
     expect(saleZ.auto_linked).toBe(1)
     expect(saleZ.unmatched).toBe(0)
 
-    // 【A035】はシリーズのみ（枝番なし）。CLAUDE.mdの原則どおりなら
-    // 候補提示止まり（unmatched のまま）のはず
+    // 【A035】はシリーズのみで、在庫は枝番付きのA035-1しかなく文字列完全一致しない。
+    // CLAUDE.mdの原則どおりなら候補提示止まり（unmatched のまま）のはず
     const saleA = db.listSales().find(s => s.id === inserted.find(i => i.mercariItemId === 'm-a035')!.id)!
     expect(saleA.item_count).toBe(0)
     expect(saleA.unmatched).toBe(1)
     expect(saleA.auto_linked).toBe(0)
     // 候補には出ている（確定はしていない）
     const suggestions = db.suggestInventory(saleA.id)
-    expect(suggestions.some(i => i.model_code === 'A035')).toBe(true)
+    expect(suggestions.some(i => i.model_code === 'A035-1')).toBe(true)
 
     // 仕入先の無効化・改名
     db.updateShopAccount(tiktokId, { is_active: 0 })

@@ -62,7 +62,7 @@ describe('ペルソナ23：タグで整理して探す人', () => {
 
     // 売れて紐付いた販売：inherited_tagsにセール・傷あり、tagsは空
     // タイトル自体に「セール」を含めない（検索一致がタグ由来かタイトル由来か紛れないように）
-    const saleId = db.createSale({ title: 'Z078のまとめ売り確認', sold_at: '2026-07-10', price: 3000 })
+    const saleId = db.createSale({ title: 'まとめ売りの確認（型番なし。手で紐付ける）', sold_at: '2026-07-10', price: 3000 })
     db.linkInventory(saleId, [item1.id])
     let sale = db.listSales().find(s => s.id === saleId)!
     expect(sale.tags).toEqual([])

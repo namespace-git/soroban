@@ -11,8 +11,8 @@ describe('ペルソナ11：捨てる人・自分で使う人', () => {
   })
 
   it('廃棄・自家消費：在庫数と在庫金額が減り、月次・ランキングの利益にその原価が混ざらない。履歴に出る。候補には出ない', () => {
-    // 型番は枝番まで（【E001-1】）にする。枝番なし（シリーズのみ）は自動確定の対象外
-    // （CLAUDE.mdの原則：自動確定は型番の枝番まで完全一致だけ）
+    // 型番は枝番まで（【E001-1】）にする。在庫のmodel_codeと文字列完全一致するので自動確定される
+    // （CLAUDE.mdの原則：自動確定は抽出した型番が在庫と完全一致するときだけ。枝番の有無は問わない）
     db.createPurchase({
       shop_account_id: shopId,
       ordered_at: '2026-05-01',
@@ -33,7 +33,7 @@ describe('ペルソナ11：捨てる人・自分で使う人', () => {
     expect(db.listInventory('disposed')).toHaveLength(1)
     expect(db.listInventory('personal_use')).toHaveLength(1)
 
-    // 型番完全一致（枝番まで）で自動紐付け（先入先出）。残っている在庫のうち1点だけが原価として乗る
+    // 型番が在庫のmodel_codeと完全一致で自動紐付け（先入先出）。残っている在庫のうち1点だけが原価として乗る
     const saleId = db.createSale({ title: 'テスト商品【E001-1】', sold_at: '2026-05-10', price: 2000 })
     const sale = db.listSales().find(s => s.id === saleId)!
     expect(sale.unmatched).toBe(0)

@@ -2295,54 +2295,57 @@ describe('db（:memory:）', () => {
     })
   })
 
-  describe('自動確定は型番の枝番まで完全一致だけ（シリーズのみは候補止まり）', () => {
-    it('枝番あり（Z078-2）は自動確定、枝番なし（A035）は候補止まり、枝番あり（A035-1）は自動確定', () => {
+  describe('自動確定は抽出した型番が在庫の model_code と完全一致するときだけ（枝番の有無は問わない）', () => {
+    it('枝番なしの在庫と完全一致（A037）・枝番ありの在庫と完全一致（Z078-2）は自動確定、シリーズだけの型番（A035）は候補止まり', () => {
       db.createPurchase({
         shop_account_id: shopId,
         ordered_at: '2026-01-01',
         shipping_fee: 0,
         lines: [
           { name: 'いちごスフレ【Z078-2】', unit_price: 1000, quantity: 1 },
-          { name: 'メロージョイ ミニランド【A035】', unit_price: 1200, quantity: 1 },
-          { name: 'メロージョイ ミニランド【A035-1】', unit_price: 1300, quantity: 1 },
+          { name: 'メロージョイ ミニランド【A035-1】', unit_price: 1200, quantity: 1 },
+          { name: 'メロージョイ ミニランド【A035-2】', unit_price: 1300, quantity: 1 },
+          { name: 'メロージョイ Sサイズ【A037】', unit_price: 1400, quantity: 1 },
         ],
       })
 
       const saleBranch = db.createSale({ title: '【Z078-2】いちごスフレ', sold_at: '2026-01-10', price: 2000 })
       expect(db.listSales().find(s => s.id === saleBranch)!.unmatched).toBe(0)
 
+      // 在庫はA035-1／A035-2の枝番付きだけで、A035と文字列完全一致する在庫が無いので候補止まり
       const saleSeriesOnly = db.createSale({ title: '【A035】メロージョイ ミニランド', sold_at: '2026-01-10', price: 2000 })
       expect(db.listSales().find(s => s.id === saleSeriesOnly)!.unmatched).toBe(1)
 
-      const saleBranch2 = db.createSale({ title: '【A035-1】メロージョイ ミニランド', sold_at: '2026-01-10', price: 2000 })
-      expect(db.listSales().find(s => s.id === saleBranch2)!.unmatched).toBe(0)
+      // 在庫が枝番なしのA037で、販売の型番も枝番なしのA037＝文字列完全一致なので自動確定
+      const saleExactNoBranch = db.createSale({ title: '【A037】メロージョイ Sサイズ', sold_at: '2026-01-10', price: 2000 })
+      expect(db.listSales().find(s => s.id === saleExactNoBranch)!.unmatched).toBe(0)
     })
   })
 
   describe('autoReserveListings：出品への型番の完全一致・先入先出の自動引き当て', () => {
-    it('枝番あり（Z078-2）の出品2件が在庫3点のうち古い順の2点に引き当たる。枝番なし（A035）は引き当たらない。既に引き当て済みは触らない', () => {
+    it('枝番なしで在庫と完全一致（A037）の出品2件が在庫3点のうち古い順の2点に引き当たる。シリーズだけの型番（A035）は引き当たらない。既に引き当て済みは触らない', () => {
       db.createPurchase({
         shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
-        lines: [{ name: 'いちごスフレ【Z078-2】', unit_price: 1000, quantity: 1 }],
+        lines: [{ name: 'メロージョイ Sサイズ【A037】', unit_price: 1000, quantity: 1 }],
       })
       db.createPurchase({
         shop_account_id: shopId, ordered_at: '2026-01-02', shipping_fee: 0,
-        lines: [{ name: 'いちごスフレ【Z078-2】', unit_price: 1000, quantity: 1 }],
+        lines: [{ name: 'メロージョイ Sサイズ【A037】', unit_price: 1000, quantity: 1 }],
       })
       db.createPurchase({
         shop_account_id: shopId, ordered_at: '2026-01-03', shipping_fee: 0,
-        lines: [{ name: 'いちごスフレ【Z078-2】', unit_price: 1000, quantity: 1 }],
+        lines: [{ name: 'メロージョイ Sサイズ【A037】', unit_price: 1000, quantity: 1 }],
       })
       db.createPurchase({
         shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
-        lines: [{ name: 'メロージョイ ミニランド【A035】', unit_price: 1200, quantity: 1 }],
+        lines: [{ name: 'メロージョイ ミニランド【A035-1】', unit_price: 1200, quantity: 1 }],
       })
 
-      const z078items = db.listInventory('in_stock')
-        .filter(i => i.model_code === 'Z078-2')
+      const a037items = db.listInventory('in_stock')
+        .filter(i => i.model_code === 'A037')
         .sort((a, b) => a.acquired_at.localeCompare(b.acquired_at))
-      expect(z078items).toHaveLength(3)
-      const [oldest, middle, newest] = z078items
+      expect(a037items).toHaveLength(3)
+      const [oldest, middle, newest] = a037items
 
       // 3点目（最新）は先に別の出品へ引き当て済みにしておく（自動引き当てが横取りしないことの確認）
       db.upsertListings([
@@ -2351,8 +2354,8 @@ describe('db（:memory:）', () => {
       db.reserveInventory('LAuto0', [newest.id])
 
       db.upsertListings([
-        { mercariItemId: 'LAuto1', title: 'いちごスフレ【Z078-2】', price: 3000, suspended: false, thumbUrl: null },
-        { mercariItemId: 'LAuto2', title: 'いちごスフレ【Z078-2】', price: 3200, suspended: false, thumbUrl: null },
+        { mercariItemId: 'LAuto1', title: 'メロージョイ Sサイズ【A037】', price: 3000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'LAuto2', title: 'メロージョイ Sサイズ【A037】', price: 3200, suspended: false, thumbUrl: null },
         {
           mercariItemId: 'LAutoA035', title: 'メロージョイ ミニランド【A035】', price: 1500,
           suspended: false, thumbUrl: null,
@@ -2360,14 +2363,14 @@ describe('db（:memory:）', () => {
       ])
 
       const count = db.autoReserveListings()
-      expect(count).toBe(2) // A035（枝番なし）は対象外
+      expect(count).toBe(2) // A035（在庫はA035-1でA035とは文字列一致しない）は対象外
 
       const l1 = db.listListings().find(l => l.mercari_item_id === 'LAuto1')!
       const l2 = db.listListings().find(l => l.mercari_item_id === 'LAuto2')!
       expect(l1.items.map(i => i.id)).toEqual([oldest.id])
       expect(l2.items.map(i => i.id)).toEqual([middle.id])
 
-      // 枝番なし（A035）は候補にならない
+      // シリーズだけの型番（A035）は候補にならない
       expect(db.listListings().find(l => l.mercari_item_id === 'LAutoA035')!.items).toEqual([])
 
       // 既に引き当て済みのものは触らない

@@ -87,8 +87,8 @@ describe('ペルソナ21：出品する人（基本の流れ）', () => {
     expect(kinds.indexOf('sold')).toBeGreaterThan(kinds.indexOf('listed'))
   })
 
-  it('引き当て無しの出品が売れたら：出品はsold、販売は枝番ありなら自動FIFO、枝番なしなら候補止まり', () => {
-    // 枝番あり（L002-1）：自動確定される
+  it('引き当て無しの出品が売れたら：出品はsold、販売は在庫と完全一致すれば自動FIFO、シリーズだけの一致なら候補止まり', () => {
+    // 枝番あり（L002-1）：在庫と文字列完全一致なので自動確定される
     db.createPurchase({
       shop_account_id: shopId,
       ordered_at: '2026-04-01',
@@ -112,19 +112,20 @@ describe('ペルソナ21：出品する人（基本の流れ）', () => {
     const listingA = db.listListings({ status: ['sold'] }).find(l => l.mercari_item_id === 'LST2')!
     expect(listingA.status).toBe('sold')
 
-    // 枝番なし（L003：シリーズだけ）：自動確定しない。候補止まり
+    // 在庫はL004-1（枝番あり）で仕入れているが、出品・販売のタイトルはL004（シリーズだけ）。
+    // 文字列として完全一致しないので自動確定しない。候補止まり
     db.createPurchase({
       shop_account_id: shopId,
       ordered_at: '2026-04-01',
       shipping_fee: 0,
-      lines: [{ name: '商品【L003】', unit_price: 1000, quantity: 1 }],
+      lines: [{ name: '商品【L004-1】', unit_price: 1000, quantity: 1 }],
     })
     db.upsertListings([
-      { mercariItemId: 'LST3', title: '商品【L003】', price: 1500, suspended: false, thumbUrl: null },
+      { mercariItemId: 'LST3', title: '商品【L004】', price: 1500, suspended: false, thumbUrl: null },
     ])
 
     const [insertedB] = db.insertCollected(
-      [{ mercariItemId: 'LST3', title: '商品【L003】', price: 1500, soldAt: todayLocal() }],
+      [{ mercariItemId: 'LST3', title: '商品【L004】', price: 1500, soldAt: todayLocal() }],
     )
     const saleB = db.listSales().find(s => s.id === insertedB.id)!
     expect(saleB.unmatched).toBe(1)
@@ -135,7 +136,7 @@ describe('ペルソナ21：出品する人（基本の流れ）', () => {
     expect(listingB.status).toBe('sold')
 
     // 候補には出る（人が確定すればよい）
-    const candidateItem = db.listInventory('in_stock').find(i => i.model_code === 'L003')!
+    const candidateItem = db.listInventory('in_stock').find(i => i.model_code === 'L004-1')!
     const suggestions = db.suggestInventory(saleB.id)
     expect(suggestions.some(i => i.id === candidateItem.id)).toBe(true)
   })

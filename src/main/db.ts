@@ -1401,18 +1401,10 @@ export function unlinkInventory(saleId: string, itemId: string): void {
 }
 
 /**
- * 型番が枝番（-2 など）まで含むか。CLAUDE.md の原則：自動確定は型番の枝番まで
- * 完全一致だけ。【A035】のようなシリーズだけのコード（枝番なし）は対象外
- * （候補提示止まり。suggestInventory には出る）。
- */
-function hasBranchCode(code: string): boolean {
-  return code.split('-')[0] !== code
-}
-
-/**
- * 販売の型番が model_code と枝番まで完全一致するとき、その型番の未販売在庫を
- * 先入先出（acquired_at 昇順）で1点だけ充てて自動確定する。
- * 条件を満たさない（型番なし・複数・枝番なし・一致在庫なし）場合は何もしない。
+ * 販売から抽出した型番が model_code と文字列として完全一致するとき、その型番の
+ * 未販売在庫を先入先出（acquired_at 昇順）で1点だけ充てて自動確定する。
+ * 枝番の有無は問わない（在庫側の model_code と一致するかどうかだけを見る）。
+ * 条件を満たさない（型番なし・複数・一致在庫なし）場合は何もしない。
  * 戻り値は確定できたかどうか。
  */
 export function autoLinkSale(saleId: string): boolean {
@@ -1425,7 +1417,7 @@ export function autoLinkSale(saleId: string): boolean {
   if (already.c > 0) return false
 
   const codes = JSON.parse(sale.model_codes || '[]') as string[]
-  if (codes.length !== 1 || !hasBranchCode(codes[0])) return false
+  if (codes.length !== 1) return false
 
   // 他の active/suspended な出品に引き当て済みの在庫はFIFO候補から外す
   // （人が出品に予約した意思を、型番一致の自動確定で横取りしない）
@@ -1859,9 +1851,9 @@ export function endListing(mercariItemId: string): void {
 }
 
 /**
- * 未引き当ての出品（active／suspended）に、型番の枝番まで完全一致する未販売・未引き当ての
- * 在庫を先入先出で1点ずつ引き当てる（販売の autoLinkSale/autoLinkPending と同じ規則。
- * 型番が1つで枝番ありのものだけ。候補が複数出品にまたがらないよう1件ずつ確定していく）。
+ * 未引き当ての出品（active／suspended）に、型番が model_code と文字列として完全一致する
+ * 未販売・未引き当ての在庫を先入先出で1点ずつ引き当てる（販売の autoLinkSale/autoLinkPending
+ * と同じ規則。型番が1つに絞れるものだけ。候補が複数出品にまたがらないよう1件ずつ確定していく）。
  * 引き当てた出品の数を返す。reserveInventory で引き当てるので、1クリック（unreserveInventory）
  * で解除できる。
  */
@@ -1875,7 +1867,7 @@ export function autoReserveListings(): number {
   let count = 0
   for (const p of pending) {
     const codes = extractCodes(p.title)
-    if (codes.length !== 1 || !hasBranchCode(codes[0])) continue
+    if (codes.length !== 1) continue
 
     // 他の active/suspended な出品に引き当て済みの在庫は候補から外す（人の意思を横取りしない）
     const item = db.prepare(`
