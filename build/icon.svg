@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- そろばん のアプリアイコン。黄色の角丸に、そろばんの珠を 3 桁ぶん。
+       macOS は角丸に切り抜かれる前提で、余白（安全域）を 8% 取っている -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f9d45c"/>
+      <stop offset="1" stop-color="#f0be2e"/>
+    </linearGradient>
+    <linearGradient id="bead" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3a40"/>
+      <stop offset="1" stop-color="#232327"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <!-- 地 -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="url(#bg)"/>
+
+  <!-- 枠（そろばんの外枠） -->
+  <rect x="160" y="184" width="704" height="656" rx="56" ry="56" fill="none" stroke="#2b2b30" stroke-width="34"/>
+  <!-- 梁（仕切り） -->
+  <rect x="160" y="404" width="704" height="34" fill="#2b2b30"/>
+
+  <!-- 桁（棒） -->
+  <g stroke="#2b2b30" stroke-width="18" stroke-linecap="round">
+    <line x1="336" y1="220" x2="336" y2="804"/>
+    <line x1="512" y1="220" x2="512" y2="804"/>
+    <line x1="688" y1="220" x2="688" y2="804"/>
+  </g>
+
+  <!-- 珠（上段 1 つ、下段 4 つ）。中央の桁だけ動かして「数を置いている」形に -->
+  <g fill="url(#bead)" filter="url(#soft)">
+    <!-- 左の桁：上珠は上、下珠は下（0） -->
+    <ellipse cx="336" cy="280" rx="76" ry="46"/>
+    <ellipse cx="336" cy="560" rx="76" ry="46"/>
+    <ellipse cx="336" cy="648" rx="76" ry="46"/>
+    <ellipse cx="336" cy="736" rx="76" ry="46"/>
+    <!-- 中央の桁：上珠を下ろし、下珠 2 つを上げる（7） -->
+    <ellipse cx="512" cy="356" rx="76" ry="46"/>
+    <ellipse cx="512" cy="488" rx="76" ry="46"/>
+    <ellipse cx="512" cy="576" rx="76" ry="46"/>
+    <ellipse cx="512" cy="736" rx="76" ry="46"/>
+    <!-- 右の桁：下珠 1 つを上げる（1） -->
+    <ellipse cx="688" cy="280" rx="76" ry="46"/>
+    <ellipse cx="688" cy="488" rx="76" ry="46"/>
+    <ellipse cx="688" cy="648" rx="76" ry="46"/>
+    <ellipse cx="688" cy="736" rx="76" ry="46"/>
+  </g>
+  <!-- 1 つだけクリーム色の珠でアクセント（利益＝黄の中の明るい点） -->
+  <ellipse cx="512" cy="488" rx="76" ry="46" fill="#fff3c4"/>
+</svg>

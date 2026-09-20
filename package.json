@@ -14,7 +14,8 @@
     "pack:mac": "pnpm build && electron-builder --mac --dir",
     "dist:win": "pnpm build && electron-builder --win",
     "dist:mac": "pnpm build && electron-builder --mac",
-    "test": "cross-env ELECTRON_RUN_AS_NODE=1 electron ./node_modules/vitest/vitest.mjs run"
+    "test": "cross-env ELECTRON_RUN_AS_NODE=1 electron ./node_modules/vitest/vitest.mjs run",
+    "icon": "electron scripts/make-icon.cjs"
   },
   "dependencies": {
     "@fontsource-variable/m-plus-2": "^5.3.0",
@@ -37,7 +38,8 @@
     "appId": "jp.namespace.soroban",
     "productName": "そろばん",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "out/**/*",
@@ -47,17 +49,45 @@
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "build/icon.png"
     },
     "mac": {
       "target": [
-        "dmg"
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
-      "category": "public.app-category.finance"
+      "category": "public.app-category.finance",
+      "icon": "build/icon.png",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "darkModeSupport": true
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "icon": "build/icon.png",
+    "dmg": {
+      "title": "そろばん",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
     }
   },
   "pnpm": {
