@@ -311,6 +311,8 @@ BEGIN
    );
   SELECT RAISE(ABORT, '未販売の在庫だけ引き当てられます')
    WHERE (SELECT status FROM inventory_item WHERE id = NEW.inventory_item_id) != 'in_stock';
+  SELECT RAISE(ABORT, '終了した出品には引き当てられません')
+   WHERE (SELECT status FROM listing WHERE mercari_item_id = NEW.listing_id) NOT IN ('active','suspended');
 END;
 
 -- ============================================================

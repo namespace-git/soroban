@@ -838,8 +838,9 @@ function addListing(opts: {
     status: opts.status,
     first_seen_at: todayLocal(daysAgo(opts.daysAgoFirstSeen)),
     // active／suspended は直近の取り込みで見えた体（1 件だけ「前回見えず」の見本にする）。sold／ended は最終日に固定
+    // 実データ（main）は last_seen_at を ISO で保存するため、モックも合わせる
     last_seen_at: (opts.status === 'active' || opts.status === 'suspended') && opts.daysAgoFirstSeen !== 3
-      ? isoLocal(new Date()) : isoLocal(daysAgo(Math.max(0, opts.daysAgoFirstSeen - 1))),
+      ? new Date().toISOString() : daysAgo(Math.max(0, opts.daysAgoFirstSeen - 1)).toISOString(),
     thumb_url: null,
     model_codes: extractAllCodes(title),
   })
@@ -1983,6 +1984,9 @@ const api: SorobanApi = {
   async reserveInventory(mercariItemId: string, inventoryItemIds: string[]) {
     const rec = listingRecords.find(r => r.mercari_item_id === mercariItemId)
     if (!rec) throw new Error('出品が見つかりません')
+    if (rec.status !== 'active' && rec.status !== 'suspended') {
+      throw new Error('この出品は終了しているため引き当てできません')
+    }
     for (const id of inventoryItemIds) {
       const item = inventory.find(i => i.id === id)
       if (!item || item.status !== 'in_stock') {

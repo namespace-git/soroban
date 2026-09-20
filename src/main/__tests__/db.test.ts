@@ -3,6 +3,7 @@ import BetterSqlite3 from 'better-sqlite3'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { todayLocal } from '../../shared/date'
 
 // db.ts は electron の app.getPath を参照する（:memory: を使うときは呼ばれないが、
 // import 時点で electron モジュールへの依存があるため潰しておく）
@@ -892,6 +893,19 @@ describe('db（:memory:）', () => {
     expect(dash.lastRun).toBeNull()
   })
 
+  it('getDashboard().thisMonth：net_profit/expense_total/unconfirmed_shippingが入る（monthly_summaryビューを直読みすると無かった）', () => {
+    db.createSale({ title: '今月の転売', sold_at: todayLocal(), price: 1000 })
+
+    const dash = db.getDashboard()
+    expect(dash.thisMonth).not.toBeNull()
+    expect(dash.thisMonth!.kind).toBe('resale')
+    expect(dash.thisMonth!.revenue).toBe(1000)
+    expect(dash.thisMonth!.total_fee).toBe(100) // fee_rate_bp既定1000(10%)
+    // 転売の販売がある月は振込手数料（既定200円）が自動計上される
+    expect(dash.thisMonth!.expense_total).toBe(200)
+    expect(dash.thisMonth!.net_profit).toBe((1000 - 100) - 200)
+  })
+
   it('タグ：作成・重複例外・改名・削除で販売から外れる', () => {
     const tagId = db.createTag('  セール品  ')
     expect(db.listTags()).toHaveLength(1)
@@ -1049,7 +1063,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('10')
+      expect(db.getSettings().schema_version).toBe('11')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1170,7 +1184,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('10')
+      expect(db.getSettings().schema_version).toBe('11')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1511,6 +1525,27 @@ describe('db（:memory:）', () => {
       expect(db.listListings({ status: ['ended'] })[0].status).toBe('ended')
     })
 
+    it('upsertListings：last_seen_atはISO形式（T・Zを含む）で保存される（collector_run.finished_atとの文字列比較のため）', () => {
+      db.upsertListings([
+        { mercariItemId: 'LIso', title: 'ISO確認', price: 1000, suspended: false, thumbUrl: null },
+      ])
+      const row = db.getDb()
+        .prepare('SELECT last_seen_at FROM listing WHERE mercari_item_id = ?').get('LIso') as
+        { last_seen_at: string }
+      expect(row.last_seen_at).toContain('T')
+      expect(row.last_seen_at).toContain('Z')
+
+      // 更新時も同様
+      db.upsertListings([
+        { mercariItemId: 'LIso', title: 'ISO確認', price: 1200, suspended: false, thumbUrl: null },
+      ])
+      const updated = db.getDb()
+        .prepare('SELECT last_seen_at FROM listing WHERE mercari_item_id = ?').get('LIso') as
+        { last_seen_at: string }
+      expect(updated.last_seen_at).toContain('T')
+      expect(updated.last_seen_at).toContain('Z')
+    })
+
     it('reserveInventory：他の出品への引き当ては外れてこちらへ移る。売却済み在庫の引き当ては拒否する', () => {
       db.createPurchase({
         shop_account_id: shopId,
@@ -1672,6 +1707,31 @@ describe('db（:memory:）', () => {
       expect(sold?.status).toBe('sold')
     })
 
+    it('insertCollected：キーワード不一致・型番なしのタイトルでも、出品への引き当てを引き継いだらkind=resaleになる', () => {
+      db.setSetting('mercari_keyword', '限定コラボ') // タイトルはこれに一致しない
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '型番なしの雑貨', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'mTakeoverKind', title: '型番なしの雑貨', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('mTakeoverKind', [item.id])
+
+      db.insertCollected([
+        { mercariItemId: 'mTakeoverKind', title: '型番なしの雑貨', price: 3000, soldAt: '2026-01-10' },
+      ])
+
+      const sale = db.listSales().find(s => s.mercari_item_id === 'mTakeoverKind')!
+      // キーワード不一致・型番なしなら本来 personal 判定になるところを、人が出品に
+      // 在庫を引き当てていた（＝転売の意思）ので resale にする
+      expect(sale.kind).toBe('resale')
+      expect(sale.cost).toBe(1000)
+    })
+
     it('insertCollected：引き当てが無い出品が売れても出品はsoldになり、販売は型番FIFOで自動紐付けされる', () => {
       db.createPurchase({
         shop_account_id: shopId,
@@ -1774,6 +1834,51 @@ describe('db（:memory:）', () => {
         { mercariItemId: 'LE2', title: '再出品', price: 2500, suspended: false, thumbUrl: null },
       ])
       expect(() => db.reserveInventory('LE2', [item.id])).not.toThrow()
+    })
+
+    it('reserveInventory：終了済み（ended）の出品には引き当てられない', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '終了済み出品対象', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'LEndedGuard', title: '終了済み出品対象', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.endListing('LEndedGuard')
+
+      expect(() => db.reserveInventory('LEndedGuard', [item.id]))
+        .toThrow('終了した出品には引き当てられません')
+
+      // 拒否された結果、inventory_view に重複行が出ていない（在庫は1件のまま）
+      expect(db.listInventory('in_stock').filter(i => i.id === item.id)).toHaveLength(1)
+    })
+
+    it('reserveInventory：sold（出品経由で売れた）出品にも引き当てられない', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [
+          { name: '売却済み出品対象', unit_price: 1000, quantity: 1 },
+          { name: '別の在庫', unit_price: 1000, quantity: 1 },
+        ],
+      })
+      const [soldTarget, other] = db.listInventory('in_stock')
+      db.upsertListings([
+        { mercariItemId: 'LSoldGuard', title: '売却済み出品対象', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LSoldGuard', [soldTarget.id])
+      db.insertCollected([
+        { mercariItemId: 'LSoldGuard', title: '売却済み出品対象', price: 3000, soldAt: '2026-01-10' },
+      ])
+      expect(db.listListings({ status: ['sold'] }).find(l => l.mercari_item_id === 'LSoldGuard')?.status)
+        .toBe('sold')
+
+      expect(() => db.reserveInventory('LSoldGuard', [other.id]))
+        .toThrow('終了した出品には引き当てられません')
     })
 
     it('getDashboard().needsListingAllocation：activeで未引き当ての出品数（suspendedは数えない）', () => {

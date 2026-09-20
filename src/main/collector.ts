@@ -502,11 +502,17 @@ async function downloadThumb(saleId: string, mercariItemId: string, url: string)
  * `thumb_file` が NULL のままなので、その販売が今後も一覧に出ている限りは次回また
  * 対象になる（一覧から消えれば対象にもならないため、実質は数回の収集で止まる）。
  */
+/** 保存に成功した数（saved）と、実際にリクエストを試みた数（attempted）。予算は attempted で減らす */
+export interface ThumbSaveResult {
+  saved: number
+  attempted: number
+}
+
 async function saveNewThumbs(
   targets: Array<{ id: string; mercariItemId: string }>,
   scraped: ScrapedSale[],
   limit = MAX_THUMBS_PER_RUN,
-): Promise<number> {
+): Promise<ThumbSaveResult> {
   const thumbByItemId = new Map(scraped.map(s => [s.mercariItemId, s.thumbUrl]))
   const seen = new Set<string>()
 
@@ -517,7 +523,9 @@ async function saveNewThumbs(
     .slice(0, Math.max(0, limit))
 
   let saved = 0
+  let attempted = 0
   for (const t of withUrl) {
+    attempted++
     try {
       await downloadThumb(t.id, t.mercariItemId, t.thumbUrl)
       saved++
@@ -526,7 +534,7 @@ async function saveNewThumbs(
     }
     await sleep(300 + Math.floor(Math.random() * 500))
   }
-  return saved
+  return { saved, attempted }
 }
 
 /**
@@ -538,7 +546,7 @@ async function saveNewListingThumbs(
   targets: string[],
   scraped: ScrapedListing[],
   limit: number,
-): Promise<number> {
+): Promise<ThumbSaveResult> {
   const thumbByItemId = new Map(scraped.map(l => [l.mercariItemId, l.thumbUrl]))
 
   const withUrl = targets
@@ -547,7 +555,9 @@ async function saveNewListingThumbs(
     .slice(0, Math.max(0, limit))
 
   let saved = 0
+  let attempted = 0
   for (const t of withUrl) {
+    attempted++
     try {
       const file = await downloadThumbFile(t.id, t.thumbUrl)
       db.setListingThumb(t.id, file)
@@ -557,7 +567,7 @@ async function saveNewListingThumbs(
     }
     await sleep(300 + Math.floor(Math.random() * 500))
   }
-  return saved
+  return { saved, attempted }
 }
 
 /**
@@ -588,35 +598,40 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     }
 
     const { sales, totalCount } = await scrape(win)
+    // 販売0件は即 empty にしない（Codexレビュー指摘）。出品中タブも読んでから、
+    // 両方0件のときだけ「異常の疑い」として empty にする
+    const salesEmpty = sales.length === 0
 
-    if (sales.length === 0) {
-      // 0件を成功にしない。DOM変更で壊れたとき静かに欠損すると
-      // 数ヶ月気づけないので、明示的に異常として残す
-      return db.finishRun(
-        runId, 'empty', 0, 0,
-        '0件でした。画面構造が変わってセレクタが壊れている可能性があります',
-      )
+    let inserted = 0
+    let updated = 0
+    let thumbsSaved = 0
+    let thumbsAttempted = 0
+
+    if (!salesEmpty) {
+      const known = db.existingMercariIds(sales.map(s => s.mercariItemId))
+      const freshSales = sales.filter(s => !known.has(s.mercariItemId))
+      const knownRows = sales.filter(s => known.has(s.mercariItemId)).map(toRow)
+
+      const insertedRows = freshSales.length > 0 ? db.insertCollected(freshSales.map(toRow)) : []
+      inserted = insertedRows.length
+      updated = knownRows.length > 0 ? db.updateCollectedActuals(knownRows) : 0
+
+      // サムネイル対象：新規に入れた分 ＋ 今回の一覧に出ていてまだ保存していない既存分。
+      // 実DBに元からあった販売は「新規」ではないので、後者を含めないと永久にサムネが付かない
+      const knownWithoutThumb = db.salesWithoutThumb(knownRows.map(r => r.mercariItemId))
+      const thumbsResult = await saveNewThumbs([...insertedRows, ...knownWithoutThumb], sales)
+      thumbsSaved = thumbsResult.saved
+      thumbsAttempted = thumbsResult.attempted
     }
 
-    const known = db.existingMercariIds(sales.map(s => s.mercariItemId))
-    const freshSales = sales.filter(s => !known.has(s.mercariItemId))
-    const knownRows = sales.filter(s => known.has(s.mercariItemId)).map(toRow)
-
-    const insertedRows = freshSales.length > 0 ? db.insertCollected(freshSales.map(toRow)) : []
-    const inserted = insertedRows.length
-    const updated = knownRows.length > 0 ? db.updateCollectedActuals(knownRows) : 0
-
-    // サムネイル対象：新規に入れた分 ＋ 今回の一覧に出ていてまだ保存していない既存分。
-    // 実DBに元からあった販売は「新規」ではないので、後者を含めないと永久にサムネが付かない
-    const knownWithoutThumb = db.salesWithoutThumb(knownRows.map(r => r.mercariItemId))
-    const thumbsSaved = await saveNewThumbs([...insertedRows, ...knownWithoutThumb], sales)
-
-    // 出品した商品「出品中」タブ（1ページ）。売却済みの後に読む。
-    // キーワード設定があればタイトルが一致するものだけ取り込む。0件でも run は ok のまま
+    // 出品した商品「出品中」タブ（1ページ）。売却済みの後に読む。販売が0件でも読む
+    // （販売0件イコール出品も何も変化していない、とは限らないため）。
+    // キーワード設定があればタイトルが一致するものだけ取り込む
     let listingInserted = 0
     let listingUpdated = 0
     let listingThumbsSaved = 0
-    let listingDomBroken = false
+    let listingsScraped = 0
+    let listingBrokenMessage: string | null = null
 
     if (pagesOpened < MAX_PAGES_PER_RUN) {
       await win.loadURL(MY_LISTINGS_URL)
@@ -631,10 +646,17 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
         .executeJavaScript('document.documentElement.outerHTML')
         .catch(() => '') as string
       const scrapedListings = parseListingsHtml(listingsHtml)
+      listingsScraped = scrapedListings.length
+      const listingTotal = extractListingTotal(listingsHtml)
 
-      if (scrapedListings.length === 0 && !listingsHtml.includes('data-testid="mypage-main-content"')) {
-        // 一覧の入れ物ごと見つからない＝セレクタが壊れている疑い。空を握りつぶさず記録する
-        listingDomBroken = true
+      if (scrapedListings.length === 0 && listingTotal !== null && listingTotal >= 1) {
+        // 総数（「n件」）は読めているのに1件も解析できない＝一覧の入れ物（listed-item-list）
+        // の構造が変わった疑い。空を握りつぶさず記録する
+        listingBrokenMessage =
+          `出品中タブの構造が変わった可能性（総数 ${listingTotal} 件・解析 0 件）`
+      } else if (scrapedListings.length === 0 && !listingsHtml.includes('data-testid="mypage-main-content"')) {
+        // ページの入れ物ごと見つからない＝セレクタが壊れている疑い
+        listingBrokenMessage = '出品中タブの構造が変わっている可能性があります'
       } else {
         const keywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
         const targetListings = keywords.length > 0
@@ -651,11 +673,14 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
         listingInserted = result.inserted
         listingUpdated = result.updated
 
-        // 残りのサムネイル予算（サムネイルは1回の収集で販売・出品合わせて30枚まで）
+        // 残りのサムネイル予算（サムネイルは1回の収集で販売・出品合わせて30枚まで。
+        // 「保存できた数」ではなく「試みた数」で減らす。失敗が多いと2倍のリクエストに
+        // なってしまうため（Codexレビュー指摘）
         const listingsNoThumb = db.listingsWithoutThumb(targetListings.map(l => l.mercariItemId))
-        listingThumbsSaved = await saveNewListingThumbs(
-          listingsNoThumb, targetListings, MAX_THUMBS_PER_RUN - thumbsSaved,
+        const listingThumbsResult = await saveNewListingThumbs(
+          listingsNoThumb, targetListings, MAX_THUMBS_PER_RUN - thumbsAttempted,
         )
+        listingThumbsSaved = listingThumbsResult.saved
       }
     }
 
@@ -690,12 +715,23 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       }
     }
 
-    const parts = [`新規 ${inserted}・更新 ${updated}`]
+    if (salesEmpty && listingsScraped === 0) {
+      // 販売・出品どちらも0件。0件を成功にしない（DOM変更で壊れたとき静かに欠損すると
+      // 数ヶ月気づけないので、明示的に異常として残す）。listingBrokenMessage は
+      // status に関わらず必ず message に残す
+      const parts = ['0件でした。画面構造が変わってセレクタが壊れている可能性があります']
+      if (listingBrokenMessage) parts.push(listingBrokenMessage)
+      return db.finishRun(runId, 'empty', 0, 0, parts.join('。'))
+    }
+
+    // status は販売側の結果に従う（ここまで来ていれば ok。出品中タブの構造異常は
+    // status を落とさず message にだけ残す＝Codexレビュー指摘）
+    const parts = [salesEmpty ? '販売 0 件' : `新規 ${inserted}・更新 ${updated}`]
     const totalThumbsSaved = thumbsSaved + listingThumbsSaved
     if (totalThumbsSaved > 0) parts.push(`サムネイル ${totalThumbsSaved} 枚`)
     if (pending.length > 0) parts.push(`型番の追記 ${codesApplied}（詳細 ${detailsRead} 件）`)
     parts.push(`出品 新規 ${listingInserted}・更新 ${listingUpdated}`)
-    if (listingDomBroken) parts.push('出品中タブの構造が変わっている可能性があります')
+    if (listingBrokenMessage) parts.push(listingBrokenMessage)
     if (totalCount !== null && totalCount !== sales.length) {
       parts.push(`一覧に ${totalCount} 件、取得 ${sales.length} 件`)
     }

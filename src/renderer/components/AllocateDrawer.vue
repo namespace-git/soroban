@@ -7,6 +7,7 @@ import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import EmptyState from './EmptyState.vue'
 import Icon from './Icon.vue'
+import { matchesSearch } from './SearchBox.vue'
 
 const props = defineProps<{
   open: boolean
@@ -56,12 +57,14 @@ watch(() => [props.open, props.listing?.mercari_item_id], ([isOpen]) => {
 }, { immediate: true })
 
 const filtered = computed(() => {
-  const q = search.value.trim().toLowerCase()
-  if (!q) return candidates.value
-  return candidates.value.filter(c =>
-    c.name.toLowerCase().includes(q) || (c.model_code ?? '').toLowerCase().includes(q),
-  )
+  if (!search.value.trim()) return candidates.value
+  return candidates.value.filter(c => matchesSearch([c.name, c.model_code], search.value))
 })
+
+// 終了済み（sold／ended）の出品には新規に引き当てられない。引き当て済みの表示だけ残す
+const canReserve = computed(() =>
+  props.listing?.status === 'active' || props.listing?.status === 'suspended',
+)
 
 function toggle(id: string) {
   const s = new Set(picked.value)
@@ -145,11 +148,6 @@ function placeholderChar(): string {
       </div>
     </template>
 
-    <label class="search-field">
-      <Icon name="search" :size="16" />
-      <input v-model="search" placeholder="在庫を検索" />
-    </label>
-
     <div v-if="listing?.items.length" class="matched-block">
       <p class="panel-title">引き当て済み</p>
       <div v-for="it in listing.items" :key="it.id" class="item matched-item">
@@ -160,28 +158,37 @@ function placeholderChar(): string {
       </div>
     </div>
 
-    <div class="candidates">
-      <label
-        v-for="c in filtered" :key="c.id"
-        class="item" :class="{ on: picked.has(c.id) }"
-      >
-        <input
-          type="checkbox"
-          :checked="picked.has(c.id)"
-          @change="toggle(c.id)"
-        />
-        <StatusChip v-if="c.model_code" tone="neutral" :label="c.model_code" />
-        <StatusChip
-          v-if="c.listing && c.listing.mercari_item_id !== listing?.mercari_item_id"
-          tone="neutral"
-          :label="`出品 ${yen(c.listing.price)} に引き当て済み`"
-        />
-        <span class="grow">{{ c.name }}</span>
-        <span class="faint nowrap">{{ c.aging_days }}日</span>
-        <span class="num">{{ yen(c.landed_cost) }}</span>
+    <p v-if="!canReserve" class="dim ended-note">この出品は終了しています（引き当てできません）</p>
+
+    <template v-else>
+      <label class="search-field">
+        <Icon name="search" :size="16" />
+        <input v-model="search" placeholder="在庫を検索" />
       </label>
-      <EmptyState v-if="!loading && !filtered.length" title="候補になる在庫がありません" />
-    </div>
+
+      <div class="candidates">
+        <label
+          v-for="c in filtered" :key="c.id"
+          class="item" :class="{ on: picked.has(c.id) }"
+        >
+          <input
+            type="checkbox"
+            :checked="picked.has(c.id)"
+            @change="toggle(c.id)"
+          />
+          <StatusChip v-if="c.model_code" tone="neutral" :label="c.model_code" />
+          <StatusChip
+            v-if="c.listing && c.listing.mercari_item_id !== listing?.mercari_item_id"
+            tone="neutral"
+            :label="`出品 ${yen(c.listing.price)} に引き当て済み`"
+          />
+          <span class="grow">{{ c.name }}</span>
+          <span class="faint nowrap">{{ c.aging_days }}日</span>
+          <span class="num">{{ yen(c.landed_cost) }}</span>
+        </label>
+        <EmptyState v-if="!loading && !filtered.length" title="候補になる在庫がありません" />
+      </div>
+    </template>
 
     <template #footer>
       <div class="match-footer">
@@ -192,7 +199,7 @@ function placeholderChar(): string {
             見込み粗利（送料・梱包前） {{ yen(previewProfit) }}
           </strong>
         </div>
-        <button class="primary" :disabled="!picked.size" @click="confirmReserve">
+        <button v-if="canReserve" class="primary" :disabled="!picked.size" @click="confirmReserve">
           {{ confirmLabel }}
         </button>
       </div>
@@ -245,6 +252,8 @@ function placeholderChar(): string {
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line-soft);
 }
+
+.ended-note { padding: 6px 8px; }
 
 .candidates { display: flex; flex-direction: column; gap: 2px; }
 

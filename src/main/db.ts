@@ -262,6 +262,8 @@ function rebuildInventoryItemForSplit(): void {
            );
           SELECT RAISE(ABORT, '未販売の在庫だけ引き当てられます')
            WHERE (SELECT status FROM inventory_item WHERE id = NEW.inventory_item_id) != 'in_stock';
+          SELECT RAISE(ABORT, '終了した出品には引き当てられません')
+           WHERE (SELECT status FROM listing WHERE mercari_item_id = NEW.listing_id) NOT IN ('active','suspended');
         END;
       `)
     }
@@ -507,6 +509,8 @@ function migrate(): void {
          );
         SELECT RAISE(ABORT, '未販売の在庫だけ引き当てられます')
          WHERE (SELECT status FROM inventory_item WHERE id = NEW.inventory_item_id) != 'in_stock';
+        SELECT RAISE(ABORT, '終了した出品には引き当てられません')
+         WHERE (SELECT status FROM listing WHERE mercari_item_id = NEW.listing_id) NOT IN ('active','suspended');
       END;
     `)
 
@@ -552,6 +556,43 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '10')
          ON CONFLICT(key) DO UPDATE SET value = '10'`,
+    ).run()
+  }
+
+  if (version < 11) {
+    // Codexレビュー指摘：終了済み（sold/ended）の出品にも引き当てられてしまっていた。
+    // 引き当て先の listing 自身の status を見るチェックを追加してトリガーを作り直す
+    db.exec(`
+      DROP TRIGGER IF EXISTS trg_listing_line_guard;
+      CREATE TRIGGER trg_listing_line_guard
+      BEFORE INSERT ON listing_line
+      BEGIN
+        SELECT RAISE(ABORT, '既に別の出品に引き当て済み')
+         WHERE EXISTS (
+           SELECT 1 FROM listing_line ll
+           JOIN listing l ON l.mercari_item_id = ll.listing_id
+           WHERE ll.inventory_item_id = NEW.inventory_item_id
+             AND l.status IN ('active','suspended')
+         );
+        SELECT RAISE(ABORT, '未販売の在庫だけ引き当てられます')
+         WHERE (SELECT status FROM inventory_item WHERE id = NEW.inventory_item_id) != 'in_stock';
+        SELECT RAISE(ABORT, '終了した出品には引き当てられません')
+         WHERE (SELECT status FROM listing WHERE mercari_item_id = NEW.listing_id) NOT IN ('active','suspended');
+      END;
+    `)
+
+    // Codexレビュー指摘：listing.last_seen_at が datetime('now')（'YYYY-MM-DD HH:MM:SS'）で
+    // 保存されており、画面側が collector_run.finished_at（ISO 'YYYY-MM-DDTHH:MM:SS.sssZ'）と
+    // 文字列比較すると常に不一致になっていた。既存行を ISO 形式へ変換する
+    // （'T' を含まない = 未変換の行だけ。新規保存分は upsertListings 側で ISO にする）
+    db.exec(`
+      UPDATE listing SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', last_seen_at)
+       WHERE last_seen_at NOT LIKE '%T%';
+    `)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '11')
+         ON CONFLICT(key) DO UPDATE SET value = '11'`,
     ).run()
   }
 
@@ -1555,13 +1596,17 @@ export function upsertListings(
   }>,
 ): { inserted: number; updated: number } {
   const today = todayLocal()
+  // last_seen_at は画面側で collector_run.finished_at（ISO）と比較するため、
+  // SQLite の datetime('now')（'YYYY-MM-DD HH:MM:SS'）ではなく JS の ISO 文字列で保存する
+  // （Codexレビュー指摘：形式が違うと文字列比較が常に不一致になる）
+  const now = new Date().toISOString()
   const getExisting = db.prepare('SELECT status FROM listing WHERE mercari_item_id = ?')
   const insertStmt = db.prepare(`
     INSERT INTO listing (mercari_item_id, title, price, status, first_seen_at, last_seen_at)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?)
   `)
   const updateStmt = db.prepare(`
-    UPDATE listing SET title = ?, price = ?, status = ?, last_seen_at = datetime('now'),
+    UPDATE listing SET title = ?, price = ?, status = ?, last_seen_at = ?,
            updated_at = datetime('now')
      WHERE mercari_item_id = ?
   `)
@@ -1573,10 +1618,10 @@ export function upsertListings(
       const status: ListingStatus = r.suspended ? 'suspended' : 'active'
       const existing = getExisting.get(r.mercariItemId) as { status: ListingStatus } | undefined
       if (!existing) {
-        insertStmt.run(r.mercariItemId, r.title, r.price, status, today)
+        insertStmt.run(r.mercariItemId, r.title, r.price, status, today, now)
         inserted++
       } else if (existing.status === 'active' || existing.status === 'suspended') {
-        updateStmt.run(r.title, r.price, status, r.mercariItemId)
+        updateStmt.run(r.title, r.price, status, now, r.mercariItemId)
         updated++
       }
       // sold / ended は一覧に出ていても戻さない
@@ -1648,6 +1693,14 @@ export function listListings(
  * 販売済み・廃棄済みの在庫は trg_listing_line_guard がそのまま拒否する。
  */
 export function reserveInventory(mercariItemId: string, inventoryItemIds: string[]): void {
+  // トリガー（trg_listing_line_guard）でも拒否されるが、そこに任せると SQLite の
+  // 生のエラーメッセージが上がってしまうため、先に同じ文言で明示的に弾く
+  const listing = db.prepare('SELECT status FROM listing WHERE mercari_item_id = ?')
+    .get(mercariItemId) as { status: ListingStatus } | undefined
+  if (!listing || (listing.status !== 'active' && listing.status !== 'suspended')) {
+    throw new Error('終了した出品には引き当てられません')
+  }
+
   const delOther = db.prepare(`
     DELETE FROM listing_line
      WHERE inventory_item_id = ?
@@ -2493,10 +2546,11 @@ export function getDashboard(): DashboardStats {
     `SELECT COUNT(*) AS c FROM inventory_view
       WHERE status = 'in_stock' AND aging_days >= ?`, warnDays).c
 
+  // monthly_summary ビューには unconfirmed_shipping / expense_total / net_profit が無い
+  // （listMonthly() が期間費用の自動計上を通した上で後付けしている）ため、直接ビューを
+  // 読まず listMonthly() の結果から今月の resale 行を拾う
   const month = thisMonthLocal()
-  const thisMonth = db.prepare(
-    `SELECT * FROM monthly_summary WHERE month = ? AND kind = 'resale'`,
-  ).get(month) as MonthlySummary | undefined
+  const thisMonth = listMonthly().find(r => r.month === month && r.kind === 'resale')
 
   const lastRun = db.prepare(
     `${RUN_SELECT} ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1`,
@@ -2953,7 +3007,13 @@ export function insertCollected(
 
       // 出品への引き当てがあれば、そのままそれを引き継ぐ（人の決定が最優先）。
       // 無ければ今までどおり型番の完全一致でFIFO自動確定する
-      if (!takeOverListing(id, r.mercariItemId)) {
+      if (takeOverListing(id, r.mercariItemId)) {
+        // 人が出品に在庫を引き当てていた＝転売の意思。キーワード不一致・型番なしの
+        // タイトルでも kind は 'resale' にする（Codexレビュー指摘）
+        if (kind !== 'resale') {
+          db.prepare(`UPDATE sale SET kind = 'resale' WHERE id = ?`).run(id)
+        }
+      } else {
         autoLinkSale(id)
       }
     }

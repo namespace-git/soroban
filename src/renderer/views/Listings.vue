@@ -6,6 +6,7 @@ import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import AllocateDrawer from '../components/AllocateDrawer.vue'
+import { matchesSearch } from '../components/SearchBox.vue'
 
 type StatusFilterKey = 'active_suspended' | 'active' | 'suspended' | 'sold' | 'ended' | 'all'
 
@@ -56,12 +57,12 @@ onMounted(load)
 watch([revision, statusFilterKey, onlyUnallocated, hasSearch], load)
 
 const filtered = computed(() => {
-  const q = search.value.trim().toLowerCase()
-  if (!q) return listings.value
+  if (!search.value.trim()) return listings.value
   return listings.value.filter(l =>
-    l.title.toLowerCase().includes(q)
-    || l.model_codes.some(mc => mc.toLowerCase().includes(q))
-    || l.items.some(it => it.name.toLowerCase().includes(q) || (it.model_code ?? '').toLowerCase().includes(q)),
+    matchesSearch(
+      [l.title, ...l.model_codes, ...l.items.flatMap(it => [it.name, it.model_code])],
+      search.value,
+    ),
   )
 })
 
@@ -142,7 +143,8 @@ watch(revision, loadLastMercariRun)
 function seenStale(l: Listing): boolean {
   if (l.status !== 'active' && l.status !== 'suspended') return false
   const finishedAt = lastMercariRun.value?.finished_at
-  return !!finishedAt && l.last_seen_at < finishedAt
+  if (!finishedAt) return false
+  return new Date(l.last_seen_at).getTime() < new Date(finishedAt).getTime()
 }
 
 function formatSeen(iso: string): string {
@@ -271,14 +273,12 @@ async function endListing(l: Listing) {
               </td>
 
               <td class="actions">
-                <button class="sm" :class="l.items.length ? 'ghost' : 'link-btn'" @click="openAllocate(l)">
-                  <Icon name="link" :size="14" /> {{ l.items.length ? '追加' : '引き当て' }}
-                </button>
-                <button
-                  v-if="l.status === 'active' || l.status === 'suspended'"
-                  class="sm ghost"
-                  @click="endListing(l)"
-                >取り下げ</button>
+                <template v-if="l.status === 'active' || l.status === 'suspended'">
+                  <button class="sm" :class="l.items.length ? 'ghost' : 'link-btn'" @click="openAllocate(l)">
+                    <Icon name="link" :size="14" /> {{ l.items.length ? '追加' : '引き当て' }}
+                  </button>
+                  <button class="sm ghost" @click="endListing(l)">取り下げ</button>
+                </template>
               </td>
             </tr>
           </tbody>
