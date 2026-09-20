@@ -68,6 +68,14 @@ export interface ShopAccount {
   kind: ShopAccountKind
   note: string | null
   is_active: number
+  /**
+   * 取り込みキーワード（改行・カンマ区切り。メルカリの設定 keywords と同じ書式）。
+   * 注文履歴の取り込みで、**商品名がどれかに一致する明細だけ**を取り込む。空なら全部。
+   * 一致する明細が 1 つも無い注文は取り込まない。一部だけ一致する注文は、一致した明細だけを
+   * 仕入にし、送料・割引は注文全体の金額比で「取り込む明細の分だけ」按分する（私物の分の送料を
+   * 転売の原価に混ぜない）。除外した明細数はメモに残す
+   */
+  import_keywords: string | null
 }
 
 /**
@@ -631,7 +639,7 @@ export interface SorobanApi {
   // マスタ
   listShopAccounts(): Promise<ShopAccount[]>
   createShopAccount(name: string, kind?: ShopAccountKind): Promise<string>
-  updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number }): Promise<void>
+  updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null }): Promise<void>
   /** 仕入で使われていれば例外（消せない）。使われていなければ削除。ログイン用プロファイルも消す */
   deleteShopAccount(id: string): Promise<void>
   listShippingMethods(): Promise<ShippingMethod[]>

@@ -337,6 +337,7 @@ describe('collector（electronに依存しない部分）', () => {
 // ============================================================
 describe('collect()（フルフロー、DOM/dbはモック）', () => {
   const listingsFixtureHtml = readFileSync(join(__dirname, 'fixtures', 'mercari-listings.html'), 'utf-8')
+  const soldFixtureHtml = readFileSync(join(__dirname, 'fixtures', 'mercari-sold.html'), 'utf-8')
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -434,5 +435,51 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     // 販売側30件の試行だけで、出品側は0件（30 + 4 = 34 にならない）
     expect(fetchMock).toHaveBeenCalledTimes(30)
     expect(db.setListingThumb).not.toHaveBeenCalled()
+  })
+
+  it('キーワード設定時：タイトル不一致の販売は挿入されず、サムネイルも取得しない。除外数がmessageに出る', async () => {
+    const sales = parseSoldHtml(soldFixtureHtml) // 3件（うち「ワンピース キャバドレス」はメロジョイ不一致）
+    state.opts.scrapeResult = { sales, totalCount: sales.length }
+    state.opts.listingsHtml = listingsFixtureHtml
+
+    vi.mocked(db.getSettings).mockReturnValue({ mercari_keyword: 'メロジョイ' } as never)
+    vi.mocked(db.parseKeywords).mockReturnValue(['メロジョイ'])
+    vi.mocked(db.matchesAnyKeyword).mockImplementation(
+      (text: string, keywords: string[]) => keywords.some(k => text.toLowerCase().includes(k.toLowerCase())),
+    )
+    // 他テストの mockReturnValue の持ち越し（vi.clearAllMocks は実装までは戻さない）を断つ
+    vi.mocked(db.listingsWithoutThumb).mockReturnValue([])
+
+    const fetchMock = vi.fn(async (_url: string) => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }))
+    state.opts.fetchImpl = fetchMock
+
+    const run = await collect(true)
+
+    expect(db.insertCollected).toHaveBeenCalledTimes(1)
+    const insertedTitles = vi.mocked(db.insertCollected).mock.calls[0][0].map(r => r.title)
+    expect(insertedTitles).toHaveLength(2)
+    expect(insertedTitles.every(t => t.includes('メロジョイ'))).toBe(true)
+
+    // サムネイルも不一致の1件（m43306721545）には取りに行かない
+    const fetchedUrls = fetchMock.mock.calls.map(c => c[0])
+    expect(fetchedUrls).toHaveLength(2)
+    expect(fetchedUrls.some(u => u.includes('m43306721545'))).toBe(false)
+
+    expect(run.message).toContain('キーワード不一致で除外 1 件')
+  })
+
+  it('キーワード未設定なら販売は全部挿入される', async () => {
+    const sales = parseSoldHtml(soldFixtureHtml)
+    state.opts.scrapeResult = { sales, totalCount: sales.length }
+    state.opts.listingsHtml = listingsFixtureHtml
+
+    vi.mocked(db.getSettings).mockReturnValue({ mercari_keyword: '' } as never)
+    vi.mocked(db.parseKeywords).mockReturnValue([])
+
+    const run = await collect(true)
+
+    expect(db.insertCollected).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(db.insertCollected).mock.calls[0][0]).toHaveLength(3)
+    expect(run.message).not.toContain('キーワード不一致で除外')
   })
 })

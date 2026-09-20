@@ -825,6 +825,20 @@ describe('db（:memory:）', () => {
     expect(db.listShopAccounts().some(a => a.id === otherId)).toBe(false)
   })
 
+  it('updateShopAccount / getShopAccount：import_keywords の保存・空文字はnullに丸める', () => {
+    expect(db.getShopAccount(shopId)!.import_keywords).toBeNull()
+
+    db.updateShopAccount(shopId, { import_keywords: 'メロジョイ, Mellojoy' })
+    expect(db.getShopAccount(shopId)!.import_keywords).toBe('メロジョイ, Mellojoy')
+    expect(db.listShopAccounts().find(a => a.id === shopId)!.import_keywords).toBe('メロジョイ, Mellojoy')
+
+    db.updateShopAccount(shopId, { import_keywords: '   ' })
+    expect(db.getShopAccount(shopId)!.import_keywords).toBeNull()
+
+    db.updateShopAccount(shopId, { import_keywords: null })
+    expect(db.getShopAccount(shopId)!.import_keywords).toBeNull()
+  })
+
   it('resetData：仕入・販売・紐付け・runを消す。マスタ（shop_account/shipping_method/setting）は残す', () => {
     db.createPurchase({
       shop_account_id: shopId,
@@ -1063,7 +1077,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('11')
+      expect(db.getSettings().schema_version).toBe('12')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1184,7 +1198,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('11')
+      expect(db.getSettings().schema_version).toBe('12')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')

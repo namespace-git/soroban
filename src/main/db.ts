@@ -596,6 +596,16 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 12) {
+    // 仕入先ごとの取り込みキーワード（商品名がどれかに一致する明細だけ取り込む）
+    addColumnIfMissing('shop_account', 'import_keywords', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '12')
+         ON CONFLICT(key) DO UPDATE SET value = '12'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -2800,9 +2810,13 @@ export function createShopAccount(name: string, kind: ShopAccountKind = 'other')
   return id
 }
 
+export function getShopAccount(id: string): ShopAccount | undefined {
+  return db.prepare('SELECT * FROM shop_account WHERE id = ?').get(id) as ShopAccount | undefined
+}
+
 export function updateShopAccount(
   id: string,
-  patch: { name?: string; kind?: ShopAccountKind; is_active?: number },
+  patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null },
 ): void {
   const sets: string[] = []
   const vals: unknown[] = []
@@ -2811,6 +2825,10 @@ export function updateShopAccount(
   if (patch.name !== undefined) put('name', patch.name)
   if (patch.kind !== undefined) put('kind', patch.kind)
   if (patch.is_active !== undefined) put('is_active', patch.is_active)
+  if (patch.import_keywords !== undefined) {
+    const trimmed = patch.import_keywords?.trim()
+    put('import_keywords', trimmed ? patch.import_keywords : null)
+  }
   if (sets.length === 0) return
 
   vals.push(id)
@@ -2969,6 +2987,7 @@ export function insertCollected(
 ): Array<{ id: string; mercariItemId: string }> {
   const rateBp = setting('fee_rate_bp', 1000)
   // 空なら「型番が抜けるか」で転売/私物を判定。空でなければキーワード（どれか1つでも部分一致・大小無視）で判定
+  // （キーワードが設定されていれば collector 側で不一致は取り込まれないので、ここに来るのは一致したものだけ）
   const keywords = parseKeywords(settingStr('mercari_keyword', ''))
 
   const ins = db.prepare(

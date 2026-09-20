@@ -8,7 +8,6 @@ import type { ConfirmChoice } from './components/ConfirmDialog.vue'
 import SearchBox from './components/SearchBox.vue'
 import GlobalSearch from './components/GlobalSearch.vue'
 import Dashboard from './views/Dashboard.vue'
-import Listings from './views/Listings.vue'
 import Sales from './views/Sales.vue'
 import Purchases from './views/Purchases.vue'
 import Inventory from './views/Inventory.vue'
@@ -18,22 +17,23 @@ import Settings from './views/Settings.vue'
 import type { CollectorRun, DashboardStats, SearchHit } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 
-type Tab = 'dashboard' | 'listings' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'settings'
+type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'settings'
 /**
- * goto にタブと一緒に渡す情報。型番指定（商品タブ）・出品指定（出品タブ）・未引き当てだけ絞る指定・
- * 横断検索からの遷移（検索語を引き継ぐ・該当行をハイライトする）
+ * goto にタブと一緒に渡す情報。型番指定（商品タブ）・売上タブの段階指定（出品中／未処理／完了／すべて）・
+ * 出品指定・未引き当てだけ絞る指定・横断検索からの遷移（検索語を引き継ぐ・該当行をハイライトする）
  */
 export type GotoPayload = {
   modelCode?: string
-  mercariItemId?: string
+  stage?: 'listed' | 'pending' | 'done' | 'all'
   onlyUnallocated?: boolean
+  onlyPending?: boolean
+  mercariItemId?: string
   search?: string
   focusId?: string
 }
 
 const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [
   { key: 'dashboard', label: 'ホーム', icon: 'home' },
-  { key: 'listings', label: '出品', icon: 'listing' },
   { key: 'sales', label: '売上', icon: 'sales' },
   { key: 'purchases', label: '仕入', icon: 'purchase' },
   { key: 'inventory', label: '在庫', icon: 'inventory' },
@@ -96,11 +96,14 @@ function onGlobalKeydown(e: KeyboardEvent) {
 }
 
 const TAB_FOR_KIND: Record<SearchHit['kind'], Tab> = {
-  inventory: 'inventory', listing: 'listings', sale: 'sales', purchase: 'purchases',
+  inventory: 'inventory', listing: 'sales', sale: 'sales', purchase: 'purchases',
 }
 
 function onSearchSelect(hit: SearchHit) {
-  goto(TAB_FOR_KIND[hit.kind], { search: searchQuery.value, focusId: hit.id })
+  const payload = hit.kind === 'listing'
+    ? { stage: 'listed' as const, search: searchQuery.value, focusId: hit.id }
+    : { search: searchQuery.value, focusId: hit.id }
+  goto(TAB_FOR_KIND[hit.kind], payload)
   searchOpen.value = false
   searchQuery.value = ''
 }
@@ -330,7 +333,6 @@ watch(revision, loadStats)
 
       <main>
         <Dashboard v-if="tab === 'dashboard'" />
-        <Listings v-else-if="tab === 'listings'" />
         <Sales v-else-if="tab === 'sales'" />
         <Purchases v-else-if="tab === 'purchases'" />
         <Inventory v-else-if="tab === 'inventory'" />

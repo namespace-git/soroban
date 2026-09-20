@@ -199,9 +199,9 @@ function extractAllCodes(text: string): string[] {
 // ------------------------------------------------------------
 
 const shopAccounts: ShopAccount[] = [
-  { id: uid(), name: 'メロジョイA', kind: 'mellojoy', note: null, is_active: 1 },
-  { id: uid(), name: 'メロジョイB', kind: 'mellojoy', note: null, is_active: 1 },
-  { id: uid(), name: 'TikTok Shop', kind: 'tiktok', note: null, is_active: 1 },
+  { id: uid(), name: 'メロジョイA', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null },
+  { id: uid(), name: 'メロジョイB', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null },
+  { id: uid(), name: 'TikTok Shop', kind: 'tiktok', note: null, is_active: 1, import_keywords: null },
 ]
 
 /** タグ。deleteTag で配列ごと差し替えるので let */
@@ -2119,16 +2119,19 @@ const api: SorobanApi = {
 
   async createShopAccount(name: string, kind: ShopAccountKind = 'other') {
     const id = uid()
-    shopAccounts.push({ id, name, kind, note: null, is_active: 1 })
+    shopAccounts.push({ id, name, kind, note: null, is_active: 1, import_keywords: null })
     return wait(id)
   },
 
-  async updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number }) {
+  async updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null }) {
     const account = shopAccounts.find(s => s.id === id)
     if (!account) throw new Error('仕入先が見つかりません')
     if (patch.name !== undefined) account.name = patch.name
     if (patch.kind !== undefined) account.kind = patch.kind
     if (patch.is_active !== undefined) account.is_active = patch.is_active
+    if (patch.import_keywords !== undefined) {
+      account.import_keywords = patch.import_keywords?.trim() ? patch.import_keywords : null
+    }
     return wait(undefined)
   },
 

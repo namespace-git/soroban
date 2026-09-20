@@ -7,7 +7,7 @@ import Skeleton from '../components/Skeleton.vue'
 
 const stats = ref<DashboardStats | null>(null)
 const revision = inject<Ref<number>>('revision')!
-const goto = inject<(t: string, payload?: { modelCode?: string; onlyUnallocated?: boolean }) => void>('goto')!
+const goto = inject<(t: string, payload?: { modelCode?: string; stage?: 'listed' | 'pending' | 'done' | 'all'; onlyUnallocated?: boolean }) => void>('goto')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -138,7 +138,7 @@ const runLabel: Record<string, string> = {
             <button
               class="need-row"
               :class="{ zero: stats.needsShipping === 0 }"
-              @click="goto('sales')"
+              @click="goto('sales', { stage: 'pending' })"
             >
               <span class="need-count">{{ stats.needsShipping }}</span>
               <span class="need-desc">送料が未入力</span>
@@ -148,7 +148,7 @@ const runLabel: Record<string, string> = {
             <button
               class="need-row"
               :class="{ zero: stats.needsMatch === 0 }"
-              @click="goto('sales')"
+              @click="goto('sales', { stage: 'pending' })"
             >
               <span class="need-count">{{ stats.needsMatch }}</span>
               <span class="need-desc">仕入が未紐付け</span>
@@ -168,7 +168,7 @@ const runLabel: Record<string, string> = {
             <button
               class="need-row"
               :class="{ zero: stats.needsListingAllocation === 0 }"
-              @click="goto('listings', { onlyUnallocated: true })"
+              @click="goto('sales', { stage: 'listed', onlyUnallocated: true })"
             >
               <span class="need-count">{{ stats.needsListingAllocation }}</span>
               <span class="need-desc">未引き当ての出品</span>

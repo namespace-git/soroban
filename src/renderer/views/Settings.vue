@@ -137,6 +137,12 @@ async function toggleAccountActive(a: ShopAccount) {
   changed()
 }
 
+async function saveAccountKeywords(a: ShopAccount, value: string) {
+  await window.soroban.updateShopAccount(a.id, { import_keywords: value })
+  accounts.value = await window.soroban.listShopAccounts()
+  toast('保存しました', 'ok')
+}
+
 async function removeAccount(a: ShopAccount) {
   if (!await confirmDialog(`「${a.name}」を削除しますか？`, {
     message: 'ログイン状態も消えます',
@@ -381,7 +387,7 @@ const runLabel: Record<string, string> = {
         </div>
         <table class="compact accounts-table">
           <thead>
-            <tr><th>名前</th><th>種別</th><th></th></tr>
+            <tr><th>名前</th><th>種別</th><th>取り込みキーワード</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="a in accounts" :key="a.id">
@@ -395,6 +401,16 @@ const runLabel: Record<string, string> = {
                   <option value="tiktok">TikTok Shop</option>
                   <option value="other">その他</option>
                 </select>
+              </td>
+              <td class="keywords-cell">
+                <textarea
+                  v-if="a.kind !== 'other'"
+                  rows="1"
+                  :value="a.import_keywords ?? ''"
+                  placeholder="例：Mellojoy, メロジョイ（空なら全部取り込む）"
+                  @change="saveAccountKeywords(a, ($event.target as HTMLTextAreaElement).value)"
+                />
+                <span v-else class="faint">—</span>
               </td>
               <td class="actions">
                 <button class="sm ghost" @click="renameAccount(a)">改名</button>
@@ -416,6 +432,9 @@ const runLabel: Record<string, string> = {
         <p class="faint hint">
           メロジョイはアカウントごとに別のブラウザプロファイルでログインします。ログイン状態は保存され、次回から入力は不要です。
           パスワードはアプリに保存しません。「取り込む」でメルカリのあとに注文履歴を読み、合計が合う注文はそのまま仕入に入ります。
+        </p>
+        <p class="faint hint">
+          商品名がどれかに一致する明細だけを取り込みます。一致しない明細の分の送料は原価に入りません。
         </p>
       </div>
 
@@ -532,6 +551,21 @@ const runLabel: Record<string, string> = {
 }
 .accounts-table select:hover,
 .accounts-table select:focus {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.keywords-cell { min-width: 220px; }
+.keywords-cell textarea {
+  width: 100%;
+  min-height: 36px;
+  resize: vertical;
+  border-color: transparent;
+  background: transparent;
+  font-size: var(--fs-13);
+}
+.keywords-cell textarea:hover,
+.keywords-cell textarea:focus {
   border-color: var(--line);
   background: var(--surface);
 }

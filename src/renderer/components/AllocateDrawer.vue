@@ -1,23 +1,28 @@
 <script setup lang="ts">
-// 出品 1 件への在庫の引き当て。Sales.vue の紐付けドロワーと同じ体験：
-// チェックした瞬間に下端の原価合計・見込み粗利が動く。確定は「引き当てる」ボタンで初めて起きる。
+// 在庫の引き当て／紐付け。出品（mode='listing'）と販売（mode='sale'）の両方から使う。
+// チェックした瞬間に下端の原価合計・粗利プレビューが動く。確定は「引き当てる／紐付ける」ボタンで初めて起きる。
 import { ref, computed, watch, inject } from 'vue'
-import type { Listing, InventoryItem, ListingStatus } from '../../shared/types'
+import type { Listing, InventoryItem, ListingStatus, SaleProfit } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import EmptyState from './EmptyState.vue'
 import Icon from './Icon.vue'
 import { matchesSearch } from './SearchBox.vue'
 
+type MatchedRow = { id: string; name: string; model_code?: string | null; landed_cost: number; aging_days?: number }
+
 const props = defineProps<{
   open: boolean
-  listing: Listing | null
+  mode: 'listing' | 'sale'
+  listing?: Listing | null
+  sale?: SaleProfit | null
 }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
 
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 
 const candidates = ref<InventoryItem[]>([])
+const matchedItems = ref<MatchedRow[]>([])
 const picked = ref<Set<string>>(new Set())
 const search = ref('')
 const feeRateBp = ref(1000)
@@ -32,38 +37,58 @@ const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = 
   active: 'info', suspended: 'neutral', sold: 'ok', ended: 'neutral',
 }
 
+const title = computed(() => (props.mode === 'listing' ? props.listing?.title : props.sale?.title) ?? '')
+const price = computed(() => (props.mode === 'listing' ? props.listing?.price : props.sale?.price) ?? 0)
+
 // 実際の手数料計算（src/main/money.ts の calcFee と同じ：切り捨て）。
-// ここは「チェックした瞬間の見込み粗利プレビュー」のための例外的な再計算。
-function calcFee(price: number, rateBp: number): number {
-  return Math.floor((price * rateBp) / 10000)
+// 出品はまだ手数料が確定していないため、ここは「チェックした瞬間の見込み粗利プレビュー」のための例外的な再計算。
+function calcFee(p: number, rateBp: number): number {
+  return Math.floor((p * rateBp) / 10000)
 }
 
 async function load() {
-  if (!props.listing) { candidates.value = []; return }
   loading.value = true
-  const [sugg, settings] = await Promise.all([
-    window.soroban.suggestForListing(props.listing.mercari_item_id, 50),
-    window.soroban.getSettings(),
-  ])
-  candidates.value = sugg
-  feeRateBp.value = Number(settings.fee_rate_bp ?? 1000)
+  if (props.mode === 'listing') {
+    const l = props.listing
+    if (!l) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
+    const [sugg, settings] = await Promise.all([
+      window.soroban.suggestForListing(l.mercari_item_id, 50),
+      window.soroban.getSettings(),
+    ])
+    candidates.value = sugg
+    feeRateBp.value = Number(settings.fee_rate_bp ?? 1000)
+    matchedItems.value = l.items.map(it => ({ id: it.id, name: it.name, model_code: it.model_code, landed_cost: it.landed_cost }))
+  } else {
+    const s = props.sale
+    if (!s) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
+    const [linked, sugg] = await Promise.all([
+      window.soroban.listSaleLines(s.id),
+      window.soroban.suggestInventory(s.id, 50),
+    ])
+    matchedItems.value = linked
+    candidates.value = sugg
+  }
   loading.value = false
 }
 
-watch(() => [props.open, props.listing?.mercari_item_id], ([isOpen]) => {
-  picked.value = new Set()
-  search.value = ''
-  if (isOpen) load()
-}, { immediate: true })
+watch(
+  () => [props.open, props.mode, props.listing?.mercari_item_id, props.sale?.id],
+  ([isOpen]) => {
+    picked.value = new Set()
+    search.value = ''
+    if (isOpen) load()
+  },
+  { immediate: true },
+)
 
 const filtered = computed(() => {
   if (!search.value.trim()) return candidates.value
   return candidates.value.filter(c => matchesSearch([c.name, c.model_code], search.value))
 })
 
-// 終了済み（sold／ended）の出品には新規に引き当てられない。引き当て済みの表示だけ残す
+// 出品モード：終了済み（sold／ended）の出品には新規に引き当てられない。引き当て済みの表示だけ残す
 const canReserve = computed(() =>
-  props.listing?.status === 'active' || props.listing?.status === 'suspended',
+  props.mode === 'sale' || props.listing?.status === 'active' || props.listing?.status === 'suspended',
 )
 
 function toggle(id: string) {
@@ -72,51 +97,70 @@ function toggle(id: string) {
   picked.value = s
 }
 
-const reservedCost = computed(() => props.listing?.items.reduce((s, it) => s + it.landed_cost, 0) ?? 0)
+const matchedCost = computed(() => matchedItems.value.reduce((s, m) => s + m.landed_cost, 0))
 const pickedCost = computed(() =>
   candidates.value.filter(c => picked.value.has(c.id)).reduce((s, c) => s + c.landed_cost, 0),
 )
-const totalCost = computed(() => reservedCost.value + pickedCost.value)
-const totalCount = computed(() => (props.listing?.items.length ?? 0) + picked.value.size)
+const totalCost = computed(() => matchedCost.value + pickedCost.value)
+const totalCount = computed(() => matchedItems.value.length + picked.value.size)
 
-// チェック済みの候補のうち、他の出品からの移動になるもの
+// チェック済みの候補のうち、他の出品からの移動になるもの（出品モードのみ）
 const movingCount = computed(() =>
-  candidates.value.filter(c => picked.value.has(c.id) && c.listing).length,
+  props.mode === 'listing'
+    ? candidates.value.filter(c => picked.value.has(c.id) && c.listing).length
+    : 0,
 )
-const confirmLabel = computed(() =>
-  movingCount.value > 0 ? `引き当てる（${movingCount.value}点を移す）` : '引き当てる',
-)
-
-const previewProfit = computed(() => {
-  if (!props.listing) return 0
-  const fee = calcFee(props.listing.price, feeRateBp.value)
-  return props.listing.price - fee - totalCost.value
+const confirmLabel = computed(() => {
+  if (props.mode === 'sale') return '紐付ける'
+  return movingCount.value > 0 ? `引き当てる（${movingCount.value}点を移す）` : '引き当てる'
 })
 
-async function confirmReserve() {
-  if (!props.listing || picked.value.size === 0) return
+const profitLabel = computed(() => (props.mode === 'listing' ? '見込み粗利（送料・梱包前）' : '粗利'))
+
+const previewProfit = computed(() => {
+  if (props.mode === 'listing') {
+    if (!props.listing) return 0
+    const fee = calcFee(props.listing.price, feeRateBp.value)
+    return props.listing.price - fee - totalCost.value
+  }
+  if (!props.sale) return 0
+  return props.sale.price - props.sale.fee - props.sale.shipping_fee - props.sale.packaging_cost - totalCost.value
+})
+
+async function confirmPick() {
+  if (picked.value.size === 0) return
   const ids = [...picked.value]
-  const moved = candidates.value.filter(c => ids.includes(c.id) && c.listing).length
   try {
-    await window.soroban.reserveInventory(props.listing.mercari_item_id, ids)
-    picked.value = new Set()
-    emit('changed')
-    await load()
-    toast(
-      moved > 0
-        ? `${ids.length}点を引き当てました（${moved}点は別の出品から移しました）`
-        : `${ids.length}点を引き当てました`,
-      'ok',
-    )
+    if (props.mode === 'listing' && props.listing) {
+      const moved = candidates.value.filter(c => ids.includes(c.id) && c.listing).length
+      await window.soroban.reserveInventory(props.listing.mercari_item_id, ids)
+      picked.value = new Set()
+      emit('changed')
+      await load()
+      toast(
+        moved > 0
+          ? `${ids.length}点を引き当てました（${moved}点は別の出品から移しました）`
+          : `${ids.length}点を引き当てました`,
+        'ok',
+      )
+    } else if (props.mode === 'sale' && props.sale) {
+      await window.soroban.linkInventory(props.sale.id, ids)
+      picked.value = new Set()
+      emit('changed')
+      emit('close')
+    }
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), 'warn')
   }
 }
 
-async function unreserve(itemId: string) {
-  if (!props.listing) return
+async function unlink(itemId: string) {
   try {
-    await window.soroban.unreserveInventory(props.listing.mercari_item_id, itemId)
+    if (props.mode === 'listing' && props.listing) {
+      await window.soroban.unreserveInventory(props.listing.mercari_item_id, itemId)
+    } else if (props.mode === 'sale' && props.sale) {
+      await window.soroban.unlinkInventory(props.sale.id, itemId)
+    }
     emit('changed')
     await load()
   } catch (e) {
@@ -125,18 +169,23 @@ async function unreserve(itemId: string) {
 }
 
 const thumbFailed = ref(false)
-watch(() => props.listing?.mercari_item_id, () => { thumbFailed.value = false })
+watch(() => [props.listing?.mercari_item_id, props.sale?.id], () => { thumbFailed.value = false })
 function placeholderChar(): string {
-  const l = props.listing
-  const c = l?.model_codes[0]?.[0] ?? l?.title.trim().charAt(0)
+  if (props.mode === 'listing') {
+    const l = props.listing
+    const c = l?.model_codes[0]?.[0] ?? l?.title.trim().charAt(0)
+    return (c || '?').toUpperCase()
+  }
+  const s = props.sale
+  const c = s?.model_codes[0]?.[0] ?? s?.title.trim().charAt(0)
   return (c || '?').toUpperCase()
 }
 </script>
 
 <template>
-  <Drawer :open="open" :title="listing?.title ?? ''" :width="560" @close="emit('close')">
+  <Drawer :open="open" :title="title" :width="560" @close="emit('close')">
     <template #header-sub>
-      <div v-if="listing" class="head-sub">
+      <div v-if="mode === 'listing' && listing" class="head-sub">
         <img
           v-if="listing.thumb_url && !thumbFailed"
           class="thumb" :src="listing.thumb_url" alt=""
@@ -146,15 +195,17 @@ function placeholderChar(): string {
         <span class="faint">出品価格 {{ yen(listing.price) }}</span>
         <StatusChip :tone="STATUS_TONE[listing.status]" :label="STATUS_LABEL[listing.status]" />
       </div>
+      <span v-else-if="mode === 'sale'" class="faint">販売 {{ yen(price) }}</span>
     </template>
 
-    <div v-if="listing?.items.length" class="matched-block">
-      <p class="panel-title">引き当て済み</p>
-      <div v-for="it in listing.items" :key="it.id" class="item matched-item">
-        <StatusChip v-if="it.model_code" tone="neutral" :label="it.model_code" />
-        <span class="grow">{{ it.name }}</span>
-        <span class="num">{{ yen(it.landed_cost) }}</span>
-        <button class="sm ghost" @click="unreserve(it.id)">解除</button>
+    <div v-if="matchedItems.length" class="matched-block">
+      <p class="panel-title">{{ mode === 'listing' ? '引き当て済み' : '紐付け済み' }}</p>
+      <div v-for="m in matchedItems" :key="m.id" class="item matched-item">
+        <StatusChip v-if="m.model_code" tone="neutral" :label="m.model_code" />
+        <span class="grow">{{ m.name }}</span>
+        <span v-if="m.aging_days != null" class="faint nowrap">{{ m.aging_days }}日</span>
+        <span class="num">{{ yen(m.landed_cost) }}</span>
+        <button class="sm ghost" @click="unlink(m.id)">解除</button>
       </div>
     </div>
 
@@ -178,7 +229,7 @@ function placeholderChar(): string {
           />
           <StatusChip v-if="c.model_code" tone="neutral" :label="c.model_code" />
           <StatusChip
-            v-if="c.listing && c.listing.mercari_item_id !== listing?.mercari_item_id"
+            v-if="mode === 'listing' && c.listing && c.listing.mercari_item_id !== listing?.mercari_item_id"
             tone="neutral"
             :label="`出品 ${yen(c.listing.price)} に引き当て済み`"
           />
@@ -196,10 +247,10 @@ function placeholderChar(): string {
           <span class="faint">{{ totalCount }}点</span>
           <span class="num">原価 {{ yen(totalCost) }}</span>
           <strong class="num" :class="previewProfit >= 0 ? 'profit' : 'loss'">
-            見込み粗利（送料・梱包前） {{ yen(previewProfit) }}
+            {{ profitLabel }} {{ yen(previewProfit) }}
           </strong>
         </div>
-        <button v-if="canReserve" class="primary" :disabled="!picked.size" @click="confirmReserve">
+        <button v-if="canReserve" class="primary" :disabled="!picked.size" @click="confirmPick">
           {{ confirmLabel }}
         </button>
       </div>

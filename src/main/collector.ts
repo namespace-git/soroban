@@ -606,11 +606,20 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     let updated = 0
     let thumbsSaved = 0
     let thumbsAttempted = 0
+    let excludedByKeyword = 0
 
     if (!salesEmpty) {
       const known = db.existingMercariIds(sales.map(s => s.mercariItemId))
-      const freshSales = sales.filter(s => !known.has(s.mercariItemId))
+      const freshSalesAll = sales.filter(s => !known.has(s.mercariItemId))
       const knownRows = sales.filter(s => known.has(s.mercariItemId)).map(toRow)
+
+      // キーワードが設定されていれば、出品中タブと同じ規則（タイトル一致）で絞る。
+      // 不一致のものは insertCollected に渡さない＝詳細ページもサムネイルも取りに行かない
+      const keywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
+      const freshSales = keywords.length > 0
+        ? freshSalesAll.filter(s => db.matchesAnyKeyword(s.title, keywords))
+        : freshSalesAll
+      excludedByKeyword = freshSalesAll.length - freshSales.length
 
       const insertedRows = freshSales.length > 0 ? db.insertCollected(freshSales.map(toRow)) : []
       inserted = insertedRows.length
@@ -727,6 +736,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     // status は販売側の結果に従う（ここまで来ていれば ok。出品中タブの構造異常は
     // status を落とさず message にだけ残す＝Codexレビュー指摘）
     const parts = [salesEmpty ? '販売 0 件' : `新規 ${inserted}・更新 ${updated}`]
+    if (excludedByKeyword > 0) parts.push(`キーワード不一致で除外 ${excludedByKeyword} 件`)
     const totalThumbsSaved = thumbsSaved + listingThumbsSaved
     if (totalThumbsSaved > 0) parts.push(`サムネイル ${totalThumbsSaved} 枚`)
     if (pending.length > 0) parts.push(`型番の追記 ${codesApplied}（詳細 ${detailsRead} 件）`)

@@ -467,6 +467,67 @@ export function toPurchaseInput(
 }
 
 /**
+ * 口座の import_keywords で確定済みの仕入を絞り込む。confirmed / draft の判定は
+ * 絞り込む前の注文全体で終わっているので、ここでは既に確定した PurchaseInput の
+ * 明細を削るだけ（判定のやり直しはしない）。
+ *
+ * - keywords が空なら input をそのまま返す（絞り込みなし）
+ * - 一致する明細が1つも無ければ null（その注文は取り込まない）
+ * - 一部だけ一致するなら、一致した明細だけに絞り、送料・割引は注文全体の金額比
+ *   （一致した明細の小計 ÷ 全明細の小計）で按分する。小計が0なら按分せず0
+ */
+export function filterPurchaseInputByKeywords(
+  input: PurchaseInput, keywords: string[],
+): PurchaseInput | null {
+  if (keywords.length === 0) return input
+
+  const matched = input.lines.filter(l => db.matchesAnyKeyword(l.name, keywords))
+  if (matched.length === 0) return null
+  if (matched.length === input.lines.length) return input
+
+  const fullSubtotal = input.lines.reduce((s, l) => s + l.unit_price * l.quantity, 0)
+  const matchedSubtotal = matched.reduce((s, l) => s + l.unit_price * l.quantity, 0)
+  const ratio = fullSubtotal > 0 ? matchedSubtotal / fullSubtotal : 0
+
+  const excluded = input.lines.length - matched.length
+  const addition = `キーワード不一致の明細 ${excluded} 件を除外（送料・割引は金額比で按分）`
+
+  return {
+    ...input,
+    lines: matched,
+    shipping_fee: Math.round((input.shipping_fee ?? 0) * ratio),
+    discount: Math.round((input.discount ?? 0) * ratio),
+    note: input.note ? `${input.note}\n${addition}` : addition,
+  }
+}
+
+/**
+ * 下書き版。下書きは単価が確定していない（quantity当たりの金額が分からない）ことがあるため、
+ * 金額比の按分はできない。送料・割引は注文全体の値のまま残し、note で「確定時に見直してください」
+ * と伝える。私物だけの注文が価格未入力の下書きとして要対応に出続けないよう、confirmed と同じく
+ * 一致0件は null（取り込まない）にする。
+ */
+export function filterPurchaseDraftByKeywords(
+  input: PurchaseDraftInput, keywords: string[],
+): PurchaseDraftInput | null {
+  if (keywords.length === 0) return input
+
+  const matched = input.lines.filter(l => db.matchesAnyKeyword(l.name, keywords))
+  if (matched.length === 0) return null
+  if (matched.length === input.lines.length) return input
+
+  const excluded = input.lines.length - matched.length
+  const addition =
+    `キーワード不一致の明細 ${excluded} 件を除外（送料・割引は注文全体の値。確定時に見直してください）`
+
+  return {
+    ...input,
+    lines: matched,
+    note: input.note ? `${input.note}\n${addition}` : addition,
+  }
+}
+
+/**
  * 詳細ページの描画がまだで明細が1行も取れていない場合に true。
  * この場合は下書きも作らない（import_key 付きの空 draft が既取込扱いになり
  * 二度と取り直せなくなるのを避ける）。次回に再試行する。
@@ -561,6 +622,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
   const runId = db.startRun('mellojoy', shopAccountId)
   const win = createShopWindow(shopAccountId, !silent)
   let pagesOpened = 0
+  const importKeywords = db.parseKeywords(db.getShopAccount(shopAccountId)?.import_keywords ?? '')
 
   try {
     await win.loadURL(ORDERS_URL)
@@ -609,6 +671,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
 
     let confirmedCount = 0
     let draftCount = 0
+    let skippedByKeyword = 0
     const failures: string[] = []
 
     for (const order of targets) {
@@ -648,10 +711,20 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
         })
 
         if (result.kind === 'confirmed') {
-          db.createPurchase(result.input)
+          const filtered = filterPurchaseInputByKeywords(result.input, importKeywords)
+          if (filtered === null) {
+            skippedByKeyword++
+            continue
+          }
+          db.createPurchase(filtered)
           confirmedCount++
         } else {
-          db.createPurchaseDraft(result.input)
+          const filteredDraft = filterPurchaseDraftByKeywords(result.input, importKeywords)
+          if (filteredDraft === null) {
+            skippedByKeyword++
+            continue
+          }
+          db.createPurchaseDraft(filteredDraft)
           draftCount++
         }
       } catch (e) {
@@ -663,6 +736,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
       `確定 ${confirmedCount}・下書き ${draftCount}・既取込 ${alreadyImported}・キャンセル ${cancelledCount}`,
     ]
     if (fulfillmentUpdated > 0) parts.push(`到着状態の更新 ${fulfillmentUpdated}`)
+    if (skippedByKeyword > 0) parts.push(`キーワード不一致で除外 ${skippedByKeyword} 件`)
     if (fresh.length > targets.length) parts.push(`残り ${fresh.length - targets.length} 件は次回`)
     if (failures.length > 0) parts.push(`失敗：${failures.join('、')}`)
 

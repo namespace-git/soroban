@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS shop_account (
              CHECK (kind IN ('mellojoy','tiktok','other')),
   note       TEXT,
   is_active  INTEGER NOT NULL DEFAULT 1,
+  -- 取り込みキーワード（改行・カンマ区切り）。空/NULLなら全部取り込む。詳細は shared/types.ts
+  import_keywords TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

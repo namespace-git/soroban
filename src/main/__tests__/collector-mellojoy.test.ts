@@ -12,8 +12,8 @@ vi.mock('electron', () => ({
 }))
 
 import {
-  fulfillmentFromStatus, inferOrderDate, isShopLoginUrl, parseOrderDetailHtml, parseOrderListHtml,
-  shouldSkipDetail, toPurchaseInput,
+  filterPurchaseDraftByKeywords, filterPurchaseInputByKeywords, fulfillmentFromStatus, inferOrderDate,
+  isShopLoginUrl, parseOrderDetailHtml, parseOrderListHtml, shouldSkipDetail, toPurchaseInput,
 } from '../collector-mellojoy'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -227,6 +227,84 @@ describe('collector-mellojoy（electronに依存しない部分）', () => {
       if (result.kind !== 'draft') throw new Error('draft になるはず')
       expect(result.reason).toContain('合計が一致しません')
       expect(result.input.import_key).toBe('mellojoy:#100002')
+    })
+  })
+
+  describe('filterPurchaseInputByKeywords（fixture #268526：Z078-2 ¥2,499 + Z074-4 ¥2,399、送料¥499・割引0）', () => {
+    const detail = parseOrderDetailHtml(orderDetailHtml)
+    const opts = { shopAccountId: 'shop-1', orderedAt: '2026-09-19', orderNo: '#268526' }
+    const result = toPurchaseInput(detail, opts)
+    if (result.kind !== 'confirmed') throw new Error('confirmed になるはず')
+    const input = result.input
+
+    it('キーワードが空なら絞り込まずそのまま返す', () => {
+      expect(filterPurchaseInputByKeywords(input, [])).toBe(input)
+    })
+
+    it('全明細が一致すればそのまま返す（送料・割引は変えない）', () => {
+      const filtered = filterPurchaseInputByKeywords(input, ['mellojoy'])
+      expect(filtered).toBe(input)
+    })
+
+    it('一部だけ一致：一致した明細だけに絞り、送料・割引を金額比で按分し、noteに除外件数を追記', () => {
+      const filtered = filterPurchaseInputByKeywords(input, ['z078'])
+      expect(filtered).not.toBeNull()
+      expect(filtered!.lines).toHaveLength(1)
+      expect(filtered!.lines[0].model_code).toBe('Z078-2')
+
+      // 送料・割引は「一致した明細の小計 ÷ 全明細の小計」の金額比で按分
+      const fullSubtotal = 2499 * 1 + 2399 * 1
+      const matchedSubtotal = 2499 * 1
+      expect(filtered!.shipping_fee).toBe(Math.round(499 * matchedSubtotal / fullSubtotal))
+      expect(filtered!.discount).toBe(Math.round(0 * matchedSubtotal / fullSubtotal))
+
+      expect(filtered!.note).toBe(
+        '注文履歴から自動取得\nキーワード不一致の明細 1 件を除外（送料・割引は金額比で按分）',
+      )
+    })
+
+    it('一致0件なら null（取り込まない）', () => {
+      expect(filterPurchaseInputByKeywords(input, ['該当しないキーワード'])).toBeNull()
+    })
+  })
+
+  describe('filterPurchaseDraftByKeywords（下書き：単価不明なので送料・割引は按分しない）', () => {
+    const draft = {
+      import_key: 'mellojoy:#300001',
+      shop_account_id: 'shop-1',
+      ordered_at: '2026-01-01',
+      order_no: '#300001',
+      shipping_fee: 500,
+      discount: 100,
+      lines: [
+        { name: '転売商品【Z078-2】', quantity: 1 },
+        { name: '私物のおやつ', quantity: 1 },
+      ],
+      note: '注文履歴から自動取得（下書き）：小計が読めません',
+    }
+
+    it('キーワードが空ならそのまま返す', () => {
+      expect(filterPurchaseDraftByKeywords(draft, [])).toBe(draft)
+    })
+
+    it('一致0件なら null（取り込まない）', () => {
+      expect(filterPurchaseDraftByKeywords(draft, ['該当しないキーワード'])).toBeNull()
+    })
+
+    it('一部一致：一致した明細だけに絞り、送料・割引は注文全体の値のまま、noteに除外件数を追記', () => {
+      const filtered = filterPurchaseDraftByKeywords(draft, ['z078'])
+      expect(filtered).not.toBeNull()
+      expect(filtered!.lines).toHaveLength(1)
+      expect(filtered!.lines[0].name).toBe('転売商品【Z078-2】')
+
+      // 単価が分からないので按分せず、注文全体の送料・割引のまま
+      expect(filtered!.shipping_fee).toBe(500)
+      expect(filtered!.discount).toBe(100)
+
+      expect(filtered!.note).toBe(
+        '注文履歴から自動取得（下書き）：小計が読めません\n' +
+        'キーワード不一致の明細 1 件を除外（送料・割引は注文全体の値。確定時に見直してください）',
+      )
     })
   })
 
