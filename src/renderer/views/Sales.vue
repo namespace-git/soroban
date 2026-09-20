@@ -42,7 +42,11 @@ const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const gotoPayload = inject<Ref<SalesGotoPayload | null>>('gotoPayload', ref(null))
 
-const STAGE_LABEL: Record<Stage, string> = { listed: '出品中', pending: '未処理', done: '完了', all: 'すべて' }
+const STAGE_LABEL: Record<Stage, string> = { listed: '出品中', pending: '売れた・要入力', done: '利益確定', all: 'すべて' }
+const STAGE_HINT: Partial<Record<Stage, string>> = {
+  listed: '出品したが売れていない。どの在庫を出したか引き当てる',
+  pending: '送料か在庫の入力が残っている。入れると利益確定へ',
+}
 const STATUS_LABEL: Record<ListingStatus, string> = {
   active: '出品中', suspended: '公開停止中', sold: '売れた', ended: '取り下げ',
 }
@@ -65,6 +69,8 @@ const loaded = ref(false)
 // タブの件数（現在の段階に関わらず常に実数を出す）
 const listedCount = ref(0)
 const pendingCount = ref(0)
+
+const stageHint = computed(() => STAGE_HINT[stage.value] ?? null)
 
 const stageOptions = computed(() => ([
   { key: 'listed' as const, label: STAGE_LABEL.listed, count: listedCount.value },
@@ -155,9 +161,17 @@ const filteredRows = computed(() => rows.value.filter(r => {
 // チップ列に短く出すだけ）。この3列は未処理・完了だけで編集操作として意味を持つ
 const showFeePack = computed(() => stage.value === 'pending' || stage.value === 'done')
 const showStatusCol = computed(() => stage.value === 'listed' || stage.value === 'all') // 出品の状態
-const dateColLabel = computed(() => (stage.value === 'listed' ? '初めて見た日' : stage.value === 'all' ? '日付' : '販売日'))
+// 出品中は出品時に発送方法を決められる（売れた・要入力の行と同じ select）
+const showListedShipping = computed(() => stage.value === 'listed')
+const dateColLabel = computed(() => (stage.value === 'listed' ? '出品日' : stage.value === 'all' ? '日付' : '販売日'))
 const costColLabel = computed(() => (stage.value === 'listed' ? '引き当てた在庫' : stage.value === 'all' ? '在庫' : '原価'))
 const profitColLabel = computed(() => (stage.value === 'listed' ? '見込み粗利' : '粗利'))
+
+/** 見込み粗利のtitle：発送方法が決まっていれば送料込み、無ければ送料前であることを示す */
+function profitCellTitle(r: Row): string | undefined {
+  if (r.kind !== 'listing' || !r.listing) return undefined
+  return r.listing.shipping_method_id ? '送料込み（梱包前）' : '送料前'
+}
 
 // 「すべて」の販売行：発送方法をチップ列に短く出す（列そのものは無いため）
 function shippingChipTone(s: SaleProfit): 'neutral' | 'warn' {
@@ -267,6 +281,13 @@ function onThumbError(key: string) {
 }
 function rowModelCodes(r: Row): string[] {
   return r.kind === 'sale' ? (r.sale?.model_codes ?? []) : (r.listing?.model_codes ?? [])
+}
+/** 出品行は出品日（listed_at）を見せる。取れなければ初めて見た日（listing の date）のまま */
+function rowDateDisplay(r: Row): string {
+  return r.kind === 'listing' && r.listing ? r.listing.listed_at : r.date
+}
+function rowDateTitle(r: Row): string | undefined {
+  return r.kind === 'listing' ? '更新日から推定' : undefined
 }
 function rowTitle(r: Row): string {
   return r.kind === 'sale' ? (r.sale?.title ?? '') : (r.listing?.title ?? '')
@@ -378,6 +399,14 @@ async function setShipping(sale: SaleProfit, methodId: string) {
   changed()
 }
 
+// --- 出品時に決める発送方法（出品中の行） ---
+
+async function setListingShipping(listing: Listing, methodId: string) {
+  await window.soroban.setListingShipping(listing.mercari_item_id, methodId || null)
+  await load()
+  changed()
+}
+
 async function setPackaging(sale: SaleProfit, value: number) {
   const packaging_cost = Math.max(0, Math.round(value || 0))
   await window.soroban.updateSale(sale.id, { packaging_cost })
@@ -413,6 +442,20 @@ async function autoLinkPending() {
     toast(`${n}件を自動で紐付けました`, 'ok')
   } else {
     toast('型番が一致する在庫はありませんでした', 'warn')
+  }
+  await load()
+  await loadCounts()
+  changed()
+}
+
+// --- 型番で自動引き当て（出品中） ---
+
+async function autoReserveListings() {
+  const n = await window.soroban.autoReserveListings()
+  if (n > 0) {
+    toast(`${n}件を引き当てました`, 'ok')
+  } else {
+    toast('引き当てられる出品はありません', 'warn')
   }
   await load()
   await loadCounts()
@@ -549,6 +592,7 @@ async function remove(sale: SaleProfit) {
         {{ opt.label }}<template v-if="opt.count !== null"> ({{ opt.count }})</template>
       </button>
     </div>
+    <p v-if="stageHint" class="faint stage-hint">{{ stageHint }}</p>
 
     <div class="toolbar">
       <label v-if="stage === 'listed'" class="row">
@@ -562,6 +606,7 @@ async function remove(sale: SaleProfit) {
       <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
       <span v-if="hasSearch && stage === 'listed'" class="faint search-hint">検索中は状態・未引き当ての絞り込みも解除して表示</span>
       <span class="grow" />
+      <button v-if="stage === 'listed'" class="sm" @click="autoReserveListings">型番で自動引き当て</button>
       <button v-if="stage !== 'listed'" class="sm" @click="autoLinkPending">型番で自動紐付け</button>
       <span class="faint">{{ filteredRows.length }}件</span>
     </div>
@@ -588,6 +633,7 @@ async function remove(sale: SaleProfit) {
             <col />
             <col class="col-listed-price" />
             <col class="col-listed-status" />
+            <col class="col-listed-shipping" />
             <col class="col-listed-reserved" />
             <col class="col-listed-profit" />
             <col class="col-listed-actions" />
@@ -622,10 +668,11 @@ async function remove(sale: SaleProfit) {
               <th class="num">価格</th>
               <th v-if="showFeePack" class="num">手数料</th>
               <th v-if="showStatusCol">状態</th>
+              <th v-if="showListedShipping" title="出品時に決めておくと、売れたときそのまま販売に入ります">発送方法</th>
               <th v-if="showFeePack">発送方法</th>
               <th v-if="showFeePack" class="num">梱包</th>
               <th class="num">{{ costColLabel }}</th>
-              <th class="num" :title="stage === 'listed' ? '送料前' : undefined">{{ profitColLabel }}</th>
+              <th class="num">{{ profitColLabel }}</th>
               <th></th>
             </tr>
           </thead>
@@ -635,8 +682,8 @@ async function remove(sale: SaleProfit) {
               :data-row-id="r.id"
               :class="{ focused: focusedId === r.id }"
             >
-              <td class="date-cell">
-                <div class="faint nowrap">{{ r.date.slice(5) }}</div>
+              <td class="date-cell" :title="rowDateTitle(r)">
+                <div class="faint nowrap">{{ rowDateDisplay(r).slice(5) }}</div>
                 <div v-if="r.kind === 'listing' && r.listing" class="faint nowrap seen-note">
                   最終確認 {{ formatSeen(r.listing.last_seen_at) }}
                 </div>
@@ -702,6 +749,12 @@ async function remove(sale: SaleProfit) {
 
                 <div v-else-if="r.listing" class="chip-row">
                   <StatusChip v-for="mc in r.listing.model_codes" :key="mc" tone="neutral" :label="mc" />
+                  <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
+                  <StatusChip
+                    v-if="stage === 'all' && r.listing.shipping_method_id"
+                    tone="neutral"
+                    :label="r.listing.shipping_method_name ?? '発送方法'"
+                  />
                 </div>
               </td>
 
@@ -723,6 +776,20 @@ async function remove(sale: SaleProfit) {
                   />
                 </div>
                 <span v-else class="faint">—</span>
+              </td>
+
+              <td v-if="showListedShipping">
+                <select
+                  v-if="r.listing"
+                  class="ship-select"
+                  :value="r.listing.shipping_method_id ?? ''"
+                  @change="r.listing && setListingShipping(r.listing, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">未定</option>
+                  <option v-for="m in methods" :key="m.id" :value="m.id">
+                    {{ m.name }}　{{ yen(m.fee) }}
+                  </option>
+                </select>
               </td>
 
               <td v-if="showFeePack">
@@ -791,7 +858,7 @@ async function remove(sale: SaleProfit) {
                 </template>
               </td>
 
-              <td class="num">
+              <td class="num" :title="profitCellTitle(r)">
                 <Transition name="settle" mode="out-in">
                   <strong
                     v-if="r.kind === 'sale' && r.sale && r.sale.is_shipping_confirmed && (!r.sale.unmatched || r.sale.kind === 'personal')"
@@ -910,6 +977,11 @@ async function remove(sale: SaleProfit) {
   font-weight: 700;
 }
 
+.stage-hint {
+  margin: -6px 0 12px;
+  font-size: var(--fs-12);
+}
+
 .totals-bar {
   display: flex;
   align-items: baseline;
@@ -938,13 +1010,14 @@ async function remove(sale: SaleProfit) {
 .col-profit-narrow { width: 100px; } /* すべて段階（閲覧用。手数料・発送方法・梱包は列を出さない） */
 
 /* --- 出品中の列幅（旧 Listings.vue 相当。手数料・梱包が無い分、他の列を広めに） --- */
-.col-listed-date     { width: 140px; }
+.col-listed-date     { width: 124px; }
 .col-listed-thumb    { width: 56px; }
-.col-listed-price    { width: 96px; }
-.col-listed-status   { width: 120px; }
-.col-listed-reserved { width: 170px; }
-.col-listed-profit   { width: 130px; }
-.col-listed-actions  { width: 200px; }
+.col-listed-price    { width: 88px; }
+.col-listed-status   { width: 96px; }
+.col-listed-shipping { width: 150px; }
+.col-listed-reserved { width: 140px; }
+.col-listed-profit   { width: 96px; }
+.col-listed-actions  { width: 180px; }
 
 @media (max-width: 1099px) {
   .col-date            { width: 56px; }
@@ -957,6 +1030,7 @@ async function remove(sale: SaleProfit) {
   .col-profit-narrow   { width: 84px; }
   .col-listed-thumb    { width: 48px; }
   .col-listed-status   { width: 120px; }
+  .col-listed-shipping { width: 150px; }
   .col-listed-reserved { width: 140px; }
   .col-listed-profit   { width: 110px; }
   .col-listed-actions  { width: 184px; }

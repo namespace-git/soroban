@@ -237,6 +237,10 @@ export interface ScrapedListing {
   suspended: boolean
   /** 商品サムネイルのURL。取れなければ null */
   thumbUrl: string | null
+  /** 「17日前に更新」等の表示。出品日（listed_at）の推定に使う。取れなければ null */
+  updatedText: string | null
+  /** いいね数。取れなければ null */
+  likes: number | null
 }
 
 /**
@@ -247,6 +251,9 @@ export interface ScrapedListing {
  *   変わるため使っていない。商品リンク（`a[href*="/item/m"]`、data-testid="listed-item"）
  *   を起点にし、タイトルは `[data-testid="item-label"]`、価格は `[data-testid="price"]`
  *   の数字、サムネイルは `img[src]` から拾う。「公開停止中」の文字列があれば suspended。
+ *   更新日時は「n日前に更新」等のテキストをそのまま拾う（listed_at の推定は db.ts 側）。
+ *   いいね数はアイコン付きの3つの数字（コメント・閲覧・いいね）のうち、更新日時の直前に
+ *   並ぶ最後の数字（svg の直後）を使う。
  */
 export function parseListingsHtml(html: string): ScrapedListing[] {
   const listMatch = /<ul\b[^>]*data-testid="listed-item-list"[^>]*>([\s\S]*?)<\/ul>/.exec(html)
@@ -277,12 +284,24 @@ export function parseListingsHtml(html: string): ScrapedListing[] {
 
     const imgMatch = /<img\b[^>]*\bsrc="([^"]*)"/.exec(content)
 
+    const updatedMatch = /(\d+(?:日|時間|分)前に更新)/.exec(content)
+    const updatedText = updatedMatch ? updatedMatch[1] : null
+
+    // アイコン＋数字（コメント・閲覧・いいね）が並ぶ。クラス名はハッシュなので使わず、
+    // 「svg の直後の数字」を順に拾い、最後（更新日時の直前）をいいね数とする
+    const svgNumRe = /<svg\b[^>]*>\s*<\/svg>\s*<span\b[^>]*>(\d+)<\/span>/g
+    let likes: number | null = null
+    let sm: RegExpExecArray | null
+    while ((sm = svgNumRe.exec(content))) likes = parseInt(sm[1], 10)
+
     rows.push({
       mercariItemId: idMatch[0],
       title,
       price: parseInt(priceDigits, 10),
       suspended: /公開停止中/.test(content),
       thumbUrl: imgMatch ? imgMatch[1] : null,
+      updatedText,
+      likes,
     })
   }
   return rows
@@ -678,6 +697,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
           price: l.price,
           suspended: l.suspended,
           thumbUrl: l.thumbUrl,
+          updatedText: l.updatedText,
+          likes: l.likes,
         })))
         listingInserted = result.inserted
         listingUpdated = result.updated

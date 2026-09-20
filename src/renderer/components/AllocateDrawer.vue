@@ -2,7 +2,7 @@
 // 在庫の引き当て／紐付け。出品（mode='listing'）と販売（mode='sale'）の両方から使う。
 // チェックした瞬間に下端の原価合計・粗利プレビューが動く。確定は「引き当てる／紐付ける」ボタンで初めて起きる。
 import { ref, computed, watch, inject } from 'vue'
-import type { Listing, InventoryItem, ListingStatus, SaleProfit } from '../../shared/types'
+import type { Listing, InventoryItem, ListingStatus, SaleProfit, ShippingMethod } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import EmptyState from './EmptyState.vue'
@@ -26,6 +26,7 @@ const matchedItems = ref<MatchedRow[]>([])
 const picked = ref<Set<string>>(new Set())
 const search = ref('')
 const feeRateBp = ref(1000)
+const shippingMethods = ref<ShippingMethod[]>([])
 const loading = ref(false)
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
@@ -51,12 +52,14 @@ async function load() {
   if (props.mode === 'listing') {
     const l = props.listing
     if (!l) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
-    const [sugg, settings] = await Promise.all([
+    const [sugg, settings, methods] = await Promise.all([
       window.soroban.suggestForListing(l.mercari_item_id, 50),
       window.soroban.getSettings(),
+      window.soroban.listShippingMethods(),
     ])
     candidates.value = sugg
     feeRateBp.value = Number(settings.fee_rate_bp ?? 1000)
+    shippingMethods.value = methods
     matchedItems.value = l.items.map(it => ({ id: it.id, name: it.name, model_code: it.model_code, landed_cost: it.landed_cost }))
   } else {
     const s = props.sale
@@ -115,13 +118,22 @@ const confirmLabel = computed(() => {
   return movingCount.value > 0 ? `引き当てる（${movingCount.value}点を移す）` : '引き当てる'
 })
 
-const profitLabel = computed(() => (props.mode === 'listing' ? '見込み粗利（送料・梱包前）' : '粗利'))
+// 出品モード：発送方法が決まっていれば送料込みの見込み粗利（expected_profit と同じ規則）
+const listingShippingFee = computed(() => {
+  if (props.mode !== 'listing' || !props.listing?.shipping_method_id) return 0
+  return shippingMethods.value.find(m => m.id === props.listing?.shipping_method_id)?.fee ?? 0
+})
+
+const profitLabel = computed(() => {
+  if (props.mode !== 'listing') return '粗利'
+  return props.listing?.shipping_method_id ? '見込み粗利（送料込み・梱包前）' : '見込み粗利（送料・梱包前）'
+})
 
 const previewProfit = computed(() => {
   if (props.mode === 'listing') {
     if (!props.listing) return 0
     const fee = calcFee(props.listing.price, feeRateBp.value)
-    return props.listing.price - fee - totalCost.value
+    return props.listing.price - fee - listingShippingFee.value - totalCost.value
   }
   if (!props.sale) return 0
   return props.sale.price - props.sale.fee - props.sale.shipping_fee - props.sale.packaging_cost - totalCost.value
@@ -193,6 +205,7 @@ function placeholderChar(): string {
         />
         <span v-else class="thumb-placeholder">{{ placeholderChar() }}</span>
         <span class="faint">出品価格 {{ yen(listing.price) }}</span>
+        <span v-if="listing.shipping_method_name" class="faint">{{ listing.shipping_method_name }}</span>
         <StatusChip :tone="STATUS_TONE[listing.status]" :label="STATUS_LABEL[listing.status]" />
       </div>
       <span v-else-if="mode === 'sale'" class="faint">販売 {{ yen(price) }}</span>

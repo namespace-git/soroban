@@ -787,6 +787,11 @@ interface ListingRecord {
   status: ListingStatus
   first_seen_at: string
   last_seen_at: string
+  /** 出品日。「n日前に更新」からの推定なので first_seen_at より前になる */
+  listed_at: string
+  likes: number | null
+  /** 出品時に決めた発送方法。売れたとき販売に引き継ぐ */
+  shipping_method_id: string | null
   thumb_url: string | null
   model_codes: string[]
 }
@@ -802,8 +807,12 @@ function buildListing(rec: ListingRecord): Listing {
     .filter((i): i is InventoryItem => !!i)
   const reservedCost = items.reduce((s, it) => s + it.landed_cost, 0)
   const rateBp = Number(settings.fee_rate_bp)
+  const shippingMethod = rec.shipping_method_id
+    ? shippingMethods.find(m => m.id === rec.shipping_method_id) ?? null
+    : null
+  const shippingFee = shippingMethod?.fee ?? 0
   const expectedProfit = items.length
-    ? rec.price - calcFeeMock(rec.price, rateBp) - reservedCost
+    ? rec.price - calcFeeMock(rec.price, rateBp) - shippingFee - reservedCost
     : null
   return {
     mercari_item_id: rec.mercari_item_id,
@@ -812,6 +821,10 @@ function buildListing(rec: ListingRecord): Listing {
     status: rec.status,
     first_seen_at: rec.first_seen_at,
     last_seen_at: rec.last_seen_at,
+    listed_at: rec.listed_at,
+    likes: rec.likes,
+    shipping_method_id: rec.shipping_method_id,
+    shipping_method_name: shippingMethod?.name ?? null,
     thumb_url: rec.thumb_url,
     model_codes: rec.model_codes,
     items: items.map(i => ({ id: i.id, name: i.name, model_code: i.model_code, landed_cost: i.landed_cost })),
@@ -826,6 +839,8 @@ function addListing(opts: {
   status: ListingStatus
   daysAgoFirstSeen: number
   reserve: boolean
+  likes?: number | null
+  shippingMethodId?: string | null
 }): void {
   const v = variantOf(opts.model)
   const title = `【${opts.model}】${displayName(v)}`
@@ -841,6 +856,10 @@ function addListing(opts: {
     // 実データ（main）は last_seen_at を ISO で保存するため、モックも合わせる
     last_seen_at: (opts.status === 'active' || opts.status === 'suspended') && opts.daysAgoFirstSeen !== 3
       ? new Date().toISOString() : daysAgo(Math.max(0, opts.daysAgoFirstSeen - 1)).toISOString(),
+    // 「n日前に更新」からの推定：初めて見た日よりさらに数日前
+    listed_at: todayLocal(daysAgo(opts.daysAgoFirstSeen + 3)),
+    likes: opts.likes ?? null,
+    shipping_method_id: opts.shippingMethodId ?? null,
     thumb_url: null,
     model_codes: extractAllCodes(title),
   })
@@ -855,12 +874,12 @@ function addListing(opts: {
 
 /** 出品中6件（うち未引き当て3件）・公開停止中2件・売れた2件・取り下げ1件 */
 function buildInitialListings(): void {
-  addListing({ model: 'Z080-2', status: 'active', daysAgoFirstSeen: 10, reserve: true })
-  addListing({ model: 'Z012-1', status: 'active', daysAgoFirstSeen: 6, reserve: false })
-  addListing({ model: 'A035', status: 'active', daysAgoFirstSeen: 4, reserve: false })
-  addListing({ model: 'Z099-1', status: 'active', daysAgoFirstSeen: 8, reserve: true })
-  addListing({ model: 'Z045-2', status: 'active', daysAgoFirstSeen: 3, reserve: false })
-  addListing({ model: 'A012', status: 'active', daysAgoFirstSeen: 12, reserve: true })
+  addListing({ model: 'Z080-2', status: 'active', daysAgoFirstSeen: 10, reserve: true, likes: 5 })
+  addListing({ model: 'Z012-1', status: 'active', daysAgoFirstSeen: 6, reserve: false, likes: 1 })
+  addListing({ model: 'A035', status: 'active', daysAgoFirstSeen: 4, reserve: false, shippingMethodId: shippingMethods[0].id })
+  addListing({ model: 'Z099-1', status: 'active', daysAgoFirstSeen: 8, reserve: true, likes: 0 })
+  addListing({ model: 'Z045-2', status: 'active', daysAgoFirstSeen: 3, reserve: false, shippingMethodId: shippingMethods[2].id })
+  addListing({ model: 'A012', status: 'active', daysAgoFirstSeen: 12, reserve: true, likes: 3 })
   addListing({ model: 'Z056-1', status: 'suspended', daysAgoFirstSeen: 20, reserve: true })
   addListing({ model: 'Z056-2', status: 'suspended', daysAgoFirstSeen: 18, reserve: true })
   addListing({ model: 'Z001-4', status: 'sold', daysAgoFirstSeen: 25, reserve: true })
@@ -2049,6 +2068,30 @@ const api: SorobanApi = {
       const item = inventory.find(i => i.id === id)
       if (item) item.listing = null
     }
+    return wait(undefined)
+  },
+
+  async autoReserveListings(): Promise<number> {
+    let confirmed = 0
+    for (const rec of listingRecords) {
+      if (rec.status !== 'active' && rec.status !== 'suspended') continue
+      if ((listingItems.get(rec.mercari_item_id) ?? []).length > 0) continue
+      if (rec.model_codes.length !== 1) continue
+      const model = rec.model_codes[0]
+      if (!model.includes('-')) continue // 枝番ありのものだけ（M-09 と同じ規則）
+      const item = takeOldestByModel(model)
+      if (!item) continue
+      listingItems.set(rec.mercari_item_id, [item.id])
+      item.listing = { mercari_item_id: rec.mercari_item_id, price: rec.price, status: rec.status }
+      confirmed++
+    }
+    return wait(confirmed)
+  },
+
+  async setListingShipping(mercariItemId: string, shippingMethodId: string | null) {
+    const rec = listingRecords.find(r => r.mercari_item_id === mercariItemId)
+    if (!rec) throw new Error('出品が見つかりません')
+    rec.shipping_method_id = shippingMethodId
     return wait(undefined)
   },
 

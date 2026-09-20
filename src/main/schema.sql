@@ -283,6 +283,12 @@ CREATE TABLE IF NOT EXISTS listing (
                   CHECK (status IN ('active','suspended','sold','ended')),
   first_seen_at   TEXT NOT NULL,             -- 初めて一覧で見た日 YYYY-MM-DD（出品日の近似）
   last_seen_at    TEXT NOT NULL,
+  -- 出品日（推定）。出品中タブの「n日前に更新」から today − n日で見積もる。
+  -- 更新で巻き戻るので、以後の取り込みでは「より古い方」にだけ更新する（db.ts の upsertListings）
+  listed_at       TEXT NOT NULL,
+  likes           INTEGER,                   -- いいね数。取れなければ NULL
+  -- 出品時に決めた発送方法（設定の発送方法）。売れたとき販売へ引き継ぐ（db.ts の takeOverListing）
+  shipping_method_id TEXT REFERENCES shipping_method(id) ON DELETE SET NULL,
   thumb_file      TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))

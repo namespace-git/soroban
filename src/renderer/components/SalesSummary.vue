@@ -182,11 +182,12 @@ const gridLines = computed(() => domainMin.value < 0
       <div class="stat-card cream">
         <span class="stat-card-label">出品中</span>
         <span class="stat-card-value">{{ listings.length }}<span class="unit">件</span></span>
-        <span class="stat-card-sub">見込み粗利の合計（送料前） {{ yen(listingProfitSum) }}</span>
+        <span class="stat-card-sub">見込み粗利の合計 {{ yen(listingProfitSum) }}</span>
+        <span class="stat-card-sub">送料は決めた分だけ引いています</span>
       </div>
 
       <div class="stat-card cream">
-        <span class="stat-card-label">未処理</span>
+        <span class="stat-card-label">売れた・要入力</span>
         <span class="stat-card-value">{{ pending.length }}<span class="unit">件</span></span>
         <span class="stat-card-sub">
           送料未入力 {{ pendingShippingCount }}・未紐付け {{ pendingUnmatchedCount }}

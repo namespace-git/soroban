@@ -306,18 +306,25 @@ describe('collector（electronに依存しない部分）', () => {
       expect(r.suspended).toBe(false)
       expect(r.thumbUrl).toBe('https://static.mercdn.net/thumb/item/jpeg/m47972655197_1.jpg?1789810502')
       expect(r.title).toContain('メロイアのんびりシリーズ')
+      // 更新日時（5時間前）といいね数（アイコン付き3数字のうち最後＝35）
+      expect(r.updatedText).toBe('5時間前に更新')
+      expect(r.likes).toBe(35)
     })
 
     it('m33032758836：公開停止中', () => {
       const r = rows.find(r => r.mercariItemId === 'm33032758836')!
       expect(r.suspended).toBe(true)
       expect(r.price).toBe(13500)
+      expect(r.updatedText).toBe('7時間前に更新')
+      expect(r.likes).toBe(29)
     })
 
-    it('メロジョイ以外の出品も同じ形式で拾う', () => {
+    it('メロジョイ以外の出品も同じ形式で拾う（m92531073051：17日前に更新・いいね47）', () => {
       const r = rows.find(r => r.mercariItemId === 'm92531073051')!
       expect(r.suspended).toBe(true)
       expect(r.title).toContain('Melty Slime')
+      expect(r.updatedText).toBe('17日前に更新')
+      expect(r.likes).toBe(47)
     })
 
     it('総件数（22件）を抜く', () => {

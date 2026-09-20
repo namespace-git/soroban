@@ -61,6 +61,8 @@ const api: SorobanApi = {
   unreserveInventory: invoke('unreserveInventory'),
   suggestForListing: invoke('suggestForListing'),
   endListing: invoke('endListing'),
+  autoReserveListings: invoke('autoReserveListings'),
+  setListingShipping: invoke('setListingShipping'),
 
   searchAll: invoke('searchAll'),
 

@@ -144,6 +144,9 @@ function registerIpc(): void {
   handle('unreserveInventory', (mercariItemId, id) => db.unreserveInventory(mercariItemId, id))
   handle('suggestForListing', (mercariItemId, limit) => db.suggestForListing(mercariItemId, limit))
   handle('endListing', (mercariItemId) => db.endListing(mercariItemId))
+  handle('autoReserveListings', () => db.autoReserveListings())
+  handle('setListingShipping', (mercariItemId, shippingMethodId) =>
+    db.setListingShipping(mercariItemId, shippingMethodId))
 
   handle('searchAll', (query, limit) => db.searchAll(query, limit))
 

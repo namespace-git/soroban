@@ -1077,7 +1077,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('12')
+      expect(db.getSettings().schema_version).toBe('13')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1198,7 +1198,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('12')
+      expect(db.getSettings().schema_version).toBe('13')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1560,6 +1560,58 @@ describe('db（:memory:）', () => {
       expect(updated.last_seen_at).toContain('Z')
     })
 
+    it('upsertListings：updatedTextからlisted_atを推定する。更新の巻き戻り（新しい候補）は無視し、より古い候補にだけ更新する。likesは毎回上書き', () => {
+      const daysAgo = (n: number) => {
+        const d = new Date()
+        d.setDate(d.getDate() - n)
+        return todayLocal(d)
+      }
+
+      // 「5時間前」は0日扱い→ first_seen_atと同じ今日
+      db.upsertListings([
+        {
+          mercariItemId: 'LDate', title: '出品日推定', price: 1000, suspended: false, thumbUrl: null,
+          updatedText: '5時間前に更新', likes: 10,
+        },
+      ])
+      let l = db.listListings().find(x => x.mercari_item_id === 'LDate')!
+      expect(l.listed_at).toBe(todayLocal())
+      expect(l.likes).toBe(10)
+
+      // より古い候補（17日前）が来たら listed_at を巻き戻す
+      db.upsertListings([
+        {
+          mercariItemId: 'LDate', title: '出品日推定', price: 1000, suspended: false, thumbUrl: null,
+          updatedText: '17日前に更新', likes: 12,
+        },
+      ])
+      l = db.listListings().find(x => x.mercari_item_id === 'LDate')!
+      expect(l.listed_at).toBe(daysAgo(17))
+      expect(l.likes).toBe(12)
+
+      // 逆に新しい候補（1日前）が来ても、より古い方（17日前）のまま。likesは常に上書き
+      db.upsertListings([
+        {
+          mercariItemId: 'LDate', title: '出品日推定', price: 1000, suspended: false, thumbUrl: null,
+          updatedText: '1日前に更新', likes: 15,
+        },
+      ])
+      l = db.listListings().find(x => x.mercari_item_id === 'LDate')!
+      expect(l.listed_at).toBe(daysAgo(17))
+      expect(l.likes).toBe(15)
+
+      // updatedTextが取れなければ、挿入時は first_seen_at（今日）になる
+      db.upsertListings([
+        {
+          mercariItemId: 'LNoDate', title: '出品日不明', price: 1000, suspended: false, thumbUrl: null,
+          updatedText: null, likes: null,
+        },
+      ])
+      const noDate = db.listListings().find(x => x.mercari_item_id === 'LNoDate')!
+      expect(noDate.listed_at).toBe(todayLocal())
+      expect(noDate.likes).toBeNull()
+    })
+
     it('reserveInventory：他の出品への引き当ては外れてこちらへ移る。売却済み在庫の引き当ては拒否する', () => {
       db.createPurchase({
         shop_account_id: shopId,
@@ -1689,6 +1741,57 @@ describe('db（:memory:）', () => {
       expect(after.expected_profit).toBe(3000 - 300 - 1000)
 
       expect(db.listListings({ onlyUnallocated: true }).some(l => l.mercari_item_id === 'LP')).toBe(false)
+    })
+
+    it('setListingShipping：expected_profitに送料が反映され、売れたとき販売へ引き継がれる（実額があればactualを優先）', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [
+          { name: '発送方法引き継ぎ対象', unit_price: 1000, quantity: 1 },
+          { name: '発送方法引き継ぎ対象2', unit_price: 1000, quantity: 1 },
+        ],
+      })
+      const [item1, item2] = db.listInventory('in_stock')
+      const method = db.listShippingMethods()[0]
+
+      db.upsertListings([
+        { mercariItemId: 'mShip1', title: '発送方法引き継ぎ対象', price: 3000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'mShip2', title: '発送方法引き継ぎ対象2', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('mShip1', [item1.id])
+      db.reserveInventory('mShip2', [item2.id])
+      db.setListingShipping('mShip1', method.id)
+      db.setListingShipping('mShip2', method.id)
+
+      // 出品一覧の見込み粗利にも発送方法の送料が反映される
+      const listing1 = db.listListings().find(l => l.mercari_item_id === 'mShip1')!
+      expect(listing1.shipping_method_id).toBe(method.id)
+      expect(listing1.shipping_method_name).toBe(method.name)
+      expect(listing1.expected_profit).toBe(3000 - 300 - 1000 - method.fee)
+
+      // mShip1：実額なしで取り込まれる → 発送方法（送料・確認済み）を引き継ぐ
+      db.insertCollected([
+        { mercariItemId: 'mShip1', title: '発送方法引き継ぎ対象', price: 3000, soldAt: '2026-01-10' },
+      ])
+      const sale1 = db.listSales().find(s => s.mercari_item_id === 'mShip1')!
+      expect(sale1.shipping_method_id).toBe(method.id)
+      expect(sale1.shipping_fee).toBe(method.fee)
+      expect(sale1.is_shipping_confirmed).toBe(1)
+      expect(sale1.shipping_source).toBe('manual')
+
+      // mShip2：実額（着払いで送料0）付きで取り込まれる → actual優先、発送方法は引き継がない
+      db.insertCollected([
+        {
+          mercariItemId: 'mShip2', title: '発送方法引き継ぎ対象2', price: 3000, soldAt: '2026-01-10',
+          shippingFee: 0,
+        },
+      ])
+      const sale2 = db.listSales().find(s => s.mercari_item_id === 'mShip2')!
+      expect(sale2.shipping_source).toBe('actual')
+      expect(sale2.shipping_fee).toBe(0)
+      expect(sale2.shipping_method_id).toBeNull()
     })
 
     it('insertCollected：出品への引き当てをそのまま販売に引き継ぐ（link_source=listing、出品はsoldに）', () => {
@@ -2213,6 +2316,66 @@ describe('db（:memory:）', () => {
 
       const saleBranch2 = db.createSale({ title: '【A035-1】メロージョイ ミニランド', sold_at: '2026-01-10', price: 2000 })
       expect(db.listSales().find(s => s.id === saleBranch2)!.unmatched).toBe(0)
+    })
+  })
+
+  describe('autoReserveListings：出品への型番の完全一致・先入先出の自動引き当て', () => {
+    it('枝番あり（Z078-2）の出品2件が在庫3点のうち古い順の2点に引き当たる。枝番なし（A035）は引き当たらない。既に引き当て済みは触らない', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'いちごスフレ【Z078-2】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-02', shipping_fee: 0,
+        lines: [{ name: 'いちごスフレ【Z078-2】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-03', shipping_fee: 0,
+        lines: [{ name: 'いちごスフレ【Z078-2】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'メロージョイ ミニランド【A035】', unit_price: 1200, quantity: 1 }],
+      })
+
+      const z078items = db.listInventory('in_stock')
+        .filter(i => i.model_code === 'Z078-2')
+        .sort((a, b) => a.acquired_at.localeCompare(b.acquired_at))
+      expect(z078items).toHaveLength(3)
+      const [oldest, middle, newest] = z078items
+
+      // 3点目（最新）は先に別の出品へ引き当て済みにしておく（自動引き当てが横取りしないことの確認）
+      db.upsertListings([
+        { mercariItemId: 'LAuto0', title: '既存引き当て済み', price: 2000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LAuto0', [newest.id])
+
+      db.upsertListings([
+        { mercariItemId: 'LAuto1', title: 'いちごスフレ【Z078-2】', price: 3000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'LAuto2', title: 'いちごスフレ【Z078-2】', price: 3200, suspended: false, thumbUrl: null },
+        {
+          mercariItemId: 'LAutoA035', title: 'メロージョイ ミニランド【A035】', price: 1500,
+          suspended: false, thumbUrl: null,
+        },
+      ])
+
+      const count = db.autoReserveListings()
+      expect(count).toBe(2) // A035（枝番なし）は対象外
+
+      const l1 = db.listListings().find(l => l.mercari_item_id === 'LAuto1')!
+      const l2 = db.listListings().find(l => l.mercari_item_id === 'LAuto2')!
+      expect(l1.items.map(i => i.id)).toEqual([oldest.id])
+      expect(l2.items.map(i => i.id)).toEqual([middle.id])
+
+      // 枝番なし（A035）は候補にならない
+      expect(db.listListings().find(l => l.mercari_item_id === 'LAutoA035')!.items).toEqual([])
+
+      // 既に引き当て済みのものは触らない
+      expect(db.listListings().find(l => l.mercari_item_id === 'LAuto0')!.items.map(i => i.id))
+        .toEqual([newest.id])
+
+      // 対象が無くなったので再実行しても0
+      expect(db.autoReserveListings()).toBe(0)
     })
   })
 

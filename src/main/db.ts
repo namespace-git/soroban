@@ -606,6 +606,21 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 13) {
+    // 出品日（推定）・いいね数・出品時に決めた発送方法
+    addColumnIfMissing('listing', 'listed_at', `TEXT NOT NULL DEFAULT ''`)
+    // 既存行は first_seen_at で埋める（新規行は upsertListings が候補日を入れる）
+    db.exec(`UPDATE listing SET listed_at = first_seen_at WHERE listed_at = ''`)
+    addColumnIfMissing('listing', 'likes', 'INTEGER')
+    addColumnIfMissing('listing', 'shipping_method_id',
+      'TEXT REFERENCES shipping_method(id) ON DELETE SET NULL')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '13')
+         ON CONFLICT(key) DO UPDATE SET value = '13'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -1590,11 +1605,33 @@ export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
 // ============================================================
 
 /**
+ * 出品中タブの「n日前に更新」（時間・分は0日扱い）から経過日数を取り出す。読めなければ null。
+ */
+export function parseElapsedDays(updatedText: string | null | undefined): number | null {
+  if (!updatedText) return null
+  const m = /(\d+)\s*(日|時間|分)前/.exec(updatedText)
+  if (!m) return null
+  return m[2] === '日' ? parseInt(m[1], 10) : 0
+}
+
+/** base（YYYY-MM-DD）から days 日前の日付を、ローカル時刻で YYYY-MM-DD にして返す */
+function subtractDaysLocal(base: string, days: number): string {
+  const [y, m, d] = base.split('-').map(Number)
+  const dt = new Date(y, m - 1, d)
+  dt.setDate(dt.getDate() - days)
+  return todayLocal(dt)
+}
+
+/**
  * 出品中タブの一覧を取り込む。新規は first_seen_at を今日にする。
  * 既存は title/price/status/last_seen_at を更新するが、sold/ended になったものは
  * 一覧に出ていても active/suspended へ戻さない（1ページしか読まないため、
  * 一覧から消えたことと「取り下げた」を区別できない＝ CLAUDE.md のCodexレビュー指摘）。
  * 一覧に無い listing は何もしない。
+ *
+ * listed_at（出品日の推定）：updatedText から経過日数 n を出し、候補 = today − n日。
+ * 新規は候補（取れなければ today）。既存は候補と現在値の min（＝より古い方）に更新する
+ * （一覧の「更新順」表示の揺れで出品日が新しく巻き戻るのを防ぐ）。likes は毎回上書きする。
  */
 export function upsertListings(
   rows: Array<{
@@ -1603,6 +1640,10 @@ export function upsertListings(
     price: number
     suspended: boolean
     thumbUrl: string | null
+    /** 出品中タブの「n日前に更新」等。取れなければ null */
+    updatedText?: string | null
+    /** いいね数。取れなければ null */
+    likes?: number | null
   }>,
 ): { inserted: number; updated: number } {
   const today = todayLocal()
@@ -1610,14 +1651,14 @@ export function upsertListings(
   // SQLite の datetime('now')（'YYYY-MM-DD HH:MM:SS'）ではなく JS の ISO 文字列で保存する
   // （Codexレビュー指摘：形式が違うと文字列比較が常に不一致になる）
   const now = new Date().toISOString()
-  const getExisting = db.prepare('SELECT status FROM listing WHERE mercari_item_id = ?')
+  const getExisting = db.prepare('SELECT status, listed_at FROM listing WHERE mercari_item_id = ?')
   const insertStmt = db.prepare(`
-    INSERT INTO listing (mercari_item_id, title, price, status, first_seen_at, last_seen_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO listing (mercari_item_id, title, price, status, first_seen_at, last_seen_at, listed_at, likes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `)
   const updateStmt = db.prepare(`
     UPDATE listing SET title = ?, price = ?, status = ?, last_seen_at = ?,
-           updated_at = datetime('now')
+           listed_at = ?, likes = ?, updated_at = datetime('now')
      WHERE mercari_item_id = ?
   `)
 
@@ -1626,12 +1667,20 @@ export function upsertListings(
   const tx = db.transaction(() => {
     for (const r of rows) {
       const status: ListingStatus = r.suspended ? 'suspended' : 'active'
-      const existing = getExisting.get(r.mercariItemId) as { status: ListingStatus } | undefined
+      const days = parseElapsedDays(r.updatedText ?? null)
+      const candidate = days !== null ? subtractDaysLocal(today, days) : null
+      const likes = r.likes ?? null
+
+      const existing = getExisting.get(r.mercariItemId) as
+        | { status: ListingStatus; listed_at: string } | undefined
       if (!existing) {
-        insertStmt.run(r.mercariItemId, r.title, r.price, status, today, now)
+        insertStmt.run(r.mercariItemId, r.title, r.price, status, today, now, candidate ?? today, likes)
         inserted++
       } else if (existing.status === 'active' || existing.status === 'suspended') {
-        updateStmt.run(r.title, r.price, status, now, r.mercariItemId)
+        const listedAt = candidate !== null && candidate < existing.listed_at
+          ? candidate
+          : existing.listed_at
+        updateStmt.run(r.title, r.price, status, now, listedAt, likes, r.mercariItemId)
         updated++
       }
       // sold / ended は一覧に出ていても戻さない
@@ -1648,6 +1697,9 @@ type ListingRow = {
   status: ListingStatus
   first_seen_at: string
   last_seen_at: string
+  listed_at: string
+  likes: number | null
+  shipping_method_id: string | null
   thumb_file: string | null
 }
 
@@ -1662,8 +1714,22 @@ function hydrateListing(r: ListingRow, rateBp: number): Listing {
   >
 
   const reserved_cost = items.reduce((s, i) => s + i.landed_cost, 0)
-  // 送料は未定なので引かない。手数料は設定の率で見込む
-  const expected_profit = items.length === 0 ? null : r.price - calcFee(r.price, rateBp) - reserved_cost
+
+  let shippingMethodName: string | null = null
+  let shippingFee = 0
+  if (r.shipping_method_id) {
+    const method = db.prepare('SELECT name, fee FROM shipping_method WHERE id = ?')
+      .get(r.shipping_method_id) as { name: string; fee: number } | undefined
+    if (method) {
+      shippingMethodName = method.name
+      shippingFee = method.fee
+    }
+  }
+
+  // 手数料は設定の率。発送方法が決まっていればその送料も引く（梱包は引かない）
+  const expected_profit = items.length === 0
+    ? null
+    : r.price - calcFee(r.price, rateBp) - reserved_cost - shippingFee
 
   return {
     mercari_item_id: r.mercari_item_id,
@@ -1672,6 +1738,10 @@ function hydrateListing(r: ListingRow, rateBp: number): Listing {
     status: r.status,
     first_seen_at: r.first_seen_at,
     last_seen_at: r.last_seen_at,
+    listed_at: r.listed_at,
+    likes: r.likes,
+    shipping_method_id: r.shipping_method_id,
+    shipping_method_name: shippingMethodName,
     thumb_url: toThumbUrl(r.thumb_file),
     model_codes: extractCodes(r.title),
     items,
@@ -1694,6 +1764,13 @@ export function listListings(
   const listings = rows.map(r => hydrateListing(r, rateBp))
 
   return filter?.onlyUnallocated ? listings.filter(l => l.items.length === 0) : listings
+}
+
+/** 出品時に発送方法を決めておく（null で外す）。売れたとき takeOverListing が販売へ引き継ぐ */
+export function setListingShipping(mercariItemId: string, shippingMethodId: string | null): void {
+  db.prepare(
+    `UPDATE listing SET shipping_method_id = ?, updated_at = datetime('now') WHERE mercari_item_id = ?`,
+  ).run(shippingMethodId, mercariItemId)
 }
 
 /**
@@ -1782,19 +1859,64 @@ export function endListing(mercariItemId: string): void {
 }
 
 /**
+ * 未引き当ての出品（active／suspended）に、型番の枝番まで完全一致する未販売・未引き当ての
+ * 在庫を先入先出で1点ずつ引き当てる（販売の autoLinkSale/autoLinkPending と同じ規則。
+ * 型番が1つで枝番ありのものだけ。候補が複数出品にまたがらないよう1件ずつ確定していく）。
+ * 引き当てた出品の数を返す。reserveInventory で引き当てるので、1クリック（unreserveInventory）
+ * で解除できる。
+ */
+export function autoReserveListings(): number {
+  const pending = db.prepare(`
+    SELECT mercari_item_id, title FROM listing l
+     WHERE l.status IN ('active','suspended')
+       AND NOT EXISTS (SELECT 1 FROM listing_line WHERE listing_id = l.mercari_item_id)
+  `).all() as Array<{ mercari_item_id: string; title: string }>
+
+  let count = 0
+  for (const p of pending) {
+    const codes = extractCodes(p.title)
+    if (codes.length !== 1 || !hasBranchCode(codes[0])) continue
+
+    // 他の active/suspended な出品に引き当て済みの在庫は候補から外す（人の意思を横取りしない）
+    const item = db.prepare(`
+      SELECT id FROM inventory_item i
+       WHERE i.model_code = ? AND i.status = 'in_stock'
+         AND NOT EXISTS (
+           SELECT 1 FROM listing_line ll
+           JOIN listing l ON l.mercari_item_id = ll.listing_id
+           WHERE ll.inventory_item_id = i.id AND l.status IN ('active','suspended')
+         )
+       ORDER BY i.acquired_at ASC, i.created_at ASC
+       LIMIT 1
+    `).get(codes[0]) as { id: string } | undefined
+    if (!item) continue
+
+    reserveInventory(p.mercari_item_id, [item.id])
+    count++
+  }
+  return count
+}
+
+/**
  * 新しく取り込んだ販売の mercari_item_id と同じ出品があれば、その出品を sold にする
  * （引き当ての有無に関わらず。売れた以上、出品タブに active のまま残さない）。
  * 引き当て（listing_line）があれば、それをそのまま sale_line（link_source='listing'）へ移す
  * （人の決定をそのまま引き継ぐ。型番一致より優先）。
+ * 出品時に発送方法を決めていれば、販売の shipping_method_id・shipping_fee・
+ * is_shipping_confirmed・shipping_source（'manual'）へ引き継ぐ。ただし販売側に既に実額
+ * （shipping_source='actual'）があればそちらを優先し、触らない。引き当てが0件でも
+ * 発送方法だけは引き継ぐ。
  * 出品が無ければ何もせず false。引き当てが無かった（sale_line へ引き継げなかった）ときも
  * false を返す（呼び出し側が型番FIFOにフォールバック。出品を sold にする処理自体はここで完了済み）。
  */
 function takeOverListing(saleId: string, mercariItemId: string | null): boolean {
   if (!mercariItemId) return false
 
-  const listing = db.prepare(
-    `SELECT mercari_item_id FROM listing WHERE mercari_item_id = ? AND status IN ('active','suspended')`,
-  ).get(mercariItemId) as { mercari_item_id: string } | undefined
+  const listing = db.prepare(`
+    SELECT mercari_item_id, shipping_method_id
+      FROM listing WHERE mercari_item_id = ? AND status IN ('active','suspended')
+  `).get(mercariItemId) as
+    | { mercari_item_id: string; shipping_method_id: string | null } | undefined
   if (!listing) return false
 
   const lines = db.prepare('SELECT inventory_item_id FROM listing_line WHERE listing_id = ?')
@@ -1811,6 +1933,24 @@ function takeOverListing(saleId: string, mercariItemId: string | null): boolean 
     db.prepare(
       `UPDATE listing SET status = 'sold', updated_at = datetime('now') WHERE mercari_item_id = ?`,
     ).run(mercariItemId)
+
+    if (listing.shipping_method_id) {
+      const sale = db.prepare('SELECT shipping_source FROM sale WHERE id = ?')
+        .get(saleId) as { shipping_source: string | null } | undefined
+      // 既に実額（actual）があればそちらを優先し、触らない
+      if (sale && sale.shipping_source !== 'actual') {
+        const method = db.prepare('SELECT fee FROM shipping_method WHERE id = ?')
+          .get(listing.shipping_method_id) as { fee: number } | undefined
+        if (method) {
+          db.prepare(`
+            UPDATE sale
+               SET shipping_method_id = ?, shipping_fee = ?,
+                   is_shipping_confirmed = 1, shipping_source = 'manual'
+             WHERE id = ?
+          `).run(listing.shipping_method_id, method.fee, saleId)
+        }
+      }
+    }
   })
   tx()
 
@@ -2365,22 +2505,22 @@ export function getItemTimeline(inventoryItemId: string): ItemTimeline | null {
 
   // 出品への引き当て（未販売ならitem.listingから）／売れたあとも、その紐付けが
   // link_source='listing'（出品からの引き継ぎ）なら「出品」イベントを足す
-  let listingInfo: { price: number; first_seen_at: string } | null = null
+  let listingInfo: { price: number; listed_at: string } | null = null
   if (item.listing) {
-    listingInfo = db.prepare('SELECT price, first_seen_at FROM listing WHERE mercari_item_id = ?')
-      .get(item.listing.mercari_item_id) as { price: number; first_seen_at: string } | undefined ?? null
+    listingInfo = db.prepare('SELECT price, listed_at FROM listing WHERE mercari_item_id = ?')
+      .get(item.listing.mercari_item_id) as { price: number; listed_at: string } | undefined ?? null
   } else if (sale) {
     const saleLine = db.prepare(
       'SELECT link_source FROM sale_line WHERE inventory_item_id = ? AND sale_id = ?',
     ).get(inventoryItemId, sale.id) as { link_source: LinkSource } | undefined
     if (saleLine?.link_source === 'listing' && sale.mercari_item_id) {
-      listingInfo = db.prepare('SELECT price, first_seen_at FROM listing WHERE mercari_item_id = ?')
-        .get(sale.mercari_item_id) as { price: number; first_seen_at: string } | undefined ?? null
+      listingInfo = db.prepare('SELECT price, listed_at FROM listing WHERE mercari_item_id = ?')
+        .get(sale.mercari_item_id) as { price: number; listed_at: string } | undefined ?? null
     }
   }
   if (listingInfo) {
     events.push({
-      date: listingInfo.first_seen_at,
+      date: listingInfo.listed_at,
       kind: 'listed',
       title: 'メルカリに出品',
       detail: yenText(listingInfo.price),

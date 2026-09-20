@@ -315,15 +315,32 @@ export interface Listing {
   title: string
   price: number
   status: ListingStatus
-  /** 初めて一覧で見た日（＝出品日の近似）／最後に見た日時 */
+  /** 初めて一覧で見た日／最後に見た日時（ISO） */
   first_seen_at: string
   last_seen_at: string
+  /**
+   * 出品日（YYYY-MM-DD）。出品中タブの「n日前に更新」から推定（初回取り込み時の日付 − n 日）。
+   * 更新で巻き戻るので、以後の取り込みでは**より古い日付にだけ**更新する。取れなければ first_seen_at
+   */
+  listed_at: string
+  /** いいね数。取れなければ null */
+  likes: number | null
+  /**
+   * 出品時に決めた発送方法（設定の発送方法）。売れたとき販売に引き継ぐ
+   * （shipping_method_id・送料・is_shipping_confirmed=1・shipping_source='manual'）。
+   * 取引画面から実額が取れたらそちらが優先（actual）
+   */
+  shipping_method_id: string | null
+  shipping_method_name: string | null
   thumb_url: string | null
   /** タイトルから抜いた型番（枝番まで）。無ければ空 */
   model_codes: string[]
   /** 引き当てた在庫 */
   items: Array<{ id: string; name: string; model_code: string | null; landed_cost: number }>
-  /** 引き当てた在庫の原価合計と、出品価格から見た見込み粗利（手数料は設定の率、送料は未定なので引かない） */
+  /**
+   * 引き当てた在庫の原価合計と、出品価格から見た見込み粗利
+   * （手数料は設定の率。発送方法が決まっていればその送料も引く。梱包は引かない）
+   */
   reserved_cost: number
   expected_profit: number | null
 }
@@ -631,6 +648,14 @@ export interface SorobanApi {
   suggestForListing(mercariItemId: string, limit?: number): Promise<InventoryItem[]>
   /** 人が「取り下げた」と記録する。引き当ては外れ、在庫は未出品に戻る */
   endListing(mercariItemId: string): Promise<void>
+  /**
+   * 未引き当ての出品（active／suspended）に、型番の枝番まで完全一致する未販売・未引き当ての在庫を
+   * 先入先出で 1 点ずつ引き当てる（販売の autoLinkPending と同じ規則。型番が 1 つで枝番ありのものだけ）。
+   * 引き当てた出品の数を返す。1 クリックで解除できること
+   */
+  autoReserveListings(): Promise<number>
+  /** 出品時に発送方法を決めておく（null で外す） */
+  setListingShipping(mercariItemId: string, shippingMethodId: string | null): Promise<void>
 
   // 横断検索（「あの商品どうなった？」を 1 か所で。全期間・全状態が対象）
   /** 空白区切り AND、NFKC 正規化。種類ごとに新しい順、合計 limit 件（既定 60） */
