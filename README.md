@@ -219,6 +219,7 @@ macOS の `.icns` と Windows の `.ico` は electron-builder が `build/icon.pn
 | 取り込みが 0 件のまま／「構造が変わった可能性」 | メルカリの画面構造が変わった。`src/main/collector.ts` のパーサを実 DOM で直す（`src/main/__tests__/fixtures/` に HTML の見本） |
 | 利益が合わない | 仕入の送料按分（仕入タブの総原価）→ まとめ売りの紐付け漏れ → 発送方法の送料マスタ → 私物と転売の混在、の順に確認 |
 | macOS で「壊れているため開けません」 | 上の `xattr` を実行 |
+| macOS で起動した瞬間に落ちる（ターミナルから起動すると `trace trap` だけ出る） | 署名が全く無いアプリは Apple Silicon で起動できない。v0.1.7 以降はビルド時に ad-hoc 署名を入れている。古い版は `codesign --force --deep --sign - /Applications/そろばん.app` で応急処置できる |
 | Windows で `dist:win` が `Cannot create symbolic link`（winCodeSign）で止まる | exe にアイコンを埋め込む工程でシンボリックリンクを作る。**設定 → 開発者向け → 開発者モード** をオンにするか、管理者のターミナルで実行する |
 | `better-sqlite3` の NODE_MODULE_VERSION エラー | `pnpm electron-builder install-app-deps`。テストは必ず `pnpm test` 経由 |
 
