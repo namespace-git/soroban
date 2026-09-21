@@ -62,6 +62,7 @@ const api: SorobanApi = {
   setGeminiApiKey: invoke('setGeminiApiKey'),
   setAiModel: invoke('setAiModel'),
   testGemini: invoke('testGemini'),
+  listGeminiModels: invoke('listGeminiModels'),
   getMonthDetail: invoke('getMonthDetail'),
   setMonthAllocMethod: invoke('setMonthAllocMethod'),
   closeMonth: invoke('closeMonth'),

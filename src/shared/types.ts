@@ -639,7 +639,7 @@ export interface ReceiptDraft {
 export interface AiStatus {
   /** API キーが保存されていれば true */
   configured: boolean
-  /** 使うモデル（設定 ai_model。既定 gemini-2.5-pro） */
+  /** 使うモデル（設定 ai_model。既定 gemini-flash-latest。キーによって使えるモデルが違うので listGeminiModels で選ぶ） */
   model: string
   /** OS の安全な保存（safeStorage）が使えるか。false なら保存を断る */
   safe_storage: boolean
@@ -1050,6 +1050,8 @@ export interface SorobanApi {
   setAiModel(model: string): Promise<void>
   /** 保存したキーで 1 回だけ小さな要求を送って疎通を確かめる */
   testGemini(): Promise<{ ok: boolean; message: string }>
+  /** このキーで使えるモデルの一覧（generateContent 対応のもの。表示名と説明付き）。キー未設定なら Error */
+  listGeminiModels(): Promise<Array<{ name: string; display_name: string; description: string }>>
 
   /** 月次の明細。tagId で絞った合計も同時に返す */
   getMonthDetail(month: string, opts?: { tagId?: string | null }): Promise<MonthDetail>

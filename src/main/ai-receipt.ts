@@ -14,7 +14,7 @@ import type { AiStatus, ExpenseCategory, ReceiptBox, ReceiptDraft } from '../sha
 // メルカリへの書き込み・認証情報の保存はしない方針は変えない）。
 // ============================================================
 
-const DEFAULT_MODEL = 'gemini-2.5-pro'
+const DEFAULT_MODEL = 'gemini-flash-latest'
 const SETTING_KEY_ENC = 'gemini_api_key_enc'
 const SETTING_MODEL = 'ai_model'
 const TIMEOUT_MS = 60_000
@@ -181,7 +181,7 @@ export function setGeminiApiKey(apiKey: string | null): void {
   db.setSetting(SETTING_KEY_ENC, encrypted.toString('base64'))
 }
 
-/** モデル名を保存する。空文字なら既定（gemini-2.5-pro）に戻す */
+/** モデル名を保存する。空文字なら既定（gemini-flash-latest）に戻す */
 export function setAiModel(model: string): void {
   db.setSetting(SETTING_MODEL, model || DEFAULT_MODEL)
 }
@@ -221,19 +221,81 @@ async function callGemini(model: string, apiKey: string, body: unknown): Promise
   }
 }
 
+/** 並び順の優先度：-latest を先頭、次に2.5系、それ以外は名前順（同順位内は呼び出し側で名前順にする） */
+function modelRank(name: string): number {
+  if (name.endsWith('-latest')) return 0
+  if (name.includes('2.5')) return 1
+  return 2
+}
+
+/**
+ * 保存したキーで使える Gemini モデルの一覧を取る（generateContent 対応の
+ * gemini 系のみ）。キー未設定なら requireApiKey が例外を投げる
+ */
+export async function listGeminiModels(): Promise<Array<{ name: string; display_name: string; description: string }>> {
+  const apiKey = requireApiKey()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  let json: unknown
+  try {
+    const res = await fetch(`${API_BASE}?pageSize=100`, {
+      method: 'GET',
+      headers: { 'x-goog-api-key': apiKey },
+      signal: controller.signal,
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new GeminiHttpError(res.status, text || `HTTP ${res.status}`)
+    }
+    json = await res.json()
+  } catch (e) {
+    logAiError('Gemini のモデル一覧の取得に失敗しました', e)
+    throw new Error(toAiErrorMessage(e, getModel()))
+  } finally {
+    clearTimeout(timer)
+  }
+
+  const models: any[] = Array.isArray((json as any)?.models) ? (json as any).models : []
+  const list: Array<{ name: string; display_name: string; description: string }> = models
+    .filter(
+      (m: any) =>
+        typeof m?.name === 'string' &&
+        m.name.startsWith('models/gemini') &&
+        Array.isArray(m.supportedGenerationMethods) &&
+        m.supportedGenerationMethods.includes('generateContent'),
+    )
+    .map((m: any) => {
+      const name = m.name.replace(/^models\//, '')
+      return {
+        name,
+        display_name: typeof m.displayName === 'string' && m.displayName ? m.displayName : name,
+        description: typeof m.description === 'string' ? m.description : '',
+      }
+    })
+
+  list.sort((a, b) => modelRank(a.name) - modelRank(b.name) || a.name.localeCompare(b.name))
+  return list
+}
+
 /**
  * candidates[0].content.parts から最初のテキストを取る。thinkingモデル
  * （gemini-2.5-pro等）は `{ thought: true, text: '...' }` という思考partを
  * 前段に挟むことがあるため、それは飛ばして本文のpartを探す
  */
 function extractResponseText(json: unknown): string {
-  const parts = (json as any)?.candidates?.[0]?.content?.parts
+  const candidate = (json as any)?.candidates?.[0]
+  const parts = candidate?.content?.parts
   if (Array.isArray(parts)) {
     for (const part of parts) {
       if (part && typeof part.text === 'string' && part.text && part.thought !== true) {
         return part.text
       }
     }
+  }
+  // maxOutputTokens を思考トークンで使い切ると、本文が空のまま finishReason だけ
+  // MAX_TOKENS で返ってくることがある（thinkingConfig で抑えていないモデル）
+  if (candidate?.finishReason === 'MAX_TOKENS') {
+    throw new AiResponseError('モデルが考えすぎて本文が空でした。別のモデル（gemini-flash-latest など）を試してください')
   }
   const snippet = maskSecrets(JSON.stringify(json ?? '')).slice(0, 120)
   throw new AiResponseError(`AI の応答を読めませんでした（${snippet}）`)
@@ -263,7 +325,7 @@ function toAiErrorMessage(e: unknown, model: string): string {
       return `API キーが無効か、権限がありません（${status}）：${apiMessage}`
     }
     if (status === 404) {
-      return `モデル「${model}」が見つかりません。設定 → AI 読み取り でモデルを変えてください`
+      return `モデル「${model}」がこのキーでは使えません。設定 → AI 読み取り で「使えるモデルを読み込む」から選んでください`
     }
     if (status === 429) {
       return '無料枠の上限に達しました。設定 → AI 読み取り でモデルを gemini-flash-latest に変えるか、明日また'
@@ -300,9 +362,15 @@ export async function testGemini(): Promise<{ ok: boolean; message: string }> {
 
   const model = getModel()
   try {
+    const generationConfig: Record<string, unknown> = {}
+    // thinking モデル（flash 系）は思考トークンだけで応答が終わることがあるので0に抑える。
+    // pro 系は thinkingBudget: 0 を受け付けないため、flash を含むモデルにだけ付ける
+    if (model.includes('flash')) {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 }
+    }
     const json = await callGemini(model, apiKey, {
       contents: [{ parts: [{ text: 'ok とだけ返してください' }] }],
-      generationConfig: { maxOutputTokens: 16 },
+      generationConfig,
     })
     extractResponseText(json)
     return { ok: true, message: '接続できました' }

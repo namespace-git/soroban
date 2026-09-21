@@ -276,7 +276,7 @@ let settings: Record<string, string> = {
 
 // --- AI 読み取り（Gemini）。キー本体は返さない。安全な保存は常に使える体で動かす ---
 let aiKeyConfigured = true
-let aiModelSetting = 'gemini-2.5-pro'
+let aiModelSetting = 'gemini-flash-latest'
 const AI_SAFE_STORAGE = true
 
 /** 実際の Gemini 呼び出しは数秒かかる想定に寄せて 1 秒待つ */
@@ -3071,6 +3071,15 @@ const api: SorobanApi = {
 
   async testGemini() {
     return waitAi({ ok: true, message: '接続できました' })
+  },
+
+  async listGeminiModels() {
+    if (!aiKeyConfigured) throw new Error('AI 読み取りの設定がありません（設定 → AI 読み取り）')
+    return waitAi([
+      { name: 'gemini-flash-latest', display_name: 'Gemini Flash（最新）', description: '速い。無料枠が多い' },
+      { name: 'gemini-pro-latest', display_name: 'Gemini Pro（最新）', description: '精度重視。無料枠は少なめ' },
+      { name: 'gemini-2.5-flash', display_name: 'Gemini 2.5 Flash', description: '固定バージョンの Flash' },
+    ])
   },
 
   async getMonthDetail(month: string, opts?: { tagId?: string | null }) {

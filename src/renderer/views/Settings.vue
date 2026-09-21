@@ -33,9 +33,32 @@ const installingUpdate = ref(false)
 const saleExclusions = ref<SaleExclusion[]>([])
 const aiStatus = ref<AiStatus | null>(null)
 const aiApiKeyInput = ref('')
-const aiModel = ref('gemini-2.5-pro')
+const aiModel = ref('gemini-flash-latest')
 const savingAiKey = ref(false)
 const testingAi = ref(false)
+const geminiModels = ref<Array<{ name: string; display_name: string; description: string }>>([])
+const loadingModels = ref(false)
+const customModelInput = ref('')
+
+/**
+ * モデルのセレクトの選択肢。読み込み前は現在の値＋既定だけ、読み込み後は listGeminiModels の結果
+ * （display_name（name）で表示、description を title に）
+ */
+const modelOptions = computed(() => {
+  if (geminiModels.value.length) {
+    return geminiModels.value.map(m => ({ name: m.name, label: `${m.display_name}（${m.name}）`, title: m.description }))
+  }
+  const opts: Array<{ name: string; label: string; title: string }> = []
+  const seen = new Set<string>()
+  if (aiModel.value) {
+    opts.push({ name: aiModel.value, label: aiModel.value, title: '' })
+    seen.add(aiModel.value)
+  }
+  if (!seen.has('gemini-flash-latest')) {
+    opts.push({ name: 'gemini-flash-latest', label: 'gemini-flash-latest（既定）', title: '' })
+  }
+  return opts
+})
 
 async function load() {
   const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes] = await Promise.all([
@@ -112,7 +135,10 @@ async function saveAiKey() {
     await window.soroban.setGeminiApiKey(key)
     aiApiKeyInput.value = ''
     aiStatus.value = await window.soroban.getAiStatus()
+    aiModel.value = aiStatus.value.model
     toast('保存しました', 'ok')
+    // キーを保存した直後は、そのキーで使えるモデルがまだ分からないので自動で一覧を読み込む
+    await loadGeminiModels(true)
   } finally {
     savingAiKey.value = false
   }
@@ -123,13 +149,38 @@ async function deleteAiKey() {
   await window.soroban.setGeminiApiKey(null)
   aiApiKeyInput.value = ''
   aiStatus.value = await window.soroban.getAiStatus()
+  geminiModels.value = []
   toast('削除しました', 'ok')
 }
 
-async function changeAiModel(model: string) {
+async function changeAiModel(model: string, opts?: { silent?: boolean }) {
   aiModel.value = model
   await window.soroban.setAiModel(model)
-  toast('保存しました', 'ok')
+  if (!opts?.silent) toast('保存しました', 'ok')
+}
+
+/** キーで使えるモデルの一覧を読み込み、選択肢を作る。既定が一覧に無ければ先頭の -latest を選んで保存する */
+async function loadGeminiModels(auto = false) {
+  loadingModels.value = true
+  try {
+    geminiModels.value = await window.soroban.listGeminiModels()
+    if (!geminiModels.value.some(m => m.name === aiModel.value)) {
+      const fallback = geminiModels.value.find(m => m.name.endsWith('-latest')) ?? geminiModels.value[0]
+      if (fallback) await changeAiModel(fallback.name, { silent: true })
+    }
+    if (!auto) toast('読み込みました', 'ok')
+  } catch (e) {
+    toast((e as Error).message, 'warn')
+  } finally {
+    loadingModels.value = false
+  }
+}
+
+async function applyCustomModel() {
+  const model = customModelInput.value.trim()
+  if (!model) return
+  await changeAiModel(model)
+  customModelInput.value = ''
 }
 
 async function testAiConnection() {
@@ -770,19 +821,33 @@ const runLabel: Record<string, string> = {
           このPCでは OS の安全な保存が使えないため、API キーを保存できません。
         </p>
 
+        <div class="row">
+          <button class="ghost sm" :disabled="!aiStatus?.configured || loadingModels" @click="loadGeminiModels()">
+            <Icon name="refresh" :size="14" /> {{ loadingModels ? '読み込み中…' : '使えるモデルを読み込む' }}
+          </button>
+        </div>
         <div class="fields">
           <label class="field">
             <span>モデル</span>
             <select :value="aiModel" style="width:260px" @change="changeAiModel(($event.target as HTMLSelectElement).value)">
-              <option value="gemini-2.5-pro">gemini-2.5-pro（既定・精度重視。無料枠は少なめ）</option>
-              <option value="gemini-flash-latest">gemini-flash-latest（最新の Flash。速い・無料枠が多い）</option>
-              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-              <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite（無料枠が一番多い）</option>
+              <option v-for="m in modelOptions" :key="m.name" :value="m.name" :title="m.title">{{ m.label }}</option>
             </select>
+          </label>
+          <label class="field">
+            <span>手で入力</span>
+            <span class="row model-manual">
+              <input
+                style="width:200px" v-model="customModelInput"
+                placeholder="例：gemini-2.0-flash-exp"
+                @keyup.enter="applyCustomModel"
+              />
+              <button class="sm ghost" :disabled="!customModelInput.trim()" @click="applyCustomModel">使う</button>
+            </span>
           </label>
         </div>
         <p class="faint hint">
-          無料枠の上限に当たったら Flash に切り替えてください。
+          キーによって使えるモデルが違います。まず「使えるモデルを読み込む」で一覧を出し、
+          gemini-flash-latest（速い）か gemini-pro-latest（精度重視）を選んでください。
         </p>
 
         <div class="row">
@@ -934,6 +999,7 @@ const runLabel: Record<string, string> = {
 }
 
 .ai-key-url { user-select: all; font-size: var(--fs-12); background: var(--surface-hi); padding: 1px 6px; border-radius: var(--radius-sm); }
+.model-manual { gap: 6px; align-items: center; }
 
 .money-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; width: auto; }
 .money-cell .yen { color: var(--text-dim); font-size: var(--fs-12); }

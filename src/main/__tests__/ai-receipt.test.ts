@@ -70,6 +70,19 @@ function geminiApiError(status: number, message: string, opts: { status_?: strin
   return { ok: false, status, json: async () => ({}), text: async () => body }
 }
 
+/** 本文が空のまま finishReason だけ MAX_TOKENS で返る応答（思考トークンを使い切った場合） */
+function geminiMaxTokensResponse() {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      candidates: [{ content: {}, finishReason: 'MAX_TOKENS', index: 0 }],
+      usageMetadata: { promptTokenCount: 5 },
+    }),
+    text: async () => '',
+  }
+}
+
 /** 思考partが混じったcandidates応答（partsの最初はthought:trueで本文はその後） */
 function geminiResponseWithThought(payload: unknown) {
   return {
@@ -91,7 +104,7 @@ function geminiResponseWithThought(payload: unknown) {
 
 describe('APIキー・モデルの設定', () => {
   it('保存していなければ configured は false', () => {
-    expect(ai.getAiStatus()).toEqual({ configured: false, model: 'gemini-2.5-pro', safe_storage: true })
+    expect(ai.getAiStatus()).toEqual({ configured: false, model: 'gemini-flash-latest', safe_storage: true })
   })
 
   it('setGeminiApiKeyで保存するとconfiguredがtrueになる。nullで外すとfalseに戻る', () => {
@@ -101,11 +114,11 @@ describe('APIキー・モデルの設定', () => {
     expect(ai.getAiStatus().configured).toBe(false)
   })
 
-  it('setAiModelで既定から変えられる。空文字を渡すと既定（gemini-2.5-pro）に戻る', () => {
-    ai.setAiModel('gemini-flash-latest')
-    expect(ai.getAiStatus().model).toBe('gemini-flash-latest')
-    ai.setAiModel('')
+  it('setAiModelで既定から変えられる。空文字を渡すと既定（gemini-flash-latest）に戻る', () => {
+    ai.setAiModel('gemini-2.5-pro')
     expect(ai.getAiStatus().model).toBe('gemini-2.5-pro')
+    ai.setAiModel('')
+    expect(ai.getAiStatus().model).toBe('gemini-flash-latest')
   })
 
   it('db.getSettings()の戻りには暗号化済みキーがそのまま含まれる（index.tsのgetSettingsハンドラはdb.getSettings()を直接返すため、ai-receipt.tsの外で漏れる。ここでは修正できない範囲として記録）', () => {
@@ -159,7 +172,7 @@ describe('readReceiptWithGemini（fetchをモック）', () => {
 
     // リクエストの形（URL・ヘッダ・本文）
     const [url, opts] = mockFetch.mock.calls[0]
-    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent')
+    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent')
     expect(opts.headers['x-goog-api-key']).toBe('secret-key')
     const body = JSON.parse(opts.body)
     expect(body.contents[0].parts[0].inline_data.mime_type).toBe('image/png')
@@ -223,11 +236,11 @@ describe('readReceiptWithGemini（fetchをモック）', () => {
     expect(err.message).toContain('Request contains an invalid argument')
   })
 
-  it('404はモデル名を含むエラーにする', async () => {
+  it('404はモデル名を含み、使えるモデルを読み込むよう促すエラーにする', async () => {
     ai.setAiModel('gemini-nope')
     ai.setGeminiApiKey('secret-key')
     mockFetch.mockResolvedValue(geminiApiError(404, 'models/gemini-nope is not found for API version v1beta'))
-    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('モデル「gemini-nope」が見つかりません')
+    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('モデル「gemini-nope」がこのキーでは使えません')
   })
 
   it('5xxはGemini側の障害というエラーにする', async () => {
@@ -264,6 +277,12 @@ describe('readReceiptWithGemini（fetchをモック）', () => {
     ai.setGeminiApiKey('secret-key')
     mockFetch.mockRejectedValue(new TypeError('fetch failed'))
     await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('ネットに接続できません')
+  })
+
+  it('本文が空のまま finishReason だけ MAX_TOKENS で返れば、考えすぎで本文が空という専用のエラーにする', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiMaxTokensResponse())
+    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('モデルが考えすぎて本文が空でした')
   })
 
   it('応答がJSONとして壊れていれば一般的なエラーにする', async () => {
@@ -318,12 +337,76 @@ describe('testGemini', () => {
     expect(result).toEqual({ ok: false, message: 'API キーが無効です（AI Studio で作り直してください）' })
   })
 
-  it('疎通確認のリクエストは軽量化のためmaxOutputTokensを指定する', async () => {
+  it('モデル名にflashを含むときはthinkingConfig（thinkingBudget:0）を付けて思考トークンを抑える', async () => {
+    ai.setAiModel('gemini-flash-latest')
     ai.setGeminiApiKey('secret-key')
     mockFetch.mockResolvedValue(geminiResponse('ok'))
     await ai.testGemini()
     const [, opts] = mockFetch.mock.calls[0]
     const body = JSON.parse(opts.body)
-    expect(body.generationConfig.maxOutputTokens).toBe(16)
+    expect(body.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 })
+  })
+
+  it('pro系のモデルはthinkingConfigを付けない（0を受け付けないため）', async () => {
+    ai.setAiModel('gemini-2.5-pro')
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiResponse('ok'))
+    await ai.testGemini()
+    const [, opts] = mockFetch.mock.calls[0]
+    const body = JSON.parse(opts.body)
+    expect(body.generationConfig.thinkingConfig).toBeUndefined()
+  })
+
+  it('本文が空のまま finishReason だけ MAX_TOKENS で返れば、考えすぎで本文が空という文言でok:false', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiMaxTokensResponse())
+    const result = await ai.testGemini()
+    expect(result).toEqual({ ok: false, message: 'モデルが考えすぎて本文が空でした。別のモデル（gemini-flash-latest など）を試してください' })
+  })
+})
+
+describe('listGeminiModels', () => {
+  it('キー未設定ならエラー', async () => {
+    await expect(ai.listGeminiModels()).rejects.toThrow('AI 読み取りの設定がありません')
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+
+  it('generateContent対応のgemini系だけを残し、-latestを先頭・次に2.5系・あとは名前順に並べる', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        models: [
+          { name: 'models/gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', description: 'pro', supportedGenerationMethods: ['generateContent'] },
+          { name: 'models/gemini-1.5-flash', displayName: 'Gemini 1.5 Flash', description: 'old', supportedGenerationMethods: ['generateContent'] },
+          { name: 'models/gemini-flash-latest', displayName: 'Gemini Flash Latest', description: 'latest', supportedGenerationMethods: ['generateContent'] },
+          // generateContent非対応は除外
+          { name: 'models/gemini-embedding-001', displayName: 'Embedding', supportedGenerationMethods: ['embedContent'] },
+          // gemini系でないものは除外
+          { name: 'models/text-bison-001', displayName: 'Bison', supportedGenerationMethods: ['generateContent'] },
+        ],
+      }),
+      text: async () => '',
+    })
+
+    const models = await ai.listGeminiModels()
+
+    expect(models).toEqual([
+      { name: 'gemini-flash-latest', display_name: 'Gemini Flash Latest', description: 'latest' },
+      { name: 'gemini-2.5-pro', display_name: 'Gemini 2.5 Pro', description: 'pro' },
+      { name: 'gemini-1.5-flash', display_name: 'Gemini 1.5 Flash', description: 'old' },
+    ])
+
+    const [url, opts] = mockFetch.mock.calls[0]
+    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/models?pageSize=100')
+    expect(opts.method).toBe('GET')
+    expect(opts.headers['x-goog-api-key']).toBe('secret-key')
+  })
+
+  it('401はAPIキーが無効・権限なしというエラーにする', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiApiError(401, 'Request had invalid authentication credentials.'))
+    await expect(ai.listGeminiModels()).rejects.toThrow('API キーが無効か、権限がありません')
   })
 })

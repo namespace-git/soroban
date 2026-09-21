@@ -408,6 +408,7 @@ export const HELP: HelpCategory[] = [
         steps: [
           'Google AI Studio で API キーを作る',
           '設定 → AI 読み取り に貼って保存',
+          '「使えるモデルを読み込む」→ gemini-flash-latest か gemini-pro-latest を選ぶ',
           '「接続を確認」',
         ],
         notes: [

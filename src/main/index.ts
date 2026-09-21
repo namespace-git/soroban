@@ -205,6 +205,7 @@ function registerIpc(): void {
   handle('setGeminiApiKey', (key) => ai.setGeminiApiKey(key))
   handle('setAiModel', (model) => ai.setAiModel(model))
   handle('testGemini', () => ai.testGemini())
+  handle('listGeminiModels', () => ai.listGeminiModels())
   handle('getMonthDetail', (month, opts) => db.getMonthDetail(month, opts))
   handle('setMonthAllocMethod', (month, method) => db.setMonthAllocMethod(month, method))
   handle('closeMonth', (month) => db.closeMonth(month))
