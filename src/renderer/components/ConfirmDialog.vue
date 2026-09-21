@@ -28,6 +28,17 @@ function cancel() {
   emit('cancel')
 }
 
+// スクリムでの mousedown → mouseup が両方ともスクリム自身のときだけ閉じる。
+// 本文内でのドラッグ選択やスライダー操作が外に抜けて mouseup しても閉じないようにする
+let downOnScrim = false
+function onScrimMouseDown(e: MouseEvent) {
+  downOnScrim = e.target === e.currentTarget
+}
+function onScrimMouseUp(e: MouseEvent) {
+  if (downOnScrim && e.target === e.currentTarget) cancel()
+  downOnScrim = false
+}
+
 // 明示指定が無ければ、最後の選択肢を主ボタン（primary）として扱う
 function toneOf(c: ConfirmChoice, isLast: boolean): 'primary' | 'danger' | 'ghost' {
   return c.tone ?? (isLast ? 'primary' : 'ghost')
@@ -66,7 +77,7 @@ watch(() => props.open, async (isOpen) => {
 <template>
   <Teleport to="body">
     <Transition name="dialog">
-      <div v-if="open" class="scrim" @click.self="cancel" @keydown="onKeydown">
+      <div v-if="open" class="scrim" @mousedown="onScrimMouseDown" @mouseup="onScrimMouseUp" @keydown="onKeydown">
         <div
           class="panel"
           role="dialog"

@@ -72,12 +72,65 @@ const RESPONSE_SCHEMA = {
   required: ['lines', 'warnings'],
 }
 
-/** Gemini が非 2xx を返したときのエラー。ステータスで文言を出し分けるために使う */
+/**
+ * APIキーらしき20文字以上の英数字（記号込み）を文言から伏せる。
+ * Google のエラー本文にキーの断片が含まれることは無い想定だが、念のため
+ */
+function maskSecrets(text: string): string {
+  return text.replace(/[A-Za-z0-9_-]{20,}/g, '[masked]')
+}
+
+/**
+ * Gemini が非 2xx を返したときのエラー。Google の JSON
+ * （`{ error: { code, message, status, details } }`）を解析し、
+ * status（HTTPコード）と apiMessage（Google側の理由）で文言を出し分ける。
+ * 無効なキーでも 400 が返る（`API_KEY_INVALID`）ので、401/403 だけでは判定できない
+ */
 class GeminiHttpError extends Error {
-  constructor(public status: number, message: string) {
-    super(message)
+  status: number
+  /** Google が返した message（JSONでなければ本文の先頭200文字）。キーは含まれない */
+  apiMessage: string
+  /** Google が返した error.status（例: INVALID_ARGUMENT）。JSONでなければ null */
+  apiStatus: string | null
+  /** error.details[].reason（例: API_KEY_INVALID）。無ければ null */
+  apiReason: string | null
+
+  constructor(status: number, bodyText: string) {
+    const parsed = GeminiHttpError.parseBody(bodyText, status)
+    super(parsed.apiMessage)
+    this.status = status
+    this.apiMessage = parsed.apiMessage
+    this.apiStatus = parsed.apiStatus
+    this.apiReason = parsed.apiReason
+  }
+
+  private static parseBody(
+    bodyText: string,
+    status: number,
+  ): { apiMessage: string; apiStatus: string | null; apiReason: string | null } {
+    if (bodyText) {
+      try {
+        const json = JSON.parse(bodyText)
+        const err = (json as any)?.error
+        if (err && typeof err === 'object') {
+          const message = typeof err.message === 'string' && err.message ? err.message : null
+          const apiStatus = typeof err.status === 'string' ? err.status : null
+          const details = Array.isArray(err.details) ? err.details : []
+          const reasonEntry = details.find((d: any) => typeof d?.reason === 'string')
+          const apiReason = reasonEntry ? reasonEntry.reason : null
+          if (message) return { apiMessage: maskSecrets(message), apiStatus, apiReason }
+        }
+      } catch {
+        // JSONでなければ本文をそのまま使う（下のfallbackへ）
+      }
+    }
+    const fallback = bodyText ? bodyText.slice(0, 200) : `HTTP ${status}`
+    return { apiMessage: maskSecrets(fallback), apiStatus: null, apiReason: null }
   }
 }
+
+/** 応答が空／JSONとして読めなかったときのエラー。メッセージは既に日本語で整形済み */
+class AiResponseError extends Error {}
 
 // ------------------------------------------------------------
 // キー・モデルの設定（setting テーブル）
@@ -168,24 +221,72 @@ async function callGemini(model: string, apiKey: string, body: unknown): Promise
   }
 }
 
+/**
+ * candidates[0].content.parts から最初のテキストを取る。thinkingモデル
+ * （gemini-2.5-pro等）は `{ thought: true, text: '...' }` という思考partを
+ * 前段に挟むことがあるため、それは飛ばして本文のpartを探す
+ */
 function extractResponseText(json: unknown): string {
-  const text = (json as any)?.candidates?.[0]?.content?.parts?.[0]?.text
-  if (typeof text !== 'string' || !text) throw new Error('AI の応答が空でした')
-  return text
+  const parts = (json as any)?.candidates?.[0]?.content?.parts
+  if (Array.isArray(parts)) {
+    for (const part of parts) {
+      if (part && typeof part.text === 'string' && part.text && part.thought !== true) {
+        return part.text
+      }
+    }
+  }
+  const snippet = maskSecrets(JSON.stringify(json ?? '')).slice(0, 120)
+  throw new AiResponseError(`AI の応答を読めませんでした（${snippet}）`)
+}
+
+/** テキストをJSONへ。壊れていれば先頭120文字を添えたAiResponseError */
+function parseDraftJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new AiResponseError(`AI の応答を読めませんでした（${maskSecrets(text).slice(0, 120)}）`)
+  }
 }
 
 /** エラーを短い日本語の文言に丸める。元のエラーは呼び出し側で console.error 済み */
-function toAiErrorMessage(e: unknown): string {
+function toAiErrorMessage(e: unknown, model: string): string {
+  if (e instanceof AiResponseError) return e.message
   if (e instanceof GeminiHttpError) {
-    if (e.status === 401 || e.status === 403) return 'API キーが無効です'
-    if (e.status === 429) return '無料枠の上限に達しました。設定 → AI 読み取り でモデルを gemini-flash-latest に変えるか、明日また'
-    return 'AI の応答を読めませんでした'
+    const { status, apiMessage, apiReason } = e
+    if (status === 400 && (apiReason === 'API_KEY_INVALID' || /API key not valid/i.test(apiMessage))) {
+      return 'API キーが無効です（AI Studio で作り直してください）'
+    }
+    if (status === 400) {
+      return `Gemini に要求を拒否されました（400）：${apiMessage.slice(0, 120)}`
+    }
+    if (status === 401 || status === 403) {
+      return `API キーが無効か、権限がありません（${status}）：${apiMessage}`
+    }
+    if (status === 404) {
+      return `モデル「${model}」が見つかりません。設定 → AI 読み取り でモデルを変えてください`
+    }
+    if (status === 429) {
+      return '無料枠の上限に達しました。設定 → AI 読み取り でモデルを gemini-flash-latest に変えるか、明日また'
+    }
+    if (status >= 500) {
+      return `Gemini 側の障害です（${status}）。しばらくして再試行`
+    }
+    return `AI の応答を読めませんでした（${apiMessage.slice(0, 120)}）`
   }
   if (e instanceof Error && e.name === 'AbortError') return 'ネットに接続できません'
   if (e instanceof Error && /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|fetch failed|network/i.test(e.message)) {
     return 'ネットに接続できません'
   }
   return 'AI の応答を読めませんでした'
+}
+
+/** エラーをログに残す。GeminiHttpErrorならstatus・apiMessageを出す（キーは出さない） */
+function logAiError(label: string, e: unknown): void {
+  if (e instanceof GeminiHttpError) {
+    console.error(label, { status: e.status, apiStatus: e.apiStatus, apiMessage: e.apiMessage })
+  } else {
+    console.error(label, e)
+  }
 }
 
 /** 保存したキーで最小の要求を送って疎通を確かめる */
@@ -197,16 +298,17 @@ export async function testGemini(): Promise<{ ok: boolean; message: string }> {
     return { ok: false, message: e instanceof Error ? e.message : 'AI 読み取りの設定がありません（設定 → AI 読み取り）' }
   }
 
+  const model = getModel()
   try {
-    const model = getModel()
     const json = await callGemini(model, apiKey, {
       contents: [{ parts: [{ text: 'ok とだけ返してください' }] }],
+      generationConfig: { maxOutputTokens: 16 },
     })
     extractResponseText(json)
     return { ok: true, message: '接続できました' }
   } catch (e) {
-    console.error('Gemini への疎通確認に失敗しました', e)
-    return { ok: false, message: toAiErrorMessage(e) }
+    logAiError('Gemini への疎通確認に失敗しました', e)
+    return { ok: false, message: toAiErrorMessage(e, model) }
   }
 }
 
@@ -331,10 +433,10 @@ export async function readReceiptWithGemini(filePath: string): Promise<ReceiptDr
       },
     })
     const text = extractResponseText(json)
-    const parsed = JSON.parse(text)
+    const parsed = parseDraftJson(text)
     return toReceiptDraft(parsed, text)
   } catch (e) {
-    console.error('Gemini でのレシート読み取りに失敗しました', e)
-    throw new Error(toAiErrorMessage(e))
+    logAiError('Gemini でのレシート読み取りに失敗しました', e)
+    throw new Error(toAiErrorMessage(e, model))
   }
 }

@@ -36,6 +36,17 @@ function cancel() {
   emit('cancel')
 }
 
+// スクリムでの mousedown → mouseup が両方ともスクリム自身のときだけ閉じる。
+// 本文内でのドラッグ選択やスライダー操作が外に抜けて mouseup しても閉じないようにする
+let downOnScrim = false
+function onScrimMouseDown(e: MouseEvent) {
+  downOnScrim = e.target === e.currentTarget
+}
+function onScrimMouseUp(e: MouseEvent) {
+  if (downOnScrim && e.target === e.currentTarget) cancel()
+  downOnScrim = false
+}
+
 function onKeydown(e: KeyboardEvent) {
   // 日本語入力の変換中（IME）の Enter / Esc は確定・取消の操作なので、ダイアログは反応しない
   if (e.isComposing || e.keyCode === 229) return
@@ -72,7 +83,7 @@ watch(() => props.open, async (isOpen) => {
 <template>
   <Teleport to="body">
     <Transition name="dialog">
-      <div v-if="open" class="scrim" @click.self="cancel" @keydown="onKeydown">
+      <div v-if="open" class="scrim" @mousedown="onScrimMouseDown" @mouseup="onScrimMouseUp" @keydown="onKeydown">
         <div
           class="panel"
           role="dialog"

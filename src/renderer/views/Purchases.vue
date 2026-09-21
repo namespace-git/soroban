@@ -40,6 +40,8 @@ const showCsvDrawer = ref(false)
 const loaded = ref(false)
 /** 下書きを確定中の仕入 id。null なら新規登録 */
 const editingId = ref<string | null>(null)
+/** 確定中の下書きの note（取り込みが積んだ理由を取り出して表示するため） */
+const editingDraftNote = ref<string | null>(null)
 
 const form = ref({
   shop_account_id: '',
@@ -226,6 +228,11 @@ const pool = computed(
   () => (form.value.shipping_fee || 0) + (form.value.other_cost || 0) - (form.value.discount || 0),
 )
 
+/** 下書きの確定中、単価が0のまま残っている明細の数（0でも確定はできるが原価が0になるので目立たせる） */
+const zeroPriceLineCount = computed(() =>
+  form.value.lines.filter(l => l.name.trim() && l.quantity > 0 && !l.unit_price).length,
+)
+
 function addLine() {
   form.value.lines.push({ name: '', unit_price: 0, quantity: 1 })
 }
@@ -290,6 +297,7 @@ async function submit() {
   }
 
   editingId.value = null
+  editingDraftNote.value = null
   form.value.order_no = ''
   form.value.shipping_fee = 0
   form.value.other_cost = 0
@@ -303,22 +311,33 @@ async function submit() {
   changed()
 }
 
-/** 下書きを確定フォームに読み込む。既存の登録フォームを編集モードで開く */
+/**
+ * 下書きの note から自動取得の理由を取り出す。無ければ既定文言。
+ * 形式は collector-mellojoy.ts が積む「注文履歴から自動取得（下書き）：<理由>」
+ * （理由なしは「注文履歴から自動取得（下書き）」）
+ */
+function draftReason(note: string | null): string {
+  const m = note?.match(/注文履歴から自動取得（下書き）(?:：(.+))?/)
+  return m?.[1]?.trim() || '価格か送料が読めなかったので確認してください'
+}
+
+/** 下書きを確定フォームに読み込む。既存の登録フォームを編集モードで開く。取れている値はそのまま引き継ぎ、人は足りない値だけ入れる */
 async function confirmDraft(p: PurchaseSummary) {
   const detail = await window.soroban.getPurchase(p.id)
   editingId.value = detail.id
+  editingDraftNote.value = detail.note
   form.value.shop_account_id = detail.shop_account_id
   form.value.ordered_at = detail.ordered_at
   form.value.order_no = ''
-  form.value.shipping_fee = 0
-  form.value.other_cost = 0
-  form.value.discount = 0
+  form.value.shipping_fee = detail.shipping_fee || accountDefaultFee(detail.shop_account_id)
+  form.value.other_cost = detail.other_cost
+  form.value.discount = detail.discount
   form.value.alloc_method = 'by_amount'
   form.value.note = detail.note ?? ''
   form.value.fulfillment = detail.fulfillment
   form.value.lines = detail.lines.map(l => ({
     name: l.name,
-    unit_price: 0,
+    unit_price: l.unit_price ?? 0,
     quantity: l.quantity,
     model_code: l.model_code,
     series_code: l.series_code,
@@ -330,6 +349,7 @@ async function confirmDraft(p: PurchaseSummary) {
 function toggleForm() {
   if (showForm.value) {
     editingId.value = null
+    editingDraftNote.value = null
     showForm.value = false
   } else {
     showForm.value = true
@@ -499,6 +519,10 @@ async function remove(p: PurchaseSummary) {
     <!-- 登録フォーム -->
     <div v-if="showForm" class="panel form">
       <p v-if="editingId" class="panel-title">下書きを確定</p>
+      <p v-if="editingId" class="draft-reason">
+        <Icon name="alert" :size="14" />
+        <span><strong>下書きの理由：</strong>{{ draftReason(editingDraftNote) }}。足りない値を入れて「確定して在庫を作る」を押してください</span>
+      </p>
       <div class="fields">
         <label class="field">
           <span>仕入先</span>
@@ -546,7 +570,7 @@ async function remove(p: PurchaseSummary) {
           <tr v-for="(l, i) in form.lines" :key="i">
             <td><input v-model="l.name" class="full" placeholder="商品名" /></td>
             <td class="faint">{{ previewModelCode(l) }}</td>
-            <td><input type="number" v-model.number="l.unit_price" class="full" /></td>
+            <td><input type="number" v-model.number="l.unit_price" class="full" :class="{ invalid: editingId && !l.unit_price }" /></td>
             <td><input type="number" v-model.number="l.quantity" class="full" min="1" /></td>
             <td class="num dim">{{ yen((l.unit_price || 0) * (l.quantity || 0)) }}</td>
             <td class="actions">
@@ -566,7 +590,10 @@ async function remove(p: PurchaseSummary) {
       <div class="fields">
         <label class="field">
           <span>送料（税込）</span>
-          <input type="number" v-model.number="form.shipping_fee" @input="shippingTouched = true" />
+          <input
+            type="number" v-model.number="form.shipping_fee" @input="shippingTouched = true"
+            :class="{ invalid: editingId && !form.shipping_fee }"
+          />
           <span v-if="selectedAccountDefaultFee !== null" class="faint">仕入先の既定値：{{ yen(selectedAccountDefaultFee) }}</span>
         </label>
         <label class="field">
@@ -592,6 +619,12 @@ async function remove(p: PurchaseSummary) {
       </p>
 
       <div class="row">
+        <span v-if="editingId && zeroPriceLineCount" class="warn draft-warn-note">
+          <Icon name="alert" :size="14" />単価が0の明細が{{ zeroPriceLineCount }}件
+        </span>
+        <span v-if="editingId && !form.shipping_fee" class="warn draft-warn-note">
+          <Icon name="alert" :size="14" />送料が0です
+        </span>
         <span class="grow" />
         <button class="primary" @click="submit">{{ editingId ? '確定して在庫を作る' : '登録して在庫を作る' }}</button>
       </div>
@@ -752,6 +785,28 @@ async function remove(p: PurchaseSummary) {
 
 .hint-row {
   margin: 12px 0 0;
+  font-size: var(--fs-13);
+}
+
+/* --- 下書きの理由：フォーム上部の琥珀パネル --- */
+.draft-reason {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-13);
+}
+
+/* --- 単価0・送料0の注意。確定ボタンの横 --- */
+.draft-warn-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: var(--fs-13);
 }
 

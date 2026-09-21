@@ -111,6 +111,11 @@ const stageCards = computed<StageStripStage[]>(() => {
 })
 function onSelectStage(key: string) { stage.value = key as Stage }
 
+// --- 見出し行のラベル。出品中（stage==='listed'）は「引き当て」「見込み」の言い回しに変える。
+//     出品と販売が混ざる「すべて」はどちらの行にも通じる既定の言い回しのまま ---
+const costHeaderLabel = computed(() => stage.value === 'listed' ? '引き当てた在庫' : '原価（紐付け）')
+const profitHeaderLabel = computed(() => stage.value === 'listed' ? '見込み粗利' : '粗利')
+
 /** 利益の入力バンドのピルをクリック：「すべて」に開いて絞る（もう一度押すと解除） */
 async function toggleInputFilter(key: InputFilterKey) {
   const next = inputFilter.value === key ? null : key
@@ -846,8 +851,8 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
           <div class="cell-meta">
             <div class="cell-price num">価格</div>
             <div class="cell-ship">発送方法（送料）</div>
-            <div class="cell-cost">原価（紐付け）</div>
-            <div class="cell-profit num">粗利</div>
+            <div class="cell-cost">{{ costHeaderLabel }}</div>
+            <div class="cell-profit num">{{ profitHeaderLabel }}</div>
           </div>
           <div class="cell-ops"></div>
         </div>
@@ -1007,10 +1012,12 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
                   <span class="num faint">{{ yen(r.listing.reserved_cost) }}</span>
                 </template>
                 <template v-else>
-                  <StatusChip tone="warn" label="未引き当て" />
-                  <button class="sm link-btn" @click="r.listing && openListingAlloc(r.listing)">
-                    <Icon name="link" :size="14" /> 引き当てる
-                  </button>
+                  <div class="unalloc-row">
+                    <StatusPill tone="solid-warn" label="未引き当て" class="unalloc-pill" />
+                    <button class="sm link-btn" @click="r.listing && openListingAlloc(r.listing)">
+                      <Icon name="link" :size="14" /> 引き当てる
+                    </button>
+                  </div>
                 </template>
               </template>
             </div>
@@ -1065,8 +1072,9 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
               >
                 <Icon name="external" :size="14" />
               </button>
-              <button class="sm" :class="r.listing.items.length ? 'ghost' : 'link-btn'" @click="r.listing && openListingAlloc(r.listing)">
-                <Icon name="link" :size="14" /> {{ r.listing.items.length ? '追加' : '引き当て' }}
+              <!-- 未引き当ては原価の欄に「引き当てる」があるので、ここは引き当て済みの「追加」だけ -->
+              <button v-if="r.listing.items.length" class="sm ghost" @click="r.listing && openListingAlloc(r.listing)">
+                <Icon name="link" :size="14" /> 追加
               </button>
               <button class="sm ghost" @click="r.listing && endListing(r.listing)">取り下げ</button>
             </template>
@@ -1326,6 +1334,24 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 }
 .cost-codes { justify-content: flex-start; }
 .candidate-hint { font-size: var(--fs-12); }
+
+/* 出品行・未引き当て：ピル＋ボタンを横並びに。列幅が足りなければピルを縮めて省略する
+   （ボタンは常に flex-shrink:0 で全文表示を優先） */
+.unalloc-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  width: 100%;
+  min-width: 0;
+}
+.unalloc-pill {
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.unalloc-row .link-btn { flex-shrink: 0; }
 
 .shipping-actual {
   display: inline-flex;

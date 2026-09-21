@@ -59,6 +59,36 @@ function geminiHttpError(status: number, body = '') {
   return { ok: false, status, json: async () => ({}), text: async () => body }
 }
 
+/** Google風のエラーJSON（{ error: { code, message, status, details } }）を返すfetch応答 */
+function geminiApiError(status: number, message: string, opts: { status_?: string; reason?: string } = {}) {
+  const error: any = { code: status, message }
+  if (opts.status_) error.status = opts.status_
+  if (opts.reason) {
+    error.details = [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: opts.reason }]
+  }
+  const body = JSON.stringify({ error })
+  return { ok: false, status, json: async () => ({}), text: async () => body }
+}
+
+/** 思考partが混じったcandidates応答（partsの最初はthought:trueで本文はその後） */
+function geminiResponseWithThought(payload: unknown) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      candidates: [{
+        content: {
+          parts: [
+            { thought: true, text: 'うーん、これはレシートですね……' },
+            { text: JSON.stringify(payload) },
+          ],
+        },
+      }],
+    }),
+    text: async () => '',
+  }
+}
+
 describe('APIキー・モデルの設定', () => {
   it('保存していなければ configured は false', () => {
     expect(ai.getAiStatus()).toEqual({ configured: false, model: 'gemini-2.5-pro', safe_storage: true })
@@ -156,22 +186,61 @@ describe('readReceiptWithGemini（fetchをモック）', () => {
     expect(draft.lines[2].box).toEqual([0, 20, 1000, 40])
   })
 
-  it('401はAPIキーが無効というエラーにする', async () => {
+  it('401はAPIキーが無効・権限なしというエラーにする', async () => {
     ai.setGeminiApiKey('secret-key')
-    mockFetch.mockResolvedValue(geminiHttpError(401))
-    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('API キーが無効です')
+    mockFetch.mockResolvedValue(geminiApiError(401, 'Request had invalid authentication credentials.'))
+    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('API キーが無効か、権限がありません')
   })
 
-  it('403もAPIキーが無効というエラーにする', async () => {
+  it('403もAPIキーが無効・権限なしというエラーにする', async () => {
     ai.setGeminiApiKey('secret-key')
-    mockFetch.mockResolvedValue(geminiHttpError(403))
-    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('API キーが無効です')
+    mockFetch.mockResolvedValue(geminiApiError(403, 'Permission denied'))
+    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('API キーが無効か、権限がありません')
   })
 
   it('429は無料枠の上限というエラーにする', async () => {
     ai.setGeminiApiKey('secret-key')
     mockFetch.mockResolvedValue(geminiHttpError(429))
     await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('無料枠の上限に達しました')
+  })
+
+  it('400でAPI_KEY_INVALIDならAPIキーが無効というエラーにする（無効なキーでも400が返る）', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiApiError(400, 'API key not valid. Please pass a valid API key.', {
+      status_: 'INVALID_ARGUMENT',
+      reason: 'API_KEY_INVALID',
+    }))
+    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('API キーが無効です（AI Studio で作り直してください）')
+  })
+
+  it('400でも理由がAPI_KEY_INVALID以外なら要求を拒否された旨のエラーにする（理由の文言を含む）', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiApiError(400, 'Request contains an invalid argument.', {
+      status_: 'INVALID_ARGUMENT',
+    }))
+    const err = await ai.readReceiptWithGemini(imagePath).catch((e) => e)
+    expect(err.message).toContain('Gemini に要求を拒否されました（400）')
+    expect(err.message).toContain('Request contains an invalid argument')
+  })
+
+  it('404はモデル名を含むエラーにする', async () => {
+    ai.setAiModel('gemini-nope')
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiApiError(404, 'models/gemini-nope is not found for API version v1beta'))
+    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('モデル「gemini-nope」が見つかりません')
+  })
+
+  it('5xxはGemini側の障害というエラーにする', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiApiError(503, 'The service is currently unavailable.'))
+    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('Gemini 側の障害です（503）')
+  })
+
+  it('思考partが混じっていても本文のtextを取り出せる', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiResponseWithThought({ lines: [], warnings: [] }))
+    const draft = await ai.readReceiptWithGemini(imagePath)
+    expect(draft.lines).toEqual([])
   })
 
   it('タイムアウト（60秒）はネットに接続できませんというエラーにする', async () => {
@@ -231,10 +300,30 @@ describe('testGemini', () => {
     expect(result.message).toContain('設定がありません')
   })
 
-  it('401ならok:falseでAPIキーが無効です', async () => {
+  it('401ならok:falseでAPIキーが無効・権限なしの文言', async () => {
     ai.setGeminiApiKey('secret-key')
-    mockFetch.mockResolvedValue(geminiHttpError(401))
+    mockFetch.mockResolvedValue(geminiApiError(401, 'Request had invalid authentication credentials.'))
     const result = await ai.testGemini()
-    expect(result).toEqual({ ok: false, message: 'API キーが無効です' })
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('API キーが無効か、権限がありません（401）')
+  })
+
+  it('400でAPI_KEY_INVALIDならok:falseでAPIキーが無効の文言（無効なキーは400で返るため）', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiApiError(400, 'API key not valid. Please pass a valid API key.', {
+      status_: 'INVALID_ARGUMENT',
+      reason: 'API_KEY_INVALID',
+    }))
+    const result = await ai.testGemini()
+    expect(result).toEqual({ ok: false, message: 'API キーが無効です（AI Studio で作り直してください）' })
+  })
+
+  it('疎通確認のリクエストは軽量化のためmaxOutputTokensを指定する', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiResponse('ok'))
+    await ai.testGemini()
+    const [, opts] = mockFetch.mock.calls[0]
+    const body = JSON.parse(opts.body)
+    expect(body.generationConfig.maxOutputTokens).toBe(16)
   })
 })

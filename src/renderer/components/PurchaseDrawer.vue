@@ -119,6 +119,16 @@ function onEditFulfillment() {
 function fulfillmentAutoTitle(): string | undefined {
   return detail.value?.import_key ? '取り込みで自動更新されます（手で変えても次の取り込みで戻ります）' : undefined
 }
+
+/**
+ * 下書きの note から自動取得の理由を取り出す。無ければ既定文言。
+ * 形式は collector-mellojoy.ts が積む「注文履歴から自動取得（下書き）：<理由>」
+ * （理由なしは「注文履歴から自動取得（下書き）」。Purchases.vue の同名関数と同じロジック）
+ */
+function draftReason(note: string | null): string {
+  const m = note?.match(/注文履歴から自動取得（下書き）(?:：(.+))?/)
+  return m?.[1]?.trim() || '価格か送料が読めなかったので確認してください'
+}
 </script>
 
 <template>
@@ -133,6 +143,11 @@ function fulfillmentAutoTitle(): string | undefined {
     <p v-if="loading" class="dim">読み込み中…</p>
 
     <template v-else-if="detail">
+      <p v-if="detail.status === 'draft'" class="draft-reason">
+        <Icon name="alert" :size="14" />
+        <span><strong>下書きの理由：</strong>{{ draftReason(detail.note) }}。「確定する」から足りない値を入れてください</span>
+      </p>
+
       <div class="item-head">
         <span class="thumb-placeholder">{{ placeholderChar() }}</span>
         <div class="item-head-text">
@@ -232,6 +247,20 @@ function fulfillmentAutoTitle(): string | undefined {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* --- 下書きの理由：確定前に「何が足りないか」を示す琥珀パネル --- */
+.draft-reason {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 8px 12px;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-13);
 }
 
 .item-head {

@@ -409,19 +409,26 @@ watch(dataRevision, loadProfitStrip)
         </button>
       </header>
 
-      <div v-if="showUpdateBanner" class="update-banner">
-        <Icon name="refresh" :size="14" />
-        <span>新しいバージョン v{{ updateStatus?.latest }} があります</span>
-        <button class="sm" :disabled="updateInstalling" @click="installUpdateFromBanner">
-          {{ updateStatus?.canAutoInstall ? '再起動して更新' : 'ダウンロード' }}
-        </button>
-        <button class="ghost sm" @click="dismissUpdateBanner">あとで</button>
-      </div>
+      <!-- 通知・更新バナーは文書フローの外（fixed）に重ねる。出入りで本文の位置がずれないように -->
+      <div class="overlay-notices">
+        <Transition name="fade">
+          <div v-if="showUpdateBanner" class="update-banner">
+            <Icon name="refresh" :size="14" />
+            <span>新しいバージョン v{{ updateStatus?.latest }} があります</span>
+            <button class="sm" :disabled="updateInstalling" @click="installUpdateFromBanner">
+              {{ updateStatus?.canAutoInstall ? '再起動して更新' : 'ダウンロード' }}
+            </button>
+            <button class="ghost sm" @click="dismissUpdateBanner">あとで</button>
+          </div>
+        </Transition>
 
-      <div v-if="notice" class="toast" :class="notice.kind">
-        <Icon v-if="notice.kind === 'warn'" class="toast-warn-icon" name="alert" :size="14" />
-        {{ notice.text }}
-        <button class="ghost sm" @click="notice = null">閉じる</button>
+        <Transition name="fade">
+          <div v-if="notice" class="toast" :class="notice.kind">
+            <Icon v-if="notice.kind === 'warn'" class="toast-warn-icon" name="alert" :size="14" />
+            {{ notice.text }}
+            <button class="ghost sm" @click="notice = null">閉じる</button>
+          </div>
+        </Transition>
       </div>
 
       <main>
@@ -623,18 +630,56 @@ main {
   background: var(--canvas);
 }
 
-/* --- 更新バナー --- */
+/* --- 通知・更新バナー（重ねて表示。文書フローに入れず、本文の位置を動かさない） --- */
+
+.overlay-notices {
+  position: fixed;
+  top: calc(var(--topbar-h) + 12px);
+  right: 24px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: 560px;
+  pointer-events: none;
+}
+.overlay-notices > * { pointer-events: auto; }
 
 .update-banner {
-  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 24px;
+  padding: 10px 16px;
+  border-radius: var(--radius-md);
   background: var(--brand-soft);
   color: var(--brand-ink);
   font-size: var(--fs-13);
+  box-shadow: var(--shadow-2);
 }
 .update-banner button { margin-left: 0; }
 .update-banner button:last-child { margin-left: auto; }
+
+/* 上書き：style.css の .toast は本文中の sticky 前提。ここでは重ねて出すので fixed 相当に */
+.toast {
+  position: static;
+  margin-left: 0;
+  box-shadow: var(--shadow-2);
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity var(--dur) var(--ease);
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-enter-active,
+  .fade-leave-active {
+    transition: none;
+  }
+}
 </style>
