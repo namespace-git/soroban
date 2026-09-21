@@ -60,7 +60,8 @@
       "target": [
         "nsis"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "artifactName": "soroban-setup-${version}.${ext}"
     },
     "mac": {
       "target": [
@@ -85,7 +86,7 @@
     },
     "icon": "build/icon.png",
     "dmg": {
-      "title": "そろばん",
+      "title": "Soroban ${version}",
       "contents": [
         {
           "x": 130,
@@ -98,7 +99,8 @@
           "path": "/Applications"
         }
       ]
-    }
+    },
+    "artifactName": "soroban-${version}-${arch}.${ext}"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

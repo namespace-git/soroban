@@ -81,7 +81,7 @@ pnpm install
 pnpm dist:mac
 ```
 
-`release/` に `そろばん-0.1.0-arm64.dmg`（Apple Silicon）と `そろばん-0.1.0-x64.dmg`（Intel）ができる。
+`release/` に `soroban-0.1.0-arm64.dmg`（Apple Silicon）と `soroban-0.1.0-x64.dmg`（Intel）ができる。
 自分の Mac に合う方を開き、**「そろばん」を Applications フォルダにドラッグ**する。
 
 ### 初回起動（署名なしアプリの開き方）
@@ -107,7 +107,7 @@ open release/mac-arm64/そろばん.app
 ### Windows
 
 ```bash
-pnpm dist:win          # release/そろばん Setup 0.1.0.exe（NSIS インストーラ）
+pnpm dist:win          # release/soroban-setup-0.1.0.exe（NSIS インストーラ）
 ```
 
 ---
