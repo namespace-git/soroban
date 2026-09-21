@@ -5,7 +5,7 @@ export type IconName =
   | 'home' | 'sales' | 'purchase' | 'inventory' | 'monthly' | 'settings'
   | 'plus' | 'close' | 'trash' | 'link' | 'unlink' | 'check' | 'alert'
   | 'search' | 'arrow-right' | 'refresh' | 'login' | 'external' | 'folder' | 'download' | 'note'
-  | 'product' | 'history' | 'listing'
+  | 'product' | 'history' | 'listing' | 'help'
 
 const props = withDefaults(defineProps<{ name: IconName; size?: number }>(), {
   size: 20,
@@ -131,6 +131,11 @@ const paths: Record<IconName, string> = {
     <circle cx="11.5" cy="9.7" r="1" />
     <path d="M11.5 5.5 V2" />
     <polyline points="10,3.5 11.5,1.8 13,3.5" />
+  `,
+  help: `
+    <circle cx="10" cy="10" r="7" />
+    <path d="M7.5 8.2 A2.5 2.5 0 1 1 10.5 12 C9.9 12.4 9.6 12.9 9.6 13.5" />
+    <line x1="9.6" y1="15.6" x2="9.6" y2="15.7" />
   `,
 }
 
