@@ -2627,12 +2627,14 @@ type ListingRow = {
 
 function hydrateListing(r: ListingRow, rateBp: number): Listing {
   const items = db.prepare(`
-    SELECT i.id, i.item_code, i.name, i.model_code, i.landed_cost
+    SELECT i.id, i.item_code, i.name, i.model_code,
+           (SELECT name FROM product_name WHERE model_code = i.model_code) AS product_name,
+           i.landed_cost
       FROM listing_line ll
       JOIN inventory_item i ON i.id = ll.inventory_item_id
      WHERE ll.listing_id = ?
   `).all(r.mercari_item_id) as Array<
-    { id: string; item_code: string; name: string; model_code: string | null; landed_cost: number }
+    { id: string; item_code: string; name: string; model_code: string | null; product_name: string | null; landed_cost: number }
   >
 
   const reserved_cost = items.reduce((s, i) => s + i.landed_cost, 0)

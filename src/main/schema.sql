@@ -588,6 +588,7 @@ SELECT
   p.order_no,
   sa.name AS shop_account_name,
   i.model_code,
+  (SELECT name FROM product_name WHERE model_code = i.model_code) AS product_name,
   i.series_code,
   i.material,
   i.parent_id,

@@ -396,6 +396,7 @@ function addConfirmedPurchase(opts: {
         order_no: orderNo,
         shop_account_name: opts.shopName,
         model_code: v.model,
+        product_name: productCustomName.get(v.model) ?? null,
         series_code: v.series,
         material: v.material,
         parent_id: null,
@@ -495,6 +496,7 @@ function addTiktokPurchase(opts: {
         order_no: orderNo,
         shop_account_name: opts.shopName,
         model_code: null,
+        product_name: null,
         series_code: null,
         material: null,
         parent_id: null,
@@ -591,6 +593,10 @@ function addDraftPurchase(opts: {
 
 function buildInitialPurchasesAndInventory(): void {
   const [mA, mB, tk] = shopAccounts
+
+  // 型番の表示名（setProductName で付けたものの見本。1〜2件だけ入れ、残りは無し（name をそのまま使う見た目を確認するため）
+  productCustomName.set('Z080-1', 'ジェラート ピケ ルームウェア')
+  productCustomName.set('A035', 'ミニランド定番セット')
 
   addConfirmedPurchase({
     shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(170)), shippingFee: 900,
@@ -938,7 +944,7 @@ function buildListing(rec: ListingRecord): Listing {
     shipping_method_name: shippingMethod?.name ?? null,
     thumb_url: rec.thumb_url,
     model_codes: rec.model_codes,
-    items: items.map(i => ({ id: i.id, item_code: i.item_code, name: i.name, model_code: i.model_code, landed_cost: i.landed_cost })),
+    items: items.map(i => ({ id: i.id, item_code: i.item_code, name: i.name, model_code: i.model_code, product_name: i.product_name, landed_cost: i.landed_cost })),
     reserved_cost: reservedCost,
     expected_profit: expectedProfit,
   }
@@ -2693,6 +2699,7 @@ const api: SorobanApi = {
           order_no: input.order_no ?? null,
           shop_account_name: shop?.name ?? null,
           model_code, series_code, material,
+          product_name: model_code ? productCustomName.get(model_code) ?? null : null,
           parent_id: null,
           note: null,
           tags: [],
@@ -2815,6 +2822,7 @@ const api: SorobanApi = {
           order_no: input.order_no ?? p.order_no,
           shop_account_name: shop?.name ?? p.shop_account_name,
           model_code, series_code, material,
+          product_name: model_code ? productCustomName.get(model_code) ?? null : null,
           parent_id: null,
           note: null,
           tags: [],
@@ -2917,6 +2925,7 @@ const api: SorobanApi = {
         order_no: item.order_no,
         shop_account_name: item.shop_account_name,
         model_code: item.model_code,
+        product_name: item.product_name,
         series_code: item.series_code,
         material: item.material,
         parent_id: item.id,

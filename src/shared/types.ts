@@ -345,6 +345,8 @@ export interface InventoryItem {
   order_no: string | null
   shop_account_name: string | null
   model_code: string | null
+  /** 型番に人が付けた表示名（setProductName）。無ければ null。名前の見出しに使い、name（明細名）は添え書きにする */
+  product_name: string | null
   series_code: string | null
   material: Material | null
   /** 分割で生まれた子なら親の id */
@@ -392,7 +394,7 @@ export interface Listing {
   /** タイトルから抜いた型番（枝番まで）。無ければ空 */
   model_codes: string[]
   /** 引き当てた在庫 */
-  items: Array<{ id: string; item_code: string; name: string; model_code: string | null; landed_cost: number }>
+  items: Array<{ id: string; item_code: string; name: string; model_code: string | null; product_name: string | null; landed_cost: number }>
   /**
    * 引き当てた在庫の原価合計と、出品価格から見た見込み粗利
    * （手数料は設定の率。発送方法が決まっていればその送料も引く。梱包は引かない）
