@@ -12,7 +12,7 @@
 import type {
   SorobanApi, ShopAccount, ShopAccountKind, ShippingMethod, ShippingSource,
   SaleProfit, SaleInput, SalePatch, SaleKind, SaleSource, SaleFilter, SaleTotals, SaleStatus,
-  PurchaseDetail, PurchaseInput, PurchaseLine,
+  PurchaseDetail, PurchaseInput, PurchaseLine, PurchaseImportResult,
   InventoryItem, InventoryStatus, InventoryPatch,
   MonthlySummary, DashboardStats, CollectorRun,
   Material, VariantSummary, Tag, Fulfillment,
@@ -1810,6 +1810,32 @@ const api: SorobanApi = {
     })
 
     return wait(purchaseId)
+  },
+
+  // CSV の一括登録：1件ずつ createPurchase と同じ検証（仕入先+注文番号の重複）で登録し、
+  // 失敗した行は理由を付けて返す（全体を止めない）。同じCSVの中の重複もここで見る
+  async importPurchases(inputs: PurchaseInput[]) {
+    const skipped: PurchaseImportResult['skipped'] = []
+    const seenInBatch = new Set<string>()
+    let created = 0
+
+    for (let i = 0; i < inputs.length; i++) {
+      const input = inputs[i]
+      const orderNo = input.order_no ?? null
+      if (orderNo) {
+        const key = `${input.shop_account_id} ${orderNo}`
+        const existsAlready = purchases.some(p => p.shop_account_id === input.shop_account_id && p.order_no === orderNo)
+        if (existsAlready || seenInBatch.has(key)) {
+          skipped.push({ index: i, reason: `この仕入先には注文番号「${orderNo}」の仕入が既にあります` })
+          continue
+        }
+        seenInBatch.add(key)
+      }
+      await api.createPurchase(input)
+      created += 1
+    }
+
+    return wait({ created, skipped })
   },
 
   async confirmPurchase(id: string, input: PurchaseInput) {

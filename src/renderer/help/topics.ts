@@ -216,6 +216,21 @@ export const HELP: HelpCategory[] = [
         links: [{ label: '仕入タブを開く', tab: 'purchases' }],
       },
       {
+        id: 'csv-import-purchase',
+        q: '仕入をまとめて登録したい（CSV）',
+        steps: [
+          '仕入タブ「CSV で一括登録」→「ひな形をダウンロード」',
+          'Excel などで埋める（1 行＝商品 1 つ。同じ注文番号の行は 1 つの仕入にまとまる）',
+          '「ファイルを選ぶ」→ プレビューで問題を直す →「登録する」',
+        ],
+        notes: [
+          '注文番号が同じ仕入先で既にあるものは登録されません（空なら重複は見ません）',
+          '金額はすべて税込。送料が空なら仕入先の既定値',
+        ],
+        keywords: ['CSV', '一括', 'まとめて', 'Excel', '取り込み'],
+        links: [{ label: '仕入タブを開く', tab: 'purchases' }],
+      },
+      {
         id: 'tiktok-purchase',
         q: 'TikTok Shop などで買った（手で登録する仕入）',
         steps: [

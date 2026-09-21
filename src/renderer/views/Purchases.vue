@@ -10,6 +10,7 @@ import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
 import PurchaseDrawer from '../components/PurchaseDrawer.vue'
+import PurchaseCsvDrawer from '../components/PurchaseCsvDrawer.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
 import SortTh from '../components/SortTh.vue'
@@ -32,6 +33,7 @@ const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 // 横断検索から goto('purchases', { search, focusId }) で開かれる
 const gotoPayload = inject<Ref<{ search?: string; focusId?: string } | null>>('gotoPayload', ref(null))
 const showForm = ref(false)
+const showCsvDrawer = ref(false)
 const loaded = ref(false)
 /** 下書きを確定中の仕入 id。null なら新規登録 */
 const editingId = ref<string | null>(null)
@@ -357,6 +359,17 @@ async function onDrawerEditNote(p: PurchaseSummary) {
   await editNote(p)
 }
 
+// --- CSV 一括登録 ---
+
+async function onCsvImported(created: number, skipped: number) {
+  await load()
+  changed()
+  toast(
+    skipped ? `${created}件登録しました（${skipped}件は登録できませんでした）` : `${created}件登録しました`,
+    skipped && !created ? 'warn' : 'ok',
+  )
+}
+
 async function remove(p: PurchaseSummary) {
   if (!await confirmDialog(`${p.ordered_at} の仕入を削除しますか？`, {
     message: '生成された在庫も消えます。',
@@ -378,6 +391,7 @@ async function remove(p: PurchaseSummary) {
     <div class="page-head">
       <h1 class="page-title">仕入</h1>
       <span class="grow" />
+      <button class="sm ghost" @click="showCsvDrawer = true">CSV で一括登録</button>
       <button class="primary" @click="toggleForm">
         <Icon :name="showForm ? 'close' : 'plus'" :size="16" />
         {{ showForm ? '閉じる' : '仕入を登録' }}
@@ -613,6 +627,12 @@ async function remove(p: PurchaseSummary) {
       @edit-tag="onDrawerEditTag"
       @edit-note="onDrawerEditNote"
       @edit-fulfillment="onDrawerEditFulfillment"
+    />
+
+    <PurchaseCsvDrawer
+      :open="showCsvDrawer"
+      @close="showCsvDrawer = false"
+      @imported="onCsvImported"
     />
   </div>
 </template>

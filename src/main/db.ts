@@ -11,7 +11,7 @@ import type {
   AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, Fulfillment, InventoryItem,
   InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus, Material,
   MonthlySummary, ProductDetail, ProductMonthPoint, ProductSummary, PurchaseDetail,
-  PurchaseDraftInput, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
+  PurchaseDraftInput, PurchaseImportResult, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
   PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleStatus, SaleTotals,
   SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, Tag, TimelineEvent, VariantSummary,
   CollectorRun, RunStatus, CollectorSource,
@@ -1015,12 +1015,68 @@ function applyShopAccountAutoTags(purchaseId: string, shopAccountId: string): vo
   for (const r of rows) ins.run(purchaseId, r.tag_id)
 }
 
+/**
+ * order_no の前後の空白を除く。空文字・空白のみは null（UNIQUE制約に引っかからない値）。
+ */
+function normalizeOrderNo(orderNo: string | null | undefined): string | null {
+  if (orderNo == null) return null
+  const trimmed = orderNo.trim()
+  return trimmed === '' ? null : trimmed
+}
+
+/**
+ * 同じ仕入先に同じ注文番号の仕入が既にあれば、その仕入の情報を返す（人が読める文にするため）。
+ * order_no が null なら見ない（UNIQUE制約も見ない）。excludeId は自分自身を除くとき（確定時の変更）に使う。
+ */
+function findDuplicateOrderNo(
+  shopAccountId: string, orderNo: string, excludeId?: string,
+): { id: string; ordered_at: string } | undefined {
+  return db.prepare(
+    `SELECT id, ordered_at FROM purchase
+      WHERE shop_account_id = ? AND TRIM(order_no) = ? ${excludeId ? 'AND id != ?' : ''}`,
+  ).get(...(excludeId ? [shopAccountId, orderNo, excludeId] : [shopAccountId, orderNo])) as
+    | { id: string; ordered_at: string } | undefined
+}
+
+/**
+ * createPurchase / confirmPurchase 共通の入力チェック。
+ * SqliteError（UNIQUE/CHECK/NOT NULL違反）がそのまま画面に出ないよう、分かる範囲で先に日本語で弾く。
+ * 戻り値は trim 済みの order_no（保存にそのまま使う）。
+ */
+function validatePurchaseInput(input: PurchaseInput, excludeId?: string): string | null {
+  const shop = db.prepare('SELECT id FROM shop_account WHERE id = ?').get(input.shop_account_id)
+  if (!shop) throw new Error('仕入先が見つかりません')
+
+  if (!input.lines || input.lines.length === 0) throw new Error('明細がありません')
+  input.lines.forEach((l, i) => {
+    if (!(l.quantity > 0)) throw new Error(`${i + 1}行目：数量は1以上にしてください`)
+    if (l.unit_price < 0) throw new Error(`${i + 1}行目：単価は0以上にしてください`)
+  })
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.ordered_at)) {
+    throw new Error('注文日はYYYY-MM-DDの形式で入力してください')
+  }
+
+  const orderNo = normalizeOrderNo(input.order_no)
+  if (orderNo) {
+    const dup = findDuplicateOrderNo(input.shop_account_id, orderNo, excludeId)
+    if (dup) {
+      throw new Error(
+        `この仕入先には注文番号「${orderNo}」の仕入が既にあります（${dup.ordered_at} の登録）`,
+      )
+    }
+  }
+  return orderNo
+}
+
 export function createPurchase(input: PurchaseInput): string {
   if (input.import_key) {
     const exists = db.prepare('SELECT id FROM purchase WHERE import_key = ?').get(input.import_key) as
       | { id: string } | undefined
     if (exists) throw new Error(`同じ注文が既に取り込まれています: ${input.import_key}`)
   }
+
+  const orderNo = validatePurchaseInput(input)
 
   const purchaseId = randomUUID()
   const shippingFee = input.shipping_fee ?? 0
@@ -1044,7 +1100,7 @@ export function createPurchase(input: PurchaseInput): string {
                CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END, ?, ?)`,
     ).run(
       purchaseId, input.shop_account_id, input.ordered_at,
-      input.order_no ?? null, shippingFee, discount, otherCost,
+      orderNo, shippingFee, discount, otherCost,
       method, input.note ?? null, input.import_key ?? null,
       fulfillment, fulfillment, shipped_at, delivered_at,
     )
@@ -1055,6 +1111,38 @@ export function createPurchase(input: PurchaseInput): string {
 
   tx()
   return purchaseId
+}
+
+/**
+ * まとめて登録。1件ずつ createPurchase と同じ検証で登録し、失敗した行は理由を付けて返す
+ * （全体を止めない）。同じ呼び出しの中で注文番号が重複（同じ仕入先・同じ注文番号が2回）したら、
+ * DBへ当たる前に「同じCSVの中で重複」として弾く（空の注文番号は見ない）。
+ */
+export function importPurchases(inputs: PurchaseInput[]): PurchaseImportResult {
+  const result: PurchaseImportResult = { created: 0, skipped: [] }
+  // このインポート内だけで見る注文番号の重複チェック（shop_account_id + order_no）
+  const seen = new Set<string>()
+
+  inputs.forEach((input, index) => {
+    const orderNo = normalizeOrderNo(input.order_no)
+    if (orderNo) {
+      const key = `${input.shop_account_id}|${orderNo}`
+      if (seen.has(key)) {
+        result.skipped.push({ index, reason: `同じCSVの中で注文番号「${orderNo}」が重複しています` })
+        return
+      }
+      seen.add(key)
+    }
+
+    try {
+      createPurchase(input)
+      result.created += 1
+    } catch (e) {
+      result.skipped.push({ index, reason: e instanceof Error ? e.message : String(e) })
+    }
+  })
+
+  return result
 }
 
 /**
@@ -1215,6 +1303,8 @@ export function confirmPurchase(id: string, input: PurchaseInput): void {
     throw new Error('確定済みの仕入は再確定できません（landed_costは後から書き換えない）')
   }
 
+  const orderNo = validatePurchaseInput(input, id)
+
   const shippingFee = input.shipping_fee ?? 0
   const discount = input.discount ?? 0
   const otherCost = input.other_cost ?? 0
@@ -1229,7 +1319,7 @@ export function confirmPurchase(id: string, input: PurchaseInput): void {
               note = ?, status = 'confirmed', updated_at = datetime('now')
         WHERE id = ?`,
     ).run(
-      input.shop_account_id, input.ordered_at, input.order_no ?? null,
+      input.shop_account_id, input.ordered_at, orderNo,
       shippingFee, discount, otherCost, method, input.note ?? null, id,
     )
 

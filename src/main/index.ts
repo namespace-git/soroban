@@ -112,6 +112,7 @@ function registerIpc(): void {
   handle('listPurchases', () => db.listPurchases())
   handle('getPurchase', (id) => db.getPurchase(id))
   handle('createPurchase', (input) => db.createPurchase(input))
+  handle('importPurchases', (inputs) => db.importPurchases(inputs))
   handle('confirmPurchase', (id, input) => db.confirmPurchase(id, input))
   handle('updatePurchaseNote', (id, note) => db.updatePurchaseNote(id, note))
   handle('updatePurchaseFulfillment', (id, f) => db.setPurchaseFulfillment(id, f))

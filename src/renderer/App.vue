@@ -204,7 +204,11 @@ provide('confirm', confirmDialog)
 provide('choose', chooseDialog)
 provide('toast', (text: string, kind: 'ok' | 'warn') => showNotice({ text, kind }))
 // main.ts の errorHandler から。処理が失敗したのに何も起きない、を防ぐ
-window.addEventListener('soroban:error', (e) => showNotice({ text: `エラー：${(e as CustomEvent<string>).detail}`, kind: 'warn' }))
+window.addEventListener('soroban:error', (e) => {
+  // Electron の IPC が付ける "Error invoking remote method 'x': " は人には要らない
+  const raw = (e as CustomEvent<string>).detail.replace(/^Error invoking remote method '[^']+': /, '').replace(/^(Sqlite)?Error: /, '')
+  showNotice({ text: `エラー：${raw}`, kind: 'warn' })
+})
 
 const needsTotal = computed(() => pendingCount.value)
 

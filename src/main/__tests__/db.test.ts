@@ -1380,6 +1380,166 @@ describe('db（:memory:）', () => {
     expect(db.listPurchases()).toHaveLength(1)
   })
 
+  describe('createPurchase：注文番号の重複を分かる言葉で断る', () => {
+    it('同じ仕入先・同じ注文番号は2回目がエラー。別の仕入先なら通る', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-03-01',
+        order_no: 'ORD-1',
+        lines: [{ name: '商品A', unit_price: 1000, quantity: 1 }],
+      })
+
+      expect(() => db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-03-05',
+        order_no: 'ORD-1',
+        lines: [{ name: '商品B', unit_price: 1000, quantity: 1 }],
+      })).toThrow('この仕入先には注文番号「ORD-1」の仕入が既にあります（2026-03-01 の登録）')
+
+      const otherShopId = db.createShopAccount('メロジョイB')
+      expect(() => db.createPurchase({
+        shop_account_id: otherShopId,
+        ordered_at: '2026-03-06',
+        order_no: 'ORD-1',
+        lines: [{ name: '商品C', unit_price: 1000, quantity: 1 }],
+      })).not.toThrow()
+
+      // 弾かれた1件は登録されていない
+      expect(db.listPurchases()).toHaveLength(2)
+    })
+
+    it('注文番号がnull・空文字・空白だけなら何件でも通る（空文字はnullとして保存される）', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-03-01',
+        order_no: null,
+        lines: [{ name: '商品A', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-03-02',
+        order_no: '',
+        lines: [{ name: '商品B', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-03-03',
+        order_no: '   ',
+        lines: [{ name: '商品C', unit_price: 1000, quantity: 1 }],
+      })
+
+      const list = db.listPurchases()
+      expect(list).toHaveLength(3)
+      expect(list.every(p => p.order_no === null)).toBe(true)
+    })
+
+    it('他のCHECK/NOT NULL違反も日本語で弾く', () => {
+      expect(() => db.createPurchase({
+        shop_account_id: 'no-such-shop',
+        ordered_at: '2026-03-01',
+        lines: [{ name: '商品', unit_price: 1000, quantity: 1 }],
+      })).toThrow('仕入先が見つかりません')
+
+      expect(() => db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-03-01',
+        lines: [],
+      })).toThrow('明細がありません')
+
+      expect(() => db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-03-01',
+        lines: [{ name: '商品', unit_price: 1000, quantity: 0 }],
+      })).toThrow('数量は1以上にしてください')
+
+      expect(() => db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-03-01',
+        lines: [{ name: '商品', unit_price: -1, quantity: 1 }],
+      })).toThrow('単価は0以上にしてください')
+
+      expect(() => db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026/03/01',
+        lines: [{ name: '商品', unit_price: 1000, quantity: 1 }],
+      })).toThrow('注文日はYYYY-MM-DDの形式で入力してください')
+    })
+  })
+
+  describe('importPurchases：まとめて登録', () => {
+    it('正常・DB重複・ファイル内重複が混ざっても、成功分だけ登録され失敗理由が返る', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-04-01',
+        order_no: 'DUP-1',
+        lines: [{ name: '既存', unit_price: 1000, quantity: 1 }],
+      })
+
+      const result = db.importPurchases([
+        {
+          shop_account_id: shopId,
+          ordered_at: '2026-04-02',
+          order_no: 'NEW-1',
+          lines: [{ name: '新規', unit_price: 1000, quantity: 1 }],
+        },
+        {
+          // DB既存と重複
+          shop_account_id: shopId,
+          ordered_at: '2026-04-03',
+          order_no: 'DUP-1',
+          lines: [{ name: 'DB重複', unit_price: 1000, quantity: 1 }],
+        },
+        {
+          shop_account_id: shopId,
+          ordered_at: '2026-04-04',
+          order_no: 'SAME-IN-FILE',
+          lines: [{ name: 'ファイル内1件目', unit_price: 1000, quantity: 1 }],
+        },
+        {
+          // 同じ呼び出しの中で注文番号が重複
+          shop_account_id: shopId,
+          ordered_at: '2026-04-05',
+          order_no: 'SAME-IN-FILE',
+          lines: [{ name: 'ファイル内2件目', unit_price: 1000, quantity: 1 }],
+        },
+      ])
+
+      expect(result.created).toBe(2)
+      expect(result.skipped).toEqual([
+        { index: 1, reason: expect.stringContaining('この仕入先には注文番号「DUP-1」の仕入が既にあります') },
+        { index: 3, reason: '同じCSVの中で注文番号「SAME-IN-FILE」が重複しています' },
+      ])
+
+      const names = db.listPurchases().map(p => p.first_line_name).sort()
+      expect(names).toEqual(['新規', '既存', 'ファイル内1件目'].sort())
+    })
+
+    it('数量0の行はskipになり、他の行は登録される', () => {
+      const result = db.importPurchases([
+        {
+          shop_account_id: shopId,
+          ordered_at: '2026-05-01',
+          lines: [{ name: '正常', unit_price: 1000, quantity: 1 }],
+        },
+        {
+          shop_account_id: shopId,
+          ordered_at: '2026-05-02',
+          lines: [{ name: '数量0', unit_price: 1000, quantity: 0 }],
+        },
+        {
+          shop_account_id: shopId,
+          ordered_at: '2026-05-03',
+          lines: [{ name: '正常2', unit_price: 500, quantity: 2 }],
+        },
+      ])
+
+      expect(result.created).toBe(2)
+      expect(result.skipped).toEqual([
+        { index: 1, reason: expect.stringContaining('数量は1以上にしてください') },
+      ])
+    })
+  })
+
   it('fulfillment：createPurchaseで指定した到着状態が仕入・在庫の両方に出て、updatePurchaseFulfillmentで更新できる', () => {
     db.createPurchase({
       shop_account_id: shopId,

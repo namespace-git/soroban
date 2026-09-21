@@ -28,6 +28,7 @@ const api: SorobanApi = {
   listPurchases: invoke('listPurchases'),
   getPurchase: invoke('getPurchase'),
   createPurchase: invoke('createPurchase'),
+  importPurchases: invoke('importPurchases'),
   confirmPurchase: invoke('confirmPurchase'),
   updatePurchaseNote: invoke('updatePurchaseNote'),
   updatePurchaseFulfillment: invoke('updatePurchaseFulfillment'),

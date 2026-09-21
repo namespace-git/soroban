@@ -204,6 +204,11 @@ export interface PurchaseLineInput {
   material?: Material | null
 }
 
+export interface PurchaseImportResult {
+  created: number
+  skipped: Array<{ index: number; reason: string }>
+}
+
 export interface PurchaseInput {
   shop_account_id: string
   ordered_at: string
@@ -636,7 +641,13 @@ export interface SorobanApi {
   // 仕入
   listPurchases(): Promise<PurchaseSummary[]>
   getPurchase(id: string): Promise<PurchaseDetail>
+  /** 登録。同じ仕入先に同じ注文番号があれば Error（日本語の文）。注文番号が空なら重複は見ない */
   createPurchase(input: PurchaseInput): Promise<string>
+  /**
+   * まとめて登録（CSV の一括登録）。1 件ずつ createPurchase と同じ検証で登録し、
+   * 失敗した行は理由を付けて返す（全体を止めない）。index は inputs の添字
+   */
+  importPurchases(inputs: PurchaseInput[]): Promise<PurchaseImportResult>
   /** 下書きを確定する：内容を input で置き換え、在庫を生成する */
   confirmPurchase(id: string, input: PurchaseInput): Promise<void>
   updatePurchaseNote(id: string, note: string | null): Promise<void>
