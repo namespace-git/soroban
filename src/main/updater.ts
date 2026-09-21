@@ -118,7 +118,7 @@ export async function checkForUpdate(): Promise<UpdateStatus> {
       notes: null,
       url: null,
       canAutoInstall,
-      message: e instanceof Error ? e.message : String(e),
+      message: shortUpdateError(e),
     }
   }
 }
@@ -158,4 +158,14 @@ export function scheduleAutoCheck(getWindow: () => BrowserWindow | null): void {
 
   setTimeout(run, 10_000)
   setInterval(run, 6 * 60 * 60 * 1000)
+}
+
+/** 更新確認のエラーを 1 行に。electron-updater のメッセージはレスポンスヘッダまで含む長文なので、原因が分かる短い文にする */
+export function shortUpdateError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  if (/404/.test(raw)) return 'GitHub の Releases が見つかりません（リポジトリが非公開だと確認できません）'
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|net::ERR|getaddrinfo/i.test(raw)) return 'ネットワークに接続できません'
+  if (/403|rate limit/i.test(raw)) return 'GitHub の制限に当たりました。しばらくして再確認してください'
+  const first = raw.split(/\r?\n/)[0].trim()
+  return first.length > 80 ? first.slice(0, 80) + '…' : first
 }

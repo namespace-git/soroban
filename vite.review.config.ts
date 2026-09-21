@@ -1,16 +1,16 @@
-// レビュー用の一時的な設定。electron-vite dev は Electron GUI を起動してしまうため、
-// プレーンな vite でレンダラーだけをブラウザ確認する。リポジトリには置かない。
+// レビュー用の設定。electron-vite dev は Electron 本体を起動して実 DB で収集が走るため、
+// プレーンな vite でレンダラーだけを mock データでブラウザ確認する（pnpm exec vite --config vite.review.config.ts）。
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = 'C:/Users/suito/Projects/soroban/src/renderer'
+const here = fileURLToPath(new URL('.', import.meta.url))
 
 export default defineConfig({
-  root,
+  root: `${here}src/renderer`,
   plugins: [vue()],
   resolve: {
-    alias: { '@shared': resolve('C:/Users/suito/Projects/soroban/src/shared') },
+    alias: { '@shared': `${here}src/shared` },
   },
   server: { port: 5199, strictPort: true },
 })

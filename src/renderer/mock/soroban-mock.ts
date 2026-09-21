@@ -2373,11 +2373,11 @@ const api: SorobanApi = {
   },
 
   async exportCsv() {
-    return wait('C:/Users/suito/Desktop/soroban-export.csv')
+    return wait('~/Desktop/soroban-export.csv')
   },
 
   async backupDb() {
-    return wait('C:/Users/suito/Desktop/soroban-backup.db')
+    return wait('~/Desktop/soroban-backup.db')
   },
 
   async revealDbFolder() {

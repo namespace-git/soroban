@@ -584,11 +584,11 @@ const runLabel: Record<string, string> = {
           <h2 class="section-head-title">アプリの更新</h2>
         </div>
         <p class="faint">現在のバージョン：v{{ updateStatus?.current ?? '—' }}</p>
-        <div class="row">
+        <div class="row update-row">
           <button class="ghost" :disabled="checkingUpdate" @click="checkUpdate">
             <Icon name="refresh" :size="16" /> {{ checkingUpdate ? '確認中…' : '更新を確認' }}
           </button>
-          <span v-if="updateStatus" class="faint">{{ updateResultText }}</span>
+          <span v-if="updateStatus" class="faint update-result" :title="updateStatus.message ?? undefined">{{ updateResultText }}</span>
         </div>
         <div v-if="updateStatus && (updateStatus.state === 'available' || updateStatus.state === 'downloaded')" class="row">
           <button :disabled="installingUpdate" @click="installUpdateNow">
@@ -693,4 +693,7 @@ const runLabel: Record<string, string> = {
 
 .money-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; width: auto; }
 .money-cell .yen { color: var(--text-dim); font-size: var(--fs-12); }
+.update-row { align-items: center; }
+.update-row > button { flex-shrink: 0; white-space: nowrap; }
+.update-result { min-width: 0; overflow-wrap: anywhere; }
 </style>
