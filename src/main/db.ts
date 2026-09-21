@@ -1474,11 +1474,16 @@ export function updateSale(id: string, patch: SalePatch): void {
 /**
  * メルカリの取引詳細・販売履歴ページから取れた実額で上書きする
  * （collector が使う。IPCには出さない）。
- * shipping_fee が取れたときだけ shipping_source を 'actual' にして確定扱いにする。
  *
- * allowZero を立てない限り 0 は「未取得」とみなして無視する（詳細ページのスクレイピング
- * 失敗時に 0 で潰さないため）。販売履歴ページの「¥0」（着払い）のような、0 自体が
- * 確定した実額であるケースでは allowZero: true を渡す。
+ * shipping_fee の扱い：
+ *   * null/undefined（詳細ページの取得失敗など）は「未取得」として無視する
+ *   * 0 より大きい額は、メルカリ便などで実際に請求された額。人が発送方法を選んで
+ *     いても（shipping_source='master'）、メルカリが請求した実額を優先して actual・確定にする
+ *   * 0 は「メルカリ便を使っていない（着払い・自己手配の郵送など）」可能性が高く、
+ *     実際は送料がかかっているのに 0 円で確定してしまう恐れがある。既に人が発送方法を
+ *     選んでいれば（shipping_source='master'、出品時に決めて引き継いだ 'manual' も同じ）その選択を尊重して送料関連の列には一切触らない。
+ *     それ以外は shipping_fee=0・shipping_source='actual' で記録しつつ is_shipping_confirmed は
+ *     立てない（＝送料未入力として要対応に出す。人が発送方法を選べば updateSale が master にして確定する）
  *
  * sold_at は source='collector' かつ status が未取得（取引中タブで先に追っていない）
  * 販売にだけ反映する。手入力の日付は上書きしない（一覧の取得日を仮の販売日として
@@ -1497,22 +1502,26 @@ export function applySaleActuals(
     status?: SaleStatus
     completedAt?: string
   },
-  opts?: { allowZero?: boolean },
 ): void {
-  const allowZero = opts?.allowZero ?? false
-  const hasValue = (v: number | null | undefined): v is number =>
-    v !== undefined && v !== null && (allowZero || v !== 0)
-
   const sets: string[] = []
   const vals: unknown[] = []
 
-  if (hasValue(actuals.fee)) {
+  if (actuals.fee !== undefined && actuals.fee !== null) {
     sets.push('fee = ?')
     vals.push(actuals.fee)
   }
-  if (hasValue(actuals.shipping_fee)) {
-    sets.push('shipping_fee = ?', `shipping_source = 'actual'`, 'is_shipping_confirmed = 1')
-    vals.push(actuals.shipping_fee)
+  if (actuals.shipping_fee !== undefined && actuals.shipping_fee !== null) {
+    if (actuals.shipping_fee > 0) {
+      sets.push('shipping_fee = ?', `shipping_source = 'actual'`, 'is_shipping_confirmed = 1')
+      vals.push(actuals.shipping_fee)
+    } else {
+      const cur = db.prepare('SELECT shipping_source FROM sale WHERE id = ?').get(id) as
+        { shipping_source: string | null } | undefined
+      if (cur?.shipping_source !== 'master' && cur?.shipping_source !== 'manual') { // manual＝出品時に決めた発送方法の引き継ぎ
+        sets.push('shipping_fee = ?', `shipping_source = 'actual'`, 'is_shipping_confirmed = 0')
+        vals.push(0)
+      }
+    }
   }
   if (actuals.sold_at !== undefined) {
     // status が既に付いている（取引中タブで先に取り込んだ）販売は sold_at を触らない
@@ -1540,7 +1549,9 @@ export function applySaleActuals(
  * completed_at（初回のみ）も併せて刻む。既に shipping_source='actual' かつ sold_at が
  * 一致していれば何もしない（差分適用。取引中タブを経由した販売は shipping_source が
  * 'actual' になるのがこの反映のタイミングなので、初回は必ず通って status も完了になる）。
- * kind・紐付けには触らない。戻り値は更新した件数。
+ * shipping_source='master'（人が発送方法を選択済み）の販売はこの条件に当たらず毎回
+ * applySaleActuals まで進むが、送料 0 円のときに送料関連の列を触らない規則で守られるので、
+ * 何度再適用しても発送方法・送料は動かない。kind・紐付けには触らない。戻り値は更新した件数。
  */
 export function updateCollectedActuals(
   rows: Array<{
@@ -1568,7 +1579,6 @@ export function updateCollectedActuals(
         fee: r.fee, shipping_fee: r.shippingFee, sold_at: r.soldAt,
         status: 'completed', completedAt: r.soldAt,
       },
-      { allowZero: true },
     )
     updated++
   }
@@ -2489,10 +2499,11 @@ function takeOverListing(saleId: string, mercariItemId: string | null): boolean 
     ).run(mercariItemId)
 
     if (listing.shipping_method_id) {
-      const sale = db.prepare('SELECT shipping_source FROM sale WHERE id = ?')
-        .get(saleId) as { shipping_source: string | null } | undefined
-      // 既に実額（actual）があればそちらを優先し、触らない
-      if (sale && sale.shipping_source !== 'actual') {
+      const sale = db.prepare('SELECT shipping_source, is_shipping_confirmed FROM sale WHERE id = ?')
+        .get(saleId) as { shipping_source: string | null; is_shipping_confirmed: number } | undefined
+      // 既に実額（actual）で確定していればそちらを優先し、触らない。
+      // 実額が ¥0（メルカリ便以外＝未確定）なら、出品時に決めた発送方法を引き継ぐ
+      if (sale && !(sale.shipping_source === 'actual' && sale.is_shipping_confirmed)) {
         const method = db.prepare('SELECT fee FROM shipping_method WHERE id = ?')
           .get(listing.shipping_method_id) as { fee: number } | undefined
         if (method) {
@@ -3718,7 +3729,11 @@ export function insertCollected(
     description?: string
     /** 販売手数料の実額。undefined/null なら従来どおり料率で計算 */
     fee?: number | null
-    /** 送料の実額。0も正当な値（着払い＝出品者負担なし）。undefined/null なら未確定のまま */
+    /**
+     * 送料の実額。undefined/null なら未確定のまま。0 はメルカリ便を使っていない
+     * （着払い・自己手配など）可能性が高く、実額として shipping_fee=0・shipping_source='actual'
+     * は記録するが is_shipping_confirmed は立てない（送料未入力として要対応に出す）
+     */
     shippingFee?: number | null
     /** 他費用。列は増やさない。raw に残すだけ */
     otherCost?: number | null
@@ -3754,11 +3769,12 @@ export function insertCollected(
       const hasFee = typeof r.fee === 'number'
       const fee = hasFee ? (r.fee as number) : calcFee(r.price, rateBp)
 
-      // shippingFee は 0 も「確定した実額」として扱う。undefined/null だけが未確定
+      // shippingFee は実額として記録するが、0 はメルカリ便を使っていない可能性が高いので
+      // 確定扱いにしない（送料未入力として要対応に出す）。undefined/null は従来どおり未確定
       const hasShippingFee = typeof r.shippingFee === 'number'
       const shippingFee = hasShippingFee ? (r.shippingFee as number) : 0
       const shippingSource = hasShippingFee ? 'actual' : null
-      const confirmed = hasShippingFee ? 1 : 0
+      const confirmed = hasShippingFee && shippingFee > 0 ? 1 : 0
 
       const status = r.status ?? null
       const statusDates = initialSaleStatusDates(status, r.soldAt)

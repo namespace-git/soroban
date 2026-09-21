@@ -35,6 +35,8 @@ type SalesGotoPayload = {
   search?: string
   focusId?: string
   modelCode?: string
+  /** 月で絞り込む（YYYY-MM）。グラフの月をクリックしたとき */
+  month?: string
 }
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
@@ -67,11 +69,20 @@ const SALE_STATUS_CHIP: Record<SaleStatus, { tone: 'warn' | 'info' | 'ok'; label
 }
 
 const stage = ref<Stage>('pending')
-const onlyUnallocated = ref(false)
+/**
+ * 出品中の状態セレクト（未引き当て／引き当て済み）。他の段階の statusFilter とは意味が違うが、
+ * toolbar の並び（状態セレクト・タグセレクト・検索…）を全段階で揃えるため同じ位置に置く
+ */
+type ListedFilter = 'all' | 'unallocated' | 'allocated'
+const listedFilter = ref<ListedFilter>('all')
 const tagFilter = ref('')
 /** 「発送してください」だけに絞る（タブは増やさない。ホームの要対応から来る） */
 const statusFilter = ref<SaleStatus | ''>('')
 const searchText = ref('')
+/** グラフの月をクリックしたときの絞り込み（YYYY-MM）。段階を切り替えても保持し、× で解除する */
+const monthFilter = ref<string | null>(null)
+// 段階を切り替えたら月の絞り込みは外す（グラフから来た「その月の販売」は「すべて」で見るもの）
+watch(stage, () => { monthFilter.value = null })
 
 const methods = ref<ShippingMethod[]>([])
 const allTags = ref<Tag[]>([])
@@ -153,6 +164,7 @@ const rows = computed<Row[]>(() => {
 })
 
 const filteredRows = computed(() => rows.value.filter(r => {
+  if (monthFilter.value && !rowDateDisplay(r).startsWith(monthFilter.value)) return false
   if (r.kind === 'sale' && r.sale) {
     const s = r.sale
     if (statusFilter.value && s.status !== statusFilter.value) return false
@@ -195,8 +207,13 @@ function shippingChipTone(s: SaleProfit): 'neutral' | 'warn' {
 }
 function shippingChipLabel(s: SaleProfit): string {
   if (!s.is_shipping_confirmed) return '送料未入力'
-  if (s.shipping_source === 'actual') return '実額'
+  if (s.shipping_source === 'actual' && s.shipping_fee > 0) return '実額'
   return methods.value.find(m => m.id === s.shipping_method_id)?.name ?? '発送方法'
+}
+/** 実額が¥0（メルカリ便以外で自分で送料を払った）で、まだ発送方法を選んでいない。
+    セレクトを出し、選び直してもらう */
+function isZeroActualShipping(s: SaleProfit): boolean {
+  return s.shipping_source === 'actual' && s.shipping_fee === 0 && !s.is_shipping_confirmed
 }
 
 const STAGE_EMPTY: Record<Stage, { title: string; hint?: string }> = {
@@ -236,11 +253,15 @@ async function loadTotals() {
 async function load() {
   loaded.value = false
   if (stage.value === 'listed') {
-    listings.value = await window.soroban.listListings(
+    const base = await window.soroban.listListings(
       hasSearch.value
         ? { status: ['active', 'suspended', 'sold', 'ended'] }
-        : { status: ['active', 'suspended'], onlyUnallocated: onlyUnallocated.value || undefined },
+        : { status: ['active', 'suspended'], onlyUnallocated: listedFilter.value === 'unallocated' || undefined },
     )
+    // 「引き当て済み」はAPI側に絞り込みが無いためここで足す（検索中は他の絞り込みと同じく解除）
+    listings.value = (!hasSearch.value && listedFilter.value === 'allocated')
+      ? base.filter(l => l.items.length > 0)
+      : base
     sales.value = []
   } else if (stage.value === 'all') {
     const [ls, ss] = await Promise.all([
@@ -296,7 +317,7 @@ onMounted(async () => {
 })
 watch(revision, loadTags)
 watch(revision, loadCounts)
-watch([revision, stage, onlyUnallocated, tagFilter, hasSearch], load)
+watch([revision, stage, listedFilter, tagFilter, hasSearch], load)
 
 // --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
 const thumbFailed = ref<Set<string>>(new Set())
@@ -394,7 +415,8 @@ watch(gotoPayload, async (p) => {
   if (p.stage) stage.value = p.stage
   else if (p.onlyPending) stage.value = 'pending'
   else if (p.focusId) stage.value = 'all' // どの段階にいても検索結果を必ず見つけられるようにする
-  if (p.onlyUnallocated) onlyUnallocated.value = true
+  if (p.month) { stage.value = 'all'; monthFilter.value = p.month } // グラフの月クリック：段階は必ず「すべて」
+  if (p.onlyUnallocated) listedFilter.value = 'unallocated'
   if (p.status) statusFilter.value = p.status
   if (p.search) searchText.value = p.search
   if (p.mercariItemId) await openFromMercariId(p.mercariItemId)
@@ -622,7 +644,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
           <input type="date" v-model="form.sold_at" />
         </label>
         <label class="field">
-          <span>価格</span>
+          <span>価格（税込・受け取った額）</span>
           <input type="number" v-model.number="form.price" />
         </label>
         <label class="field">
@@ -637,6 +659,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
           <input v-model="form.note" placeholder="任意" />
         </label>
       </div>
+      <p class="faint form-hint">金額はすべて税込。メルカリの表示どおりに入れてください</p>
       <div class="row">
         <span class="grow" />
         <button class="primary" @click="submit">登録</button>
@@ -657,15 +680,20 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
     <p v-if="stageHint" class="faint stage-hint">{{ stageHint }}</p>
 
     <div class="toolbar">
-      <label v-if="stage === 'listed'" class="row">
-        <input type="checkbox" v-model="onlyUnallocated" />
-        未引き当てだけ
-      </label>
-      <select v-if="stage !== 'listed'" v-model="statusFilter" title="取引の進み具合で絞り込む">
+      <select v-if="stage === 'listed'" v-model="listedFilter" title="引き当ての状態で絞り込む">
+        <option value="all">すべて</option>
+        <option value="unallocated">未引き当て</option>
+        <option value="allocated">引き当て済み</option>
+      </select>
+      <select v-else v-model="statusFilter" title="取引の進み具合で絞り込む">
         <option value="">すべての状態</option>
         <option value="waiting_shipment">発送してください</option>
       </select>
-      <select v-if="stage !== 'listed'" v-model="tagFilter">
+      <select
+        v-model="tagFilter"
+        :disabled="stage === 'listed'"
+        :title="stage === 'listed' ? '出品中はタグで絞れません' : undefined"
+      >
         <option value="">すべてのタグ</option>
         <optgroup v-if="directTagOptions.length" label="直接">
           <option v-for="t in directTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
@@ -682,10 +710,19 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
       </select>
       <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
       <span v-if="hasSearch && stage === 'listed'" class="faint search-hint">検索中は状態・未引き当ての絞り込みも解除して表示</span>
+      <button
+        v-if="monthFilter"
+        type="button"
+        class="month-chip-btn"
+        :title="`${monthFilter} の絞り込みを解除`"
+        @click="monthFilter = null"
+      >
+        <StatusChip tone="brand" :label="`${monthFilter} ×`" />
+      </button>
       <span class="grow" />
       <button v-if="stage === 'listed'" class="sm" @click="autoReserveListings">型番で自動引き当て</button>
       <button v-if="stage !== 'listed'" class="sm" @click="autoLinkPending">型番で自動紐付け</button>
-      <span class="faint">{{ filteredRows.length }}件</span>
+      <span class="faint">{{ filteredRows.length }}件<template v-if="monthFilter">・{{ monthFilter }} の販売</template></span>
     </div>
 
     <div v-if="tagFilter && totals" class="panel totals-bar">
@@ -747,7 +784,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
               <th v-if="showStatusCol">状態</th>
               <th v-if="showListedShipping" title="出品時に決めておくと、売れたときそのまま販売に入ります">発送方法</th>
               <th v-if="showFeePack">発送方法</th>
-              <th v-if="showFeePack" class="num">梱包</th>
+              <th v-if="showFeePack" class="num" title="梱包材の実費（税込）">梱包</th>
               <th class="num">{{ costColLabel }}</th>
               <th class="num">{{ profitColLabel }}</th>
               <th></th>
@@ -879,7 +916,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 
               <td v-if="showFeePack">
                 <template v-if="r.kind === 'sale' && r.sale">
-                  <span v-if="r.sale.shipping_source === 'actual'" class="shipping-actual">
+                  <span v-if="r.sale.shipping_source === 'actual' && r.sale.shipping_fee > 0" class="shipping-actual">
                     {{ yen(r.sale.shipping_fee) }}
                     <StatusChip tone="ok" label="実額" />
                   </span>
@@ -888,9 +925,10 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
                     class="ship-select"
                     :value="r.sale.shipping_method_id ?? ''"
                     :class="{ invalid: !r.sale.is_shipping_confirmed }"
+                    :title="isZeroActualShipping(r.sale) ? 'メルカリ側の送料は0円でした。自分で払った送料の発送方法を選んでください' : undefined"
                     @change="r.sale && setShipping(r.sale, ($event.target as HTMLSelectElement).value)"
                   >
-                    <option value="">選択…</option>
+                    <option value="">{{ isZeroActualShipping(r.sale) ? '選択…（メルカリ便以外）' : '選択…' }}</option>
                     <option v-for="m in methods" :key="m.id" :value="m.id">
                       {{ m.name }}　{{ yen(m.fee) }}
                     </option>
@@ -1010,7 +1048,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
       </div>
 
       <EmptyState
-        v-else-if="searchText"
+        v-else-if="searchText || monthFilter || statusFilter"
         title="検索条件に一致する行がありません"
       />
       <EmptyState
@@ -1055,6 +1093,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
   margin-bottom: 16px;
 }
 .field-wide input { width: 320px; }
+.form-hint { margin: -4px 0 0; }
 
 /* 派生タグ（仕入・商品・在庫から引き継いだもの）は直接付けたタグより少し薄く見せる。
    先頭の小さな記号で出どころを示す */
@@ -1214,6 +1253,17 @@ tr:hover .fade-btn { opacity: 1; }
   cursor: pointer;
 }
 .kind-toggle:hover:not(:disabled) { background: transparent; }
+
+.month-chip-btn {
+  flex-shrink: 0;
+  display: block;
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: auto;
+  cursor: pointer;
+}
+.month-chip-btn:hover:not(:disabled) { background: transparent; }
 
 .ship-select {
   width: 100%;

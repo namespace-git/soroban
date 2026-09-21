@@ -13,6 +13,7 @@ import Icon from './Icon.vue'
 import Skeleton from './Skeleton.vue'
 
 const revision = inject<Ref<number>>('revision')!
+const goto = inject<(t: string, payload?: { stage?: 'listed' | 'pending' | 'done' | 'all'; month?: string }) => void>('goto')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -82,6 +83,7 @@ interface ChartPoint {
   revenue: number
   grossProfit: number
   netProfit: number
+  salesCount: number
 }
 
 const chartPoints = computed<ChartPoint[]>(() => {
@@ -94,6 +96,7 @@ const chartPoints = computed<ChartPoint[]>(() => {
       revenue: row?.revenue ?? 0,
       grossProfit: row?.gross_profit ?? 0,
       netProfit: row?.net_profit ?? 0,
+      salesCount: row?.sales_count ?? 0,
     }
   })
 })
@@ -141,9 +144,43 @@ function monthLabel(month: string, i: number): string {
   return i === 0 || prevYear !== y ? `${y}/${m}` : String(Number(m))
 }
 
-function pointTitle(p: ChartPoint): string {
-  return `${p.month}\n売上 ${yen(p.revenue)}\n粗利 ${yen(p.grossProfit)}\n純利益 ${yen(p.netProfit)}`
+// --- ホバー：一番近い月を強調し、カスタムツールチップを出す。月ごとの縦の帯（透明 rect）で
+//     ヒットを取るので、点そのものを狙わなくてよい。同じ帯をクリックにも使う ---
+const hoverIndex = ref<number | null>(null)
+
+function onEnterMonth(i: number) {
+  hoverIndex.value = i
 }
+function onLeaveChart() {
+  hoverIndex.value = null
+}
+function onClickMonth(i: number) {
+  const p = chartPoints.value[i]
+  if (!p) return
+  goto('sales', { stage: 'all', month: p.month })
+}
+
+interface TooltipInfo {
+  p: ChartPoint
+  leftPct: number
+  topPct: number
+  align: 'left' | 'right'
+}
+
+const tooltip = computed<TooltipInfo | null>(() => {
+  if (hoverIndex.value === null) return null
+  const i = hoverIndex.value
+  const p = chartPoints.value[i]
+  if (!p) return null
+  const topY = Math.min(valueToY(p.revenue), valueToY(p.grossProfit), valueToY(p.netProfit))
+  return {
+    p,
+    leftPct: (x(i) / W) * 100,
+    topPct: (topY / H) * 100,
+    // 右端付近では吹き出しが見切れるので、点の左側に開く
+    align: x(i) / W > 0.65 ? 'right' : 'left',
+  }
+})
 
 /** y軸ラベル用の短い表記（¥12,345 → ¥12k） */
 function formatShort(n: number): string {
@@ -212,31 +249,65 @@ const gridLines = computed(() => domainMin.value < 0
         <button class="sm ghost" @click="toggleChart">{{ showChart ? 'グラフを隠す' : 'グラフを見せる' }}</button>
       </div>
 
-      <svg v-if="showChart" :viewBox="`0 0 ${W} ${H}`" class="chart" preserveAspectRatio="xMidYMid meet">
-        <line v-for="gl in gridLines" :key="gl.y" :x1="PAD_L" :y1="gl.y" :x2="W - PAD_R" :y2="gl.y" class="grid" />
-        <text v-for="gl in gridLines" :key="'gl' + gl.y" :x="PAD_L - 6" :y="gl.y + 3" class="grid-label">{{ gl.label }}</text>
+      <div v-if="showChart" class="chart-wrap">
+        <svg :viewBox="`0 0 ${W} ${H}`" class="chart" preserveAspectRatio="xMidYMid meet" @mouseleave="onLeaveChart">
+          <line v-for="gl in gridLines" :key="gl.y" :x1="PAD_L" :y1="gl.y" :x2="W - PAD_R" :y2="gl.y" class="grid" />
+          <text v-for="gl in gridLines" :key="'gl' + gl.y" :x="PAD_L - 6" :y="gl.y + 3" class="grid-label">{{ gl.label }}</text>
 
-        <g v-for="(p, i) in chartPoints" :key="p.month">
+          <line
+            v-if="hoverIndex !== null"
+            class="guide-line"
+            :x1="x(hoverIndex)" :y1="PAD_T" :x2="x(hoverIndex)" :y2="PAD_T + plotH"
+          />
+
+          <g v-for="(p, i) in chartPoints" :key="p.month">
+            <rect
+              :x="x(i) - barW / 2" :y="barRectY(p.revenue)"
+              :width="barW" :height="barRectH(p.revenue)"
+              class="bar-revenue" :class="{ hover: hoverIndex === i }"
+            />
+            <text :x="x(i)" :y="H - 3" class="axis-label">{{ monthLabel(p.month, i) }}</text>
+          </g>
+
+          <polyline :points="grossLine" class="line-gross" />
+          <circle
+            v-for="(p, i) in chartPoints" :key="'g' + p.month"
+            :cx="x(i)" :cy="valueToY(p.grossProfit)" :r="hoverIndex === i ? 4.5 : 2.5"
+            class="dot-gross"
+          />
+
+          <polyline :points="netLine" class="line-net" />
+          <circle
+            v-for="(p, i) in chartPoints" :key="'n' + p.month"
+            :cx="x(i)" :cy="valueToY(p.netProfit)" :r="hoverIndex === i ? 4.5 : 2.5"
+            class="dot-net"
+          />
+
+          <!-- ヒット領域：月ごとの縦の帯。細い点を狙わなくてよいように、帯全体でホバー・クリックを拾う -->
           <rect
-            :x="x(i) - barW / 2" :y="barRectY(p.revenue)"
-            :width="barW" :height="barRectH(p.revenue)"
-            class="bar-revenue"
-          >
-            <title>{{ pointTitle(p) }}</title>
-          </rect>
-          <text :x="x(i)" :y="H - 3" class="axis-label">{{ monthLabel(p.month, i) }}</text>
-        </g>
+            v-for="(p, i) in chartPoints" :key="'hit' + p.month"
+            :x="PAD_L + groupW * i" :y="PAD_T" :width="groupW" :height="plotH"
+            class="hit-col"
+            @mouseenter="onEnterMonth(i)"
+            @mousemove="onEnterMonth(i)"
+            @click="onClickMonth(i)"
+          />
+        </svg>
 
-        <polyline :points="grossLine" class="line-gross" />
-        <circle v-for="(p, i) in chartPoints" :key="'g' + p.month" :cx="x(i)" :cy="valueToY(p.grossProfit)" r="2.5" class="dot-gross">
-          <title>{{ pointTitle(p) }}</title>
-        </circle>
-
-        <polyline :points="netLine" class="line-net" />
-        <circle v-for="(p, i) in chartPoints" :key="'n' + p.month" :cx="x(i)" :cy="valueToY(p.netProfit)" r="2.5" class="dot-net">
-          <title>{{ pointTitle(p) }}</title>
-        </circle>
-      </svg>
+        <div
+          v-if="tooltip"
+          class="chart-tooltip"
+          :class="tooltip.align"
+          :style="{ left: tooltip.leftPct + '%', top: tooltip.topPct + '%' }"
+        >
+          <div class="chart-tooltip-month">{{ tooltip.p.month }}</div>
+          <div class="chart-tooltip-row">売上 {{ yen(tooltip.p.revenue) }}</div>
+          <div class="chart-tooltip-row" :class="tooltip.p.grossProfit < 0 ? 'loss' : 'profit'">粗利 {{ yen(tooltip.p.grossProfit) }}</div>
+          <div class="chart-tooltip-row">件数 {{ tooltip.p.salesCount }} 件</div>
+          <div class="chart-tooltip-row" :class="tooltip.p.netProfit < 0 ? 'loss' : 'profit'">純利益 {{ yen(tooltip.p.netProfit) }}</div>
+        </div>
+      </div>
+      <p v-if="showChart" class="chart-hint">月をクリックすると、その月の販売を売上タブで表示します</p>
     </div>
   </div>
 </template>
@@ -287,6 +358,9 @@ const gridLines = computed(() => domainMin.value < 0
 .legend .dot.gross { background: var(--profit-solid); }
 .legend .dot.net { background: var(--text); }
 
+.chart-wrap {
+  position: relative;
+}
 .chart {
   display: block;
   width: 100%;
@@ -295,12 +369,42 @@ const gridLines = computed(() => domainMin.value < 0
 }
 .grid { stroke: var(--line-soft); stroke-width: 1; }
 .grid-label { font-size: 12px; fill: var(--text-faint); text-anchor: end; }
-.bar-revenue { fill: var(--brand); }
+.bar-revenue { fill: var(--brand); transition: fill 100ms var(--ease); }
+.bar-revenue.hover { fill: var(--primary); }
 .axis-label { font-size: 12px; fill: var(--text-faint); text-anchor: middle; }
 .line-gross { fill: none; stroke: var(--profit-solid); stroke-width: 1.5; }
 .line-net { fill: none; stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 3 2; }
-.dot-gross { fill: var(--profit-solid); }
-.dot-net { fill: var(--text); }
+.dot-gross { fill: var(--profit-solid); transition: r 100ms var(--ease); }
+.dot-net { fill: var(--text); transition: r 100ms var(--ease); }
+.guide-line { stroke: var(--text-faint); stroke-width: 1; stroke-dasharray: 2 2; }
+.hit-col { fill: transparent; cursor: pointer; }
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 5;
+  min-width: 140px;
+  padding: 8px 10px;
+  margin-top: -10px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-2);
+  font-size: var(--fs-12);
+  pointer-events: none;
+  transition: left 100ms var(--ease), top 100ms var(--ease);
+}
+.chart-tooltip.left { transform: translate(0, -100%); }
+.chart-tooltip.right { transform: translate(-100%, -100%); }
+.chart-tooltip-month { font-weight: 700; margin-bottom: 2px; }
+.chart-tooltip-row { color: var(--text-dim); white-space: nowrap; }
+.chart-tooltip-row.profit { color: var(--profit); }
+.chart-tooltip-row.loss { color: var(--loss); }
+
+.chart-hint {
+  margin: 4px 0 0;
+  font-size: var(--fs-12);
+  color: var(--text-faint);
+}
 
 @media (max-width: 1099px) {
   .stat-row { grid-template-columns: 1fr; }

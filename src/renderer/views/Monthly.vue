@@ -243,7 +243,7 @@ async function removeExpense(month: string, expense: Expense) {
                     </select>
                     <input
                       type="number" v-model.number="form.amount"
-                      min="0" placeholder="金額" class="expense-amount"
+                      min="0" placeholder="金額（税込）" class="expense-amount"
                     />
                     <input v-model="form.note" placeholder="メモ（任意）" class="expense-note" />
                     <button class="sm primary" @click="addExpense(month)">追加</button>

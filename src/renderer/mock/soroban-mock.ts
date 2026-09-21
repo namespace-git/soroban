@@ -770,6 +770,16 @@ function buildInitialSales(): void {
     }))
   }
 
+  // --- 実額¥0（メルカリ便以外。取引詳細の送料表示が0円だった）。未確定のまま発送方法を選び直す見本 ---
+  {
+    const i = idx++
+    const model = 'Z088-2'
+    out.push(buildSaleFixed({
+      i, title: `【${model}】${displayName(variantOf(model))}`, kind: 'resale', items: [],
+      shipping: { id: null, fee: 0, confirmed: false, source: 'actual' },
+    }))
+  }
+
   // --- 私物（型番なし。S-09：型番の形式を含まない取引は私物として扱う） ---
   const personalTitles = ['ダイソン ドライヤー 中古美品', 'ワンピース Mサイズ 未使用', 'ハンドバッグ レザー 中古']
   for (const title of personalTitles) {

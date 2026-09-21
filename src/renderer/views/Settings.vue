@@ -326,6 +326,9 @@ const runLabel: Record<string, string> = {
           </label>
         </div>
         <p class="faint hint">
+          メルカリの販売手数料は税込価格に対する率（既定 10%）です。
+        </p>
+        <p class="faint hint">
           月1回の振込として、月次の費用に計上します。
         </p>
         <p class="faint hint">
@@ -351,7 +354,7 @@ const runLabel: Record<string, string> = {
               <td class="num">
                 <span class="num money-cell">
                   <span class="yen">¥</span>
-                  <input type="number" v-model.number="m.fee" @change="saveMethod(m)" style="width:72px" />
+                  <input type="number" v-model.number="m.fee" @change="saveMethod(m)" style="width:72px" title="税込の実費" />
                 </span>
               </td>
               <td class="actions">

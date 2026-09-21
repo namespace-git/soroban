@@ -725,13 +725,13 @@ describe('db（:memory:）', () => {
     expect(sale.gross_profit).toBe(8999 - 899 - 215 - 0 - sale.cost)
   })
 
-  it('insertCollected：shippingFeeが0でも確定扱い（着払い）', () => {
+  it('insertCollected：shippingFeeが0は送料未入力のまま（メルカリ便を使っていない可能性が高い）', () => {
     db.insertCollected([{
       mercariItemId: 'h2', title: '着払いの商品', price: 1000, soldAt: '2026-09-19', shippingFee: 0,
     }])
     const sale = db.listSales().find(s => s.mercari_item_id === 'h2')!
     expect(sale.shipping_fee).toBe(0)
-    expect(sale.is_shipping_confirmed).toBe(1)
+    expect(sale.is_shipping_confirmed).toBe(0)
     expect(sale.shipping_source).toBe('actual')
   })
 
@@ -760,7 +760,7 @@ describe('db（:memory:）', () => {
     expect(after.fee).toBe(250)
     expect(after.shipping_fee).toBe(0)
     expect(after.shipping_source).toBe('actual')
-    expect(after.is_shipping_confirmed).toBe(1)
+    expect(after.is_shipping_confirmed).toBe(0) // 送料0はメルカリ便未使用の疑いがあるので未確定のまま
 
     // 手入力の販売：sold_at は変わらない
     const manual = db.listSales().find(s => s.id === manualId)!
@@ -1870,6 +1870,7 @@ describe('db（:memory:）', () => {
       db.upsertListings([
         { mercariItemId: 'mShip1', title: '発送方法引き継ぎ対象', price: 3000, suspended: false, thumbUrl: null },
         { mercariItemId: 'mShip2', title: '発送方法引き継ぎ対象2', price: 3000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'mShip3', title: '発送方法引き継ぎ対象3', price: 3000, suspended: false, thumbUrl: null },
       ])
       db.reserveInventory('mShip1', [item1.id])
       db.reserveInventory('mShip2', [item2.id])
@@ -1892,7 +1893,7 @@ describe('db（:memory:）', () => {
       expect(sale1.is_shipping_confirmed).toBe(1)
       expect(sale1.shipping_source).toBe('manual')
 
-      // mShip2：実額（着払いで送料0）付きで取り込まれる → actual優先、発送方法は引き継がない
+      // mShip2：販売履歴の送料が ¥0（メルカリ便以外）で取り込まれる → 未確定なので出品時の発送方法を引き継ぐ
       db.insertCollected([
         {
           mercariItemId: 'mShip2', title: '発送方法引き継ぎ対象2', price: 3000, soldAt: '2026-01-10',
@@ -1900,9 +1901,25 @@ describe('db（:memory:）', () => {
         },
       ])
       const sale2 = db.listSales().find(s => s.mercari_item_id === 'mShip2')!
-      expect(sale2.shipping_source).toBe('actual')
-      expect(sale2.shipping_fee).toBe(0)
-      expect(sale2.shipping_method_id).toBeNull()
+      expect(sale2.shipping_source).toBe('manual')
+      expect(sale2.shipping_fee).toBe(method.fee)
+      expect(sale2.shipping_method_id).toBe(method.id)
+      expect(sale2.is_shipping_confirmed).toBe(1)
+
+      // 次の取り込みで販売履歴の送料がまた ¥0 でも、引き継いだ発送方法は上書きされない
+      db.updateCollectedActuals([{ mercariItemId: 'mShip2', soldAt: '2026-01-10', fee: 300, shippingFee: 0 }])
+      const sale2b = db.listSales().find(s => s.mercari_item_id === 'mShip2')!
+      expect(sale2b.shipping_source).toBe('manual')
+      expect(sale2b.shipping_fee).toBe(method.fee)
+
+      // mShip3：メルカリ便で実額 ¥500 → 出品時の発送方法より実額を優先
+      db.setListingShipping('mShip3', method.id)
+      db.insertCollected([
+        { mercariItemId: 'mShip3', title: '発送方法引き継ぎ対象3', price: 3000, soldAt: '2026-01-10', shippingFee: 500 },
+      ])
+      const sale3 = db.listSales().find(s => s.mercari_item_id === 'mShip3')!
+      expect(sale3.shipping_source).toBe('actual')
+      expect(sale3.shipping_fee).toBe(500)
     })
 
     it('insertCollected：出品への引き当てをそのまま販売に引き継ぐ（link_source=listing、出品はsoldに）', () => {

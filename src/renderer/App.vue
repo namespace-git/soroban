@@ -33,6 +33,8 @@ export type GotoPayload = {
   focusId?: string
   /** 売上タブの取引状態の絞り込み（例：発送してください） */
   status?: SaleStatus
+  /** 売上タブを月で絞る（YYYY-MM。グラフの月をクリックしたとき） */
+  month?: string
 }
 
 const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [

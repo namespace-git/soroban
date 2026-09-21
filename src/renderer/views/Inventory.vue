@@ -13,7 +13,7 @@ import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 
 const MODEL_CODE_RE = /^[A-Z]\d{3}(-\d+)?$/
 
-type StatusFilter = 'unlisted' | 'listed' | 'sold' | 'other'
+type StatusFilter = 'all' | 'unlisted' | 'listed' | 'sold' | 'other'
 
 const items = ref<InventoryItem[]>([])
 const statusFilter = ref<StatusFilter>('unlisted')
@@ -57,7 +57,8 @@ const hasSearch = computed(() => !!searchText.value.trim())
 async function load() {
   // 未出品／出品中は在庫としては同じ in_stock。listing の有無で client 側に分ける。
   // 「その他」は listInventory が単一の状態しか取れないため 3 回に分けて合わせる。
-  if (hasSearch.value) {
+  // 「すべて」は検索中と同じく全状態を並列で取って結合する。
+  if (hasSearch.value || statusFilter.value === 'all') {
     const [inStock, sold, disposed, personalUse, split] = await Promise.all([
       window.soroban.listInventory('in_stock'),
       window.soroban.listInventory('sold'),
@@ -109,6 +110,13 @@ watch(gotoPayload, (p) => {
   gotoPayload.value = null
 }, { immediate: true })
 
+// 「すべて」のときの並び：状態（未出品 → 出品中 → 販売済 → その他）→ 既存の並び
+function statusRank(i: InventoryItem): number {
+  if (i.status === 'in_stock') return i.listing === null ? 0 : 1
+  if (i.status === 'sold') return 2
+  return 3
+}
+
 const filteredItems = computed(() => {
   let list = items.value
   if (!hasSearch.value) {
@@ -120,14 +128,21 @@ const filteredItems = computed(() => {
       i.tags.some(t => t.id === tagFilter.value) || i.inherited_tags.some(t => t.id === tagFilter.value),
     )
   }
-  return list.filter(i => matchesSearch(
+  list = list.filter(i => matchesSearch(
     [
       i.item_code, i.name, i.model_code, i.series_code, i.material, i.note, i.shop_account_name,
       ...i.tags.map(t => t.name), ...i.inherited_tags.map(t => t.name),
     ],
     searchText.value,
   ))
+  if (!hasSearch.value && statusFilter.value === 'all') {
+    list = [...list].sort((a, b) => statusRank(a) - statusRank(b))
+  }
+  return list
 })
+
+// 状態が絞られていない（すべて／検索中）ときだけ、行に状態チップを出す
+const showStatusChips = computed(() => hasSearch.value || statusFilter.value === 'all')
 
 const total = computed(() => filteredItems.value.reduce((s, i) => s + i.landed_cost, 0))
 
@@ -245,6 +260,7 @@ async function editNote(item: InventoryItem) {
 
     <div class="toolbar">
       <select v-model="statusFilter">
+        <option value="all">すべて</option>
         <option value="unlisted">未出品</option>
         <option value="listed">出品中</option>
         <option value="sold">販売済</option>
@@ -318,12 +334,12 @@ async function editNote(item: InventoryItem) {
                 />
                 <StatusChip v-if="i.fulfillment === 'pending' || i.fulfillment === 'shipped'" tone="info" label="未着" />
                 <StatusChip v-if="i.parent_id" tone="neutral" label="分割" />
-                <!-- 通常時は statusFilter で状態が絞られているため出さない。検索中は全状態が混ざるので目印を出す -->
-                <StatusChip v-if="hasSearch && i.status === 'in_stock' && !i.listing" tone="neutral" label="未出品" />
-                <StatusChip v-if="hasSearch && i.status === 'sold'" tone="ok" label="販売済" />
-                <StatusChip v-if="hasSearch && i.status === 'disposed'" tone="neutral" label="廃棄" />
-                <StatusChip v-if="hasSearch && i.status === 'personal_use'" tone="neutral" label="自家消費" />
-                <StatusChip v-if="hasSearch && i.status === 'split'" tone="neutral" label="分割済" />
+                <!-- 通常時は statusFilter で状態が絞られているため出さない。検索中・「すべて」は全状態が混ざるので目印を出す -->
+                <StatusChip v-if="showStatusChips && i.status === 'in_stock' && !i.listing" tone="neutral" label="未出品" />
+                <StatusChip v-if="showStatusChips && i.status === 'sold'" tone="ok" label="販売済" />
+                <StatusChip v-if="showStatusChips && i.status === 'disposed'" tone="neutral" label="廃棄" />
+                <StatusChip v-if="showStatusChips && i.status === 'personal_use'" tone="neutral" label="自家消費" />
+                <StatusChip v-if="showStatusChips && i.status === 'split'" tone="neutral" label="分割済" />
                 <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
                 <span
                   v-for="t in i.inherited_tags" :key="'inh-' + t.id"

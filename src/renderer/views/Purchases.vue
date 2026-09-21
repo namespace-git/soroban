@@ -318,13 +318,14 @@ async function remove(p: PurchaseSummary) {
           <input v-model="form.note" placeholder="任意" />
         </label>
       </div>
+      <p class="faint tax-hint">金額はすべて税込。注文画面の表示どおりに入れてください</p>
 
       <table class="compact lines-table">
         <thead>
           <tr>
             <th>商品名</th>
             <th class="col-model">型番</th>
-            <th class="num col-price">単価</th>
+            <th class="num col-price">単価（税込）</th>
             <th class="num col-qty">数量</th>
             <th class="num col-subtotal">小計</th>
             <th class="col-actions"></th>
@@ -353,15 +354,15 @@ async function remove(p: PurchaseSummary) {
 
       <div class="fields">
         <label class="field">
-          <span>送料</span>
+          <span>送料（税込）</span>
           <input type="number" v-model.number="form.shipping_fee" />
         </label>
         <label class="field">
-          <span>その他費用</span>
+          <span>その他費用（税込）</span>
           <input type="number" v-model.number="form.other_cost" />
         </label>
         <label class="field">
-          <span>割引・クーポン</span>
+          <span>割引（税込）</span>
           <input type="number" v-model.number="form.discount" />
         </label>
         <label class="field">
@@ -516,6 +517,11 @@ async function remove(p: PurchaseSummary) {
 
 .hint-row {
   margin: 12px 0 0;
+  font-size: var(--fs-13);
+}
+
+.tax-hint {
+  margin: 0;
   font-size: var(--fs-13);
 }
 
