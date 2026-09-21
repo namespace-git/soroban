@@ -18,6 +18,7 @@ const emit = defineEmits<{
   confirmDraft: [purchase: PurchaseDetail]
   editTag: [purchase: PurchaseDetail, event: MouseEvent]
   editNote: [purchase: PurchaseDetail]
+  editFulfillment: [purchase: PurchaseDetail]
 }>()
 
 // ホームの型番ランキング・商品タブと同じ inject。売れた在庫のチップから売上タブの該当行へ飛ぶ
@@ -92,6 +93,13 @@ function onEditTag(e: MouseEvent) {
 function onEditNote() {
   if (detail.value) emit('editNote', detail.value)
 }
+function onEditFulfillment() {
+  if (detail.value) emit('editFulfillment', detail.value)
+}
+
+function fulfillmentAutoTitle(): string | undefined {
+  return detail.value?.import_key ? '取り込みで自動更新されます（手で変えても次の取り込みで戻ります）' : undefined
+}
 </script>
 
 <template>
@@ -116,6 +124,7 @@ function onEditNote() {
           <div class="chip-row">
             <span v-if="detail.order_no" class="faint">#{{ detail.order_no }}</span>
             <StatusChip :tone="fulfillmentChip(detail.fulfillment).tone" :label="fulfillmentChip(detail.fulfillment).label" />
+            <button class="ghost sm" :title="fulfillmentAutoTitle() ?? '配送状態を変える'" @click="onEditFulfillment">配送</button>
             <StatusChip v-if="detail.status === 'draft'" tone="warn" label="価格未入力" />
             <StatusChip v-if="detail.import_key" tone="neutral" label="自動取得" />
             <StatusChip v-for="t in detail.tags" :key="t.id" tone="info" :label="t.name" />

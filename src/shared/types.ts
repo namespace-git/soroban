@@ -638,6 +638,12 @@ export interface SorobanApi {
   /** 下書きを確定する：内容を input で置き換え、在庫を生成する */
   confirmPurchase(id: string, input: PurchaseInput): Promise<void>
   updatePurchaseNote(id: string, note: string | null): Promise<void>
+  /**
+   * 到着状態を手で変える（TikTok Shop など自動取得しない仕入先向け）。
+   * shipped / delivered に初めて到達した日を shipped_at / delivered_at に刻む（既に入っていれば触らない）。
+   * メロジョイの自動取得がある仕入は次の取り込みで注文一覧の状態に戻る
+   */
+  updatePurchaseFulfillment(id: string, fulfillment: Fulfillment | null): Promise<void>
   deletePurchase(id: string): Promise<void>
 
   // 在庫

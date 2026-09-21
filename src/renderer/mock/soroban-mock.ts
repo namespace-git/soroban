@@ -1908,6 +1908,16 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
+  async updatePurchaseFulfillment(id: string, fulfillment: Fulfillment | null) {
+    const p = findPurchase(id)
+    p.fulfillment = fulfillment
+    Object.assign(p, fulfillmentDates(p.ordered_at, fulfillment))
+    for (const it of inventory) {
+      if (itemPurchaseId.get(it.id) === id) it.fulfillment = fulfillment
+    }
+    return wait(undefined)
+  },
+
   async deletePurchase(id: string) {
     const soldCount = inventory.filter(it => itemPurchaseId.get(it.id) === id && it.status === 'sold').length
     if (soldCount > 0) {

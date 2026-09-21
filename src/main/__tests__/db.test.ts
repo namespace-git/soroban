@@ -1416,6 +1416,49 @@ describe('db（:memory:）', () => {
     expect(db.getPurchase(draftId).fulfillment).toBe('shipped')
   })
 
+  it('setPurchaseFulfillment：idを指定して到着状態を手で変えられる（TikTok Shopなど自動取得しない仕入先向け）', () => {
+    const id = db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-05-01',
+      lines: [{ name: '手動fulfillment', unit_price: 1000, quantity: 1 }],
+    })
+    expect(db.getPurchase(id).fulfillment).toBeNull()
+
+    db.setPurchaseFulfillment(id, 'shipped')
+    const afterShipped = db.getPurchase(id)
+    expect(afterShipped.fulfillment).toBe('shipped')
+    expect(afterShipped.shipped_at).not.toBeNull()
+    expect(afterShipped.delivered_at).toBeNull()
+
+    db.setPurchaseFulfillment(id, 'delivered')
+    const afterDelivered = db.getPurchase(id)
+    expect(afterDelivered.fulfillment).toBe('delivered')
+    expect(afterDelivered.shipped_at).toBe(afterShipped.shipped_at) // 既に入っていた日は触らない
+    expect(afterDelivered.delivered_at).not.toBeNull()
+
+    // 後戻り（delivered → pending）も許可するが、日付は消さない
+    db.setPurchaseFulfillment(id, 'pending')
+    const afterPending = db.getPurchase(id)
+    expect(afterPending.fulfillment).toBe('pending')
+    expect(afterPending.shipped_at).toBe(afterShipped.shipped_at)
+    expect(afterPending.delivered_at).toBe(afterDelivered.delivered_at)
+
+    // 在庫側（inventory_view由来のfulfillment）も追従する
+    expect(db.listInventory('in_stock')[0].fulfillment).toBe('pending')
+
+    expect(() => db.setPurchaseFulfillment('no-such-id', 'shipped')).toThrow('仕入が見つかりません')
+  })
+
+  it('createPurchase：fulfillmentを指定した状態で保存できる（フォームからの初期状態）', () => {
+    const id = db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-05-02',
+      fulfillment: 'pending',
+      lines: [{ name: 'フォームの初期状態', unit_price: 1000, quantity: 1 }],
+    })
+    expect(db.getPurchase(id).fulfillment).toBe('pending')
+  })
+
   it('startRun：sourceとshop_account_idを渡すと、finishRun/listRunsにshop_account_nameまで付いて返る', () => {
     const runId = db.startRun('mellojoy', shopId)
     const finished = db.finishRun(runId, 'ok', 3, 3)

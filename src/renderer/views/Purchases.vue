@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue'
 import type {
-  PurchaseSummary, ShopAccount, PurchaseLineInput, AllocMethod, PurchaseInput, Tag,
+  PurchaseSummary, ShopAccount, PurchaseLineInput, AllocMethod, PurchaseInput, Tag, Fulfillment,
 } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
@@ -12,6 +12,7 @@ import TagPicker from '../components/TagPicker.vue'
 import PurchaseDrawer from '../components/PurchaseDrawer.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
+import type { ConfirmChoice } from '../components/ConfirmDialog.vue'
 
 const MODEL_CODE_PREVIEW_RE = /【?([A-Z]\d{3}(?:-\d+)?)】?/
 
@@ -21,6 +22,7 @@ const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
+const choose = inject<(title: string, choices: ConfirmChoice[], opts?: { message?: string }) => Promise<string | null>>('choose')!
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 // 横断検索から goto('purchases', { search, focusId }) で開かれる
 const gotoPayload = inject<Ref<{ search?: string; focusId?: string } | null>>('gotoPayload', ref(null))
@@ -38,6 +40,7 @@ const form = ref({
   discount: 0,
   alloc_method: 'by_amount' as AllocMethod,
   note: '' as string,
+  fulfillment: null as Fulfillment | null,
   lines: [{ name: '', unit_price: 0, quantity: 1 }] as PurchaseLineInput[],
 })
 
@@ -139,6 +142,7 @@ async function submit() {
     discount: form.value.discount,
     alloc_method: form.value.alloc_method,
     note: form.value.note || null,
+    fulfillment: form.value.fulfillment,
     lines,
   }
 
@@ -154,6 +158,7 @@ async function submit() {
   form.value.other_cost = 0
   form.value.discount = 0
   form.value.note = ''
+  form.value.fulfillment = null
   form.value.lines = [{ name: '', unit_price: 0, quantity: 1 }]
   showForm.value = false
   await load()
@@ -172,6 +177,7 @@ async function confirmDraft(p: PurchaseSummary) {
   form.value.discount = 0
   form.value.alloc_method = 'by_amount'
   form.value.note = detail.note ?? ''
+  form.value.fulfillment = detail.fulfillment
   form.value.lines = detail.lines.map(l => ({
     name: l.name,
     unit_price: 0,
@@ -212,6 +218,30 @@ function openPurchaseDrawer(id: string) {
 async function onDrawerConfirmDraft(p: PurchaseSummary) {
   drawerPurchaseId.value = null
   await confirmDraft(p)
+}
+
+// --- 到着状態：チップ・行の「配送」ボタン・ドロワーの「配送」ボタン共通 ---
+
+function fulfillmentAutoTitle(p: PurchaseSummary): string | undefined {
+  return p.import_key ? '取り込みで自動更新されます（手で変えても次の取り込みで戻ります）' : undefined
+}
+
+async function editFulfillment(p: PurchaseSummary) {
+  const value = await choose('配送状態', [
+    { label: '到着済', value: 'delivered', tone: 'ghost' },
+    { label: '未発送', value: 'pending', tone: 'ghost' },
+    { label: '配送中', value: 'shipped', tone: 'ghost' },
+  ])
+  if (!value) return
+  const fulfillment = value === 'delivered' ? null : (value as 'pending' | 'shipped')
+  await window.soroban.updatePurchaseFulfillment(p.id, fulfillment)
+  await load()
+  await purchaseDrawerRef.value?.reload()
+  changed()
+}
+
+function onDrawerEditFulfillment(p: PurchaseSummary) {
+  editFulfillment(p)
 }
 
 // --- 仕入タグ：この仕入に直接付ける。在庫・販売には派生（コピーしない）で見える ---
@@ -317,6 +347,15 @@ async function remove(p: PurchaseSummary) {
           <span>メモ</span>
           <input v-model="form.note" placeholder="任意" />
         </label>
+        <label class="field">
+          <span>配送状態</span>
+          <select v-model="form.fulfillment">
+            <option :value="null">到着済</option>
+            <option value="pending">未発送</option>
+            <option value="shipped">配送中</option>
+          </select>
+          <span class="faint">メロジョイは取り込みで自動更新</span>
+        </label>
       </div>
       <p class="faint tax-hint">金額はすべて税込。注文画面の表示どおりに入れてください</p>
 
@@ -415,11 +454,11 @@ async function remove(p: PurchaseSummary) {
               :data-row-id="p.id"
               :class="{ focused: focusedId === p.id }"
             >
-              <td class="faint">{{ p.ordered_at }}</td>
+              <td class="faint nowrap">{{ p.ordered_at }}</td>
               <td class="thumb-cell clickable" title="取引詳細を見る" @click="openPurchaseDrawer(p.id)">
                 <span class="thumb-placeholder">{{ placeholderChar(p) }}</span>
               </td>
-              <td>{{ p.shop_account_name }}</td>
+              <td class="nowrap">{{ p.shop_account_name }}</td>
               <td class="product-cell">
                 <div class="product-name clickable" title="取引詳細を見る" @click="openPurchaseDrawer(p.id)">
                   {{ p.first_line_name ?? '—' }}
@@ -430,8 +469,15 @@ async function remove(p: PurchaseSummary) {
                   <div class="chip-row">
                     <StatusChip v-if="p.status === 'draft'" tone="warn" label="価格未入力" />
                     <StatusChip v-if="p.import_key" tone="neutral" label="自動取得" />
-                    <StatusChip v-if="p.fulfillment === 'pending'" tone="neutral" label="未発送" />
-                    <StatusChip v-if="p.fulfillment === 'shipped'" tone="info" label="配送中" />
+                    <button
+                      v-if="p.fulfillment === 'pending' || p.fulfillment === 'shipped'"
+                      class="chip-btn"
+                      :title="fulfillmentAutoTitle(p) ?? '配送状態を変える'"
+                      @click="editFulfillment(p)"
+                    >
+                      <StatusChip v-if="p.fulfillment === 'pending'" tone="neutral" label="未発送" />
+                      <StatusChip v-else tone="info" label="配送中" />
+                    </button>
                     <StatusChip v-for="t in p.tags" :key="t.id" tone="info" :label="t.name" />
                   </div>
                 </div>
@@ -456,6 +502,7 @@ async function remove(p: PurchaseSummary) {
               </td>
               <td class="actions">
                 <button v-if="p.status === 'draft'" class="sm primary" @click="confirmDraft(p)">確定</button>
+                <button class="sm ghost" :title="fulfillmentAutoTitle(p) ?? '配送状態を変える'" @click="editFulfillment(p)">配送</button>
                 <button class="sm ghost" @click="openPurchaseTagPicker(p, $event)" title="タグを編集する">タグ</button>
                 <button class="sm ghost" @click="editNote(p)">メモ</button>
                 <button class="icon ghost" aria-label="削除" @click="remove(p)">
@@ -503,11 +550,13 @@ async function remove(p: PurchaseSummary) {
       @confirm-draft="onDrawerConfirmDraft"
       @edit-tag="onDrawerEditTag"
       @edit-note="onDrawerEditNote"
+      @edit-fulfillment="onDrawerEditFulfillment"
     />
   </div>
 </template>
 
 <style scoped>
+.nowrap { white-space: nowrap; }
 .form {
   display: flex;
   flex-direction: column;
@@ -553,6 +602,14 @@ async function remove(p: PurchaseSummary) {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.chip-btn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: auto;
+  cursor: pointer;
 }
 
 .table-panel { padding: 0; overflow: hidden; }

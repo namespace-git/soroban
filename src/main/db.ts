@@ -1236,22 +1236,26 @@ export function updatePurchaseNote(id: string, note: string | null): void {
   db.prepare(`UPDATE purchase SET note = ?, updated_at = datetime('now') WHERE id = ?`).run(note, id)
 }
 
+type FulfillmentRow = {
+  fulfillment: Fulfillment | null
+  shipped_at: string | null
+  delivered_at: string | null
+}
+
 /**
- * 仕入元の注文の到着状態を更新する（collector が一覧の表示から更新する）。
- * import_key で引く。変化が無ければ何もせず false を返す。
+ * 到着状態の更新の共通処理。import_key / id のどちらで引くかだけが呼び出し側で違う。
+ * 変化が無ければ何もせず false。到着状態が shipped / delivered に進んだのを最初に
+ * 観測した日を shipped_at / delivered_at に刻む（既に入っていれば触らない。後戻りしても消さない）
  */
-export function updatePurchaseFulfillment(
-  importKey: string, fulfillment: Fulfillment | null,
+function applyFulfillment(
+  whereCol: 'import_key' | 'id', whereVal: string, fulfillment: Fulfillment | null,
 ): boolean {
   const cur = db.prepare(
-    'SELECT fulfillment, shipped_at, delivered_at FROM purchase WHERE import_key = ?',
-  ).get(importKey) as
-    | { fulfillment: Fulfillment | null; shipped_at: string | null; delivered_at: string | null }
-    | undefined
+    `SELECT fulfillment, shipped_at, delivered_at FROM purchase WHERE ${whereCol} = ?`,
+  ).get(whereVal) as FulfillmentRow | undefined
   if (!cur) return false
   if (cur.fulfillment === fulfillment) return false
 
-  // 到着状態が進んだのを最初に観測した日を刻む。既に入っていれば触らない
   const today = todayLocal()
   let shippedAt = cur.shipped_at
   let deliveredAt = cur.delivered_at
@@ -1265,9 +1269,30 @@ export function updatePurchaseFulfillment(
     `UPDATE purchase
         SET fulfillment = ?, fulfillment_updated_at = datetime('now'),
             shipped_at = ?, delivered_at = ?, updated_at = datetime('now')
-      WHERE import_key = ?`,
-  ).run(fulfillment, shippedAt, deliveredAt, importKey)
+      WHERE ${whereCol} = ?`,
+  ).run(fulfillment, shippedAt, deliveredAt, whereVal)
   return true
+}
+
+/**
+ * 仕入元の注文の到着状態を更新する（collector が一覧の表示から更新する）。
+ * import_key で引く。変化が無ければ何もせず false を返す。
+ */
+export function updatePurchaseFulfillment(
+  importKey: string, fulfillment: Fulfillment | null,
+): boolean {
+  return applyFulfillment('import_key', importKey, fulfillment)
+}
+
+/**
+ * 到着状態を手で変える（TikTok Shop など自動取得しない仕入先向け）。
+ * shipped / delivered に初めて到達した日を shipped_at / delivered_at に刻む（既に入っていれば触らない）。
+ * メロジョイの自動取得がある仕入は次の取り込みで注文一覧の状態に戻る
+ */
+export function setPurchaseFulfillment(id: string, fulfillment: Fulfillment | null): void {
+  const exists = db.prepare('SELECT id FROM purchase WHERE id = ?').get(id) as { id: string } | undefined
+  if (!exists) throw new Error('仕入が見つかりません')
+  applyFulfillment('id', id, fulfillment)
 }
 
 /** listPurchases / getPurchaseSummary で共通の SELECT（WHERE・ORDER BY は呼び出し側で足す） */
