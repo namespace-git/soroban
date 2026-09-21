@@ -4,6 +4,7 @@ import type { InventoryItem, Tag } from '../../shared/types'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
+import CodeChip from '../components/CodeChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
@@ -121,7 +122,7 @@ const filteredItems = computed(() => {
   }
   return list.filter(i => matchesSearch(
     [
-      i.name, i.model_code, i.series_code, i.material, i.note, i.shop_account_name,
+      i.item_code, i.name, i.model_code, i.series_code, i.material, i.note, i.shop_account_name,
       ...i.tags.map(t => t.name), ...i.inherited_tags.map(t => t.name),
     ],
     searchText.value,
@@ -198,9 +199,14 @@ async function split(item: InventoryItem) {
     { message: `原価 ${yen(item.landed_cost)} を等分します`, okLabel: '分割する' },
   )) return
   try {
-    await window.soroban.splitInventory(item.id, n)
+    const newIds = await window.soroban.splitInventory(item.id, n)
+    const created = await window.soroban.listInventory('in_stock')
+    const codes = newIds
+      .map(id => created.find(i => i.id === id)?.item_code)
+      .filter((c): c is string => !!c)
     await load()
     changed()
+    if (codes.length) toast(`${codes.join('・')}に分割しました`, 'ok')
   } catch (e) {
     toast((e as Error).message, 'warn')
   }
@@ -261,6 +267,9 @@ async function editNote(item: InventoryItem) {
       <span class="grow" />
       <span class="faint">{{ filteredItems.length }}点 ／ 原価計 {{ yen(total) }}</span>
     </div>
+    <p class="faint hint-row">
+      在庫コード（S-0012）をクリックするとコピーできます。メルカリのタイトルに貼るとその1点が自動で引き当たります。2個セットは【S-0012】【S-0013】のように並べます
+    </p>
 
     <div class="panel table-panel">
       <Skeleton v-if="!loaded" :rows="6" />
@@ -296,12 +305,12 @@ async function editNote(item: InventoryItem) {
             <td class="item-cell">
               <div class="item-name clickable" :title="i.name" @click="openTimeline(i)">{{ i.name }}</div>
               <div class="chip-row">
-                <StatusChip
-                  v-if="i.model_code" tone="neutral" :label="i.model_code"
-                  @click="i.status === 'in_stock' && editModelCode(i)"
-                  :class="{ clickable: i.status === 'in_stock' }"
-                />
-                <button v-else-if="i.status === 'in_stock'" class="sm ghost" @click="editModelCode(i)">型番</button>
+                <CodeChip kind="item" :code="i.item_code" />
+                <CodeChip v-if="i.model_code" kind="model" :code="i.model_code" />
+                <button
+                  v-if="i.status === 'in_stock'" class="sm ghost" @click="editModelCode(i)"
+                  :title="i.model_code ? '型番を編集する' : '型番を設定する'"
+                >{{ i.model_code ? '型番編集' : '型番' }}</button>
                 <StatusChip
                   v-if="i.listing"
                   :tone="i.listing.status === 'suspended' ? 'neutral' : 'brand'"
@@ -387,6 +396,8 @@ async function editNote(item: InventoryItem) {
   font-size: 10px;
   color: var(--text-faint);
 }
+
+.hint-row { margin: -4px 0 12px; }
 
 .table-panel { padding: 0; overflow: hidden; }
 .table-panel table { table-layout: fixed; }

@@ -13,6 +13,7 @@ const state = vi.hoisted(() => ({
     bodyText: '',
     scrapeResult: { sales: [] as unknown[], totalCount: null as number | null },
     listingsHtml: '',
+    inProgressHtml: '',
     detailDescription: null as string | null,
     fetchImpl: undefined as
       | ((url: string) => Promise<{ ok: boolean; arrayBuffer: () => Promise<ArrayBuffer> }>)
@@ -48,7 +49,9 @@ vi.mock('electron', () => {
           // `document.body ? document.body.innerText` を使うため、
           // より具体的なパターン（sold-item-link 等）を先に見る
           if (script.includes('sold-item-link')) return o.scrapeResult
-          if (script.includes('outerHTML')) return o.listingsHtml
+          if (script.includes('outerHTML')) {
+            return this.currentUrl.includes('in_progress') ? o.inProgressHtml : o.listingsHtml
+          }
           if (script.includes('description')) return o.detailDescription
           if (script.includes('recaptcha')) return o.hasCaptchaFrame
           if (script.includes("querySelector('main')")) return o.loggedIn
@@ -125,6 +128,7 @@ vi.mock('../db', () => ({
   insertCollected: vi.fn((rows: Array<{ mercariItemId: string }>) =>
     rows.map((r, i) => ({ id: `sale-${i}-${r.mercariItemId}`, mercariItemId: r.mercariItemId }))),
   updateCollectedActuals: vi.fn(() => 0),
+  updateSaleStatus: vi.fn(() => true),
   salesWithoutThumb: vi.fn(() => []),
   setSaleThumb: vi.fn(),
   setListingThumb: vi.fn(),
@@ -138,8 +142,8 @@ vi.mock('../db', () => ({
 }))
 
 import {
-  buildUserAgent, collect, extractListingTotal, extractTotalCount, isChallengeText,
-  parseListingsHtml, parseSoldHtml, parseSoldRow, randomWaitMs,
+  buildUserAgent, collect, extractInProgressTotal, extractListingTotal, extractTotalCount,
+  isChallengeText, parseInProgressHtml, parseListingsHtml, parseSoldHtml, parseSoldRow, randomWaitMs,
 } from '../collector'
 import * as db from '../db'
 
@@ -356,6 +360,78 @@ describe('collector（electronに依存しない部分）', () => {
       expect(extractListingTotal('該当の記載なし')).toBeNull()
     })
   })
+
+  describe('parseInProgressHtml（実DOM抜粋のfixture）', () => {
+    const html = readFileSync(join(__dirname, 'fixtures', 'mercari-in-progress.html'), 'utf-8')
+    const rows = parseInProgressHtml(html)
+
+    it('4件取れる', () => {
+      expect(rows).toHaveLength(4)
+    })
+
+    it('m47467786314：発送してください → waiting_shipment・¥8,999・サムネURL', () => {
+      const r = rows.find(r => r.mercariItemId === 'm47467786314')!
+      expect(r.price).toBe(8999)
+      expect(r.statusText).toBe('発送してください')
+      expect(r.status).toBe('waiting_shipment')
+      expect(r.updatedText).toBe('3時間前に更新')
+      expect(r.thumbUrl).toBe(
+        'https://static.mercdn.net/thumb/item/jpeg/m47467786314_1.jpg?1789781431',
+      )
+    })
+
+    it('m69773157501：受取評価待ち → shipped', () => {
+      const r = rows.find(r => r.mercariItemId === 'm69773157501')!
+      expect(r.statusText).toBe('受取評価待ち')
+      expect(r.status).toBe('shipped')
+    })
+
+    it('総件数（4件）を抜く', () => {
+      expect(extractInProgressTotal(html)).toBe(4)
+    })
+  })
+
+  describe('parseInProgressHtml：状態文言のマッピング', () => {
+    // fixture と同じ構造の最小HTMLを組み立てる（更新日時の直後の<span>が状態文言）
+    function buildHtml(statusText: string, id = 'm100000001'): string {
+      return `<div data-testid="mypage-main-content"><ul data-testid="listed-item-list"><li>`
+        + `<a href="/transaction/${id}" data-testid="listed-item">`
+        + `<img src="https://example.com/${id}.jpg">`
+        + `<p data-testid="item-label">テスト商品</p>`
+        + `<span data-testid="price"><span>¥</span><span>1,000</span></span>`
+        + `<span>1時間前に更新</span>`
+        + `<p><span>${statusText}</span></p>`
+        + `</a></li></ul></div>`
+    }
+
+    it('支払いをしてください → waiting_payment', () => {
+      expect(parseInProgressHtml(buildHtml('支払いをしてください'))[0].status).toBe('waiting_payment')
+    })
+
+    it('支払い待ち → waiting_payment', () => {
+      expect(parseInProgressHtml(buildHtml('支払い待ち'))[0].status).toBe('waiting_payment')
+    })
+
+    it('発送待ち → waiting_shipment', () => {
+      expect(parseInProgressHtml(buildHtml('発送待ち'))[0].status).toBe('waiting_shipment')
+    })
+
+    it('評価をしてください → delivered', () => {
+      expect(parseInProgressHtml(buildHtml('評価をしてください'))[0].status).toBe('delivered')
+    })
+
+    it('未知の文言は null（statusTextには残す。waiting_shipmentに決め打たない）', () => {
+      const row = parseInProgressHtml(buildHtml('謎の状態'))[0]
+      expect(row.status).toBeNull()
+      expect(row.statusText).toBe('謎の状態')
+    })
+  })
+
+  describe('extractInProgressTotal', () => {
+    it('見つからなければ null', () => {
+      expect(extractInProgressTotal('該当の記載なし')).toBeNull()
+    })
+  })
 })
 
 // ============================================================
@@ -374,6 +450,7 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
       bodyText: '通常のマイページの本文です。'.repeat(50),
       scrapeResult: { sales: [], totalCount: null },
       listingsHtml: '',
+      inProgressHtml: '',
       detailDescription: null,
       fetchImpl: undefined,
     }
@@ -520,5 +597,48 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     expect(db.insertCollected).toHaveBeenCalledTimes(1)
     expect(vi.mocked(db.insertCollected).mock.calls[0][0]).toHaveLength(3)
     expect(run.message).not.toContain('キーワード不一致で除外')
+  })
+
+  describe('取引中タブ', () => {
+    const inProgressFixtureHtml =
+      readFileSync(join(__dirname, 'fixtures', 'mercari-in-progress.html'), 'utf-8')
+
+    it('既知の販売はupdateSaleStatusを呼び、未知は新規insertCollectedされる。messageに件数が出る', async () => {
+      state.opts.listingsHtml = listingsFixtureHtml
+      state.opts.inProgressHtml = inProgressFixtureHtml
+      // 4件のうち m47467786314 だけ既知（それ以外3件は新規）
+      vi.mocked(db.existingMercariIds).mockImplementation((ids: string[]) =>
+        new Set(ids.filter(id => id === 'm47467786314')))
+
+      const run = await collect(true)
+
+      expect(db.updateSaleStatus).toHaveBeenCalledTimes(1)
+      expect(db.updateSaleStatus).toHaveBeenCalledWith('m47467786314', 'waiting_shipment')
+
+      // insertCollectedは売却済み側（0件・呼ばれない）と取引中側（1回）の合計1回
+      expect(db.insertCollected).toHaveBeenCalledTimes(1)
+      const rows = vi.mocked(db.insertCollected).mock.calls[0][0] as Array<{ mercariItemId: string }>
+      expect(rows.map(r => r.mercariItemId).sort()).toEqual(
+        ['m17929703335', 'm62168185726', 'm69773157501'].sort(),
+      )
+
+      expect(run.message).toContain('取引中 4件（新規 3・更新 1）')
+    })
+
+    it('総数は読めるのに1件も解析できなければ、messageに構造変化の疑いを残す（出品中と同じ）', async () => {
+      state.opts.listingsHtml = listingsFixtureHtml
+      state.opts.inProgressHtml =
+        '<div data-testid="mypage-main-content">'
+        + '<div data-testid="transaction-filter-menu"><p><span>3件</span></p></div>'
+        + '<section data-testid="listed-item-list-changed"></section>'
+        + '</div>'
+
+      const run = await collect(true)
+
+      expect(run.status).toBe('ok')
+      expect(run.message).toContain('取引中タブの構造が変わった可能性')
+      expect(run.message).toContain('総数 3 件')
+      expect(db.insertCollected).not.toHaveBeenCalled()
+    })
   })
 })

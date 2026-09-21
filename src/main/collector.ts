@@ -5,7 +5,8 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import * as db from './db'
 import { extractCodes } from './code'
-import type { CollectorRun } from '../shared/types'
+import { todayLocal } from '../shared/date'
+import type { CollectorRun, SaleStatus } from '../shared/types'
 
 // ============================================================
 // メルカリの販売履歴を読み取る
@@ -27,6 +28,9 @@ const PARTITION = 'persist:mercari'
 const LISTINGS_URL = 'https://jp.mercari.com/mypage/listings/sold'
 // 出品した商品「出品中」タブ。ここから出品と在庫の引き当てを取り込む
 const MY_LISTINGS_URL = 'https://jp.mercari.com/mypage/listings'
+// 出品した商品「取引中」タブ。購入されたが未入金〜発送待ち〜受取評価待ちの取引がここに出る。
+// 「発送してください」は放置すると評価が下がるので、ここから状態を拾ってホームで目立たせる
+const IN_PROGRESS_URL = 'https://jp.mercari.com/mypage/listings/in_progress'
 const LOGIN_URL = 'https://jp.mercari.com/login'
 
 /** 1回の収集で開くページ数の上限（一覧1＋詳細最大5）。超えたら次回に回す */
@@ -315,6 +319,104 @@ export function extractListingTotal(html: string): number | null {
   return m ? parseInt(m[1].replace(/,/g, ''), 10) : null
 }
 
+/** 取引中タブの1件（parseInProgressHtml の要素） */
+export interface ScrapedTransaction {
+  mercariItemId: string
+  title: string
+  price: number
+  /** 状態の生の文言（「発送してください」等）。status が読めなくても記録は残す */
+  statusText: string
+  /** 文言から解釈した状態。未知の文言なら null（waiting_shipment 等に決め打たない） */
+  status: SaleStatus | null
+  /** 「3時間前に更新」等の表示。取れなければ null */
+  updatedText: string | null
+  /** 商品サムネイルのURL。取れなければ null */
+  thumbUrl: string | null
+}
+
+/**
+ * 取引中タブ（`/mypage/listings/in_progress`）の状態文言から SaleStatus を判定する。
+ *   支払いをしてください／支払い待ち   → waiting_payment（購入されたが未入金）
+ *   発送してください／発送待ち         → waiting_shipment（入金済み。こちらが発送する）
+ *   受取評価待ち                       → shipped（発送済み。買い手の受取待ち）
+ *   評価をしてください                 → delivered（買い手が受取評価済み。こちらの評価待ち）
+ * 未知の文言（i18n・表記ゆれ等）は null を返す。waiting_shipment に決め打つと
+ * 実際には発送不要な取引まで「要対応」に出てしまうため
+ */
+function mapInProgressStatusText(text: string): SaleStatus | null {
+  if (text.includes('支払い')) return 'waiting_payment'
+  if (text.includes('発送してください') || text.includes('発送待ち')) return 'waiting_shipment'
+  if (text.includes('受取評価待ち')) return 'shipped'
+  if (text.includes('評価をしてください')) return 'delivered'
+  return null
+}
+
+/**
+ * 「出品した商品 › 取引中」タブの HTML から取引を抜く（jsdom なしの簡易パース。fixture テスト用）。
+ *
+ * ⚠ セレクタは実DOM（fixtures/mercari-in-progress.html）に基づくが、クラス名はハッシュで
+ *   変わるため使っていない。parseListingsHtml と同じ流儀：商品リンク（`a[href*="/transaction/m"]`、
+ *   data-testid="listed-item"）を起点にし、タイトルは `[data-testid="item-label"]`、価格は
+ *   `[data-testid="price"]` の数字、サムネイルは `img[src]` から拾う。状態の文言は
+ *   「n日前／n時間前／n分前に更新」の直後に来る最初の `<span>` のテキスト（受取評価待ち等）。
+ */
+export function parseInProgressHtml(html: string): ScrapedTransaction[] {
+  const listMatch = /<ul\b[^>]*data-testid="listed-item-list"[^>]*>([\s\S]*?)<\/ul>/.exec(html)
+  if (!listMatch) return []
+  const listHtml = listMatch[1]
+
+  const rows: ScrapedTransaction[] = []
+  const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/g
+  let am: RegExpExecArray | null
+  while ((am = anchorRe.exec(listHtml))) {
+    const attrs = am[1]
+    if (!/data-testid="listed-item"/.test(attrs)) continue
+    const content = am[2]
+
+    const hrefMatch = /href="([^"]*)"/.exec(attrs)
+    const idMatch = hrefMatch ? /m\d{9,}/.exec(hrefMatch[1]) : null
+    if (!idMatch) continue
+
+    const titleMatch = /<p\b[^>]*data-testid="item-label"[^>]*>([\s\S]*?)<\/p>/.exec(content)
+    const title = titleMatch ? stripTags(titleMatch[1]) : ''
+    if (!title) continue
+
+    const priceMatch = /<span\b[^>]*data-testid="price"[^>]*>([\s\S]*?)<\/span>\s*<\/span>/.exec(content)
+    const priceDigits = priceMatch ? stripTags(priceMatch[1]).replace(/[^\d]/g, '') : ''
+    if (!priceDigits) continue
+
+    const imgMatch = /<img\b[^>]*\bsrc="([^"]*)"/.exec(content)
+
+    const updatedMatch = /(\d+(?:日|時間|分)前に更新)/.exec(content)
+    const updatedText = updatedMatch ? updatedMatch[1] : null
+
+    // 状態の文言は更新日時の直後に来る最初の <span> のテキスト
+    let statusText = ''
+    if (updatedMatch) {
+      const rest = content.slice(updatedMatch.index + updatedMatch[0].length)
+      const statusMatch = /<span\b[^>]*>([\s\S]*?)<\/span>/.exec(rest)
+      statusText = statusMatch ? stripTags(statusMatch[1]) : ''
+    }
+
+    rows.push({
+      mercariItemId: idMatch[0],
+      title,
+      price: parseInt(priceDigits, 10),
+      statusText,
+      status: mapInProgressStatusText(statusText),
+      updatedText,
+      thumbUrl: imgMatch ? imgMatch[1] : null,
+    })
+  }
+  return rows
+}
+
+/** 取引中タブの総件数（`data-testid="transaction-filter-menu"` 内の「4件」）。読めなければ null */
+export function extractInProgressTotal(html: string): number | null {
+  const m = /data-testid="transaction-filter-menu"[\s\S]*?<span\b[^>]*>([\d,]+)件<\/span>/.exec(html)
+  return m ? parseInt(m[1].replace(/,/g, ''), 10) : null
+}
+
 function createWindow(show: boolean): BrowserWindow {
   return new BrowserWindow({
     width: 1280,
@@ -485,6 +587,7 @@ function toRow(s: ScrapedSale): {
   fee?: number | null
   shippingFee?: number | null
   otherCost?: number | null
+  status?: SaleStatus | null
 } {
   return {
     mercariItemId: s.mercariItemId,
@@ -494,6 +597,8 @@ function toRow(s: ScrapedSale): {
     fee: s.fee,
     shippingFee: s.shippingFee,
     otherCost: s.otherCost,
+    // 販売履歴（sold）タブに出ている時点で取引完了（購入完了日つき）
+    status: 'completed',
   }
 }
 
@@ -538,9 +643,12 @@ export interface ThumbSaveResult {
   attempted: number
 }
 
+/** saveNewThumbs が必要とする最小限の形（ScrapedSale・ScrapedTransaction のどちらも満たす） */
+type ThumbSource = { mercariItemId: string; thumbUrl: string | null }
+
 async function saveNewThumbs(
   targets: Array<{ id: string; mercariItemId: string }>,
-  scraped: ScrapedSale[],
+  scraped: ThumbSource[],
   limit = MAX_THUMBS_PER_RUN,
 ): Promise<ThumbSaveResult> {
   const thumbByItemId = new Map(scraped.map(s => [s.mercariItemId, s.thumbUrl]))
@@ -674,6 +782,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     let listingInserted = 0
     let listingUpdated = 0
     let listingThumbsSaved = 0
+    let listingThumbsAttempted = 0
     let listingsScraped = 0
     let listingBrokenMessage: string | null = null
 
@@ -729,6 +838,74 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
           listingsNoThumb, targetListings, MAX_THUMBS_PER_RUN - thumbsAttempted,
         )
         listingThumbsSaved = listingThumbsResult.saved
+        listingThumbsAttempted = listingThumbsResult.attempted
+      }
+    }
+
+    // 出品した商品「取引中」タブ（1ページ）。出品中タブの後に読む。購入されたが未入金〜
+    // 発送待ち〜受取評価待ちの取引がここに出る。既知の販売は状態だけ更新、未知は
+    // 新しい販売として取り込む（soldAt は今日。本当の購入完了日は売却済み一覧が来たら直す）
+    let inProgressScraped = 0
+    let inProgressNew = 0
+    let inProgressUpdated = 0
+    let inProgressUnknownStatus = 0
+    let inProgressThumbsSaved = 0
+    let inProgressBrokenMessage: string | null = null
+
+    if (pagesOpened < MAX_PAGES_PER_RUN) {
+      await win.loadURL(IN_PROGRESS_URL)
+      pagesOpened++
+      await randomWait()
+
+      if (await isChallenge(win)) {
+        keepWindowOpen = true
+        revealForChallenge(win)
+        return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
+      }
+
+      const inProgressHtml = await win.webContents
+        .executeJavaScript('document.documentElement.outerHTML')
+        .catch(() => '') as string
+      const scrapedTransactions = parseInProgressHtml(inProgressHtml)
+      inProgressScraped = scrapedTransactions.length
+      const inProgressTotal = extractInProgressTotal(inProgressHtml)
+
+      if (scrapedTransactions.length === 0 && inProgressTotal !== null && inProgressTotal >= 1) {
+        // 総数は読めているのに1件も解析できない＝一覧の入れ物の構造が変わった疑い
+        inProgressBrokenMessage =
+          `取引中タブの構造が変わった可能性（総数 ${inProgressTotal} 件・解析 0 件）`
+      } else if (scrapedTransactions.length === 0 && !inProgressHtml.includes('data-testid="mypage-main-content"')) {
+        inProgressBrokenMessage = '取引中タブの構造が変わっている可能性があります'
+      } else {
+        const keywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
+        const targetTransactions = keywords.length > 0
+          ? scrapedTransactions.filter(t => db.matchesAnyKeyword(t.title, keywords))
+          : scrapedTransactions
+
+        const knownIds = db.existingMercariIds(targetTransactions.map(t => t.mercariItemId))
+        const freshTransactions = targetTransactions.filter(t => !knownIds.has(t.mercariItemId))
+
+        for (const t of targetTransactions) {
+          if (t.status === null) inProgressUnknownStatus++
+          if (!knownIds.has(t.mercariItemId) || !t.status) continue
+          if (db.updateSaleStatus(t.mercariItemId, t.status)) inProgressUpdated++
+        }
+
+        const insertedRows = freshTransactions.length > 0
+          ? db.insertCollected(freshTransactions.map(t => ({
+              mercariItemId: t.mercariItemId,
+              title: t.title,
+              price: t.price,
+              soldAt: todayLocal(),
+              status: t.status,
+            })))
+          : []
+        inProgressNew = insertedRows.length
+
+        const inProgressThumbsResult = await saveNewThumbs(
+          insertedRows, targetTransactions, MAX_THUMBS_PER_RUN - thumbsAttempted - listingThumbsAttempted,
+        )
+        inProgressThumbsSaved = inProgressThumbsResult.saved
       }
     }
 
@@ -774,15 +951,18 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       return db.finishRun(runId, 'empty', 0, 0, parts.join('。'))
     }
 
-    // status は販売側の結果に従う（ここまで来ていれば ok。出品中タブの構造異常は
+    // status は販売側の結果に従う（ここまで来ていれば ok。出品中・取引中タブの構造異常は
     // status を落とさず message にだけ残す＝Codexレビュー指摘）
     const parts = [salesEmpty ? '販売 0 件' : `新規 ${inserted}・更新 ${updated}`]
     if (excludedByKeyword > 0) parts.push(`キーワード不一致で除外 ${excludedByKeyword} 件`)
-    const totalThumbsSaved = thumbsSaved + listingThumbsSaved
+    const totalThumbsSaved = thumbsSaved + listingThumbsSaved + inProgressThumbsSaved
     if (totalThumbsSaved > 0) parts.push(`サムネイル ${totalThumbsSaved} 枚`)
     if (pending.length > 0) parts.push(`型番の追記 ${codesApplied}（詳細 ${detailsRead} 件）`)
     parts.push(`出品 新規 ${listingInserted}・更新 ${listingUpdated}`)
     if (listingBrokenMessage) parts.push(listingBrokenMessage)
+    parts.push(`取引中 ${inProgressScraped}件（新規 ${inProgressNew}・更新 ${inProgressUpdated}）`)
+    if (inProgressUnknownStatus > 0) parts.push(`取引中の文言不明 ${inProgressUnknownStatus} 件`)
+    if (inProgressBrokenMessage) parts.push(inProgressBrokenMessage)
     if (totalCount !== null && totalCount !== sales.length) {
       parts.push(`一覧に ${totalCount} 件、取得 ${sales.length} 件`)
     }

@@ -4,11 +4,12 @@
 import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue'
 import type {
   SaleProfit, ShippingMethod, SaleKind, SaleInput, SaleFilter, SaleTotals, Tag,
-  Listing, ListingStatus, CollectorRun,
+  Listing, ListingStatus, CollectorRun, SaleStatus,
 } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
+import CodeChip from '../components/CodeChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
@@ -28,6 +29,8 @@ type SalesGotoPayload = {
   stage?: Stage
   onlyUnallocated?: boolean
   onlyPending?: boolean
+  /** stage:'pending' と一緒に来たら、その状態だけに絞り込む（例：発送してください） */
+  status?: SaleStatus
   mercariItemId?: string
   search?: string
   focusId?: string
@@ -54,9 +57,20 @@ const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = 
   active: 'info', suspended: 'neutral', sold: 'ok', ended: 'neutral',
 }
 
+// --- 取引の進み具合のチップ（sale_profit の status）。null は出さない ---
+const SALE_STATUS_CHIP: Record<SaleStatus, { tone: 'warn' | 'info' | 'ok'; label: string }> = {
+  waiting_payment: { tone: 'warn', label: '支払い待ち' },
+  waiting_shipment: { tone: 'warn', label: '発送してください' },
+  shipped: { tone: 'info', label: '受取評価待ち' },
+  delivered: { tone: 'info', label: '評価してください' },
+  completed: { tone: 'ok', label: '取引完了' },
+}
+
 const stage = ref<Stage>('pending')
 const onlyUnallocated = ref(false)
 const tagFilter = ref('')
+/** 「発送してください」だけに絞る（タブは増やさない。ホームの要対応から来る） */
+const statusFilter = ref<SaleStatus | ''>('')
 const searchText = ref('')
 
 const methods = ref<ShippingMethod[]>([])
@@ -141,12 +155,14 @@ const rows = computed<Row[]>(() => {
 const filteredRows = computed(() => rows.value.filter(r => {
   if (r.kind === 'sale' && r.sale) {
     const s = r.sale
+    if (statusFilter.value && s.status !== statusFilter.value) return false
     return matchesSearch(
       [s.title, s.note, s.buyer, ...s.model_codes, ...s.tags.map(t => t.name), ...s.inherited_tags.map(t => t.name)],
       searchText.value,
     )
   }
   if (r.kind === 'listing' && r.listing) {
+    if (statusFilter.value) return false // 状態の絞り込みは販売行だけが対象
     const l = r.listing
     return matchesSearch([l.title, ...l.model_codes, ...l.items.flatMap(it => [it.name, it.model_code])], searchText.value)
   }
@@ -242,7 +258,21 @@ async function load() {
     listings.value = []
   }
   await loadTotals()
+  await loadSaleItemCodes()
   loaded.value = true
+}
+
+// --- 原価セルに出す在庫コード。sale_profit には個々の item_code が無いため、
+//     紐付いている行だけ listSaleLines で引き直す（表示専用。金額の再計算はしない） ---
+const saleItemCodes = ref<Map<string, string[]>>(new Map())
+async function loadSaleItemCodes() {
+  const targets = sales.value.filter(s => s.item_count > 0)
+  if (!targets.length) { saleItemCodes.value = new Map(); return }
+  const pairs = await Promise.all(targets.map(async s => {
+    const items = await window.soroban.listSaleLines(s.id)
+    return [s.id, items.map(it => it.item_code)] as const
+  }))
+  saleItemCodes.value = new Map(pairs)
 }
 
 async function loadCounts() {
@@ -365,6 +395,7 @@ watch(gotoPayload, async (p) => {
   else if (p.onlyPending) stage.value = 'pending'
   else if (p.focusId) stage.value = 'all' // どの段階にいても検索結果を必ず見つけられるようにする
   if (p.onlyUnallocated) onlyUnallocated.value = true
+  if (p.status) statusFilter.value = p.status
   if (p.search) searchText.value = p.search
   if (p.mercariItemId) await openFromMercariId(p.mercariItemId)
   if (p.focusId) await focusRow(p.focusId)
@@ -561,6 +592,11 @@ async function remove(sale: SaleProfit) {
   await loadCounts()
   changed()
 }
+
+// --- メルカリで開く（標準ブラウザ。読み取り専用） ---
+async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: string) {
+  await window.soroban.openMercari(kind, mercariItemId)
+}
 </script>
 
 <template>
@@ -625,6 +661,10 @@ async function remove(sale: SaleProfit) {
         <input type="checkbox" v-model="onlyUnallocated" />
         未引き当てだけ
       </label>
+      <select v-if="stage !== 'listed'" v-model="statusFilter" title="取引の進み具合で絞り込む">
+        <option value="">すべての状態</option>
+        <option value="waiting_shipment">発送してください</option>
+      </select>
       <select v-if="stage !== 'listed'" v-model="tagFilter">
         <option value="">すべてのタグ</option>
         <optgroup v-if="directTagOptions.length" label="直接">
@@ -717,7 +757,7 @@ async function remove(sale: SaleProfit) {
             <tr
               v-for="r in filteredRows" :key="r.key"
               :data-row-id="r.id"
-              :class="{ focused: focusedId === r.id }"
+              :class="{ focused: focusedId === r.id, 'needs-shipment': r.kind === 'sale' && r.sale?.status === 'waiting_shipment' }"
             >
               <td class="date-cell" :title="rowDateTitle(r)">
                 <div class="faint nowrap">{{ rowDateDisplay(r).slice(5) }}</div>
@@ -753,6 +793,11 @@ async function remove(sale: SaleProfit) {
 
                 <template v-if="r.kind === 'sale' && r.sale">
                   <div class="chip-row">
+                    <StatusChip
+                      v-if="r.sale.status && SALE_STATUS_CHIP[r.sale.status]"
+                      :tone="SALE_STATUS_CHIP[r.sale.status].tone"
+                      :label="SALE_STATUS_CHIP[r.sale.status].label"
+                    />
                     <button
                       class="kind-toggle"
                       title="転売／私物を切り替える（確認あり）"
@@ -769,7 +814,7 @@ async function remove(sale: SaleProfit) {
                       :tone="shippingChipTone(r.sale)"
                       :label="shippingChipLabel(r.sale)"
                     />
-                    <StatusChip v-for="mc in r.sale.model_codes" :key="mc" tone="neutral" :label="mc" />
+                    <CodeChip v-for="mc in r.sale.model_codes" :key="mc" kind="model" :code="mc" />
                     <StatusChip v-for="t in r.sale.tags" :key="t.id" tone="info" :label="t.name" />
                     <span
                       v-for="t in r.sale.inherited_tags" :key="'inh-' + t.id"
@@ -788,7 +833,7 @@ async function remove(sale: SaleProfit) {
                 </template>
 
                 <div v-else-if="r.listing" class="chip-row">
-                  <StatusChip v-for="mc in r.listing.model_codes" :key="mc" tone="neutral" :label="mc" />
+                  <CodeChip v-for="mc in r.listing.model_codes" :key="mc" kind="model" :code="mc" />
                   <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
                   <StatusChip
                     v-if="stage === 'all' && r.listing.shipping_method_id"
@@ -883,6 +928,9 @@ async function remove(sale: SaleProfit) {
                     >
                       {{ yen(r.sale.cost) }}<small class="faint"> ×{{ r.sale.item_count }}</small>
                     </button>
+                    <div class="chip-row cost-codes">
+                      <CodeChip v-for="code in saleItemCodes.get(r.sale.id) ?? []" :key="code" kind="item" :code="code" />
+                    </div>
                     <StatusChip v-if="r.sale.auto_linked" tone="neutral" label="自動紐付け" />
                   </span>
                   <span v-else class="faint">—</span>
@@ -890,7 +938,7 @@ async function remove(sale: SaleProfit) {
                 <template v-else-if="r.listing">
                   <div v-if="r.listing.items.length" class="reserved-cell">
                     <div class="chip-row">
-                      <StatusChip v-for="it in r.listing.items" :key="it.id" tone="neutral" :label="it.model_code ?? it.name" />
+                      <CodeChip v-for="it in r.listing.items" :key="it.id" kind="item" :code="it.item_code" />
                     </div>
                     <span class="num faint">{{ yen(r.listing.reserved_cost) }}</span>
                   </div>
@@ -916,6 +964,15 @@ async function remove(sale: SaleProfit) {
 
               <td class="actions">
                 <template v-if="r.kind === 'sale' && r.sale">
+                  <button
+                    v-if="r.sale.mercari_item_id"
+                    class="icon ghost"
+                    aria-label="メルカリで開く"
+                    title="メルカリの取引画面を開く"
+                    @click.stop="r.sale && openMercariExternal('transaction', r.sale.mercari_item_id)"
+                  >
+                    <Icon name="external" :size="14" />
+                  </button>
                   <button class="sm ghost fade-btn" @click="r.sale && openTagPicker(r.sale, $event)" title="タグを編集する">タグ</button>
                   <button class="sm ghost fade-btn" @click="r.sale && editNote(r.sale)" title="メモを編集する">メモ</button>
                   <button
@@ -933,6 +990,14 @@ async function remove(sale: SaleProfit) {
                   </button>
                 </template>
                 <template v-else-if="r.listing && (r.listing.status === 'active' || r.listing.status === 'suspended')">
+                  <button
+                    class="icon ghost"
+                    aria-label="メルカリで開く"
+                    title="メルカリの商品ページを開く"
+                    @click.stop="r.listing && openMercariExternal('item', r.listing.mercari_item_id)"
+                  >
+                    <Icon name="external" :size="14" />
+                  </button>
                   <button class="sm" :class="r.listing.items.length ? 'ghost' : 'link-btn'" @click="r.listing && openListingAlloc(r.listing)">
                     <Icon name="link" :size="14" /> {{ r.listing.items.length ? '追加' : '引き当て' }}
                   </button>
@@ -1055,8 +1120,8 @@ async function remove(sale: SaleProfit) {
 .col-ship         { width: 200px; }
 .col-pack         { width: 76px; }
 .col-status       { width: 110px; }
-.col-actions      { width: 112px; }
-.col-actions-wide { width: 200px; } /* 出品行の「引き当て／追加」＋「取り下げ」が入る分だけ広げる */
+.col-actions      { width: 136px; } /* メルカリで開くアイコンの分だけ広げる */
+.col-actions-wide { width: 220px; } /* 出品行の「引き当て／追加」＋「取り下げ」＋メルカリで開くが入る分だけ広げる */
 .col-profit-narrow { width: 100px; } /* すべて段階（閲覧用。手数料・発送方法・梱包は列を出さない） */
 
 /* --- 出品中の列幅（旧 Listings.vue 相当。手数料・梱包が無い分、他の列を広めに） --- */
@@ -1067,7 +1132,7 @@ async function remove(sale: SaleProfit) {
 .col-listed-shipping { width: 150px; }
 .col-listed-reserved { width: 140px; }
 .col-listed-profit   { width: 96px; }
-.col-listed-actions  { width: 180px; }
+.col-listed-actions  { width: 204px; } /* メルカリで開くアイコンの分だけ広げる */
 
 @media (max-width: 1099px) {
   .col-date            { width: 56px; }
@@ -1076,14 +1141,15 @@ async function remove(sale: SaleProfit) {
   .col-amt             { width: 76px; }
   .col-ship            { width: 168px; }
   .col-status          { width: 96px; }
-  .col-actions-wide    { width: 184px; }
+  .col-actions         { width: 128px; }
+  .col-actions-wide    { width: 204px; }
   .col-profit-narrow   { width: 84px; }
   .col-listed-thumb    { width: 48px; }
   .col-listed-status   { width: 120px; }
   .col-listed-shipping { width: 150px; }
   .col-listed-reserved { width: 140px; }
   .col-listed-profit   { width: 110px; }
-  .col-listed-actions  { width: 184px; }
+  .col-listed-actions  { width: 192px; }
 }
 
 .nowrap { white-space: nowrap; }
@@ -1094,6 +1160,10 @@ async function remove(sale: SaleProfit) {
 
 /* 横断検索・要対応から来たときに該当行を一時的に示す */
 tr.focused { background: var(--brand-soft); }
+
+/* 発送してください（waiting_shipment）は今日の作業として目立たせる。
+   box-shadow は table-row では描画されないブラウザがあるため先頭セルに付ける */
+tr.needs-shipment td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
 
 .thumb-cell { padding-right: 4px; }
 .thumb, .thumb-placeholder {
@@ -1158,6 +1228,7 @@ tr:hover .fade-btn { opacity: 1; }
   align-items: flex-end;
   gap: 2px;
 }
+.cost-codes { justify-content: flex-end; margin-top: 0; }
 
 .cost-btn {
   background: transparent;

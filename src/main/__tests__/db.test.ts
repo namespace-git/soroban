@@ -1063,6 +1063,117 @@ describe('db（:memory:）', () => {
     expect(db.salesWithoutThumb([])).toEqual([])
   })
 
+  describe('メルカリの取引状態（取引中タブ）', () => {
+    it('insertCollected：statusを渡すと保存され、shipped/delivered/completedの初期日付も入る', () => {
+      db.insertCollected([
+        { mercariItemId: 'ip-1', title: '発送待ちの商品', price: 1000, soldAt: '2026-08-01', status: 'waiting_shipment' },
+        { mercariItemId: 'ip-2', title: '評価待ちの商品', price: 1000, soldAt: '2026-08-02', status: 'delivered' },
+        { mercariItemId: 'ip-3', title: '状態不明の商品', price: 1000, soldAt: '2026-08-03' },
+      ])
+
+      const s1 = db.listSales().find(s => s.mercari_item_id === 'ip-1')!
+      expect(s1.status).toBe('waiting_shipment')
+      expect(s1.shipped_at).toBeNull()
+      expect(s1.delivered_at).toBeNull()
+      expect(s1.completed_at).toBeNull()
+
+      const s2 = db.listSales().find(s => s.mercari_item_id === 'ip-2')!
+      expect(s2.status).toBe('delivered')
+      expect(s2.shipped_at).toBe('2026-08-02')
+      expect(s2.delivered_at).toBe('2026-08-02')
+      expect(s2.completed_at).toBeNull()
+
+      const s3 = db.listSales().find(s => s.mercari_item_id === 'ip-3')!
+      expect(s3.status).toBeNull()
+    })
+
+    it('updateSaleStatus：状態は前にしか進まない。同じ状態・後戻りはfalseで何もしない', () => {
+      db.insertCollected([
+        { mercariItemId: 'st-1', title: '商品', price: 1000, soldAt: '2026-08-01', status: 'waiting_payment' },
+      ])
+      const id = db.listSales().find(s => s.mercari_item_id === 'st-1')!.id
+
+      expect(db.updateSaleStatus('st-1', 'waiting_shipment', '2026-08-02')).toBe(true)
+      expect(db.listSales().find(s => s.id === id)!.status).toBe('waiting_shipment')
+
+      // 後戻り：無視されfalse
+      expect(db.updateSaleStatus('st-1', 'waiting_payment', '2026-08-03')).toBe(false)
+      expect(db.listSales().find(s => s.id === id)!.status).toBe('waiting_shipment')
+
+      // 同じ状態：無視されfalse
+      expect(db.updateSaleStatus('st-1', 'waiting_shipment', '2026-08-03')).toBe(false)
+
+      // 未知のmercari_item_idはfalse
+      expect(db.updateSaleStatus('does-not-exist', 'shipped')).toBe(false)
+    })
+
+    it('updateSaleStatus：shipped_at・delivered_atは初めて観測した日で固定（後から呼んでも変わらない）', () => {
+      db.insertCollected([
+        { mercariItemId: 'st-2', title: '商品', price: 1000, soldAt: '2026-08-01', status: 'waiting_shipment' },
+      ])
+
+      expect(db.updateSaleStatus('st-2', 'shipped', '2026-08-05')).toBe(true)
+      let s = db.listSales().find(s => s.mercari_item_id === 'st-2')!
+      expect(s.shipped_at).toBe('2026-08-05')
+      expect(s.delivered_at).toBeNull()
+
+      // delivered まで進めても、既に入っているshipped_atは動かない
+      expect(db.updateSaleStatus('st-2', 'delivered', '2026-08-09')).toBe(true)
+      s = db.listSales().find(s => s.mercari_item_id === 'st-2')!
+      expect(s.shipped_at).toBe('2026-08-05')
+      expect(s.delivered_at).toBe('2026-08-09')
+    })
+
+    it('updateCollectedActuals：売却済み一覧で観測したらstatus=completed・completed_atが付く。取引中タブで先に入ったsold_atは上書きしない', () => {
+      // 取引中タブで先に取り込まれた販売（sold_atは「初めて見た日」の仮日付）
+      db.insertCollected([
+        { mercariItemId: 'ip-done', title: '取引中から入った商品', price: 2000, soldAt: '2026-08-01', status: 'waiting_shipment' },
+      ])
+      db.updateSaleStatus('ip-done', 'shipped', '2026-08-02')
+
+      // 後日、売却済み一覧（販売履歴）で観測。soldAtは本当の購入完了日
+      const updated = db.updateCollectedActuals([
+        { mercariItemId: 'ip-done', soldAt: '2026-08-10', fee: 200, shippingFee: 300 },
+      ])
+      expect(updated).toBe(1)
+
+      const s = db.listSales().find(s => s.mercari_item_id === 'ip-done')!
+      expect(s.sold_at).toBe('2026-08-01') // 「初めて見た日」のまま。上書きしない
+      expect(s.status).toBe('completed')
+      expect(s.completed_at).toBe('2026-08-10')
+      expect(s.fee).toBe(200)
+      expect(s.shipping_fee).toBe(300)
+
+      // 2回目に呼んでも completed_at は最初に観測した日のまま
+      db.updateCollectedActuals([
+        { mercariItemId: 'ip-done', soldAt: '2026-08-11', fee: 200, shippingFee: 300 },
+      ])
+      expect(db.listSales().find(s => s.mercari_item_id === 'ip-done')!.completed_at).toBe('2026-08-10')
+    })
+
+    it('updateCollectedActuals：取引中タブを経由していない販売は、従来どおりsold_atを本当の日付に直す', () => {
+      db.insertCollected([{ mercariItemId: 'plain-1', title: '商品', price: 1000, soldAt: '2026-08-01' }])
+
+      db.updateCollectedActuals([{ mercariItemId: 'plain-1', soldAt: '2026-07-20', fee: 100 }])
+
+      const s = db.listSales().find(s => s.mercari_item_id === 'plain-1')!
+      expect(s.sold_at).toBe('2026-07-20')
+      expect(s.status).toBe('completed')
+      expect(s.completed_at).toBe('2026-07-20')
+    })
+
+    it('getDashboard().needsShipment：status=waiting_shipmentの件数', () => {
+      db.insertCollected([
+        { mercariItemId: 'ns-1', title: '発送待ち1', price: 1000, soldAt: '2026-08-01', status: 'waiting_shipment' },
+        { mercariItemId: 'ns-2', title: '発送待ち2', price: 1000, soldAt: '2026-08-02', status: 'waiting_shipment' },
+        { mercariItemId: 'ns-3', title: '支払い待ち', price: 1000, soldAt: '2026-08-03', status: 'waiting_payment' },
+        { mercariItemId: 'ns-4', title: '完了済み', price: 1000, soldAt: '2026-08-04', status: 'completed' },
+      ])
+
+      expect(db.getDashboard().needsShipment).toBe(2)
+    })
+  })
+
   it('migrate：version2のDB→3でタグ機能が使えるようになる', () => {
     // version2状態（tag系テーブルが無いだけ）をファイルDB上で作り、initDbで3へ上げる
     const dir = mkdtempSync(join(tmpdir(), 'soroban-tag-migrate-'))
@@ -1077,7 +1188,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('14')
+      expect(db.getSettings().schema_version).toBe('16')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1198,7 +1309,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('14')
+      expect(db.getSettings().schema_version).toBe('16')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')

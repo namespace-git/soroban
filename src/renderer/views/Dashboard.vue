@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
-import type { DashboardStats, VariantSummary } from '../../shared/types'
+import type { DashboardStats, VariantSummary, SaleStatus } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
 
 const stats = ref<DashboardStats | null>(null)
 const revision = inject<Ref<number>>('revision')!
-const goto = inject<(t: string, payload?: { modelCode?: string; stage?: 'listed' | 'pending' | 'done' | 'all'; onlyUnallocated?: boolean }) => void>('goto')!
+const goto = inject<(t: string, payload?: { modelCode?: string; stage?: 'listed' | 'pending' | 'done' | 'all'; onlyUnallocated?: boolean; status?: SaleStatus }) => void>('goto')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -48,10 +48,10 @@ async function retryCollect() {
   }
 }
 
-// 要対応の合計（送料未入力＋未紐付け＋価格未入力の仕入）
+// 要対応の合計（発送待ち＋送料未入力＋未紐付け＋価格未入力の仕入＋未引き当ての出品）
 const needsTotal = computed(() => {
   if (!stats.value) return 0
-  return stats.value.needsShipping + stats.value.needsMatch
+  return stats.value.needsShipment + stats.value.needsShipping + stats.value.needsMatch
     + stats.value.needsPurchaseConfirm + stats.value.needsListingAllocation
 })
 
@@ -135,6 +135,16 @@ const runLabel: Record<string, string> = {
               </button>
             </div>
 
+            <button
+              class="need-row"
+              :class="{ zero: stats.needsShipment === 0 }"
+              @click="goto('sales', { stage: 'pending', status: 'waiting_shipment' })"
+            >
+              <span class="need-count">{{ stats.needsShipment }}</span>
+              <span class="need-desc">発送してください</span>
+              <span class="grow" />
+              <span class="pill">開く <Icon name="arrow-right" :size="12" /></span>
+            </button>
             <button
               class="need-row"
               :class="{ zero: stats.needsShipping === 0 }"

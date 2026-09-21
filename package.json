@@ -2,7 +2,7 @@
   "name": "soroban",
   "version": "0.1.9",
   "private": true,
-  "description": "メルカリ転売の利益管理（単一Electronアプリ・ローカルSQLite）",
+  "description": "メルカリ販売の利益管理（単一Electronアプリ・ローカルSQLite）",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

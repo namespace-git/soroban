@@ -205,6 +205,14 @@ function registerIpc(): void {
 
   handle('resetData', () => db.resetData())
 
+  handle('openMercari', async (kind, mercariItemId) => {
+    if (!/^m\d{9,}$/.test(mercariItemId)) {
+      throw new Error(`不正な商品IDです: ${mercariItemId}`)
+    }
+    const path = kind === 'item' ? 'item' : 'transaction'
+    await shell.openExternal(`https://jp.mercari.com/${path}/${mercariItemId}`)
+  })
+
   handle('checkForUpdate', () => updater.checkForUpdate())
   handle('installUpdate', () => updater.installUpdate())
 }

@@ -2,9 +2,10 @@
 // 在庫 1 点の履歴（仕入→到着→販売→発送→受取→取引完了）を読むだけのドロワー。
 // 編集はしない。開くたびに getItemTimeline を呼び直す。
 import { ref, watch } from 'vue'
-import type { ItemTimeline } from '../../shared/types'
+import type { ItemTimeline, SaleStatus } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
+import CodeChip from './CodeChip.vue'
 
 const props = defineProps<{
   open: boolean
@@ -14,6 +15,15 @@ const emit = defineEmits<{ close: [] }>()
 
 const timeline = ref<ItemTimeline | null>(null)
 const loading = ref(false)
+
+// --- 取引の進み具合のチップ。Sales.vue と同じ表記に揃える ---
+const SALE_STATUS_CHIP: Record<SaleStatus, { tone: 'warn' | 'info' | 'ok'; label: string }> = {
+  waiting_payment: { tone: 'warn', label: '支払い待ち' },
+  waiting_shipment: { tone: 'warn', label: '発送してください' },
+  shipped: { tone: 'info', label: '受取評価待ち' },
+  delivered: { tone: 'info', label: '評価してください' },
+  completed: { tone: 'ok', label: '取引完了' },
+}
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -54,7 +64,13 @@ function onThumbError() {
   <Drawer :open="open" :title="timeline?.item.name ?? '在庫の履歴'" :width="480" @close="emit('close')">
     <template v-if="timeline" #header-sub>
       <div class="head-sub">
+        <CodeChip kind="item" :code="timeline.item.item_code" />
         <StatusChip v-if="timeline.item.model_code" tone="neutral" :label="timeline.item.model_code" />
+        <StatusChip
+          v-if="timeline.sale?.status && SALE_STATUS_CHIP[timeline.sale.status]"
+          :tone="SALE_STATUS_CHIP[timeline.sale.status].tone"
+          :label="SALE_STATUS_CHIP[timeline.sale.status].label"
+        />
         <span class="faint">原価 {{ yen(timeline.item.landed_cost) }}</span>
       </div>
     </template>

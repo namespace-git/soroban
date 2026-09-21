@@ -14,7 +14,7 @@ import Inventory from './views/Inventory.vue'
 import Products from './views/Products.vue'
 import Monthly from './views/Monthly.vue'
 import Settings from './views/Settings.vue'
-import type { CollectorRun, DashboardStats, SearchHit, UpdateStatus } from '../shared/types'
+import type { CollectorRun, DashboardStats, SaleStatus, SearchHit, UpdateStatus } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 
 type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'settings'
@@ -30,6 +30,8 @@ export type GotoPayload = {
   mercariItemId?: string
   search?: string
   focusId?: string
+  /** 売上タブの取引状態の絞り込み（例：発送してください） */
+  status?: SaleStatus
 }
 
 const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [

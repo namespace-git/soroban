@@ -1,6 +1,6 @@
 ---
 name: そろばん（Soroban）
-description: メルカリ転売の利益を家族が10秒で確定させる、「Milestone」風の温かい帳簿
+description: メルカリ販売用の利益を家族が10秒で確定させる、「Milestone」風の温かい帳簿
 colors:
   canvas: "#f6f6f3"
   surface: "#ffffff"
@@ -327,7 +327,7 @@ components:
 温かい無彩色（黄味を帯びたグレー）が地と罫とインクを担い、彩度を持つ色はブランド黄 1 系統、主ボタンのチャコール、意味色 4 系統（緑／赤／橙／青）だけ。意味色は文字用とベタ塗り用（`*-solid`）の 2 層を持つ。
 
 ### Primary
-- **ブランド黄（brand）**：ナビのロゴ丸（36px、「そ」）、セクション見出しの丸アイコン（28px）、ホームの主役カード `.stat-card.brand`、`brand` チップ（「転売」）、チェックボックス／ラジオの `accent-color`、入力の `:focus` 枠。**文字色には使わない**（白地で 1.6:1 しかない）。hover は **brand-hover**。
+- **ブランド黄（brand）**：ナビのロゴ丸（36px、「そ」）、セクション見出しの丸アイコン（28px）、ホームの主役カード `.stat-card.brand`、`brand` チップ（「販売用」）、チェックボックス／ラジオの `accent-color`、入力の `:focus` 枠。**文字色には使わない**（白地で 1.6:1 しかない）。hover は **brand-hover**。
 - **クリーム（brand-soft）**：副次の数字カード `.stat-card.cream`、選択行（`tr.selected`、ドロワーでチェックした候補行 `.item.on`、`--accent-soft` 経由）、テキスト選択の地、サムネイルのプレースホルダの地。
 - **クリーム上のインク（brand-ink）**：クリーム地の上のラベル・プレースホルダ文字。白地では使わない。
 - **チャコール（primary / primary-hover）**：主ボタン（「取り込む」「販売を登録」「紐付ける」「決定」）の面、トーストの地、`:focus-visible` の 2px アウトライン、キャレット。`--accent` / `--accent-hover` はこれの別名（後方互換）。
@@ -434,13 +434,13 @@ components:
 - **Small（`.sm`）:** 13px、padding 0 10px、高さ 28px。
 - **Link（`.link-btn`、`.sm` と併用）:** 行内の「紐付け」。warn-bg の面、warn-line の枠、warn の文字、link アイコン付き。要対応の橙をボタンに載せる唯一の場所。
 - **Icon（`.icon`）:** 28×28px、padding 0。行末の削除（trash）、ドロワーの閉じる。行末の `.fade-btn` は opacity .35 で待機し、行 hover で 1 に上がる。
-- **Text（`.cost-btn` / `.kind-toggle`）:** 面も枠も透明、padding 0、高さ auto。原価セルの数字（hover で下線）と、転売／私物チップの切り替え。
+- **Text（`.cost-btn` / `.kind-toggle`）:** 面も枠も透明、padding 0、高さ auto。原価セルの数字（hover で下線）と、販売用／私物チップの切り替え。
 - **Disabled:** opacity .45。**Focus:** `primary`（チャコール）の 2px アウトライン、offset 2px。**Transition:** background / border-color / color を 180ms。
 
 ### Chips（`StatusChip`、props `tone` / `label`）
 - **Style:** 12px/600、padding 2px 10px、pill、枠なし。文字と地の 2 色。
 - **Tones:**
-  - `brand`（brand / text）：「転売」。主役の印。
+  - `brand`（brand / text）：「販売用」。主役の印。
   - `neutral`（surface-hi / text-dim）：「私物」「自動取得」「自動紐付け」「分割」「未発送」「無効」、型番。
   - `info`（info-bg / info）：「未着」「配送中」、タグ名。
   - `ok`（profit-solid / 白）：「正常」「実額」。
@@ -487,7 +487,7 @@ components:
 行頭に 40px のサムネイル、続く商品セルは意味のまとまりで 3 段に分ける。
 - **Thumb（`.thumb` / `.thumb-placeholder`）:** 40×40px、8px 角丸、`object-fit: cover`。画像がないか読めないときはプレースホルダ（brand-soft の地に brand-ink の 14px/700、先頭 1 文字）。
 - **1 段目 商品名（`.title-name` / `.item-name` / `.product-name`）:** 14px/500、折り返す（`word-break: break-word`）。
-- **2 段目 チップ列（`.chip-row`）:** `flex-wrap`、gap 6px、上余白 4px。先頭は転売／私物（`brand` / `neutral`、押すと確認付きで切り替え）、次に「自動取得」、型番、タグ（`info`）。
+- **2 段目 チップ列（`.chip-row`）:** `flex-wrap`、gap 6px、上余白 4px。先頭は販売用／私物（`brand` / `neutral`、押すと確認付きで切り替え）、次に「自動取得」、型番、タグ（`info`）。
 - **3 段目 メモ行（`.note-row`）:** note アイコン 14px（text-faint）＋「メモ」ラベル 12px（text-faint）＋ 本文 13px（text-dim、折り返す）。メモがあるときだけ出す。商品名の続きにメモが見えないための段。
 
 ### Navigation

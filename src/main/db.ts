@@ -5,14 +5,14 @@ import { app } from 'electron'
 // ビルド後もスキーマを確実に読めるよう、ファイル読み込みではなく埋め込む
 import schemaSql from './schema.sql?raw'
 import { allocate, calcFee, splitEvenly } from './money'
-import { extractCode, extractCodes, extractMaterial } from './code'
+import { extractCode, extractCodeQuantities, extractCodes, extractItemCodes, extractMaterial } from './code'
 import { thisMonthLocal, todayLocal } from '../shared/date'
 import type {
   AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, Fulfillment, InventoryItem,
   InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus, Material,
   MonthlySummary, ProductDetail, ProductMonthPoint, ProductSummary, PurchaseDetail,
   PurchaseDraftInput, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
-  PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleTotals,
+  PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleStatus, SaleTotals,
   SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, Tag, TimelineEvent, VariantSummary,
   CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
@@ -115,6 +115,19 @@ function settingStr(key: string, fallback = ''): string {
   const r = db.prepare('SELECT value FROM setting WHERE key = ?').get(key) as
     | { value: string } | undefined
   return r ? r.value : fallback
+}
+
+/**
+ * 在庫コードを1つ発行する（setting.item_code_seq を+1）。形式は `S-0001`
+ * （4桁ゼロ埋め。9999を超えたら桁が増える）。呼び出し側のトランザクション内で使うこと
+ */
+function nextItemCode(): string {
+  const next = setting('item_code_seq', 0) + 1
+  db.prepare(
+    `INSERT INTO setting (key, value) VALUES ('item_code_seq', ?)
+       ON CONFLICT(key) DO UPDATE SET value = ?`,
+  ).run(String(next), String(next))
+  return `S-${String(next).padStart(4, '0')}`
 }
 
 /**
@@ -330,6 +343,191 @@ function rebuildSaleLineForListingSource(): void {
         UPDATE inventory_item
            SET status = 'in_stock', updated_at = datetime('now')
          WHERE id = OLD.inventory_item_id;
+      END;
+    `)
+  })
+  tx()
+  db.pragma('foreign_keys = ON')
+}
+
+function saleHasWaitingPaymentStatus(): boolean {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sale'`,
+  ).get() as { sql: string } | undefined
+  return !!row && row.sql.includes("'waiting_payment'")
+}
+
+/**
+ * sale.status の CHECK に 'waiting_payment'（購入されたが未入金）を足す。取引中タブは
+ * 支払い待ちの段階からここに出るため、waiting_shipment に決め打てない。
+ * rebuildSaleLineForListingSource と同じ流儀：sale を参照するビューを先に DROP →
+ * 新テーブルへ列をそのままコピー → 旧を DROP → RENAME。データは一切落とさない。
+ */
+function rebuildSaleForWaitingPayment(): void {
+  db.pragma('foreign_keys = OFF')
+  const tx = db.transaction(() => {
+    db.exec(`
+      DROP VIEW IF EXISTS sale_line_share;
+      DROP VIEW IF EXISTS variant_summary;
+      DROP VIEW IF EXISTS sale_profit;
+      DROP VIEW IF EXISTS monthly_summary;
+      DROP VIEW IF EXISTS inventory_view;
+    `)
+
+    db.exec(`
+      CREATE TABLE sale_new (
+        id                 TEXT PRIMARY KEY,
+        mercari_item_id    TEXT UNIQUE,
+        title              TEXT NOT NULL,
+        sold_at            TEXT NOT NULL,
+        price              INTEGER NOT NULL,
+        kind               TEXT NOT NULL DEFAULT 'resale'
+                           CHECK (kind IN ('resale','personal')),
+        fee_rate_bp        INTEGER NOT NULL DEFAULT 1000,
+        fee                INTEGER NOT NULL DEFAULT 0,
+        shipping_method_id TEXT REFERENCES shipping_method(id),
+        shipping_fee       INTEGER NOT NULL DEFAULT 0,
+        packaging_cost     INTEGER NOT NULL DEFAULT 0,
+        shipping_source    TEXT CHECK (shipping_source IN ('actual','master','manual')),
+        is_shipping_confirmed INTEGER NOT NULL DEFAULT 0,
+        model_codes        TEXT NOT NULL DEFAULT '[]',
+        expected_item_count INTEGER,
+        status             TEXT
+                           CHECK (status IN ('waiting_payment','waiting_shipment','shipped','delivered','completed')),
+        shipped_at         TEXT,
+        delivered_at       TEXT,
+        completed_at       TEXT,
+        buyer              TEXT,
+        note               TEXT,
+        source             TEXT NOT NULL DEFAULT 'collector'
+                           CHECK (source IN ('collector','manual')),
+        raw                TEXT,
+        thumb_file         TEXT,
+        created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      INSERT INTO sale_new
+        (id, mercari_item_id, title, sold_at, price, kind, fee_rate_bp, fee,
+         shipping_method_id, shipping_fee, packaging_cost, shipping_source,
+         is_shipping_confirmed, model_codes, expected_item_count, status,
+         shipped_at, delivered_at, completed_at, buyer, note, source, raw,
+         thumb_file, created_at, updated_at)
+      SELECT
+        id, mercari_item_id, title, sold_at, price, kind, fee_rate_bp, fee,
+        shipping_method_id, shipping_fee, packaging_cost, shipping_source,
+        is_shipping_confirmed, model_codes, expected_item_count, status,
+        shipped_at, delivered_at, completed_at, buyer, note, source, raw,
+        thumb_file, created_at, updated_at
+      FROM sale;
+
+      DROP TABLE sale;
+      ALTER TABLE sale_new RENAME TO sale;
+
+      CREATE INDEX IF NOT EXISTS idx_sale_sold ON sale(sold_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_sale_kind ON sale(kind);
+    `)
+  })
+  tx()
+  db.pragma('foreign_keys = ON')
+}
+
+function inventoryHasItemCodeConstraint(): boolean {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inventory_item'`,
+  ).get() as { sql: string } | undefined
+  return !!row && /item_code\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(row.sql)
+}
+
+/**
+ * inventory_item.item_code に NOT NULL UNIQUE を付ける。呼び出し時点で全行に
+ * item_code が採番済みである前提（migrate() の version<15 で先に埋めてから呼ぶ）。
+ * ALTER TABLE では UNIQUE 制約を後付けできないため、他の列追加と同じ流儀
+ * （rebuildInventoryItemForSplit）でテーブルを作り直す。
+ */
+function rebuildInventoryItemForItemCode(): void {
+  db.pragma('foreign_keys = OFF')
+  const tx = db.transaction(() => {
+    db.exec(`
+      DROP VIEW IF EXISTS sale_line_share;
+      DROP VIEW IF EXISTS sale_profit;
+      DROP VIEW IF EXISTS monthly_summary;
+      DROP VIEW IF EXISTS inventory_view;
+      DROP VIEW IF EXISTS variant_summary;
+      DROP TRIGGER IF EXISTS trg_sline_sold;
+      DROP TRIGGER IF EXISTS trg_sline_unsold;
+      DROP TRIGGER IF EXISTS trg_listing_line_guard;
+    `)
+
+    db.exec(`
+      CREATE TABLE inventory_item_new (
+        id               TEXT PRIMARY KEY,
+        item_code        TEXT NOT NULL UNIQUE,
+        purchase_line_id TEXT REFERENCES purchase_line(id) ON DELETE CASCADE,
+        name             TEXT NOT NULL,
+        landed_cost      INTEGER NOT NULL,
+        acquired_at      TEXT NOT NULL,
+        model_code       TEXT,
+        series_code      TEXT,
+        material         TEXT,
+        parent_id        TEXT REFERENCES inventory_item_new(id),
+        note             TEXT,
+        status           TEXT NOT NULL DEFAULT 'in_stock'
+                         CHECK (status IN ('in_stock','sold','disposed','personal_use','split')),
+        disposed_at      TEXT,
+        disposed_note    TEXT,
+        created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      INSERT INTO inventory_item_new
+        (id, item_code, purchase_line_id, name, landed_cost, acquired_at,
+         model_code, series_code, material, parent_id, note,
+         status, disposed_at, disposed_note, created_at, updated_at)
+      SELECT
+        id, item_code, purchase_line_id, name, landed_cost, acquired_at,
+        model_code, series_code, material, parent_id, note,
+        status, disposed_at, disposed_note, created_at, updated_at
+      FROM inventory_item;
+
+      DROP TABLE inventory_item;
+      ALTER TABLE inventory_item_new RENAME TO inventory_item;
+
+      CREATE INDEX IF NOT EXISTS idx_inv_status   ON inventory_item(status);
+      CREATE INDEX IF NOT EXISTS idx_inv_acquired ON inventory_item(acquired_at);
+      CREATE INDEX IF NOT EXISTS idx_inv_pline    ON inventory_item(purchase_line_id);
+      CREATE INDEX IF NOT EXISTS idx_inv_model    ON inventory_item(model_code, status, acquired_at);
+
+      CREATE TRIGGER trg_sline_sold
+      AFTER INSERT ON sale_line
+      BEGIN
+        UPDATE inventory_item
+           SET status = 'sold', updated_at = datetime('now')
+         WHERE id = NEW.inventory_item_id;
+      END;
+
+      CREATE TRIGGER trg_sline_unsold
+      AFTER DELETE ON sale_line
+      BEGIN
+        UPDATE inventory_item
+           SET status = 'in_stock', updated_at = datetime('now')
+         WHERE id = OLD.inventory_item_id;
+      END;
+
+      CREATE TRIGGER trg_listing_line_guard
+      BEFORE INSERT ON listing_line
+      BEGIN
+        SELECT RAISE(ABORT, '既に別の出品に引き当て済み')
+         WHERE EXISTS (
+           SELECT 1 FROM listing_line ll
+           JOIN listing l ON l.mercari_item_id = ll.listing_id
+           WHERE ll.inventory_item_id = NEW.inventory_item_id
+             AND l.status IN ('active','suspended')
+         );
+        SELECT RAISE(ABORT, '未販売の在庫だけ引き当てられます')
+         WHERE (SELECT status FROM inventory_item WHERE id = NEW.inventory_item_id) != 'in_stock';
+        SELECT RAISE(ABORT, '終了した出品には引き当てられません')
+         WHERE (SELECT status FROM listing WHERE mercari_item_id = NEW.listing_id) NOT IN ('active','suspended');
       END;
     `)
   })
@@ -643,6 +841,50 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 15) {
+    // 在庫コード（item_code）。既存の在庫に acquired_at, created_at 順で採番して埋めてから
+    // NOT NULL UNIQUE を付ける（ALTER TABLE では UNIQUE を後付けできないためテーブルを作り直す）
+    addColumnIfMissing('inventory_item', 'item_code', 'TEXT')
+
+    const uncoded = db.prepare(
+      `SELECT id FROM inventory_item WHERE item_code IS NULL ORDER BY acquired_at, created_at`,
+    ).all() as Array<{ id: string }>
+    if (uncoded.length > 0) {
+      let seq = setting('item_code_seq', 0)
+      const setCode = db.prepare('UPDATE inventory_item SET item_code = ? WHERE id = ?')
+      for (const row of uncoded) {
+        seq += 1
+        setCode.run(`S-${String(seq).padStart(4, '0')}`, row.id)
+      }
+      db.prepare(
+        `INSERT INTO setting (key, value) VALUES ('item_code_seq', ?)
+           ON CONFLICT(key) DO UPDATE SET value = ?`,
+      ).run(String(seq), String(seq))
+    }
+
+    if (!inventoryHasItemCodeConstraint()) rebuildInventoryItemForItemCode()
+
+    // 自動紐付けが「これだけ揃えば完了」と見積もった点数（在庫コード・型番の個数表記）
+    addColumnIfMissing('sale', 'expected_item_count', 'INTEGER')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '15')
+         ON CONFLICT(key) DO UPDATE SET value = '15'`,
+    ).run()
+  }
+
+  if (version < 16) {
+    // 取引中タブは「支払いをしてください」（購入されたが未入金）の段階からも出る。
+    // sale.status の CHECK に 'waiting_payment' を足す（SQLite は CHECK を ALTER できない
+    // ためテーブルを作り直す。列・データはそのまま）
+    if (!saleHasWaitingPaymentStatus()) rebuildSaleForWaitingPayment()
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '16')
+         ON CONFLICT(key) DO UPDATE SET value = '16'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -722,9 +964,9 @@ function insertLinesAndItems(
   )
   const insItem = db.prepare(
     `INSERT INTO inventory_item
-       (id, purchase_line_id, name, landed_cost, acquired_at,
+       (id, item_code, purchase_line_id, name, landed_cost, acquired_at,
         model_code, series_code, material)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
 
   for (const l of lineRows) {
@@ -738,11 +980,11 @@ function insertLinesAndItems(
       a.allocated, baseUnit, l.sort_order,
     )
     // 数量分だけ在庫アイテムを生成する。
-    // landed_cost はここで確定し、以後は独立（過去の利益を動かさない）
+    // landed_cost・item_code はここで確定し、以後は独立（過去の利益を動かさない）
     const parts = splitEvenly(a.allocated, l.quantity)
     for (let n = 0; n < l.quantity; n++) {
       insItem.run(
-        randomUUID(), l.id, l.name, l.unit_price + parts[n], orderedAt,
+        randomUUID(), nextItemCode(), l.id, l.name, l.unit_price + parts[n], orderedAt,
         l.model_code, l.series_code, l.material,
       )
     }
@@ -868,7 +1110,7 @@ function loadPurchaseLineItems(lineIds: string[]): Map<string, PurchaseLine['ite
   const rows = db.prepare(`
     SELECT
       i.purchase_line_id AS line_id,
-      i.id, i.status, i.landed_cost,
+      i.id, i.item_code, i.status, i.landed_cost,
       lst.price    AS listing_price,
       sl.sale_id   AS sale_id,
       sale.price   AS sale_price,
@@ -882,7 +1124,7 @@ function loadPurchaseLineItems(lineIds: string[]): Map<string, PurchaseLine['ite
     ORDER BY i.created_at
   `).all(...lineIds) as Array<{
     line_id: string
-    id: string; status: InventoryStatus; landed_cost: number
+    id: string; item_code: string; status: InventoryStatus; landed_cost: number
     listing_price: number | null
     sale_id: string | null; sale_price: number | null; sold_at: string | null
   }>
@@ -891,6 +1133,7 @@ function loadPurchaseLineItems(lineIds: string[]): Map<string, PurchaseLine['ite
     const arr = map.get(r.line_id) ?? []
     arr.push({
       id: r.id,
+      item_code: r.item_code,
       status: r.status,
       landed_cost: r.landed_cost,
       listing_price: r.listing_price,
@@ -1098,6 +1341,65 @@ export function deletePurchase(id: string): void {
 // 販売
 // ============================================================
 
+/**
+ * メルカリの取引の進み具合。この順でしか進まない（後戻りしない）。
+ * waiting_payment＝購入されたが未入金、completed＝売却済み一覧に出た（取引完了）。
+ */
+const SALE_STATUS_ORDER: SaleStatus[] =
+  ['waiting_payment', 'waiting_shipment', 'shipped', 'delivered', 'completed']
+
+/**
+ * status の初期値（取り込み時点で既に分かっている段階）から shipped_at / delivered_at /
+ * completed_at を決める。initialFulfillmentDates（仕入の到着状態）と同じ規則：
+ * 該当段階に達していれば seenAt（観測日）を入れ、以後は updateSaleStatus 側で
+ * 「最初に観測した日」として固定される。
+ */
+function initialSaleStatusDates(
+  status: SaleStatus | null | undefined, seenAt: string,
+): { shipped_at: string | null; delivered_at: string | null; completed_at: string | null } {
+  if (!status) return { shipped_at: null, delivered_at: null, completed_at: null }
+  const idx = SALE_STATUS_ORDER.indexOf(status)
+  return {
+    shipped_at: idx >= SALE_STATUS_ORDER.indexOf('shipped') ? seenAt : null,
+    delivered_at: idx >= SALE_STATUS_ORDER.indexOf('delivered') ? seenAt : null,
+    completed_at: status === 'completed' ? seenAt : null,
+  }
+}
+
+/**
+ * メルカリの取引の進み具合を更新する（取引中タブから collector が呼ぶ）。
+ * status は前にしか進まない：後戻り・同じ状態への更新は無視して false を返す
+ * （買い手都合のキャンセル等で表示が乱れても、一度進んだ記録を壊さないため）。
+ * 初めて shipped 以上になった日を shipped_at、初めて delivered 以上になった日を
+ * delivered_at に刻む（既に入っていれば触らない）。mercari_item_id が無ければ何もしない。
+ * 戻り値は実際に状態が進んだかどうか。
+ */
+export function updateSaleStatus(
+  mercariItemId: string, status: SaleStatus, seenAt = todayLocal(),
+): boolean {
+  const row = db.prepare(
+    'SELECT id, status, shipped_at, delivered_at FROM sale WHERE mercari_item_id = ?',
+  ).get(mercariItemId) as
+    | { id: string; status: SaleStatus | null; shipped_at: string | null; delivered_at: string | null }
+    | undefined
+  if (!row) return false
+
+  const curIdx = row.status ? SALE_STATUS_ORDER.indexOf(row.status) : -1
+  const nextIdx = SALE_STATUS_ORDER.indexOf(status)
+  if (nextIdx <= curIdx) return false
+
+  const shippedAt = nextIdx >= SALE_STATUS_ORDER.indexOf('shipped') && !row.shipped_at
+    ? seenAt : row.shipped_at
+  const deliveredAt = nextIdx >= SALE_STATUS_ORDER.indexOf('delivered') && !row.delivered_at
+    ? seenAt : row.delivered_at
+
+  db.prepare(
+    `UPDATE sale SET status = ?, shipped_at = ?, delivered_at = ?, updated_at = datetime('now')
+      WHERE id = ?`,
+  ).run(status, shippedAt, deliveredAt, row.id)
+  return true
+}
+
 export function createSale(input: SaleInput): string {
   const id = randomUUID()
   const rateBp = setting('fee_rate_bp', 1000)
@@ -1177,12 +1479,23 @@ export function updateSale(id: string, patch: SalePatch): void {
  * 失敗時に 0 で潰さないため）。販売履歴ページの「¥0」（着払い）のような、0 自体が
  * 確定した実額であるケースでは allowZero: true を渡す。
  *
- * sold_at は source='collector' の販売にだけ反映する。手入力の日付は上書きしない
- * （一覧の取得日を仮の販売日として保存していたものを、本当の購入完了日に直すため）。
+ * sold_at は source='collector' かつ status が未取得（取引中タブで先に追っていない）
+ * 販売にだけ反映する。手入力の日付は上書きしない（一覧の取得日を仮の販売日として
+ * 保存していたものを、本当の購入完了日に直すため）。取引中タブで先に status が付いた
+ * 販売は sold_at を「初めて見た日」のまま固定する（本当の完了日は completed_at に持つ）。
+ *
+ * status に 'completed' を渡すと、completed_at が未設定なら completedAt で埋める
+ * （既に入っていれば触らない。「最初に観測した日」を刻む他の日付と同じ規則）。
  */
 export function applySaleActuals(
   id: string,
-  actuals: { fee?: number | null; shipping_fee?: number | null; sold_at?: string },
+  actuals: {
+    fee?: number | null
+    shipping_fee?: number | null
+    sold_at?: string
+    status?: SaleStatus
+    completedAt?: string
+  },
   opts?: { allowZero?: boolean },
 ): void {
   const allowZero = opts?.allowZero ?? false
@@ -1201,8 +1514,17 @@ export function applySaleActuals(
     vals.push(actuals.shipping_fee)
   }
   if (actuals.sold_at !== undefined) {
-    sets.push(`sold_at = CASE WHEN source = 'collector' THEN ? ELSE sold_at END`)
+    // status が既に付いている（取引中タブで先に取り込んだ）販売は sold_at を触らない
+    sets.push(`sold_at = CASE WHEN source = 'collector' AND status IS NULL THEN ? ELSE sold_at END`)
     vals.push(actuals.sold_at)
+  }
+  if (actuals.status !== undefined) {
+    sets.push('status = ?')
+    vals.push(actuals.status)
+  }
+  if (actuals.completedAt !== undefined) {
+    sets.push('completed_at = COALESCE(completed_at, ?)')
+    vals.push(actuals.completedAt)
   }
   if (sets.length === 0) return
 
@@ -1212,9 +1534,12 @@ export function applySaleActuals(
 }
 
 /**
- * メルカリの販売履歴ページ（一覧）から取れた実額・本当の購入完了日で、
- * 既知の取引を更新する。既に shipping_source='actual' かつ sold_at が一致していれば
- * 何もしない（差分適用）。kind・紐付けには触らない。戻り値は更新した件数。
+ * メルカリの販売履歴ページ（一覧）から取れた実額・購入完了日で、既知の取引を更新する。
+ * 売却済み一覧（販売履歴）に出た時点で取引は完了しているので、status='completed'・
+ * completed_at（初回のみ）も併せて刻む。既に shipping_source='actual' かつ sold_at が
+ * 一致していれば何もしない（差分適用。取引中タブを経由した販売は shipping_source が
+ * 'actual' になるのがこの反映のタイミングなので、初回は必ず通って status も完了になる）。
+ * kind・紐付けには触らない。戻り値は更新した件数。
  */
 export function updateCollectedActuals(
   rows: Array<{
@@ -1227,15 +1552,21 @@ export function updateCollectedActuals(
   let updated = 0
   for (const r of rows) {
     const sale = db.prepare(
-      'SELECT id, shipping_source, sold_at FROM sale WHERE mercari_item_id = ?',
-    ).get(r.mercariItemId) as { id: string; shipping_source: string | null; sold_at: string } | undefined
+      'SELECT id, shipping_source, sold_at, status FROM sale WHERE mercari_item_id = ?',
+    ).get(r.mercariItemId) as
+      | { id: string; shipping_source: string | null; sold_at: string; status: SaleStatus | null }
+      | undefined
     if (!sale) continue
 
-    if (sale.shipping_source === 'actual' && sale.sold_at === r.soldAt) continue
+    // 既に実額が入っていて日付も同じ（または取引中タブ経由で先に取り込み、完了まで刻んだ）販売は再適用しない
+    if (sale.shipping_source === 'actual' && (sale.sold_at === r.soldAt || sale.status === 'completed')) continue
 
     applySaleActuals(
       sale.id,
-      { fee: r.fee, shipping_fee: r.shippingFee, sold_at: r.soldAt },
+      {
+        fee: r.fee, shipping_fee: r.shippingFee, sold_at: r.soldAt,
+        status: 'completed', completedAt: r.soldAt,
+      },
       { allowZero: true },
     )
     updated++
@@ -1587,27 +1918,27 @@ export function unlinkInventory(saleId: string, itemId: string): void {
 }
 
 /**
- * 販売から抽出した型番が model_code と文字列として完全一致するとき、その型番の
- * 未販売在庫を先入先出（acquired_at 昇順）で1点だけ充てて自動確定する。
- * 枝番の有無は問わない（在庫側の model_code と一致するかどうかだけを見る）。
- * 条件を満たさない（型番なし・複数・一致在庫なし）場合は何もしない。
- * 戻り値は確定できたかどうか。
+ * 在庫コード（そろばん発行）に一致する未販売在庫の id を、渡した順に返す
+ * （見つからないコードはスキップする。他の出品に引き当て中でも in_stock なら対象＝移す）。
  */
-export function autoLinkSale(saleId: string): boolean {
-  const sale = db.prepare('SELECT kind, model_codes FROM sale WHERE id = ?').get(saleId) as
-    | { kind: SaleKind; model_codes: string } | undefined
-  if (!sale || sale.kind !== 'resale') return false
+function findInventoryIdsByItemCodes(itemCodes: string[]): string[] {
+  const find = db.prepare(`SELECT id FROM inventory_item WHERE item_code = ? AND status = 'in_stock'`)
+  const ids: string[] = []
+  for (const code of itemCodes) {
+    const row = find.get(code) as { id: string } | undefined
+    if (row) ids.push(row.id)
+  }
+  return ids
+}
 
-  const already = db.prepare('SELECT COUNT(*) AS c FROM sale_line WHERE sale_id = ?')
-    .get(saleId) as { c: number }
-  if (already.c > 0) return false
-
-  const codes = JSON.parse(sale.model_codes || '[]') as string[]
-  if (codes.length !== 1) return false
-
-  // 他の active/suspended な出品に引き当て済みの在庫はFIFO候補から外す
-  // （人が出品に予約した意思を、型番一致の自動確定で横取りしない）
-  const item = db.prepare(`
+/**
+ * 型番が model_code と文字列として完全一致する未販売在庫を、先入先出（acquired_at 昇順）で
+ * 最大 qty 点まで返す（在庫が足りなければある分だけ）。枝番の有無は問わない。
+ * 他の active/suspended な出品に引き当て済みの在庫は候補から外す
+ * （人が出品に予約した意思を、型番一致の自動確定で横取りしない）。
+ */
+function findInventoryIdsByModelCodeFifo(modelCode: string, qty: number): string[] {
+  const rows = db.prepare(`
     SELECT id FROM inventory_item i
      WHERE i.model_code = ? AND i.status = 'in_stock'
        AND NOT EXISTS (
@@ -1616,11 +1947,47 @@ export function autoLinkSale(saleId: string): boolean {
          WHERE ll.inventory_item_id = i.id AND l.status IN ('active','suspended')
        )
      ORDER BY i.acquired_at ASC, i.created_at ASC
-     LIMIT 1
-  `).get(codes[0]) as { id: string } | undefined
-  if (!item) return false
+     LIMIT ?
+  `).all(modelCode, qty) as Array<{ id: string }>
+  return rows.map(r => r.id)
+}
 
-  linkInventory(saleId, [item.id], 'auto')
+/**
+ * 優先順で1回だけ自動確定を試みる：
+ *   1. タイトルに在庫コードがあれば、見つかった分だけ全部（1つでも見つからない／販売済みなら
+ *      その分は候補止まり。見つかった分だけ確定し、expected_item_count との差分で unmatched を残す）
+ *   2. 在庫コードが無ければ型番：抽出した型番が1つで在庫と完全一致するときだけ、
+ *      FIFOで個数表記（×2 等。無ければ1）の分だけ充てる（足りなければある分だけ）
+ *   3. 型番が2つ以上なら候補止まり（何もしない）
+ * 条件を満たさない、またはsale_lineが既にあれば何もしない。戻り値は1点でも確定できたか。
+ */
+export function autoLinkSale(saleId: string): boolean {
+  const sale = db.prepare('SELECT kind, title, model_codes FROM sale WHERE id = ?').get(saleId) as
+    | { kind: SaleKind; title: string; model_codes: string } | undefined
+  if (!sale || sale.kind !== 'resale') return false
+
+  const already = db.prepare('SELECT COUNT(*) AS c FROM sale_line WHERE sale_id = ?')
+    .get(saleId) as { c: number }
+  if (already.c > 0) return false
+
+  const itemCodes = extractItemCodes(sale.title)
+  if (itemCodes.length > 0) {
+    db.prepare('UPDATE sale SET expected_item_count = ? WHERE id = ?').run(itemCodes.length, saleId)
+    const ids = findInventoryIdsByItemCodes(itemCodes)
+    if (ids.length === 0) return false
+    linkInventory(saleId, ids, 'auto')
+    return true
+  }
+
+  const codes = JSON.parse(sale.model_codes || '[]') as string[]
+  if (codes.length !== 1) return false
+
+  const qty = extractCodeQuantities(sale.title).find(q => q.code === codes[0])?.qty ?? 1
+  db.prepare('UPDATE sale SET expected_item_count = ? WHERE id = ?').run(qty, saleId)
+  const ids = findInventoryIdsByModelCodeFifo(codes[0], qty)
+  if (ids.length === 0) return false
+
+  linkInventory(saleId, ids, 'auto')
   return true
 }
 
@@ -1731,23 +2098,25 @@ function attachInventoryTags(items: InventoryRow[]): InventoryItem[] {
 }
 
 /**
- * 在庫候補の並び順：型番完全一致 → シリーズ一致 → 商品名の類似度
+ * 在庫候補の並び順：在庫コード一致 → 型番完全一致 → シリーズ一致 → 商品名の類似度
  * （完全一致 → 前方一致 → 部分一致 → 残り）。suggestInventory / suggestForListing で共通。
  */
 function rankInventoryMatch(
-  item: InventoryRow, codeSet: Set<string>, seriesCodes: Set<string>, target: string, head: string,
+  item: InventoryRow, itemCodeSet: Set<string>, codeSet: Set<string>, seriesCodes: Set<string>,
+  target: string, head: string,
 ): number {
-  if (item.model_code && codeSet.has(item.model_code)) return 0
-  if (item.series_code && seriesCodes.has(item.series_code)) return 1
+  if (itemCodeSet.has(item.item_code)) return 0
+  if (item.model_code && codeSet.has(item.model_code)) return 1
+  if (item.series_code && seriesCodes.has(item.series_code)) return 2
   const n = normalizeName(item.name)
-  if (n === target) return 2
-  if (head && n.startsWith(head)) return 3
-  if (head && n.includes(head)) return 4
-  return 5
+  if (n === target) return 3
+  if (head && n.startsWith(head)) return 4
+  if (head && n.includes(head)) return 5
+  return 6
 }
 
 /**
- * 在庫候補を返す。並びは 型番完全一致 → シリーズ一致 → 商品名の類似度
+ * 在庫候補を返す。並びは 在庫コード一致 → 型番完全一致 → シリーズ一致 → 商品名の類似度
  * （完全一致 → 前方一致 → 部分一致 → 残り）。同順位は滞留日数が長い方を先に
  * （型番一致の中では先入先出と同じ順になる）。
  * SQL側では正規化できないため、in_stock を全件取ってJS側で並べ替える
@@ -1761,6 +2130,7 @@ export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
   const codes = JSON.parse(sale.model_codes || '[]') as string[]
   const codeSet = new Set(codes)
   const seriesCodes = new Set(codes.map(c => c.split('-')[0]))
+  const itemCodeSet = new Set(extractItemCodes(sale.title))
 
   const target = normalizeName(sale.title)
   const head = target.slice(0, 6)
@@ -1770,7 +2140,7 @@ export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
   ).all() as InventoryRow[]
 
   const picked = items
-    .map(item => ({ item, r: rankInventoryMatch(item, codeSet, seriesCodes, target, head) }))
+    .map(item => ({ item, r: rankInventoryMatch(item, itemCodeSet, codeSet, seriesCodes, target, head) }))
     .sort((a, b) => (a.r !== b.r ? a.r - b.r : b.item.aging_days - a.item.aging_days))
     .slice(0, limit)
     .map(({ item }) => item)
@@ -1887,12 +2257,12 @@ type ListingRow = {
 
 function hydrateListing(r: ListingRow, rateBp: number): Listing {
   const items = db.prepare(`
-    SELECT i.id, i.name, i.model_code, i.landed_cost
+    SELECT i.id, i.item_code, i.name, i.model_code, i.landed_cost
       FROM listing_line ll
       JOIN inventory_item i ON i.id = ll.inventory_item_id
      WHERE ll.listing_id = ?
   `).all(r.mercari_item_id) as Array<
-    { id: string; name: string; model_code: string | null; landed_cost: number }
+    { id: string; item_code: string; name: string; model_code: string | null; landed_cost: number }
   >
 
   const reserved_cost = items.reduce((s, i) => s + i.landed_cost, 0)
@@ -1993,7 +2363,7 @@ export function unreserveInventory(mercariItemId: string, inventoryItemId: strin
 }
 
 /**
- * 出品の引き当て候補。型番の完全一致 → シリーズ一致 → 名前の一致の順。
+ * 出品の引き当て候補。在庫コード一致 → 型番の完全一致 → シリーズ一致 → 名前の一致の順。
  * 販売済み・廃棄済みは除く。他の出品に引き当て済みの在庫も候補に含める
  * （InventoryItem.listing に引き当て先が入る。この出品自身に引き当て済みのものは除く）。
  * 同順位なら未引き当てを先に。
@@ -2006,6 +2376,7 @@ export function suggestForListing(mercariItemId: string, limit = 20): InventoryI
   const codes = extractCodes(listing.title)
   const codeSet = new Set(codes)
   const seriesCodes = new Set(codes.map(c => c.split('-')[0]))
+  const itemCodeSet = new Set(extractItemCodes(listing.title))
 
   const target = normalizeName(listing.title)
   const head = target.slice(0, 6)
@@ -2015,7 +2386,7 @@ export function suggestForListing(mercariItemId: string, limit = 20): InventoryI
   ).all(mercariItemId) as InventoryRow[]
 
   const picked = items
-    .map(item => ({ item, r: rankInventoryMatch(item, codeSet, seriesCodes, target, head) }))
+    .map(item => ({ item, r: rankInventoryMatch(item, itemCodeSet, codeSet, seriesCodes, target, head) }))
     .sort((a, b) => {
       if (a.r !== b.r) return a.r - b.r
       const aReserved = a.item.listing_id ? 1 : 0
@@ -2041,9 +2412,10 @@ export function endListing(mercariItemId: string): void {
 }
 
 /**
- * 未引き当ての出品（active／suspended）に、型番が model_code と文字列として完全一致する
- * 未販売・未引き当ての在庫を先入先出で1点ずつ引き当てる（販売の autoLinkSale/autoLinkPending
- * と同じ規則。型番が1つに絞れるものだけ。候補が複数出品にまたがらないよう1件ずつ確定していく）。
+ * 未引き当ての出品（active／suspended）に在庫を引き当てる。autoLinkSale と同じ優先順：
+ *   1. タイトルに在庫コードがあれば、見つかった分だけ全部
+ *   2. 在庫コードが無ければ型番が1つに絞れるときだけ、FIFOで個数表記（×2等。無ければ1）の分だけ
+ *   3. 型番が2つ以上なら候補止まり
  * 引き当てた出品の数を返す。reserveInventory で引き当てるので、1クリック（unreserveInventory）
  * で解除できる。
  */
@@ -2056,24 +2428,23 @@ export function autoReserveListings(): number {
 
   let count = 0
   for (const p of pending) {
+    const itemCodes = extractItemCodes(p.title)
+    if (itemCodes.length > 0) {
+      const ids = findInventoryIdsByItemCodes(itemCodes)
+      if (ids.length === 0) continue
+      reserveInventory(p.mercari_item_id, ids)
+      count++
+      continue
+    }
+
     const codes = extractCodes(p.title)
     if (codes.length !== 1) continue
 
-    // 他の active/suspended な出品に引き当て済みの在庫は候補から外す（人の意思を横取りしない）
-    const item = db.prepare(`
-      SELECT id FROM inventory_item i
-       WHERE i.model_code = ? AND i.status = 'in_stock'
-         AND NOT EXISTS (
-           SELECT 1 FROM listing_line ll
-           JOIN listing l ON l.mercari_item_id = ll.listing_id
-           WHERE ll.inventory_item_id = i.id AND l.status IN ('active','suspended')
-         )
-       ORDER BY i.acquired_at ASC, i.created_at ASC
-       LIMIT 1
-    `).get(codes[0]) as { id: string } | undefined
-    if (!item) continue
+    const qty = extractCodeQuantities(p.title).find(q => q.code === codes[0])?.qty ?? 1
+    const ids = findInventoryIdsByModelCodeFifo(codes[0], qty)
+    if (ids.length === 0) continue
 
-    reserveInventory(p.mercari_item_id, [item.id])
+    reserveInventory(p.mercari_item_id, ids)
     count++
   }
   return count
@@ -2213,16 +2584,18 @@ export function splitInventory(id: string, count: number): string[] {
 
   const insItem = db.prepare(
     `INSERT INTO inventory_item
-       (id, purchase_line_id, name, landed_cost, acquired_at, status,
+       (id, item_code, purchase_line_id, name, landed_cost, acquired_at, status,
         model_code, series_code, material, parent_id)
-     VALUES (?, ?, ?, ?, ?, 'in_stock', ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, 'in_stock', ?, ?, ?, ?)`,
   )
 
   const tx = db.transaction(() => {
     for (let n = 0; n < count; n++) {
       const childId = randomUUID()
+      // 子は新しい在庫コードを持ち、名前は「元の名前（分割 1/2）」
       insItem.run(
-        childId, item.purchase_line_id, item.name, parts[n], item.acquired_at,
+        childId, nextItemCode(), item.purchase_line_id,
+        `${item.name}（分割 ${n + 1}/${count}）`, parts[n], item.acquired_at,
         item.model_code, item.series_code, item.material, item.id,
       )
       childIds.push(childId)
@@ -2885,6 +3258,11 @@ export function getDashboard(): DashboardStats {
      )
   `).c
 
+  // 発送が必要な販売（取引中タブで「発送してください」の段階）。放置すると評価が下がるので
+  // ホームの要対応の上位に出す
+  const needsShipment = one<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM sale WHERE status = 'waiting_shipment'`).c
+
   const stock = one<{ c: number; v: number }>(
     `SELECT COUNT(*) AS c, COALESCE(SUM(landed_cost),0) AS v
        FROM inventory_item WHERE status = 'in_stock'`)
@@ -2933,6 +3311,7 @@ export function getDashboard(): DashboardStats {
     needsMatch,
     needsPurchaseConfirm,
     needsListingAllocation,
+    needsShipment,
     stockCount: stock.c,
     stockValue: stock.v,
     agingCount: aging,
@@ -3031,7 +3410,7 @@ function searchInventoryHits(terms: string[], perKind: number): SearchHit[] {
 
   const hits: SearchHit[] = items
     .filter(i => matchesQuery([
-      i.name, i.model_code, i.series_code, i.material, i.note,
+      i.name, i.item_code, i.model_code, i.series_code, i.material, i.note,
       i.order_no, i.shop_account_name,
       ...i.tags.map(t => t.name), ...i.inherited_tags.map(t => t.name),
     ], terms))
@@ -3342,6 +3721,11 @@ export function insertCollected(
     shippingFee?: number | null
     /** 他費用。列は増やさない。raw に残すだけ */
     otherCost?: number | null
+    /**
+     * メルカリの取引の進み具合。取引中タブから来た行は waiting_payment 等、
+     * 販売履歴（売却済み）から来た行は 'completed'。undefined/null なら未取得のまま
+     */
+    status?: SaleStatus | null
   }>,
 ): Array<{ id: string; mercariItemId: string }> {
   const rateBp = setting('fee_rate_bp', 1000)
@@ -3353,8 +3737,8 @@ export function insertCollected(
     `INSERT INTO sale
        (id, mercari_item_id, title, sold_at, price, kind,
         fee_rate_bp, fee, source, raw, is_shipping_confirmed, model_codes,
-        shipping_fee, shipping_source)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'collector', ?, ?, ?, ?, ?)`,
+        shipping_fee, shipping_source, status, shipped_at, delivered_at, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'collector', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
 
   const inserted: Array<{ id: string; mercariItemId: string }> = []
@@ -3375,11 +3759,15 @@ export function insertCollected(
       const shippingSource = hasShippingFee ? 'actual' : null
       const confirmed = hasShippingFee ? 1 : 0
 
+      const status = r.status ?? null
+      const statusDates = initialSaleStatusDates(status, r.soldAt)
+
       const id = randomUUID()
       ins.run(
         id, r.mercariItemId, r.title, r.soldAt, r.price, kind,
         rateBp, fee, JSON.stringify(r), confirmed, JSON.stringify(codes),
-        shippingFee, shippingSource,
+        shippingFee, shippingSource, status,
+        statusDates.shipped_at, statusDates.delivered_at, statusDates.completed_at,
       )
       inserted.push({ id, mercariItemId: r.mercariItemId })
 

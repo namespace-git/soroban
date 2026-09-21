@@ -14,6 +14,12 @@ export const CODE_RE = /【([A-Z]\d{3}(?:-\d+)?)】/
 /** 【】なしでも拾う。販売側（メルカリのタイトル）で使う */
 export const CODE_LOOSE_RE = /\b([A-Z]\d{3}(?:-\d+)?)\b/g
 
+/**
+ * 在庫コード（そろばんが発行。例 S-0012）。型番とは別に在庫1点ずつを指す。
+ * 【】あり・なし両方にマッチする（【】は含めない）
+ */
+export const ITEM_CODE_RE = /\bS-\d{4,}\b/g
+
 const MATERIALS: Material[] = [
   'ムースクリーム',
   'ねっとりヨーグルト',
@@ -53,6 +59,65 @@ export function extractCodes(text: string): string[] {
       seen.add(code)
       result.push(code)
     }
+  }
+  return result
+}
+
+/**
+ * 在庫コード（そろばん発行。例 S-0012）をすべて抜く。【】付き・なし両方に対応し、
+ * 重複を除いて出現順に返す。
+ */
+export function extractItemCodes(text: string): string[] {
+  const re = new RegExp(ITEM_CODE_RE.source, 'g')
+  const seen = new Set<string>()
+  const result: string[] = []
+
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text))) {
+    if (!seen.has(m[0])) {
+      seen.add(m[0])
+      result.push(m[0])
+    }
+  }
+  return result
+}
+
+/**
+ * 型番の直後（【】・空白は読み飛ばす）にある個数表記を読む。
+ * 『×2』『x2』『✕2』（型番の直後の乗算記号＋数字）、または『2個』『2点』
+ * （数字＋直後の助数詞）だけを個数とみなす。見つからなければ 1
+ * （'100円' のように単位が違う数字は個数と解釈しない）。
+ */
+function readTrailingQuantity(text: string, from: number): number {
+  let i = from
+  while (i < text.length && (text[i] === '】' || /\s/.test(text[i]))) i++
+  const rest = text.slice(i)
+
+  const mult = /^[×✕xX]\s*(\d+)/.exec(rest)
+  if (mult) return Number(mult[1])
+
+  const count = /^(\d+)\s*[個点]/.exec(rest)
+  if (count) return Number(count[1])
+
+  return 1
+}
+
+/**
+ * 型番ごとの個数表記を拾う（【Z078-2】×2 / Z078-2 2個セット など）。
+ * 抽出そのものは extractCodes と同じ規則（【】付き・なし両方、重複除去・出現順）。
+ * 個数表記が無ければ 1。
+ */
+export function extractCodeQuantities(text: string): Array<{ code: string; qty: number }> {
+  const combined = new RegExp(`${CODE_RE.source}|${CODE_LOOSE_RE.source}`, 'g')
+  const seen = new Set<string>()
+  const result: Array<{ code: string; qty: number }> = []
+
+  let m: RegExpExecArray | null
+  while ((m = combined.exec(text))) {
+    const code = m[1] ?? m[2]
+    if (seen.has(code)) continue
+    seen.add(code)
+    result.push({ code, qty: readTrailingQuantity(text, combined.lastIndex) })
   }
   return result
 }

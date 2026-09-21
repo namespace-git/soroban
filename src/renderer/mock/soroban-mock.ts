@@ -33,6 +33,13 @@ function uid(): string {
   return crypto.randomUUID()
 }
 
+/** 在庫コード（S-0001, S-0002, ...）。生成順に連番を振る。絶対に重複しない */
+let itemCodeSeq = 0
+function nextItemCode(): string {
+  itemCodeSeq += 1
+  return `S-${String(itemCodeSeq).padStart(4, '0')}`
+}
+
 function pad(n: number): string {
   return String(n).padStart(2, '0')
 }
@@ -91,6 +98,31 @@ function saleStatusFor(source: SaleSource, soldAt: string): {
     delivered_at: addDays(3),
     completed_at: addDays(5),
     buyer: buyerFor(k),
+  }
+}
+
+/**
+ * 特定の販売を狙って「発送してください」「受取評価待ち」「評価してください」の見本にするための、
+ * 状態を明示指定したバージョン（saleStatusFor は経過日数から自動で決めるため、狙った状態を作れない）。
+ */
+function statusInfoFor(status: SaleStatus, soldAt: string, seed: number): {
+  status: SaleStatus; shipped_at: string | null; delivered_at: string | null; completed_at: string | null; buyer: string | null
+} {
+  const [y, m, d] = soldAt.split('-').map(Number)
+  const sold = new Date(y, m - 1, d)
+  const addDays = (n: number) => todayLocal(new Date(sold.getTime() + n * 86400000))
+  const buyer = buyerFor(seed)
+  switch (status) {
+    case 'waiting_payment':
+      return { status, shipped_at: null, delivered_at: null, completed_at: null, buyer }
+    case 'waiting_shipment':
+      return { status, shipped_at: null, delivered_at: null, completed_at: null, buyer }
+    case 'shipped':
+      return { status, shipped_at: addDays(1), delivered_at: null, completed_at: null, buyer }
+    case 'delivered':
+      return { status, shipped_at: addDays(1), delivered_at: addDays(3), completed_at: null, buyer }
+    case 'completed':
+      return { status, shipped_at: addDays(1), delivered_at: addDays(3), completed_at: addDays(5), buyer }
   }
 }
 
@@ -335,6 +367,7 @@ function addConfirmedPurchase(opts: {
       const itemId = uid()
       inventory.push({
         id: itemId,
+        item_code: nextItemCode(),
         name: displayName(v),
         landed_cost: v.price + parts[n],
         acquired_at: opts.orderedAt,
@@ -429,6 +462,7 @@ function addTiktokPurchase(opts: {
       const itemId = uid()
       inventory.push({
         id: itemId,
+        item_code: nextItemCode(),
         name: l.name,
         landed_cost: l.price + parts[n],
         acquired_at: opts.orderedAt,
@@ -649,6 +683,8 @@ function buildSaleFixed(opts: {
   note?: string | null
   autoLinked?: boolean
   priceOverride?: number
+  /** 取引の進み具合を明示指定する見本（省略時は saleStatusFor が経過日数から決める） */
+  statusOverride?: SaleStatus
 }): SaleProfit {
   const rateBp = Number(settings.fee_rate_bp)
   const price = opts.priceOverride ?? priceFor(opts.i)
@@ -684,7 +720,7 @@ function buildSaleFixed(opts: {
     source,
     tags: [],
     inherited_tags: [],
-    ...saleStatusFor(source, soldAt),
+    ...(opts.statusOverride ? statusInfoFor(opts.statusOverride, soldAt, opts.i) : saleStatusFor(source, soldAt)),
   }
 
   if (itemCount > 0) {
@@ -752,6 +788,8 @@ function buildInitialSales(): void {
     'Z045-2', 'Z099-1', 'A035', 'A012', 'Z080-2', 'Z088-2',
   ]
   const negativeAt = new Set([2, 9])
+  // ホームの「発送してください」・履歴の状態チップの見本（K-XX：waiting_shipment 2件・shipped 1件・delivered 1件）
+  const statusOverrideAt: Record<number, SaleStatus> = { 0: 'waiting_shipment', 1: 'waiting_shipment', 3: 'shipped', 4: 'delivered' }
   singleModels.forEach((model, k) => {
     const i = idx++
     const item = takeOldestByModel(model)
@@ -773,6 +811,7 @@ function buildInitialSales(): void {
       i, title: `【${model}】${displayName(variantOf(model))}`, kind: 'resale', items,
       shipping: { id: method.id, fee: method.fee, confirmed: true, source: k % 3 === 0 ? 'master' : 'actual' },
       packaging, autoLinked: k % 2 === 0, priceOverride: price,
+      statusOverride: statusOverrideAt[k],
     }))
   })
 
@@ -850,7 +889,7 @@ function buildListing(rec: ListingRecord): Listing {
     shipping_method_name: shippingMethod?.name ?? null,
     thumb_url: rec.thumb_url,
     model_codes: rec.model_codes,
-    items: items.map(i => ({ id: i.id, name: i.name, model_code: i.model_code, landed_cost: i.landed_cost })),
+    items: items.map(i => ({ id: i.id, item_code: i.item_code, name: i.name, model_code: i.model_code, landed_cost: i.landed_cost })),
     reserved_cost: reservedCost,
     expected_profit: expectedProfit,
   }
@@ -1179,6 +1218,7 @@ function buildPurchaseLineItems(lineId: string) {
       const sale = saleForItem(i.id)
       return {
         id: i.id,
+        item_code: i.item_code,
         status: i.status,
         landed_cost: i.landed_cost,
         listing_price: i.listing?.price ?? null,
@@ -1445,6 +1485,7 @@ function buildItemTimeline(item: InventoryItem): ItemTimeline {
 
 const api: SorobanApi = {
   async getDashboard(): Promise<DashboardStats> {
+    const needsShipment = sales.filter(s => s.status === 'waiting_shipment').length
     const needsShipping = sales.filter(s => !s.is_shipping_confirmed).length
     const needsMatch = sales.filter(s => s.kind === 'resale' && s.unmatched).length
     const needsPurchaseConfirm = purchases.filter(p => p.status === 'draft').length
@@ -1460,7 +1501,7 @@ const api: SorobanApi = {
     const thisMonth = withExpenses(monthlyFromSales(sales)).find(m => m.month === month && m.kind === 'resale') ?? null
     const lastRun = sortedRuns()[0] ?? null
     return wait({
-      needsShipping, needsMatch, needsPurchaseConfirm, needsListingAllocation,
+      needsShipment, needsShipping, needsMatch, needsPurchaseConfirm, needsListingAllocation,
       stockCount, stockValue, agingCount, thisMonth, lastRun,
       recentRuns: recentRunsMock(),
     })
@@ -1710,6 +1751,7 @@ const api: SorobanApi = {
         const itemId = uid()
         inventory.push({
           id: itemId,
+          item_code: nextItemCode(),
           name: l.name,
           landed_cost: l.unit_price + parts[n],
           acquired_at: input.ordered_at,
@@ -1805,6 +1847,7 @@ const api: SorobanApi = {
         const itemId = uid()
         inventory.push({
           id: itemId,
+          item_code: nextItemCode(),
           name: l.name,
           landed_cost: l.unit_price + parts[n],
           acquired_at: input.ordered_at,
@@ -1896,7 +1939,8 @@ const api: SorobanApi = {
       const childId = uid()
       inventory.push({
         id: childId,
-        name: item.name,
+        item_code: nextItemCode(),
+        name: `${item.name}（分割 ${n + 1}/${count}）`,
         landed_cost: parts[n],
         acquired_at: item.acquired_at,
         status: 'in_stock',
@@ -2400,6 +2444,14 @@ const api: SorobanApi = {
     listingItems.clear()
     lineItemIds.clear()
     productTags.clear()
+    return wait(undefined)
+  },
+
+  // メルカリのページを標準ブラウザで開く。モックにはブラウザ制御が無いため、開く先を確認できるよう
+  // alert で知らせる（本物は shell.openExternal で新規タブに開く。読み取り専用・ログイン操作はしない）
+  async openMercari(kind: 'item' | 'transaction', mercariItemId: string) {
+    const url = `https://jp.mercari.com/${kind}/${mercariItemId}`
+    window.alert(`ブラウザで開きます: ${url}`)
     return wait(undefined)
   },
 

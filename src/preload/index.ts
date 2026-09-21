@@ -87,6 +87,8 @@ const api: SorobanApi = {
   revealDbFolder: invoke('revealDbFolder'),
   resetData: invoke('resetData'),
 
+  openMercari: invoke('openMercari'),
+
   checkForUpdate: invoke('checkForUpdate'),
   installUpdate: invoke('installUpdate'),
 } as SorobanApi

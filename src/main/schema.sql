@@ -66,12 +66,14 @@ CREATE TABLE IF NOT EXISTS setting (
 -- schema_version はここに入れない。migrate() がバージョン判定に使う値なので、
 -- ここで先に既定値を入れてしまうと「未マイグレーションの既存DB」でも
 -- version=2 に見えてしまい、列追加が一切走らなくなる（migrate() 側でだけ設定する）
+-- item_code_seq: 在庫コード（S-0001…）の採番カウンタ。整数を+1しながら発行する
 INSERT OR IGNORE INTO setting (key, value) VALUES
   ('fee_rate_bp',                 '1000'),
   ('transfer_fee',                '200'),
   ('aging_warn_days',             '90'),
   ('collect_interval_h',          '1'),
-  ('mercari_keyword',             '');
+  ('mercari_keyword',             ''),
+  ('item_code_seq',               '0');
 
 -- ============================================================
 -- 仕入
@@ -146,6 +148,9 @@ CREATE INDEX IF NOT EXISTS idx_pline_purchase ON purchase_line(purchase_id);
 
 CREATE TABLE IF NOT EXISTS inventory_item (
   id               TEXT PRIMARY KEY,
+  -- そろばんが発行する、在庫1点ずつを指す絶対に重複しないコード（例 S-0012）。
+  -- 型番（商品の種類）とは別。タイトルに入れるとその1点だけが自動で引き当て・紐付けされる
+  item_code        TEXT NOT NULL UNIQUE,
   -- NULL 可：仕入記録のない私物を在庫として扱う場合に使う
   purchase_line_id TEXT REFERENCES purchase_line(id) ON DELETE CASCADE,
 
@@ -212,10 +217,14 @@ CREATE TABLE IF NOT EXISTS sale (
   -- タイトル・説明文から抜いた型番（複数可）。JSON配列で持つ
   model_codes        TEXT NOT NULL DEFAULT '[]',
 
-  -- メルカリの取引の進み具合。NULL = まだ取れていない（collector は今のところ埋めない。
-  -- 取引中タブ・取引画面の DOM 確認後に対応する）
+  -- 自動紐付け（autoLinkSale）が「これだけ揃えば紐付け完了」と見積もった点数
+  -- （タイトルの在庫コードの数、または型番1つの個数表記×N）。NULL なら見積もっていない
+  -- （sale_profit の unmatched は、揃うまで 1 のままにするためにこれを見る）
+  expected_item_count INTEGER,
+
+  -- メルカリの取引の進み具合。NULL = まだ取れていない（取引中タブと販売履歴から埋める）
   status             TEXT
-                     CHECK (status IN ('waiting_shipment','shipped','delivered','completed')),
+                     CHECK (status IN ('waiting_payment','waiting_shipment','shipped','delivered','completed')),
   shipped_at         TEXT,
   delivered_at       TEXT,
   completed_at       TEXT,
@@ -464,7 +473,13 @@ SELECT
   s.price - s.fee - s.shipping_fee - s.packaging_cost
     - COALESCE(SUM(i.landed_cost), 0) AS gross_profit,
   COUNT(sl.id) AS item_count,
-  CASE WHEN COUNT(sl.id) = 0 THEN 1 ELSE 0 END AS unmatched,
+  -- expected_item_count（見積もった点数）が分かっていて、まだそこに届いていなければ
+  -- 揃うまでは unmatched のまま（在庫コード・型番の個数表記が一部しか見つからなかった場合）
+  CASE
+    WHEN COUNT(sl.id) = 0 THEN 1
+    WHEN s.expected_item_count IS NOT NULL AND COUNT(sl.id) < s.expected_item_count THEN 1
+    ELSE 0
+  END AS unmatched,
   -- 1 なら紐付けのどれかが型番の自動確定
   COALESCE(MAX(CASE WHEN sl.link_source = 'auto' THEN 1 ELSE 0 END), 0) AS auto_linked
 FROM sale s
@@ -493,6 +508,7 @@ DROP VIEW IF EXISTS inventory_view;
 CREATE VIEW inventory_view AS
 SELECT
   i.id,
+  i.item_code,
   i.name,
   i.landed_cost,
   i.acquired_at,

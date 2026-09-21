@@ -3,6 +3,7 @@ import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { ProductSummary, ProductDetail, InventoryItem, SaleProfit, Tag } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
+import CodeChip from '../components/CodeChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import MiniChart from '../components/MiniChart.vue'
@@ -335,7 +336,12 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
               >
                 <td class="faint">{{ i.acquired_at }}</td>
                 <td class="num">{{ yen(i.landed_cost) }}</td>
-                <td><StatusChip :tone="itemStatusChip(i).tone" :label="itemStatusChip(i).label" /></td>
+                <td>
+                  <div class="chip-row">
+                    <CodeChip kind="item" :code="i.item_code" />
+                    <StatusChip :tone="itemStatusChip(i).tone" :label="itemStatusChip(i).label" />
+                  </div>
+                </td>
               </tr>
             </tbody>
           </table>

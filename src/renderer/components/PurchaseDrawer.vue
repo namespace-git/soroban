@@ -6,6 +6,7 @@ import { ref, watch, inject } from 'vue'
 import type { PurchaseDetail, PurchaseLineItem, Fulfillment } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
+import CodeChip from './CodeChip.vue'
 import Icon from './Icon.vue'
 
 const props = defineProps<{
@@ -140,15 +141,17 @@ function onEditNote() {
                 <StatusChip tone="neutral" :label="l.model_code" />
               </div>
               <div v-if="l.items.length" class="chip-row items-row">
-                <button
-                  v-for="it in l.items" :key="it.id"
-                  class="item-chip-btn" :class="{ clickable: itemClickable(it) }"
-                  :disabled="!itemClickable(it)"
-                  :title="itemClickable(it) ? '売上タブの該当行を見る' : undefined"
-                  @click="openSale(it)"
-                >
-                  <StatusChip :tone="itemChip(it).tone" :label="itemChip(it).label" />
-                </button>
+                <span v-for="it in l.items" :key="it.id" class="item-chip-group">
+                  <CodeChip kind="item" :code="it.item_code" />
+                  <button
+                    class="item-chip-btn" :class="{ clickable: itemClickable(it) }"
+                    :disabled="!itemClickable(it)"
+                    :title="itemClickable(it) ? '売上タブの該当行を見る' : undefined"
+                    @click="openSale(it)"
+                  >
+                    <StatusChip :tone="itemChip(it).tone" :label="itemChip(it).label" />
+                  </button>
+                </span>
               </div>
             </td>
             <td class="num">{{ l.quantity }}</td>
@@ -227,6 +230,12 @@ function onEditNote() {
   word-break: break-word;
 }
 .items-row { margin-top: 6px; }
+
+.item-chip-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 
 .item-chip-btn {
   background: transparent;

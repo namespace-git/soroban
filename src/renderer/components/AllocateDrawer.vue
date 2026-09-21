@@ -5,11 +5,12 @@ import { ref, computed, watch, inject } from 'vue'
 import type { Listing, InventoryItem, ListingStatus, SaleProfit, ShippingMethod } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
+import CodeChip from './CodeChip.vue'
 import EmptyState from './EmptyState.vue'
 import Icon from './Icon.vue'
 import { matchesSearch } from './SearchBox.vue'
 
-type MatchedRow = { id: string; name: string; model_code?: string | null; landed_cost: number; aging_days?: number }
+type MatchedRow = { id: string; item_code: string; name: string; model_code?: string | null; landed_cost: number; aging_days?: number }
 
 const props = defineProps<{
   open: boolean
@@ -60,7 +61,7 @@ async function load() {
     candidates.value = sugg
     feeRateBp.value = Number(settings.fee_rate_bp ?? 1000)
     shippingMethods.value = methods
-    matchedItems.value = l.items.map(it => ({ id: it.id, name: it.name, model_code: it.model_code, landed_cost: it.landed_cost }))
+    matchedItems.value = l.items.map(it => ({ id: it.id, item_code: it.item_code, name: it.name, model_code: it.model_code, landed_cost: it.landed_cost }))
   } else {
     const s = props.sale
     if (!s) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
@@ -86,7 +87,7 @@ watch(
 
 const filtered = computed(() => {
   if (!search.value.trim()) return candidates.value
-  return candidates.value.filter(c => matchesSearch([c.name, c.model_code], search.value))
+  return candidates.value.filter(c => matchesSearch([c.name, c.model_code, c.item_code], search.value))
 })
 
 // 出品モード：終了済み（sold／ended）の出品には新規に引き当てられない。引き当て済みの表示だけ残す
@@ -214,6 +215,7 @@ function placeholderChar(): string {
     <div v-if="matchedItems.length" class="matched-block">
       <p class="panel-title">{{ mode === 'listing' ? '引き当て済み' : '紐付け済み' }}</p>
       <div v-for="m in matchedItems" :key="m.id" class="item matched-item">
+        <CodeChip kind="item" :code="m.item_code" />
         <StatusChip v-if="m.model_code" tone="neutral" :label="m.model_code" />
         <span class="grow">{{ m.name }}</span>
         <span v-if="m.aging_days != null" class="faint nowrap">{{ m.aging_days }}日</span>
@@ -240,6 +242,7 @@ function placeholderChar(): string {
             :checked="picked.has(c.id)"
             @change="toggle(c.id)"
           />
+          <CodeChip kind="item" :code="c.item_code" />
           <StatusChip v-if="c.model_code" tone="neutral" :label="c.model_code" />
           <StatusChip
             v-if="mode === 'listing' && c.listing && c.listing.mercari_item_id !== listing?.mercari_item_id"

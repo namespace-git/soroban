@@ -28,7 +28,15 @@ export type Fulfillment = 'pending' | 'shipped' | 'delivered'
  * delivered = 受取済み（評価待ち） / completed = 取引完了（売上金が反映）。
  * null = まだ取れていない（取引中タブ・取引画面の DOM 確認後に collector が埋める）
  */
-export type SaleStatus = 'waiting_shipment' | 'shipped' | 'delivered' | 'completed'
+/**
+ * メルカリの取引の進み具合。取引中タブ（/mypage/listings/in_progress）の文言から：
+ *   waiting_payment  = 「支払いをしてください」「支払い待ち」（購入されたが未入金）
+ *   waiting_shipment = 「発送してください」「発送待ち」（入金済み。こちらが発送する）
+ *   shipped          = 「受取評価待ち」（発送済み。買い手の受取待ち）
+ *   delivered        = 「評価をしてください」（買い手が受取評価済み。こちらの評価待ち）
+ *   completed        = 売却済みタブ（販売履歴）に出た（取引完了・入金）
+ */
+export type SaleStatus = 'waiting_payment' | 'waiting_shipment' | 'shipped' | 'delivered' | 'completed'
 export type ShopAccountKind = 'mellojoy' | 'tiktok' | 'other'
 /** actual = メルカリの取引詳細から取った実額 / master = 発送方法マスタ / manual = 手入力 */
 export type ShippingSource = 'actual' | 'master' | 'manual'
@@ -253,6 +261,7 @@ export interface PurchaseLine {
 
 export interface PurchaseLineItem {
   id: string
+  item_code: string
   status: InventoryStatus
   landed_cost: number
   /** 出品に引き当て済みなら出品価格 */
@@ -306,6 +315,12 @@ export interface ImportResult {
 
 export interface InventoryItem {
   id: string
+  /**
+   * 在庫コード（例 `S-0012`）。在庫 1 点ずつにそろばんが振る、絶対に重複しない番号。
+   * 型番（商品の種類）とは別。メルカリのタイトルに `【S-0012】` と入れると、その 1 点だけが
+   * 自動で引き当て・紐付けされる。複数（`【S-0012】【S-0013】`）なら全部。分割した子も新しいコードを持つ
+   */
+  item_code: string
   name: string
   landed_cost: number
   acquired_at: string
@@ -361,7 +376,7 @@ export interface Listing {
   /** タイトルから抜いた型番（枝番まで）。無ければ空 */
   model_codes: string[]
   /** 引き当てた在庫 */
-  items: Array<{ id: string; name: string; model_code: string | null; landed_cost: number }>
+  items: Array<{ id: string; item_code: string; name: string; model_code: string | null; landed_cost: number }>
   /**
    * 引き当てた在庫の原価合計と、出品価格から見た見込み粗利
    * （手数料は設定の率。発送方法が決まっていればその送料も引く。梱包は引かない）
@@ -552,6 +567,8 @@ export interface DashboardStats {
   needsPurchaseConfirm: number
   /** 出品中（active）で在庫が未引き当ての出品の数 */
   needsListingAllocation: number
+  /** 発送が必要な販売（status = waiting_shipment）の件数。要対応の上位に出す */
+  needsShipment: number
   /** 未販売在庫の点数 */
   stockCount: number
   /** 未販売在庫の原価合計（寝ている資金） */
@@ -627,6 +644,10 @@ export interface SorobanApi {
   listInventory(status?: InventoryStatus): Promise<InventoryItem[]>
   updateInventory(id: string, patch: InventoryPatch): Promise<void>
   /** ばらして売る：1点を count 点に分割。原価は等分し端数は最後の子へ。親は 'split' になる。戻り値は子の id */
+  /**
+   * 在庫 1 点を count 点に分割（箱を開けて半分ずつ売る等）。原価は均等割り（余りは末尾に 1 円ずつ）。
+   * 子は新しい在庫コードを持ち、名前は「元の名前（分割 1/2）」。親は split になる。子の id を返す
+   */
   splitInventory(id: string, count: number): Promise<string[]>
   /** 在庫から外す。廃棄（disposed）か自家消費（personal_use）。既定は disposed */
   disposeInventory(id: string, note: string, status?: 'disposed' | 'personal_use'): Promise<void>
@@ -716,6 +737,12 @@ export interface SorobanApi {
   revealDbFolder(): Promise<void>
   /** 取引データ（販売・仕入・在庫・紐付け・取り込み履歴・期間費用）を全部消す。設定・仕入先・発送方法は残す */
   resetData(): Promise<void>
+
+  /**
+   * メルカリのページを標準ブラウザで開く。item = 商品ページ（https://jp.mercari.com/item/mXXX）、
+   * transaction = 取引画面（https://jp.mercari.com/transaction/mXXX）。この 2 種以外は開かない
+   */
+  openMercari(kind: 'item' | 'transaction', mercariItemId: string): Promise<void>
 
   // 更新（GitHub Releases）
   /** いまのアプリのバージョンと、更新の確認結果。起動時と 6 時間ごとに自動で確認し、手動でも呼べる */

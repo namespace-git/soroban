@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  CODE_LOOSE_RE, CODE_RE, displayName, extractCode, extractCodes,
-  extractMaterial, extractQuantity,
+  CODE_LOOSE_RE, CODE_RE, displayName, extractCode, extractCodeQuantities, extractCodes,
+  extractItemCodes, extractMaterial, extractQuantity,
 } from '../code'
 
 describe('code（型番・素材・数量の抽出）', () => {
@@ -74,6 +74,58 @@ describe('code（型番・素材・数量の抽出）', () => {
 
     it('コードがなければ空配列', () => {
       expect(extractCodes('私物の売却です')).toEqual([])
+    })
+  })
+
+  describe('extractItemCodes（在庫コード）', () => {
+    it('【】付きの在庫コードを複数拾う', () => {
+      expect(extractItemCodes('【S-0012】【S-0013】')).toEqual(['S-0012', 'S-0013'])
+    })
+
+    it('【】なしでも拾う', () => {
+      expect(extractItemCodes('S-0012 と S-0040')).toEqual(['S-0012', 'S-0040'])
+    })
+
+    it('重複は除いて1つにする', () => {
+      expect(extractItemCodes('【S-0012】S-0012')).toEqual(['S-0012'])
+    })
+
+    it('在庫コードが無ければ空配列（型番だけでは拾わない）', () => {
+      expect(extractItemCodes('【Z078-2】いちごスフレ')).toEqual([])
+    })
+  })
+
+  describe('extractCodeQuantities（型番直後の個数表記）', () => {
+    it('【Z078-2】×2 → qty 2', () => {
+      expect(extractCodeQuantities('【Z078-2】×2')).toEqual([{ code: 'Z078-2', qty: 2 }])
+    })
+
+    it('Z078-2 2個セット → qty 2', () => {
+      expect(extractCodeQuantities('Z078-2 2個セット')).toEqual([{ code: 'Z078-2', qty: 2 }])
+    })
+
+    it('Z078-2 100円 → 単位が違う数字は個数と見なさず qty 1', () => {
+      expect(extractCodeQuantities('Z078-2 100円')).toEqual([{ code: 'Z078-2', qty: 1 }])
+    })
+
+    it('個数表記が無ければ qty 1', () => {
+      expect(extractCodeQuantities('【Z078-2】いちごスフレ')).toEqual([{ code: 'Z078-2', qty: 1 }])
+    })
+
+    it('x2・✕2 も半角×と同様に拾う', () => {
+      expect(extractCodeQuantities('Z078-2 x2')).toEqual([{ code: 'Z078-2', qty: 2 }])
+      expect(extractCodeQuantities('Z078-2 ✕2')).toEqual([{ code: 'Z078-2', qty: 2 }])
+    })
+
+    it('2点セット も個数表記として拾う', () => {
+      expect(extractCodeQuantities('Z078-2 2点セット')).toEqual([{ code: 'Z078-2', qty: 2 }])
+    })
+
+    it('複数型番はそれぞれの個数を拾う', () => {
+      expect(extractCodeQuantities('【Z080-1】【Z088-2】×3')).toEqual([
+        { code: 'Z080-1', qty: 1 },
+        { code: 'Z088-2', qty: 3 },
+      ])
     })
   })
 
