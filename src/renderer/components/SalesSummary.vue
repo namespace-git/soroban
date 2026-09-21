@@ -13,6 +13,8 @@ import Icon from './Icon.vue'
 import Skeleton from './Skeleton.vue'
 
 const revision = inject<Ref<number>>('revision')!
+// 売上タブ内で引き当て・送料・紐付けを変えた直後にも数字を更新する
+const dataRevision = inject<Ref<number>>('dataRevision', ref(0))
 const goto = inject<(t: string, payload?: { stage?: 'listed' | 'pending' | 'done' | 'all'; month?: string }) => void>('goto')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
@@ -34,7 +36,7 @@ async function load() {
   loaded.value = true
 }
 onMounted(load)
-watch(revision, load)
+watch([revision, dataRevision], load)
 
 // --- 今月の粗利（転売のみ。ホームの主要指標と同じ考え方） ---
 const thisMonthSummary = computed(() =>

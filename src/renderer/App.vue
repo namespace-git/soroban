@@ -134,8 +134,11 @@ async function loadStats() {
   pendingCount.value = pending.length
 }
 
-// 子の view がデータを変更したら呼ぶ。バッジと取り込み状態を再読み込みする
-provide('changed', () => { loadStats() })
+// 子の view がデータを変更したら呼ぶ。バッジと取り込み状態を再読み込みし、
+// 同じ画面に居る兄弟（売上サマリなど）にも知らせる（revision は取り込み後だけ動く）
+const dataRevision = ref(0)
+provide('dataRevision', dataRevision)
+provide('changed', () => { loadStats(); dataRevision.value++ })
 
 // window.prompt() は Electron では動かないため、入力ダイアログを共通で用意する
 type PromptState = { title: string; opts: PromptOptions; resolve: (v: string | null) => void }
