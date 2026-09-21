@@ -17,7 +17,9 @@
     "test": "cross-env ELECTRON_RUN_AS_NODE=1 electron ./node_modules/vitest/vitest.mjs run",
     "icon": "electron scripts/make-icon.cjs",
     "release:patch": "npm version patch -m \"v%s\" && git push && git push --tags",
-    "release:minor": "npm version minor -m \"v%s\" && git push && git push --tags"
+    "release:minor": "npm version minor -m \"v%s\" && git push && git push --tags",
+    "dist:mac:ci": "pnpm build && electron-builder --mac --publish never",
+    "dist:win:ci": "pnpm build && electron-builder --win --publish never"
   },
   "dependencies": {
     "@fontsource-variable/m-plus-2": "^5.3.0",
