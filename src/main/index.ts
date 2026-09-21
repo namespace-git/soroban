@@ -126,6 +126,8 @@ const UNLOGGED_HANDLERS = new Set<keyof SorobanApi>([
   'logClient', 'getDashboard', 'listSales', 'listListings', 'listInventory',
   'listPurchases', 'listMonthly', 'listExpenses', 'searchAll', 'getSettings',
   'getMonthDetail', 'listProducts', 'listTags', 'listShopAccounts', 'listShippingMethods',
+  // 引数に API キーが載るので記録しない（summarize はキー名でしか伏せられない）
+  'setGeminiApiKey',
 ])
 
 function registerIpc(): void {
