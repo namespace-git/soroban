@@ -750,27 +750,40 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     let thumbsSaved = 0
     let thumbsAttempted = 0
     let excludedByKeyword = 0
+    let excludedDeleted = 0
+    let excludedKnownByKeyword = 0
 
     if (!salesEmpty) {
       const known = db.existingMercariIds(sales.map(s => s.mercariItemId))
       const freshSalesAll = sales.filter(s => !known.has(s.mercariItemId))
       const knownRows = sales.filter(s => known.has(s.mercariItemId)).map(toRow)
 
+      // 削除した販売（sale_exclusion）は再取り込みしない。挿入の前に弾く
+      const freshSalesNotDeleted = freshSalesAll.filter(s => !db.isMercariItemExcluded(s.mercariItemId))
+      excludedDeleted += freshSalesAll.length - freshSalesNotDeleted.length
+
       // キーワードが設定されていれば、出品中タブと同じ規則（タイトル一致）で絞る。
       // 不一致のものは insertCollected に渡さない＝詳細ページもサムネイルも取りに行かない
       const keywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
       const freshSales = keywords.length > 0
-        ? freshSalesAll.filter(s => db.matchesAnyKeyword(s.title, keywords))
-        : freshSalesAll
-      excludedByKeyword = freshSalesAll.length - freshSales.length
+        ? freshSalesNotDeleted.filter(s => db.matchesAnyKeyword(s.title, keywords))
+        : freshSalesNotDeleted
+      excludedByKeyword = freshSalesNotDeleted.length - freshSales.length
 
       const insertedRows = freshSales.length > 0 ? db.insertCollected(freshSales.map(toRow)) : []
       inserted = insertedRows.length
       updated = knownRows.length > 0 ? db.updateCollectedActuals(knownRows) : 0
 
       // サムネイル対象：新規に入れた分 ＋ 今回の一覧に出ていてまだ保存していない既存分。
-      // 実DBに元からあった販売は「新規」ではないので、後者を含めないと永久にサムネが付かない
-      const knownWithoutThumb = db.salesWithoutThumb(knownRows.map(r => r.mercariItemId))
+      // 実DBに元からあった販売は「新規」ではないので、後者を含めないと永久にサムネが付かない。
+      // ただし既知分は「現在のキーワードに一致する」ものだけを対象にする（キーワードを変えた後、
+      // 既に取り込んだ不一致の販売にサムネを取りに行かないため。判定は新規と同じ関数）
+      const knownRowsMatched = keywords.length > 0
+        ? knownRows.filter(r => db.matchesAnyKeyword(r.title, keywords))
+        : knownRows
+      excludedKnownByKeyword = knownRows.length - knownRowsMatched.length
+
+      const knownWithoutThumb = db.salesWithoutThumb(knownRowsMatched.map(r => r.mercariItemId))
       const thumbsResult = await saveNewThumbs([...insertedRows, ...knownWithoutThumb], sales)
       thumbsSaved = thumbsResult.saved
       thumbsAttempted = thumbsResult.attempted
@@ -846,6 +859,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     // 発送待ち〜受取評価待ちの取引がここに出る。既知の販売は状態だけ更新、未知は
     // 新しい販売として取り込む（soldAt は今日。本当の購入完了日は売却済み一覧が来たら直す）
     let inProgressScraped = 0
+    let inProgressIds = new Set<string>()
     let inProgressNew = 0
     let inProgressUpdated = 0
     let inProgressUnknownStatus = 0
@@ -868,6 +882,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
         .catch(() => '') as string
       const scrapedTransactions = parseInProgressHtml(inProgressHtml)
       inProgressScraped = scrapedTransactions.length
+      inProgressIds = new Set(scrapedTransactions.map(t => t.mercariItemId))
       const inProgressTotal = extractInProgressTotal(inProgressHtml)
 
       if (scrapedTransactions.length === 0 && inProgressTotal !== null && inProgressTotal >= 1) {
@@ -883,7 +898,10 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
           : scrapedTransactions
 
         const knownIds = db.existingMercariIds(targetTransactions.map(t => t.mercariItemId))
-        const freshTransactions = targetTransactions.filter(t => !knownIds.has(t.mercariItemId))
+        const freshTransactionsAll = targetTransactions.filter(t => !knownIds.has(t.mercariItemId))
+        // 削除した販売は取引中タブからも再取り込みしない
+        const freshTransactions = freshTransactionsAll.filter(t => !db.isMercariItemExcluded(t.mercariItemId))
+        excludedDeleted += freshTransactionsAll.length - freshTransactions.length
 
         for (const t of targetTransactions) {
           if (t.status === null) inProgressUnknownStatus++
@@ -910,11 +928,18 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     }
 
     // 詳細を開く対象：未紐付けの転売で model_codes が空のものだけ
-    // （説明文に型番があれば紐付けを救える）。実額のためには開かない
-    const pending = db.listSales({ onlyPending: true })
+    // （説明文に型番があれば紐付けを救える）。実額のためには開かない。
+    // キーワードを変えた後は、取り込み時点では resale だったが現在のキーワードには
+    // 一致しない販売が残っていることがあるため、ここでも同じ関数で絞る
+    const pendingKeywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
+    const pendingAll = db.listSales({ onlyPending: true })
       .filter(s => s.mercari_item_id
         && s.kind === 'resale' && s.unmatched === 1 && s.model_codes.length === 0)
-      .slice(0, Math.max(0, MAX_PAGES_PER_RUN - pagesOpened))
+    const pendingMatched = pendingKeywords.length > 0
+      ? pendingAll.filter(s => db.matchesAnyKeyword(s.title, pendingKeywords))
+      : pendingAll
+    const excludedPendingByKeyword = pendingAll.length - pendingMatched.length
+    const pending = pendingMatched.slice(0, Math.max(0, MAX_PAGES_PER_RUN - pagesOpened))
 
     let detailsRead = 0
     let codesApplied = 0
@@ -942,8 +967,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       }
     }
 
-    if (salesEmpty && listingsScraped === 0) {
-      // 販売・出品どちらも0件。0件を成功にしない（DOM変更で壊れたとき静かに欠損すると
+    if (salesEmpty && listingsScraped === 0 && inProgressScraped === 0) {
+      // 販売・出品・取引中のどれも0件。0件を成功にしない（DOM変更で壊れたとき静かに欠損すると
       // 数ヶ月気づけないので、明示的に異常として残す）。listingBrokenMessage は
       // status に関わらず必ず message に残す
       const parts = ['0件でした。画面構造が変わってセレクタが壊れている可能性があります']
@@ -955,8 +980,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     // status を落とさず message にだけ残す＝Codexレビュー指摘）
     const parts = [salesEmpty ? '販売 0 件' : `新規 ${inserted}・更新 ${updated}`]
     if (excludedByKeyword > 0) parts.push(`キーワード不一致で除外 ${excludedByKeyword} 件`)
+    if (excludedKnownByKeyword > 0) parts.push(`既知の不一致でサムネ対象外 ${excludedKnownByKeyword} 件`)
+    if (excludedDeleted > 0) parts.push(`削除済み ${excludedDeleted} 件`)
     const totalThumbsSaved = thumbsSaved + listingThumbsSaved + inProgressThumbsSaved
     if (totalThumbsSaved > 0) parts.push(`サムネイル ${totalThumbsSaved} 枚`)
+    if (excludedPendingByKeyword > 0) parts.push(`既知の不一致で詳細対象外 ${excludedPendingByKeyword} 件`)
     if (pending.length > 0) parts.push(`型番の追記 ${codesApplied}（詳細 ${detailsRead} 件）`)
     parts.push(`出品 新規 ${listingInserted}・更新 ${listingUpdated}`)
     if (listingBrokenMessage) parts.push(listingBrokenMessage)
@@ -967,7 +995,13 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       parts.push(`一覧に ${totalCount} 件、取得 ${sales.length} 件`)
     }
 
-    return db.finishRun(runId, 'ok', sales.length, inserted, parts.join('。'))
+    // fetched / inserted は売却済み一覧と取引中タブの合計（同じ商品IDは重複除去）。
+    // 取引中タブだけで取り込んでも 0 件扱いにならないようにする（Codexレビュー指摘）
+    const observedIds = new Set([...sales.map(s => s.mercariItemId), ...inProgressIds])
+    const totalFetched = observedIds.size
+    const totalInserted = inserted + inProgressNew
+
+    return db.finishRun(runId, 'ok', totalFetched, totalInserted, parts.join('。'))
 
   } catch (e) {
     return db.finishRun(

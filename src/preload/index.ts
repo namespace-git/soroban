@@ -93,6 +93,9 @@ const api: SorobanApi = {
 
   collect: invoke('collect'),
   openLogin: invoke('openLogin'),
+  estimateSaleProfit: invoke('estimateSaleProfit'),
+  listSaleExclusions: invoke('listSaleExclusions'),
+  removeSaleExclusion: invoke('removeSaleExclusion'),
   openShopLogin: invoke('openShopLogin'),
   listRuns: invoke('listRuns'),
 

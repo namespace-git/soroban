@@ -121,6 +121,17 @@ const filteredSales = computed(() => {
   return tagFilter.value ? sales.filter(s => saleHasTag(s, tagFilter.value)) : sales
 })
 
+// タグで絞っているとき、絞った販売のうち別のタグも付いているものの件数
+// （同じ販売が別のタグの集計にも数えられてしまう。払う相手のタグは1販売に1つにする運用を促す注意）
+const multiTagCount = computed(() => {
+  if (!tagFilter.value) return 0
+  return filteredSales.value.filter(s => {
+    const otherTagIds = [...s.tags.map(t => t.id), ...s.inherited_tags.map(t => t.id)]
+      .filter(id => id !== tagFilter.value)
+    return otherTagIds.length > 0
+  }).length
+})
+
 // 表の合計行：タグで絞っているときは filtered、そうでなければ totals（どちらも main が計算済み）
 const footerTotals = computed<MonthTotals | null>(() => {
   if (!detail.value) return null
@@ -233,6 +244,11 @@ function expenseContent(e: Expense): string {
         </strong>
         <span class="faint">（{{ detail.filtered.sales_count }} 件）</span>
       </div>
+
+      <p v-if="multiTagCount > 0" class="multi-tag-note">
+        <Icon name="alert" :size="14" />
+        {{ multiTagCount }} 件に別のタグも付いています。別のタグで絞っても同じ販売が数えられます（払う相手のタグは1販売に1つに）
+      </p>
       <p class="faint alloc-hint">
         経費は販売用の販売に、金額（販売価格の比）か数量（点数の比）で配賦。端数は最後の行
       </p>
@@ -430,6 +446,19 @@ function expenseContent(e: Expense): string {
 }
 
 .alloc-hint { margin: 0 4px 16px; }
+
+.multi-tag-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 4px 16px;
+  padding: 8px 12px;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-13);
+}
 
 .table-panel { padding: 0; overflow-x: auto; margin-bottom: 16px; }
 .table-panel .section-head { padding: 16px 20px 0; margin-bottom: 12px; }

@@ -948,9 +948,9 @@ describe('db（:memory:）', () => {
     expect(db.getShopAccount(shopId)!.default_shipping_fee).toBeNull()
 
     expect(() => db.updateShopAccount(shopId, { default_shipping_fee: -1 }))
-      .toThrow('送料は 0 以上の整数で')
+      .toThrow('送料は整数で入力してください')
     expect(() => db.updateShopAccount(shopId, { default_shipping_fee: 1.5 }))
-      .toThrow('送料は 0 以上の整数で')
+      .toThrow('送料は整数で入力してください')
   })
 
   it('resetData：仕入・販売・紐付け・runを消す。マスタ（shop_account/shipping_method/setting）は残す', () => {
@@ -1303,7 +1303,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('21')
+      expect(db.getSettings().schema_version).toBe('22')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1461,8 +1461,8 @@ describe('db（:memory:）', () => {
     expect(other.last_ordered_at).toBeNull()
   })
 
-  it('migrate：schema_versionが21になる', () => {
-    expect(db.getSettings().schema_version).toBe('21')
+  it('migrate：schema_versionが22になる', () => {
+    expect(db.getSettings().schema_version).toBe('22')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1548,7 +1548,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('21')
+      expect(db.getSettings().schema_version).toBe('22')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1582,7 +1582,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('21')
+      expect(db.getSettings().schema_version).toBe('22')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -1707,13 +1707,13 @@ describe('db（:memory:）', () => {
         shop_account_id: shopId,
         ordered_at: '2026-03-01',
         lines: [{ name: '商品', unit_price: 1000, quantity: 0 }],
-      })).toThrow('数量は1以上にしてください')
+      })).toThrow('数量は1以上の整数で入力してください')
 
       expect(() => db.createPurchase({
         shop_account_id: shopId,
         ordered_at: '2026-03-01',
         lines: [{ name: '商品', unit_price: -1, quantity: 1 }],
-      })).toThrow('単価は0以上にしてください')
+      })).toThrow('単価は整数で入力してください')
 
       expect(() => db.createPurchase({
         shop_account_id: shopId,
@@ -1792,7 +1792,7 @@ describe('db（:memory:）', () => {
 
       expect(result.created).toBe(2)
       expect(result.skipped).toEqual([
-        { index: 1, reason: expect.stringContaining('数量は1以上にしてください') },
+        { index: 1, reason: expect.stringContaining('数量は1以上の整数で入力してください') },
       ])
     })
   })
@@ -3581,6 +3581,206 @@ describe('db（:memory:）', () => {
       expect(purchaseHit('未着商品テスト').status_label).toBe('未着')
       expect(purchaseHit('配送中商品テスト').status_label).toBe('配送中')
       expect(purchaseHit('到着済商品テスト').status_label).toBe('到着済')
+    })
+  })
+
+  describe('getMonthDetail：価格0の月でも経費配賦は数量按分にフォールバックする', () => {
+    it('販売価格が全て0でも、経費は数量按分で全額配賦される（合計が一致する）', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-04-01', shipping_fee: 0,
+        lines: [{ name: '無料配布品A', unit_price: 0, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-04-01', shipping_fee: 0,
+        lines: [{ name: '無料配布品B', unit_price: 0, quantity: 1 }],
+      })
+      const [itemA, itemB] = db.listInventory('in_stock')
+
+      const saleA = db.createSale({ title: '無料配布品A', sold_at: '2026-04-10', price: 0 })
+      db.linkInventory(saleA, [itemA.id])
+      const saleB = db.createSale({ title: '無料配布品B', sold_at: '2026-04-12', price: 0 })
+      db.linkInventory(saleB, [itemB.id])
+
+      db.createExpense({ occurred_at: '2026-04-05', category: 'packaging', amount: 101 })
+
+      const detail = db.getMonthDetail('2026-04')
+      expect(detail.totals.expense_total).toBe(101)
+      const sum = detail.sales.reduce((s, r) => s + r.allocated_expense, 0)
+      // 金額按分（価格の比）だと重みの合計が0円になり、以前は誰にも配賦されず
+      // Σallocated_expense が経費合計と一致しなくなっていた。数量按分にフォールバックして一致させる
+      expect(sum).toBe(101)
+    })
+  })
+
+  describe('getMonthDetail：expense_by_categoryは明細ごとの項目で集計する', () => {
+    it('複数項目にまたがるレシートは明細ごとのcategoryに配分される（先頭項目にまとめない）。明細の無い経費は親の項目で集計する', () => {
+      db.createExpense({
+        occurred_at: '2026-05-01', category: 'packaging',
+        lines: [
+          { name: '緩衝材', unit_price: 300, quantity: 1, category: 'packaging' },
+          { name: 'OPP袋', unit_price: 100, quantity: 2, category: 'supplies' },
+        ],
+      })
+      db.createExpense({ occurred_at: '2026-05-02', category: 'shipping', amount: 500 })
+
+      const detail = db.getMonthDetail('2026-05')
+      const byCat = Object.fromEntries(detail.expense_by_category.map(c => [c.category, c.amount]))
+      expect(byCat.packaging).toBe(300)
+      expect(byCat.supplies).toBe(200)
+      expect(byCat.shipping).toBe(500)
+    })
+  })
+
+  describe('自動紐付け（在庫コード名指し）は他の出品に引き当て済みの在庫を横取りしない', () => {
+    it('タイトルの在庫コードが一致しても、その在庫が別の出品に引き当て済みなら候補止まり（listing_lineは消えない）', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '在庫コード商品', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+
+      db.upsertListings([
+        { mercariItemId: 'LCode1', title: `在庫コード商品【${item.item_code}】`, price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LCode1', [item.id])
+
+      const saleId = db.createSale({ title: `【${item.item_code}】在庫コード商品`, sold_at: '2026-01-10', price: 3000 })
+      const sale = db.listSales().find(s => s.id === saleId)!
+      expect(sale.unmatched).toBe(1) // 奪わず候補止まり
+      expect(sale.item_count).toBe(0)
+
+      // 出品への引き当ては消えずそのまま残る
+      const listing = db.listListings().find(l => l.mercari_item_id === 'LCode1')!
+      expect(listing.items.map(i => i.id)).toEqual([item.id])
+    })
+  })
+
+  describe('nextItemCode：カウンタが既存コードより後ろにずれていても衝突しない', () => {
+    it('開始番号は max(カウンタ, 既存コードの最大番号) から採番する', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '商品A', unit_price: 100, quantity: 1 }],
+      })
+      const first = db.listInventory('in_stock')[0]
+      expect(first.item_code).toBe('S-0001')
+
+      // カウンタが既存コードより後ろにずれた状態を再現する（v15の一括採番の再実行・手動編集など）
+      db.getDb().prepare(`UPDATE setting SET value = '0' WHERE key = 'item_code_seq'`).run()
+
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-02', shipping_fee: 0,
+        lines: [{ name: '商品B', unit_price: 100, quantity: 1 }],
+      })
+      const codes = db.listInventory('in_stock').map(i => i.item_code)
+      expect(new Set(codes).size).toBe(codes.length) // 重複しない
+      expect(codes).toContain('S-0002')
+    })
+  })
+
+  describe('deleteSale：取り込んだ販売を削除すると除外記録（sale_exclusion）が残る', () => {
+    it('source=collectorで削除するとlistSaleExclusionsに出て、removeSaleExclusionで解除できる', () => {
+      const [inserted] = db.insertCollected([
+        { mercariItemId: 'del-1', title: '削除される商品', price: 1000, soldAt: '2026-01-01' },
+      ])
+      db.deleteSale(inserted.id)
+
+      expect(db.isMercariItemExcluded('del-1')).toBe(true)
+      const list = db.listSaleExclusions()
+      expect(list.find(e => e.mercari_item_id === 'del-1')).toMatchObject({ title: '削除される商品' })
+
+      db.removeSaleExclusion('del-1')
+      expect(db.isMercariItemExcluded('del-1')).toBe(false)
+      expect(db.listSaleExclusions().find(e => e.mercari_item_id === 'del-1')).toBeUndefined()
+    })
+
+    it('手入力（manual）の販売を削除しても除外記録は残らない', () => {
+      const saleId = db.createSale({ title: '手入力の販売', sold_at: '2026-01-01', price: 1000 })
+      db.deleteSale(saleId)
+      expect(db.listSaleExclusions()).toHaveLength(0)
+    })
+
+    it('resetDataでsale_exclusionも消える', () => {
+      const [inserted] = db.insertCollected([
+        { mercariItemId: 'del-2', title: '削除される商品2', price: 1000, soldAt: '2026-01-01' },
+      ])
+      db.deleteSale(inserted.id)
+      expect(db.listSaleExclusions()).toHaveLength(1)
+
+      db.resetData()
+      expect(db.listSaleExclusions()).toHaveLength(0)
+    })
+  })
+
+  describe('mellojoy_excluded_order：メロジョイの注文取り込みの除外記録', () => {
+    it('markで記録するとisがtrueになり、keywords_hashが変われば再評価されfalseに戻る', () => {
+      expect(db.isMellojoyOrderExcluded(shopId, 'order-1', 'hashA')).toBe(false)
+
+      db.markMellojoyOrderExcluded(shopId, 'order-1', 'hashA')
+      expect(db.isMellojoyOrderExcluded(shopId, 'order-1', 'hashA')).toBe(true)
+
+      // キーワードが変わってhashが変わると再評価する（除外を引き継がない）
+      expect(db.isMellojoyOrderExcluded(shopId, 'order-1', 'hashB')).toBe(false)
+    })
+  })
+
+  describe('estimateSaleProfit：紐付けパネルの粗利見積もり（画面で再計算しないための共通計算）', () => {
+    it('手数料・送料・梱包材費・原価から粗利を計算する。無効化した発送方法でも送料は引く', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '在庫X', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+
+      db.saveShippingMethod({ name: 'テスト送料', fee: 300 })
+      const method = db.listShippingMethods().find(m => m.name === 'テスト送料')!
+      db.deleteShippingMethod(method.id) // 無効化（is_active=0）にしても料金を引くことを確かめる
+
+      const result = db.estimateSaleProfit({
+        price: 2000, shipping_method_id: method.id, packaging_cost: 50, inventory_item_ids: [item.id],
+      })
+      // fee_rate_bp既定1000(10%) → fee = floor(2000*1000/10000) = 200
+      expect(result.fee).toBe(200)
+      expect(result.shipping_fee).toBe(300)
+      expect(result.packaging_cost).toBe(50)
+      expect(result.cost).toBe(1000)
+      expect(result.gross_profit).toBe(2000 - 200 - 300 - 50 - 1000)
+    })
+
+    it('発送方法なし・在庫指定なしなら送料・原価は0', () => {
+      const result = db.estimateSaleProfit({ price: 1000, shipping_method_id: null, inventory_item_ids: [] })
+      expect(result).toEqual({ fee: 100, shipping_fee: 0, packaging_cost: 0, cost: 0, gross_profit: 900 })
+    })
+  })
+
+  describe('入力値チェック（assertYen/assertQty）：画面からの入口で整数以外はエラーになる', () => {
+    it('createPurchase：単価・送料が小数だとthrow', () => {
+      expect(() => db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '商品', unit_price: 100.5, quantity: 1 }],
+      })).toThrow('単価は整数で入力してください')
+
+      expect(() => db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 99.9,
+        lines: [{ name: '商品', unit_price: 100, quantity: 1 }],
+      })).toThrow('送料は整数で入力してください')
+    })
+
+    it('createSale：価格が小数だとthrow', () => {
+      expect(() => db.createSale({ title: '商品', sold_at: '2026-01-01', price: 100.5 }))
+        .toThrow('価格は整数で入力してください')
+    })
+
+    it('updateSale：送料・梱包材費が小数だとthrow', () => {
+      const saleId = db.createSale({ title: '商品', sold_at: '2026-01-01', price: 1000 })
+      expect(() => db.updateSale(saleId, { shipping_fee: 100.5 }))
+        .toThrow('送料は整数で入力してください')
+      expect(() => db.updateSale(saleId, { packaging_cost: -1 }))
+        .toThrow('梱包材費は整数で入力してください')
+    })
+
+    it('saveShippingMethod：料金が小数だとthrow', () => {
+      expect(() => db.saveShippingMethod({ name: 'テスト', fee: 100.5 }))
+        .toThrow('料金は整数で入力してください')
     })
   })
 })

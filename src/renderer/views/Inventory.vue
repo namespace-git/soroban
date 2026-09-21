@@ -28,8 +28,14 @@ const changed = inject<() => void>('changed', () => {})
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
-// 横断検索から goto('inventory', { search, focusId }) で開かれる
-const gotoPayload = inject<Ref<{ search?: string; focusId?: string } | null>>('gotoPayload', ref(null))
+// 横断検索から goto('inventory', { search, focusId }) で開かれる。ホームの長期滞留からは
+// inventoryStatus（状態）と agingMin（滞留日数の下限）が来る
+const gotoPayload = inject<Ref<{
+  search?: string
+  focusId?: string
+  inventoryStatus?: StatusFilter
+  agingMin?: number
+} | null>>('gotoPayload', ref(null))
 
 const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
 
@@ -56,6 +62,8 @@ const allTags = ref<Tag[]>([])
 const tagFilter = ref('')
 const searchText = ref('')
 const period = ref<Period>('all')
+// ホームの「長期滞留」から来たときの絞り込み（滞留日数の下限）。× で解除する
+const agingMinFilter = ref<number | null>(null)
 
 // --- 並び替え（列見出しクリック）。既定は滞留 desc（現状の並びと同じ） ---
 const { sortKey, sortDir, toggle, sortRows } = useSort<SortKey>('aging_days', 'desc')
@@ -125,6 +133,8 @@ watch(gotoPayload, (p) => {
   if (!p) return
   // focusId 指定時は、対象行が今の状態の絞り込みで隠れていても見えるよう「すべて」にしてから探す
   if (p.focusId) statusFilter.value = 'all'
+  if (p.inventoryStatus) statusFilter.value = p.inventoryStatus
+  if (p.agingMin != null) agingMinFilter.value = p.agingMin
   if (p.search) searchText.value = p.search
   if (p.focusId) focusRow(p.focusId)
   gotoPayload.value = null
@@ -154,6 +164,7 @@ const filteredItems = computed(() => {
     searchText.value,
   ))
   list = list.filter(i => inPeriod(i.acquired_at, period.value))
+  if (agingMinFilter.value != null) list = list.filter(i => i.aging_days >= agingMinFilter.value!)
   list = sortRows(list, sortValue)
   // 「すべて」のときは状態順を優先し、その中を選んだ並びにする
   if (statusFilter.value === 'all') {
@@ -324,6 +335,15 @@ async function editNote(item: InventoryItem) {
       </select>
       <SearchBox v-model="searchText" placeholder="名前・型番・素材・メモ・タグ・仕入先を検索" />
       <PeriodSelect v-model="period" />
+      <button
+        v-if="agingMinFilter != null"
+        type="button"
+        class="aging-chip-btn"
+        :title="`滞留 ${agingMinFilter} 日以上の絞り込みを解除`"
+        @click="agingMinFilter = null"
+      >
+        <StatusChip tone="warn" :label="`滞留 ${agingMinFilter} 日以上 ×`" />
+      </button>
       <span class="grow" />
       <span class="faint nowrap">{{ filteredItems.length }}点 ／ 原価計 {{ yen(total) }}</span>
     </div>
@@ -468,6 +488,17 @@ async function editNote(item: InventoryItem) {
 }
 
 .hint-row { margin: -4px 0 12px; }
+
+.aging-chip-btn {
+  flex-shrink: 0;
+  display: block;
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: auto;
+  cursor: pointer;
+}
+.aging-chip-btn:hover:not(:disabled) { background: transparent; }
 
 .table-panel { padding: 0; overflow: hidden; }
 .table-panel table { table-layout: fixed; }

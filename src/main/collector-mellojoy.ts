@@ -1,11 +1,12 @@
 import { BrowserWindow, session } from 'electron'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { createHash } from 'node:crypto'
 import * as db from './db'
 import { extractCode, extractMaterial } from './code'
 import { buildUserAgent, CHALLENGE_MESSAGE, isChallengeText, randomWait, revealForChallenge } from './collector'
 import { todayLocal } from '../shared/date'
 import type {
-  CollectorRun, Fulfillment, Material, PurchaseDraftInput, PurchaseInput, PurchaseLineInput,
+  CollectorRun, Fulfillment, Material, PurchaseDraftInput, PurchaseInput, PurchaseLineInput, RunStatus,
 } from '../shared/types'
 
 // ============================================================
@@ -38,6 +39,15 @@ const AUTH_MESSAGE =
 /** アカウントごとに別プロファイルにする。Cookieを混ぜない */
 export function partitionFor(shopAccountId: string): string {
   return `persist:mellojoy-${shopAccountId}`
+}
+
+/**
+ * import_keywords（db.parseKeywords で正規化済みの配列）から sha1 を作る。
+ * 順序に依らないよう並べ替えてから連結する。キーワードを変えればハッシュが変わり、
+ * 除外記録（mellojoy_excluded_order）が再評価される。
+ */
+export function hashKeywords(keywords: string[]): string {
+  return createHash('sha1').update(keywords.slice().sort().join('\n')).digest('hex')
 }
 
 /** UA・Accept-Language を通常の Chrome に合わせる（collector.ts と同じ） */
@@ -686,8 +696,16 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
       }
     }
 
+    // 前回キーワード不一致と判明した注文は、詳細を開かずに飛ばす（キーワードが変われば
+    // ハッシュが変わるので再評価される）。取得枠を占有しないよう、budget/slice の前に弾く
+    const currentKeywordsHash = hashKeywords(importKeywords)
+    const freshNotExcluded = fresh.filter(
+      o => !db.isMellojoyOrderExcluded(shopAccountId, o.orderNo, currentKeywordsHash),
+    )
+    const skippedExcluded = fresh.length - freshNotExcluded.length
+
     const budget = Math.max(0, Math.min(MAX_DETAILS_PER_RUN, MAX_PAGES_PER_RUN - pagesOpened))
-    const targets = fresh.slice(0, budget)
+    const targets = freshNotExcluded.slice(0, budget)
 
     let confirmedCount = 0
     let draftCount = 0
@@ -736,6 +754,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           const filtered = filterPurchaseInputByKeywords(result.input, importKeywords)
           if (filtered === null) {
             skippedByKeyword++
+            db.markMellojoyOrderExcluded(shopAccountId, order.orderNo, currentKeywordsHash)
             continue
           }
           db.createPurchase(filtered)
@@ -744,6 +763,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           const filteredDraft = filterPurchaseDraftByKeywords(result.input, importKeywords)
           if (filteredDraft === null) {
             skippedByKeyword++
+            db.markMellojoyOrderExcluded(shopAccountId, order.orderNo, currentKeywordsHash)
             continue
           }
           db.createPurchaseDraft(filteredDraft)
@@ -759,10 +779,20 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     ]
     if (fulfillmentUpdated > 0) parts.push(`到着状態の更新 ${fulfillmentUpdated}`)
     if (skippedByKeyword > 0) parts.push(`キーワード不一致で除外 ${skippedByKeyword} 件`)
-    if (fresh.length > targets.length) parts.push(`残り ${fresh.length - targets.length} 件は次回`)
+    if (skippedExcluded > 0) parts.push(`不一致で除外済み・スキップ ${skippedExcluded} 件`)
+    if (freshNotExcluded.length > targets.length) {
+      parts.push(`残り ${freshNotExcluded.length - targets.length} 件は次回`)
+    }
     if (failures.length > 0) parts.push(`失敗：${failures.join('、')}`)
 
-    return db.finishRun(runId, 'ok', list.length, confirmedCount + draftCount, parts.join('。'))
+    // 詳細取得の対象があり、その全件が例外・解析失敗（failures）なら failed とする。
+    // 「既取込のみ」「不一致のみ（skippedByKeyword）」「正常な差分0件」は ok のまま
+    // （message で区別できる）
+    const allDetailsFailed = targets.length > 0 && failures.length === targets.length
+    const status: RunStatus = allDetailsFailed ? 'failed' : 'ok'
+    if (allDetailsFailed) parts.unshift(`詳細の取得に全て失敗しました（${targets.length} 件）`)
+
+    return db.finishRun(runId, status, list.length, confirmedCount + draftCount, parts.join('。'))
 
   } catch (e) {
     return db.finishRun(

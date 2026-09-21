@@ -125,6 +125,7 @@ vi.mock('../db', () => ({
     status, fetched, inserted, message: message ?? null,
   })),
   existingMercariIds: vi.fn(() => new Set<string>()),
+  isMercariItemExcluded: vi.fn(() => false),
   insertCollected: vi.fn((rows: Array<{ mercariItemId: string }>) =>
     rows.map((r, i) => ({ id: `sale-${i}-${r.mercariItemId}`, mercariItemId: r.mercariItemId }))),
   updateCollectedActuals: vi.fn(() => 0),
@@ -443,6 +444,11 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    // vi.clearAllMocks は呼び出し記録だけ消し、mockImplementation の中身までは戻さないため、
+    // 前のテストで differ させた実装（既知扱い・除外扱いなど）が漏れないよう明示的に既定へ戻す
+    vi.mocked(db.existingMercariIds).mockImplementation(() => new Set<string>())
+    vi.mocked(db.isMercariItemExcluded).mockImplementation(() => false)
+    vi.mocked(db.listSales).mockReturnValue([])
     state.opts = {
       loggedIn: true,
       hasCaptchaFrame: false,
@@ -584,6 +590,76 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     expect(run.message).toContain('キーワード不一致で除外 1 件')
   })
 
+  it('キーワードを変更後：既知の不一致販売はサムネイル対象から除外する（db.salesWithoutThumb への入力で確認）', async () => {
+    const sales = parseSoldHtml(soldFixtureHtml) // 3件。m43306721545（キャバドレス）はメロジョイ不一致
+    state.opts.scrapeResult = { sales, totalCount: sales.length }
+    state.opts.listingsHtml = listingsFixtureHtml
+
+    vi.mocked(db.getSettings).mockReturnValue({ mercari_keyword: 'メロジョイ' } as never)
+    vi.mocked(db.parseKeywords).mockReturnValue(['メロジョイ'])
+    vi.mocked(db.matchesAnyKeyword).mockImplementation(
+      (text: string, keywords: string[]) => keywords.some(k => text.toLowerCase().includes(k.toLowerCase())),
+    )
+    vi.mocked(db.listingsWithoutThumb).mockReturnValue([])
+
+    // 3件とも既に取り込み済み（新規挿入は0件、実額更新だけ）にする
+    vi.mocked(db.existingMercariIds).mockImplementation((ids: string[]) => new Set(ids))
+
+    const run = await collect(true)
+
+    expect(db.insertCollected).not.toHaveBeenCalled()
+    expect(db.updateCollectedActuals).toHaveBeenCalledTimes(1)
+
+    // サムネイル対象（db.salesWithoutThumb への入力）に、キーワード不一致の
+    // m43306721545（キャバドレス）が含まれない
+    const idsPassed = vi.mocked(db.salesWithoutThumb).mock.calls[0][0] as string[]
+    expect(idsPassed).not.toContain('m43306721545')
+    expect(idsPassed.sort()).toEqual(['m84307165710', 'm87039845554'])
+
+    expect(run.message).toContain('既知の不一致でサムネ対象外 1 件')
+  })
+
+  it('キーワードを変更後：既知の不一致販売は型番救済の詳細ページも開かない', async () => {
+    state.opts.listingsHtml = listingsFixtureHtml
+
+    vi.mocked(db.getSettings).mockReturnValue({ mercari_keyword: 'メロジョイ' } as never)
+    vi.mocked(db.parseKeywords).mockReturnValue(['メロジョイ'])
+    vi.mocked(db.matchesAnyKeyword).mockImplementation(
+      (text: string, keywords: string[]) => keywords.some(k => text.toLowerCase().includes(k.toLowerCase())),
+    )
+    vi.mocked(db.listingsWithoutThumb).mockReturnValue([])
+    vi.mocked(db.listSales).mockReturnValue([{
+      id: 'sale-x', mercari_item_id: 'm90000000001', title: 'ワンピース キャバドレス（対象外）',
+      kind: 'resale', unmatched: 1, model_codes: [],
+    } as never])
+
+    const run = await collect(true)
+
+    // 詳細ページを開かないので appendModelCodes は呼ばれず、message にも「型番の追記」は出ない
+    expect(db.appendModelCodes).not.toHaveBeenCalled()
+    expect(run.message).not.toContain('型番の追記')
+    expect(run.message).toContain('既知の不一致で詳細対象外 1 件')
+  })
+
+  it('削除済みの販売（sale_exclusion）は再取り込みしない', async () => {
+    const sales = parseSoldHtml(soldFixtureHtml) // 3件
+    state.opts.scrapeResult = { sales, totalCount: sales.length }
+    state.opts.listingsHtml = listingsFixtureHtml
+
+    vi.mocked(db.getSettings).mockReturnValue({ mercari_keyword: '' } as never)
+    vi.mocked(db.parseKeywords).mockReturnValue([])
+    vi.mocked(db.listingsWithoutThumb).mockReturnValue([])
+    vi.mocked(db.isMercariItemExcluded).mockImplementation((id: string) => id === 'm43306721545')
+
+    const run = await collect(true)
+
+    expect(db.insertCollected).toHaveBeenCalledTimes(1)
+    const insertedIds = vi.mocked(db.insertCollected).mock.calls[0][0].map(r => r.mercariItemId)
+    expect(insertedIds).not.toContain('m43306721545')
+    expect(insertedIds).toHaveLength(2)
+    expect(run.message).toContain('削除済み 1 件')
+  })
+
   it('キーワード未設定なら販売は全部挿入される', async () => {
     const sales = parseSoldHtml(soldFixtureHtml)
     state.opts.scrapeResult = { sales, totalCount: sales.length }
@@ -639,6 +715,44 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
       expect(run.message).toContain('取引中タブの構造が変わった可能性')
       expect(run.message).toContain('総数 3 件')
       expect(db.insertCollected).not.toHaveBeenCalled()
+    })
+
+    it('削除済みの販売は取引中タブからも再取り込みしない', async () => {
+      state.opts.listingsHtml = listingsFixtureHtml
+      state.opts.inProgressHtml = inProgressFixtureHtml
+      vi.mocked(db.isMercariItemExcluded).mockImplementation((id: string) => id === 'm47467786314')
+
+      const run = await collect(true)
+
+      const rows = vi.mocked(db.insertCollected).mock.calls[0][0] as Array<{ mercariItemId: string }>
+      expect(rows.map(r => r.mercariItemId)).not.toContain('m47467786314')
+      expect(rows).toHaveLength(3)
+      expect(run.message).toContain('削除済み 1 件')
+    })
+
+    it('売却済み0・出品0・取引中1（新規）：empty にならず ok。fetched/inserted に取引中分が入る', async () => {
+      state.opts.scrapeResult = { sales: [], totalCount: null }
+      state.opts.listingsHtml =
+        '<div data-testid="mypage-main-content">'
+        + '<p data-testid="total-item-count"><span>0件</span></p>'
+        + '<ul data-testid="listed-item-list"></ul>'
+        + '</div>'
+      state.opts.inProgressHtml =
+        '<div data-testid="mypage-main-content">'
+        + '<ul data-testid="listed-item-list"><li>'
+        + '<a href="/transaction/m99999999901" data-testid="listed-item">'
+        + '<img src="https://example.com/m99999999901.jpg">'
+        + '<p data-testid="item-label">テスト商品</p>'
+        + '<span data-testid="price"><span>¥</span><span>1,000</span></span>'
+        + '<span>1時間前に更新</span>'
+        + '<p><span>発送してください</span></p>'
+        + '</a></li></ul></div>'
+
+      const run = await collect(true)
+
+      expect(run.status).toBe('ok')
+      expect(run.fetched).toBe(1)
+      expect(run.inserted).toBe(1)
     })
   })
 })

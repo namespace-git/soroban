@@ -1,20 +1,109 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join, dirname } from 'node:path'
 
+// collectShopOrders() のフルフローをテストするための、実行のたびに差し替え可能な状態。
+// FakeBrowserWindow.webContents.executeJavaScript がスクリプトの文字列と現在のURLで
+// どの呼び出しかを判別し、ここに積んだ値を返す（実DOMの代わり。collector.test.ts と同じ流儀）
+const state = vi.hoisted(() => ({
+  opts: {
+    hasCaptchaFrame: false,
+    bodyText: '通常のマイページの本文です。'.repeat(50),
+    listHtml: '',
+    /** 詳細ページのURL（href をそのまま絶対URLにしたもの）→ 詳細ページの outerHTML */
+    detailHtmlByUrl: {} as Record<string, string>,
+  },
+  /** loadURL に渡された URL を呼び出し順に積む（詳細ページを開いたかどうかの確認用） */
+  loadedUrls: [] as string[],
+}))
+
 // collector-mellojoy.ts は electron（BrowserWindow・session）と collector.ts（同じく electron 依存）
-// に依存する。ここで検証するのは electron に依存しない純粋関数だけなので、
-// import を通すために両方潰しておく
-vi.mock('electron', () => ({
-  BrowserWindow: class {},
-  session: { fromPartition: () => ({ setUserAgent: () => {} }) },
+// に依存する。純粋関数だけを見るテストのための最小限のモックに加え、collectShopOrders() 自体を
+// テストするための簡易 DOM（executeJavaScript をスクリプト文字列で分岐）を用意する
+vi.mock('electron', () => {
+  class FakeBrowserWindow {
+    private destroyedFlag = false
+    private currentUrl = ''
+    webContents: {
+      getURL: () => string
+      executeJavaScript: (script: string) => Promise<unknown>
+    }
+
+    constructor() {
+      this.webContents = {
+        getURL: () => this.currentUrl,
+        executeJavaScript: async (script: string) => {
+          const o = state.opts
+          if (script.includes('recaptcha')) return o.hasCaptchaFrame
+          if (script.includes('ResourceList')) return true // waitForDetailReady：常に即座にready扱い
+          if (script.includes('order-')) return true // waitForOrdersReady：常に即座にready扱い
+          if (script.includes('outerHTML')) {
+            return this.currentUrl.includes('mellojoyjapan.com')
+              ? o.listHtml
+              : (o.detailHtmlByUrl[this.currentUrl] ?? '')
+          }
+          if (script.includes('document.body ? document.body.innerText')) return o.bodyText
+          return null
+        },
+      }
+    }
+
+    loadURL(url: string): Promise<void> {
+      this.currentUrl = url
+      state.loadedUrls.push(url)
+      return Promise.resolve()
+    }
+
+    isDestroyed(): boolean {
+      return this.destroyedFlag
+    }
+
+    destroy(): void {
+      this.destroyedFlag = true
+    }
+
+    on(): void {}
+  }
+
+  return {
+    BrowserWindow: FakeBrowserWindow,
+    session: { fromPartition: () => ({ setUserAgent: () => {} }) },
+  }
+})
+
+// randomWait（ページ間の待ち）を即時にし、テストを遅くしない
+vi.mock('node:timers/promises', () => ({ setTimeout: vi.fn(async () => {}) }))
+
+// db.ts はテストごとに呼び出しを検証したいので個別にモックする
+vi.mock('../db', () => ({
+  startRun: vi.fn(() => 'run-1'),
+  finishRun: vi.fn((
+    id: string, status: string, fetched: number, inserted: number, message?: string,
+  ) => ({
+    id, source: 'mellojoy', shop_account_id: 'shop-1', shop_account_name: null,
+    started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:00:05.000Z',
+    status, fetched, inserted, message: message ?? null,
+  })),
+  getShopAccount: vi.fn(() => ({ id: 'shop-1', import_keywords: '' })),
+  parseKeywords: vi.fn((raw: string) =>
+    raw.split(/[,、\s]+/).map(s => s.trim().toLowerCase()).filter(s => s.length > 0)),
+  matchesAnyKeyword: vi.fn((text: string, keywords: string[]) =>
+    keywords.some(k => text.toLowerCase().includes(k.toLowerCase()))),
+  existingImportKeys: vi.fn(() => new Set<string>()),
+  updatePurchaseFulfillment: vi.fn(() => false),
+  isMellojoyOrderExcluded: vi.fn(() => false),
+  markMellojoyOrderExcluded: vi.fn(),
+  createPurchase: vi.fn(),
+  createPurchaseDraft: vi.fn(),
 }))
 
 import {
-  filterPurchaseDraftByKeywords, filterPurchaseInputByKeywords, fulfillmentFromStatus, inferOrderDate,
-  isShopLoginUrl, parseOrderDetailHtml, parseOrderListHtml, shouldSkipDetail, toPurchaseInput,
+  collectShopOrders,
+  filterPurchaseDraftByKeywords, filterPurchaseInputByKeywords, fulfillmentFromStatus, hashKeywords,
+  inferOrderDate, isShopLoginUrl, parseOrderDetailHtml, parseOrderListHtml, shouldSkipDetail, toPurchaseInput,
 } from '../collector-mellojoy'
+import * as db from '../db'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -364,5 +453,141 @@ describe('collector-mellojoy（electronに依存しない部分）', () => {
     it('不正なURLは false', () => {
       expect(isShopLoginUrl('not a url')).toBe(false)
     })
+  })
+
+  describe('hashKeywords', () => {
+    it('同じキーワード（順序違い）なら同じハッシュ', () => {
+      expect(hashKeywords(['a', 'b'])).toBe(hashKeywords(['b', 'a']))
+    })
+
+    it('キーワードが変われば別のハッシュ', () => {
+      expect(hashKeywords(['a'])).not.toBe(hashKeywords(['b']))
+    })
+
+    it('空配列も安定したハッシュを返す', () => {
+      expect(hashKeywords([])).toBe(hashKeywords([]))
+    })
+  })
+})
+
+// ============================================================
+// collectShopOrders()（DOM・db をモックしたフルフロー）
+// ============================================================
+describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => {
+  /** parseOrderListHtml が読める最小限の注文一覧HTML（複数注文） */
+  function buildListHtml(orders: Array<{ orderNo: string; href: string; status?: string; total?: number }>): string {
+    return orders.map(o => `
+      <article aria-labelledby="order-${o.orderNo}">
+        <a aria-label="注文を表示するテスト" href="${o.href}">link</a>
+        <h2 role="presentation">${o.status ?? '確認済み'}</h2>
+        <span>￥${(o.total ?? 1000).toLocaleString()} JPY</span>
+      </article>
+    `).join('')
+  }
+
+  /** parseOrderDetailHtml が confirmed にできる最小限の詳細HTML（明細1行・送料0・割引0） */
+  function buildDetailHtml(orderNo: string, unitPrice: number): string {
+    const yen = (n: number) => `￥${n.toLocaleString()}`
+    return `
+      <h1>注文 (${orderNo})</h1>
+      <span>確認日: 1月1日</span>
+      <div role="table" aria-labelledby="ResourceList1">
+        <div role="row">
+          <div role="cell"><span>数量</span>1</div>
+          <div role="cell"><span>テスト商品</span></div>
+          <div role="cell"><span>${yen(unitPrice)}</span></div>
+        </div>
+      </div>
+      <h3 id="MoneyLine-Heading1">注文合計</h3>
+      <div role="table" aria-labelledby="MoneyLine-Heading1">
+        <div role="row"><div role="rowheader"><span>小計・1アイテム</span></div><div role="cell"><span>${yen(unitPrice)}</span></div></div>
+        <div role="row"><div role="rowheader"><span>配送</span></div><div role="cell"><span>${yen(0)}</span></div></div>
+        <div role="row"><div role="rowheader"><strong>合計</strong></div><div role="cell"><strong>${yen(unitPrice)}</strong></div></div>
+      </div>
+    `
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(db.getShopAccount).mockReturnValue({ id: 'shop-1', import_keywords: '' } as never)
+    vi.mocked(db.parseKeywords).mockImplementation((raw: string) =>
+      raw.split(/[,、\s]+/).map(s => s.trim().toLowerCase()).filter(s => s.length > 0))
+    vi.mocked(db.matchesAnyKeyword).mockImplementation((text: string, keywords: string[]) =>
+      keywords.some(k => text.toLowerCase().includes(k.toLowerCase())))
+    vi.mocked(db.existingImportKeys).mockReturnValue(new Set<string>())
+    vi.mocked(db.isMellojoyOrderExcluded).mockReturnValue(false)
+    state.opts = {
+      hasCaptchaFrame: false,
+      bodyText: '通常のマイページの本文です。'.repeat(50),
+      listHtml: '',
+      detailHtmlByUrl: {},
+    }
+    state.loadedUrls = []
+  })
+
+  it('除外済みの注文は詳細を開かず、次の注文へ進む（残りの取得枠は消費しない）', async () => {
+    state.opts.listHtml = buildListHtml([
+      { orderNo: '#100001', href: 'https://shop.example.com/order/100001' },
+      { orderNo: '#100002', href: 'https://shop.example.com/order/100002' },
+    ])
+    state.opts.detailHtmlByUrl = {
+      'https://shop.example.com/order/100002': buildDetailHtml('#100002', 1000),
+    }
+    vi.mocked(db.isMellojoyOrderExcluded).mockImplementation(
+      (_shopAccountId: string, orderKey: string) => orderKey === '#100001',
+    )
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(state.loadedUrls).not.toContain('https://shop.example.com/order/100001')
+    expect(state.loadedUrls).toContain('https://shop.example.com/order/100002')
+    expect(db.createPurchase).toHaveBeenCalledTimes(1)
+    expect(run.status).toBe('ok')
+    expect(run.message).toContain('不一致で除外済み・スキップ 1 件')
+  })
+
+  it('詳細ページでキーワード不一致と判明したら markMellojoyOrderExcluded を呼ぶ', async () => {
+    state.opts.listHtml = buildListHtml([{ orderNo: '#100003', href: 'https://shop.example.com/order/100003' }])
+    state.opts.detailHtmlByUrl = {
+      'https://shop.example.com/order/100003': buildDetailHtml('#100003', 1000),
+    }
+    vi.mocked(db.getShopAccount).mockReturnValue({ id: 'shop-1', import_keywords: '該当しないキーワード' } as never)
+    vi.mocked(db.parseKeywords).mockReturnValue(['該当しないキーワード'])
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(db.markMellojoyOrderExcluded).toHaveBeenCalledWith(
+      'shop-1', '#100003', hashKeywords(['該当しないキーワード']),
+    )
+    expect(db.createPurchase).not.toHaveBeenCalled()
+    expect(run.status).toBe('ok')
+  })
+
+  it('詳細取得の対象が全件失敗（解析不能）なら failed になる', async () => {
+    state.opts.listHtml = buildListHtml([{ orderNo: '#200001', href: 'https://shop.example.com/order/200001' }])
+    // detailHtmlByUrl に何も積まない → outerHTML が空文字 → 明細0行 → shouldSkipDetail で失敗扱い
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(run.status).toBe('failed')
+  })
+
+  it('既取込のみ（詳細取得の対象0件）なら ok のまま', async () => {
+    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/order/300001' }])
+    vi.mocked(db.existingImportKeys).mockReturnValue(new Set(['mellojoy:#300001']))
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(run.status).toBe('ok')
+    expect(db.createPurchase).not.toHaveBeenCalled()
+    expect(state.loadedUrls).not.toContain('https://shop.example.com/order/300001')
+  })
+
+  it('一覧が0件なら従来どおり empty', async () => {
+    state.opts.listHtml = ''
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(run.status).toBe('empty')
   })
 })

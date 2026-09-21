@@ -7,12 +7,27 @@ import Skeleton from '../components/Skeleton.vue'
 
 const stats = ref<DashboardStats | null>(null)
 const revision = inject<Ref<number>>('revision')!
-const goto = inject<(t: string, payload?: { modelCode?: string; stage?: 'listed' | 'pending' | 'done' | 'all'; onlyUnallocated?: boolean; status?: SaleStatus }) => void>('goto')!
+const goto = inject<(t: string, payload?: {
+  modelCode?: string
+  stage?: 'listed' | 'pending' | 'done' | 'all'
+  onlyUnallocated?: boolean
+  status?: SaleStatus
+  inventoryStatus?: 'unlisted' | 'listed' | 'sold' | 'other' | 'all'
+  agingMin?: number
+}) => void>('goto')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
+// 在庫の長期滞留とみなす日数（在庫タブ・設定タブと同じ設定値）
+const agingWarnDays = ref(90)
+
 async function load() {
-  stats.value = await window.soroban.getDashboard()
+  const [dashboard, settings] = await Promise.all([
+    window.soroban.getDashboard(),
+    window.soroban.getSettings(),
+  ])
+  stats.value = dashboard
+  agingWarnDays.value = Number(settings.aging_warn_days ?? 90)
 }
 onMounted(load)
 watch(revision, load)
@@ -46,6 +61,11 @@ async function retryCollect() {
   } finally {
     collecting.value = false
   }
+}
+
+// ログインが必要なときは、まずログインのウィンドウを開くだけにする（取り込みは人が「取り込む」を押す）
+async function openLoginForRun() {
+  await window.soroban.openLogin()
 }
 
 // 要対応の合計（発送待ち＋送料未入力＋未紐付け＋価格未入力の仕入＋未引き当ての出品）
@@ -105,9 +125,14 @@ const runLabel: Record<string, string> = {
             <span class="stat-card-label">在庫</span>
             <span class="stat-card-value">{{ stats.stockCount }}<span class="unit">点</span></span>
             <span class="stat-card-sub">{{ yen(stats.stockValue) }}</span>
-            <span v-if="stats.agingCount > 0" class="stat-card-sub warn">
+            <button
+              v-if="stats.agingCount > 0"
+              type="button"
+              class="stat-card-sub warn aging-btn"
+              @click="goto('inventory', { inventoryStatus: 'all', agingMin: agingWarnDays })"
+            >
               長期滞留 {{ stats.agingCount }} 点
-            </span>
+            </button>
           </div>
         </div>
 
@@ -130,15 +155,21 @@ const runLabel: Record<string, string> = {
                 <span v-if="r.message" class="faint">{{ truncate(r.message, 80) }}</span>
               </span>
               <span class="grow" />
-              <button class="sm link-btn" :disabled="collecting" @click="retryCollect">
-                {{ r.status === 'auth_required' ? 'ログインして取り込む' : 'もう一度取り込む' }}
+              <button
+                v-if="r.status === 'auth_required'"
+                class="sm link-btn"
+                title="ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください"
+                @click="openLoginForRun"
+              >ログインする</button>
+              <button v-else class="sm link-btn" :disabled="collecting" @click="retryCollect">
+                もう一度取り込む
               </button>
             </div>
 
             <button
               class="need-row"
               :class="{ zero: stats.needsShipment === 0 }"
-              @click="goto('sales', { stage: 'pending', status: 'waiting_shipment' })"
+              @click="goto('sales', { stage: 'all', status: 'waiting_shipment' })"
             >
               <span class="need-count">{{ stats.needsShipment }}</span>
               <span class="need-desc">発送してください</span>
@@ -350,6 +381,18 @@ const runLabel: Record<string, string> = {
 }
 .stat-card.brand .stat-card-sub { color: var(--text); opacity: .75; }
 .stat-card-sub.warn { color: var(--warn); }
+.aging-btn {
+  display: block;
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: auto;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+}
+.aging-btn:hover { text-decoration-color: currentColor; }
 .unit { font-size: var(--fs-12); font-weight: 400; margin-left: 2px; }
 
 .section-head select { margin-left: auto; }

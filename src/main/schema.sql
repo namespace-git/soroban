@@ -79,6 +79,17 @@ CREATE TABLE IF NOT EXISTS product_name (
   updated_at TEXT NOT NULL
 );
 
+-- メロジョイの注文取り込みで人が除外した注文（「もう取り込まない」）。
+-- キーワードが変わったら（keywords_hash 不一致）再評価する。
+-- resetData() では消さない（shop_alias・product_name と同じ、学習に近い知識のため）
+CREATE TABLE IF NOT EXISTS mellojoy_excluded_order (
+  shop_account_id TEXT NOT NULL REFERENCES shop_account(id) ON DELETE CASCADE,
+  order_key       TEXT NOT NULL,
+  keywords_hash   TEXT NOT NULL,
+  excluded_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (shop_account_id, order_key)
+);
+
 -- fee_rate_bp: ベーシスポイント。1000 = 10.00%
 -- 小数を避けるため整数で持つ
 -- collect_interval_h: 2026-09-19 に 6 時間から 1 時間へ変更（既存DBは migrate() で更新）
@@ -278,6 +289,14 @@ CREATE TABLE IF NOT EXISTS sale_line (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sline_sale ON sale_line(sale_id);
+
+-- 取り込んだ販売を削除したときに残す「もう取り込まない」記録
+-- （source='collector' かつ mercari_item_id がある販売だけ、deleteSale が記録する）。resetData() で消える
+CREATE TABLE IF NOT EXISTS sale_exclusion (
+  mercari_item_id TEXT PRIMARY KEY,
+  title           TEXT NOT NULL,
+  excluded_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- 紐付けたら在庫を sold に、外したら in_stock に戻す
 CREATE TRIGGER IF NOT EXISTS trg_sline_sold

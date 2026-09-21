@@ -261,6 +261,9 @@ const shippingMethods: ShippingMethod[] = [
   { id: uid(), name: '宅急便60', carrier: 'らくらくメルカリ便', fee: 750, sort_order: 6, is_active: 1 },
 ]
 
+/** 削除済み発送方法の料金（id→fee）。estimateSaleProfit が削除後も送料を引けるように残す */
+const deletedShippingMethodFees = new Map<string, number>()
+
 let settings: Record<string, string> = {
   fee_rate_bp: '1000',
   collect_interval_h: '1',
@@ -638,6 +641,9 @@ function takeOldestByModel(model: string): InventoryItem | undefined {
 let sales: SaleProfit[] = []
 /** sale.id -> 紐付けた inventory_item.id[] */
 const saleLines = new Map<string, string[]>()
+
+/** 取り込んだ販売（source==='collector'）を削除したときの「もう取り込まない」記録。設定→データで見て解除できる */
+let saleExclusions: Array<{ mercari_item_id: string; title: string; excluded_at: string }> = []
 
 function priceFor(i: number): number {
   return 800 + (((i * 733) % 60) * 100) // 800〜6800円、100円刻み
@@ -1912,6 +1918,7 @@ const api: SorobanApi = {
   },
 
   async deleteSale(id: string) {
+    const sale = sales.find(s => s.id === id)
     const ids = saleLines.get(id) ?? []
     for (const itemId of ids) {
       const item = inventory.find(it => it.id === itemId)
@@ -1922,6 +1929,13 @@ const api: SorobanApi = {
     }
     saleLines.delete(id)
     sales = sales.filter(s => s.id !== id)
+    // 取り込んだ販売（手入力は再取り込みされないので対象外）は、次の取り込みで復活しないよう記録する
+    if (sale && sale.source === 'collector' && sale.mercari_item_id) {
+      saleExclusions = [
+        { mercari_item_id: sale.mercari_item_id, title: sale.title, excluded_at: todayLocal() },
+        ...saleExclusions.filter(e => e.mercari_item_id !== sale.mercari_item_id),
+      ]
+    }
     return wait(undefined)
   },
 
@@ -2824,6 +2838,9 @@ const api: SorobanApi = {
   },
 
   async deleteShippingMethod(id: string) {
+    // 削除後も estimateSaleProfit が料金を引けるよう、料金だけ残しておく
+    const m = shippingMethods.find(x => x.id === id)
+    if (m) deletedShippingMethodFees.set(id, m.fee)
     shippingMethods.splice(0, shippingMethods.length, ...shippingMethods.filter(m => m.id !== id))
     return wait(undefined)
   },
@@ -2872,6 +2889,35 @@ const api: SorobanApi = {
   },
 
   async openLogin() {
+    return wait(undefined)
+  },
+
+  async estimateSaleProfit(input) {
+    const rateBp = Number(settings.fee_rate_bp ?? 1000)
+    const fee = calcFeeMock(input.price, rateBp)
+    const method = input.shipping_method_id
+      ? shippingMethods.find(m => m.id === input.shipping_method_id)
+      : null
+    const shipping_fee = method
+      ? method.fee
+      : input.shipping_method_id
+        ? deletedShippingMethodFees.get(input.shipping_method_id) ?? 0
+        : 0
+    const packaging_cost = input.packaging_cost ?? 0
+    const cost = input.inventory_item_ids.reduce(
+      (s, id) => s + (inventory.find(i => i.id === id)?.landed_cost ?? 0),
+      0,
+    )
+    const gross_profit = input.price - fee - shipping_fee - packaging_cost - cost
+    return wait({ fee, shipping_fee, packaging_cost, cost, gross_profit })
+  },
+
+  async listSaleExclusions() {
+    return wait(saleExclusions.map(e => ({ ...e })))
+  },
+
+  async removeSaleExclusion(mercariItemId: string) {
+    saleExclusions = saleExclusions.filter(e => e.mercari_item_id !== mercariItemId)
     return wait(undefined)
   },
 

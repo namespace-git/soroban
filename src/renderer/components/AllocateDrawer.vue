@@ -2,7 +2,7 @@
 // 在庫の引き当て／紐付け。出品（mode='listing'）と販売（mode='sale'）の両方から使う。
 // チェックした瞬間に下端の原価合計・粗利プレビューが動く。確定は「引き当てる／紐付ける」ボタンで初めて起きる。
 import { ref, computed, watch, inject } from 'vue'
-import type { Listing, InventoryItem, ListingStatus, SaleProfit, ShippingMethod } from '../../shared/types'
+import type { Listing, InventoryItem, ListingStatus, SaleProfit } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import CodeChip from './CodeChip.vue'
@@ -11,6 +11,7 @@ import Icon from './Icon.vue'
 import { matchesSearch } from './SearchBox.vue'
 
 type MatchedRow = { id: string; item_code: string; name: string; model_code?: string | null; landed_cost: number; aging_days?: number }
+type ProfitEstimate = { fee: number; shipping_fee: number; packaging_cost: number; cost: number; gross_profit: number }
 
 const props = defineProps<{
   open: boolean
@@ -26,8 +27,6 @@ const candidates = ref<InventoryItem[]>([])
 const matchedItems = ref<MatchedRow[]>([])
 const picked = ref<Set<string>>(new Set())
 const search = ref('')
-const feeRateBp = ref(1000)
-const shippingMethods = ref<ShippingMethod[]>([])
 const loading = ref(false)
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
@@ -42,25 +41,13 @@ const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = 
 const title = computed(() => (props.mode === 'listing' ? props.listing?.title : props.sale?.title) ?? '')
 const price = computed(() => (props.mode === 'listing' ? props.listing?.price : props.sale?.price) ?? 0)
 
-// 実際の手数料計算（src/main/money.ts の calcFee と同じ：切り捨て）。
-// 出品はまだ手数料が確定していないため、ここは「チェックした瞬間の見込み粗利プレビュー」のための例外的な再計算。
-function calcFee(p: number, rateBp: number): number {
-  return Math.floor((p * rateBp) / 10000)
-}
-
 async function load() {
   loading.value = true
   if (props.mode === 'listing') {
     const l = props.listing
     if (!l) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
-    const [sugg, settings, methods] = await Promise.all([
-      window.soroban.suggestForListing(l.mercari_item_id, 50),
-      window.soroban.getSettings(),
-      window.soroban.listShippingMethods(),
-    ])
+    const sugg = await window.soroban.suggestForListing(l.mercari_item_id, 50)
     candidates.value = sugg
-    feeRateBp.value = Number(settings.fee_rate_bp ?? 1000)
-    shippingMethods.value = methods
     matchedItems.value = l.items.map(it => ({ id: it.id, item_code: it.item_code, name: it.name, model_code: it.model_code, landed_cost: it.landed_cost }))
   } else {
     const s = props.sale
@@ -119,26 +106,55 @@ const confirmLabel = computed(() => {
   return movingCount.value > 0 ? `引き当てる（${movingCount.value}点を移す）` : '引き当てる'
 })
 
-// 出品モード：発送方法が決まっていれば送料込みの見込み粗利（expected_profit と同じ規則）
-const listingShippingFee = computed(() => {
-  if (props.mode !== 'listing' || !props.listing?.shipping_method_id) return 0
-  return shippingMethods.value.find(m => m.id === props.listing?.shipping_method_id)?.fee ?? 0
-})
-
 const profitLabel = computed(() => {
   if (props.mode !== 'listing') return '粗利'
   return props.listing?.shipping_method_id ? '見込み粗利（送料込み・梱包前）' : '見込み粗利（送料・梱包前）'
 })
 
-const previewProfit = computed(() => {
+// チェックが変わるたびに main へ見積もりを頼む（手数料・送料は画面で計算しない）。
+// 150ms デバウンスし、応答が前後しても最後に投げた要求の結果だけを反映する
+const estimate = ref<ProfitEstimate | null>(null)
+let estimateTimer: ReturnType<typeof setTimeout> | undefined
+let estimateSeq = 0
+
+async function runEstimate() {
+  const seq = ++estimateSeq
+  const inventoryItemIds = [...matchedItems.value.map(m => m.id), ...picked.value]
+  let priceVal: number
+  let shippingMethodId: string | null
+  let packagingCost: number | undefined
   if (props.mode === 'listing') {
-    if (!props.listing) return 0
-    const fee = calcFee(props.listing.price, feeRateBp.value)
-    return props.listing.price - fee - listingShippingFee.value - totalCost.value
+    if (!props.listing) { estimate.value = null; return }
+    priceVal = props.listing.price
+    shippingMethodId = props.listing.shipping_method_id
+    packagingCost = 0 // 出品はまだ梱包費が無い（見込み粗利は送料込み・梱包前）
+  } else {
+    if (!props.sale) { estimate.value = null; return }
+    priceVal = props.sale.price
+    shippingMethodId = props.sale.shipping_method_id
+    packagingCost = props.sale.packaging_cost
   }
-  if (!props.sale) return 0
-  return props.sale.price - props.sale.fee - props.sale.shipping_fee - props.sale.packaging_cost - totalCost.value
-})
+  const result = await window.soroban.estimateSaleProfit({
+    price: priceVal,
+    shipping_method_id: shippingMethodId,
+    packaging_cost: packagingCost,
+    inventory_item_ids: inventoryItemIds,
+  })
+  if (seq === estimateSeq) estimate.value = result
+}
+
+function scheduleEstimate() {
+  clearTimeout(estimateTimer)
+  estimateTimer = setTimeout(runEstimate, 150)
+}
+
+watch(
+  [picked, matchedItems, () => props.listing, () => props.sale],
+  scheduleEstimate,
+  { deep: true },
+)
+
+const previewProfit = computed(() => estimate.value?.gross_profit ?? 0)
 
 async function confirmPick() {
   if (picked.value.size === 0) return

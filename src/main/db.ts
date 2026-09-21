@@ -5,7 +5,7 @@ import { existsSync, renameSync, unlinkSync } from 'node:fs'
 import { app } from 'electron'
 // ビルド後もスキーマを確実に読めるよう、ファイル読み込みではなく埋め込む
 import schemaSql from './schema.sql?raw'
-import { allocate, calcFee, splitEvenly } from './money'
+import { allocate, assertQty, assertYen, calcFee, splitEvenly } from './money'
 import { extractCode, extractCodeQuantities, extractCodes, extractItemCodes, extractMaterial } from './code'
 import { thisMonthLocal, todayLocal } from '../shared/date'
 import type {
@@ -122,10 +122,20 @@ function settingStr(key: string, fallback = ''): string {
 
 /**
  * 在庫コードを1つ発行する（setting.item_code_seq を+1）。形式は `S-0001`
- * （4桁ゼロ埋め。9999を超えたら桁が増える）。呼び出し側のトランザクション内で使うこと
+ * （4桁ゼロ埋め。9999を超えたら桁が増える）。呼び出し側のトランザクション内で使うこと。
+ *
+ * 開始番号は max(カウンタ, 既存コードの最大番号) から。カウンタが既存の item_code より
+ * 後ろにずれている（v15の一括採番の再実行・手動でのDB編集等）場合でも、採番が既存コードと
+ * 衝突しないようにするため。採番とカウンタの更新は同じ呼び出しの中（＝呼び出し元のトランザクション内）
+ * で行う
  */
 function nextItemCode(): string {
-  const next = setting('item_code_seq', 0) + 1
+  const counter = setting('item_code_seq', 0)
+  const maxRow = db.prepare(
+    `SELECT MAX(CAST(substr(item_code, 3) AS INTEGER)) AS m
+       FROM inventory_item WHERE item_code LIKE 'S-%'`,
+  ).get() as { m: number | null }
+  const next = Math.max(counter, maxRow.m ?? 0) + 1
   db.prepare(
     `INSERT INTO setting (key, value) VALUES ('item_code_seq', ?)
        ON CONFLICT(key) DO UPDATE SET value = ?`,
@@ -853,7 +863,13 @@ function migrate(): void {
       `SELECT id FROM inventory_item WHERE item_code IS NULL ORDER BY acquired_at, created_at`,
     ).all() as Array<{ id: string }>
     if (uncoded.length > 0) {
-      let seq = setting('item_code_seq', 0)
+      // 開始番号は max(カウンタ, 既にコード済みの最大番号) から。中断・再実行で一部の
+      // 行だけ既に採番済みでも、既存コードと衝突しない番号から続きを振る
+      const maxRow = db.prepare(
+        `SELECT MAX(CAST(substr(item_code, 3) AS INTEGER)) AS m
+           FROM inventory_item WHERE item_code LIKE 'S-%'`,
+      ).get() as { m: number | null }
+      let seq = Math.max(setting('item_code_seq', 0), maxRow.m ?? 0)
       const setCode = db.prepare('UPDATE inventory_item SET item_code = ? WHERE id = ?')
       for (const row of uncoded) {
         seq += 1
@@ -992,6 +1008,34 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '21')
          ON CONFLICT(key) DO UPDATE SET value = '21'`,
+    ).run()
+  }
+
+  if (version < 22) {
+    // 取り込んだ販売を削除したときに残す「もう取り込まない」記録。resetData() で消える
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sale_exclusion (
+        mercari_item_id TEXT PRIMARY KEY,
+        title           TEXT NOT NULL,
+        excluded_at     TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `)
+    // メロジョイの注文取り込みで人が除外した注文。キーワードが変わったら（keywords_hash
+    // 不一致）再評価する。新規テーブルなので ALTER 不要。resetData() では消さない
+    // （shop_alias・product_name と同じ、学習に近い知識のため）
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS mellojoy_excluded_order (
+        shop_account_id TEXT NOT NULL REFERENCES shop_account(id) ON DELETE CASCADE,
+        order_key       TEXT NOT NULL,
+        keywords_hash   TEXT NOT NULL,
+        excluded_at     TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (shop_account_id, order_key)
+      );
+    `)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '22')
+         ON CONFLICT(key) DO UPDATE SET value = '22'`,
     ).run()
   }
 
@@ -1148,9 +1192,12 @@ function validatePurchaseInput(input: PurchaseInput, excludeId?: string): string
 
   if (!input.lines || input.lines.length === 0) throw new Error('明細がありません')
   input.lines.forEach((l, i) => {
-    if (!(l.quantity > 0)) throw new Error(`${i + 1}行目：数量は1以上にしてください`)
-    if (l.unit_price < 0) throw new Error(`${i + 1}行目：単価は0以上にしてください`)
+    assertQty(`${i + 1}行目の数量`, l.quantity)
+    assertYen(`${i + 1}行目の単価`, l.unit_price)
   })
+  assertYen('送料', input.shipping_fee ?? 0)
+  assertYen('割引', input.discount ?? 0)
+  assertYen('その他費用', input.other_cost ?? 0)
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.ordered_at)) {
     throw new Error('注文日はYYYY-MM-DDの形式で入力してください')
@@ -1626,6 +1673,7 @@ export function updateSaleStatus(
 }
 
 export function createSale(input: SaleInput): string {
+  assertYen('価格', input.price)
   const id = randomUUID()
   const rateBp = setting('fee_rate_bp', 1000)
   const modelCodes = extractCodes(input.title)
@@ -1660,11 +1708,15 @@ export function updateSale(id: string, patch: SalePatch): void {
   if (patch.title !== undefined) put('title', patch.title)
   if (patch.sold_at !== undefined) put('sold_at', patch.sold_at)
   if (patch.kind !== undefined) put('kind', patch.kind)
-  if (patch.packaging_cost !== undefined) put('packaging_cost', patch.packaging_cost)
+  if (patch.packaging_cost !== undefined) {
+    assertYen('梱包材費', patch.packaging_cost)
+    put('packaging_cost', patch.packaging_cost)
+  }
   if (patch.note !== undefined) put('note', patch.note)
 
   // 価格が変わったら手数料を再計算する
   if (patch.price !== undefined) {
+    assertYen('価格', patch.price)
     put('price', patch.price)
     put('fee', calcFee(patch.price, cur.fee_rate_bp))
   }
@@ -1675,7 +1727,9 @@ export function updateSale(id: string, patch: SalePatch): void {
     if (patch.shipping_method_id) {
       const m = db.prepare('SELECT fee FROM shipping_method WHERE id = ?')
         .get(patch.shipping_method_id) as { fee: number } | undefined
-      put('shipping_fee', patch.shipping_fee ?? m?.fee ?? 0)
+      const fee = patch.shipping_fee ?? m?.fee ?? 0
+      assertYen('送料', fee)
+      put('shipping_fee', fee)
       put('is_shipping_confirmed', 1)
       put('shipping_source', 'master')
     } else {
@@ -1683,6 +1737,7 @@ export function updateSale(id: string, patch: SalePatch): void {
       put('shipping_source', null)
     }
   } else if (patch.shipping_fee !== undefined) {
+    assertYen('送料', patch.shipping_fee)
     put('shipping_fee', patch.shipping_fee)
     put('is_shipping_confirmed', 1)
     put('shipping_source', 'manual')
@@ -1770,12 +1825,14 @@ export function applySaleActuals(
 /**
  * メルカリの販売履歴ページ（一覧）から取れた実額・購入完了日で、既知の取引を更新する。
  * 売却済み一覧（販売履歴）に出た時点で取引は完了しているので、status='completed'・
- * completed_at（初回のみ）も併せて刻む。既に shipping_source='actual' かつ sold_at が
- * 一致していれば何もしない（差分適用。取引中タブを経由した販売は shipping_source が
- * 'actual' になるのがこの反映のタイミングなので、初回は必ず通って status も完了になる）。
- * shipping_source='master'（人が発送方法を選択済み）の販売はこの条件に当たらず毎回
- * applySaleActuals まで進むが、送料 0 円のときに送料関連の列を触らない規則で守られるので、
- * 何度再適用しても発送方法・送料は動かない。kind・紐付けには触らない。戻り値は更新した件数。
+ * completed_at（初回のみ）も併せて刻む。
+ *
+ * スキップ判定は「取得元が actual かどうか」ではなく、取得できた各値（fee・shipping_fee・
+ * sold_at・status='completed'）と保存済みの値を1つずつ比べて行う。どれか1つでも違えば
+ * applySaleActuals まで進む（一度 actual になった後でも、メルカリ側の実額が後から変わった
+ * ケースを取りこぼさない）。送料 0 円のとき shipping_source='master'/'manual' の選択を守る
+ * 規則は applySaleActuals 側にあるのでここでは変えない。kind・紐付けには触らない。
+ * 戻り値は実際に applySaleActuals まで進んだ件数。
  */
 export function updateCollectedActuals(
   rows: Array<{
@@ -1788,14 +1845,20 @@ export function updateCollectedActuals(
   let updated = 0
   for (const r of rows) {
     const sale = db.prepare(
-      'SELECT id, shipping_source, sold_at, status FROM sale WHERE mercari_item_id = ?',
+      'SELECT id, sold_at, status, fee, shipping_fee FROM sale WHERE mercari_item_id = ?',
     ).get(r.mercariItemId) as
-      | { id: string; shipping_source: string | null; sold_at: string; status: SaleStatus | null }
+      | { id: string; sold_at: string; status: SaleStatus | null; fee: number; shipping_fee: number }
       | undefined
     if (!sale) continue
 
-    // 既に実額が入っていて日付も同じ（または取引中タブ経由で先に取り込み、完了まで刻んだ）販売は再適用しない
-    if (sale.shipping_source === 'actual' && (sale.sold_at === r.soldAt || sale.status === 'completed')) continue
+    const feeChanged = r.fee != null && r.fee !== sale.fee
+    const shippingChanged = r.shippingFee != null && r.shippingFee !== sale.shipping_fee
+    // sold_at は status が未取得（null）の販売にしか反映されない（applySaleActuals の規則）ので、
+    // それ以外は比較しても実際には変わらない
+    const soldAtChanged = sale.status === null && sale.sold_at !== r.soldAt
+    const statusChanged = sale.status !== 'completed'
+
+    if (!feeChanged && !shippingChanged && !soldAtChanged && !statusChanged) continue
 
     applySaleActuals(
       sale.id,
@@ -1809,8 +1872,70 @@ export function updateCollectedActuals(
   return updated
 }
 
+/**
+ * 販売を削除する。取り込んだ販売（source='collector' かつ mercari_item_id あり）は、
+ * 次回の収集で再取り込みしないよう sale_exclusion に記録する（設定 → データ で見て解除できる）。
+ */
 export function deleteSale(id: string): void {
-  db.prepare('DELETE FROM sale WHERE id = ?').run(id)
+  const sale = db.prepare(
+    `SELECT source, mercari_item_id, title FROM sale WHERE id = ?`,
+  ).get(id) as { source: string; mercari_item_id: string | null; title: string } | undefined
+
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM sale WHERE id = ?').run(id)
+    if (sale && sale.source === 'collector' && sale.mercari_item_id) {
+      db.prepare(`
+        INSERT INTO sale_exclusion (mercari_item_id, title, excluded_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(mercari_item_id) DO UPDATE SET title = excluded.title, excluded_at = excluded.excluded_at
+      `).run(sale.mercari_item_id, sale.title)
+    }
+  })
+  tx()
+}
+
+/** 取り込んだ販売の除外記録（deleteSale が作る）。次回の収集で再取り込みしないために見る */
+export function isMercariItemExcluded(mercariItemId: string): boolean {
+  const row = db.prepare('SELECT 1 FROM sale_exclusion WHERE mercari_item_id = ?').get(mercariItemId)
+  return !!row
+}
+
+export function listSaleExclusions(): Array<{ mercari_item_id: string; title: string; excluded_at: string }> {
+  return db.prepare(
+    'SELECT mercari_item_id, title, excluded_at FROM sale_exclusion ORDER BY excluded_at DESC',
+  ).all() as Array<{ mercari_item_id: string; title: string; excluded_at: string }>
+}
+
+/** 除外を解除する（次回の収集で再取り込みできるようにする） */
+export function removeSaleExclusion(mercariItemId: string): void {
+  db.prepare('DELETE FROM sale_exclusion WHERE mercari_item_id = ?').run(mercariItemId)
+}
+
+// ------------------------------------------------------------
+// メロジョイの注文取り込みの除外記録（collector 用）。
+// キーワードが変わったら（keywords_hash 不一致）再評価する。resetData() では消さない
+// （shop_alias・product_name と同じ、学習に近い知識のため）
+// ------------------------------------------------------------
+
+export function isMellojoyOrderExcluded(
+  shopAccountId: string, orderKey: string, keywordsHash: string,
+): boolean {
+  const row = db.prepare(
+    `SELECT keywords_hash FROM mellojoy_excluded_order
+      WHERE shop_account_id = ? AND order_key = ?`,
+  ).get(shopAccountId, orderKey) as { keywords_hash: string } | undefined
+  return !!row && row.keywords_hash === keywordsHash
+}
+
+export function markMellojoyOrderExcluded(
+  shopAccountId: string, orderKey: string, keywordsHash: string,
+): void {
+  db.prepare(`
+    INSERT INTO mellojoy_excluded_order (shop_account_id, order_key, keywords_hash, excluded_at)
+    VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(shop_account_id, order_key)
+      DO UPDATE SET keywords_hash = excluded.keywords_hash, excluded_at = excluded.excluded_at
+  `).run(shopAccountId, orderKey, keywordsHash)
 }
 
 type SaleProfitRow = Omit<SaleProfit, 'model_codes' | 'tags' | 'inherited_tags' | 'thumb_url'> & {
@@ -2154,10 +2279,20 @@ export function unlinkInventory(saleId: string, itemId: string): void {
 
 /**
  * 在庫コード（そろばん発行）に一致する未販売在庫の id を、渡した順に返す
- * （見つからないコードはスキップする。他の出品に引き当て中でも in_stock なら対象＝移す）。
+ * （見つからないコードはスキップする）。他の active/suspended な出品に引き当て済みの在庫は
+ * 対象から外す（人が出品に予約した意思を、コード名指しの自動確定でも横取りしない。
+ * listing_line は消さず、その分は候補止まりのまま残る）。
  */
 function findInventoryIdsByItemCodes(itemCodes: string[]): string[] {
-  const find = db.prepare(`SELECT id FROM inventory_item WHERE item_code = ? AND status = 'in_stock'`)
+  const find = db.prepare(`
+    SELECT id FROM inventory_item i
+     WHERE i.item_code = ? AND i.status = 'in_stock'
+       AND NOT EXISTS (
+         SELECT 1 FROM listing_line ll
+         JOIN listing l ON l.mercari_item_id = ll.listing_id
+         WHERE ll.inventory_item_id = i.id AND l.status IN ('active','suspended')
+       )
+  `)
   const ids: string[] = []
   for (const code of itemCodes) {
     const row = find.get(code) as { id: string } | undefined
@@ -3096,13 +3231,9 @@ function validateExpenseInput(input: ExpenseInput): ValidatedExpense {
 
   const lines = (input.lines ?? []).map((l, i) => {
     if (!l.name.trim()) throw new Error(`${i + 1}行目：品名を入力してください`)
-    if (!Number.isInteger(l.unit_price) || l.unit_price < 0) {
-      throw new Error(`${i + 1}行目：単価は0以上の整数で入力してください`)
-    }
+    assertYen(`${i + 1}行目の単価`, l.unit_price)
     const quantity = l.quantity ?? 1
-    if (!Number.isInteger(quantity) || quantity <= 0) {
-      throw new Error(`${i + 1}行目：数量は1以上の整数で入力してください`)
-    }
+    assertQty(`${i + 1}行目の数量`, quantity)
     const category = l.category ?? input.category
     if (!EXPENSE_CATEGORIES.includes(category)) {
       throw new Error(`不正な費用区分です: ${category}`)
@@ -3248,7 +3379,9 @@ export function setExpenseReceiptFile(id: string, file: string | null): void {
 // 経費はその月の販売用の販売（kind='resale'）にだけ按分する。私物には配賦しない。
 // 金額按分＝販売価格の比、数量按分＝紐付けた在庫の点数の比（0点なら1）。
 // floor で配って余りは最後の行（sales の末尾）に寄せ、Σallocated_expense = 経費合計にする。
-// 販売が0件（または重みの合計が0）なら誰にも配賦しない（CLAUDE.mdの按分と同じ流儀）。
+// 販売が0件なら誰にも配賦しない。販売はあるが金額按分の重みの合計が0円（価格0の月）だと
+// 配賦先が消えて経費が誰にも乗らなくなるため、数量按分にフォールバックする（money.ts の
+// allocate と同じ流儀。数量は必ず1以上あるので、販売が1件でもあれば重みの合計は0にならない）。
 // ------------------------------------------------------------
 
 function sumSaleTotals(sales: SaleProfit[]): Omit<MonthTotals, 'expense_total' | 'net_profit'> {
@@ -3272,13 +3405,19 @@ function allocateExpenseToSales(
   method: AllocMethod,
 ): Map<string, number> {
   const map = new Map<string, number>()
-  const weight = (s: { price: number; item_count: number }) =>
-    method === 'by_quantity' ? Math.max(s.item_count, 1) : s.price
-  const total = sales.reduce((sum, s) => sum + weight(s), 0)
+  if (sales.length === 0) return map
 
-  if (sales.length === 0 || total === 0) {
-    for (const s of sales) map.set(s.id, 0)
-    return map
+  const amountWeight = (s: { price: number; item_count: number }) => s.price
+  const quantityWeight = (s: { price: number; item_count: number }) => Math.max(s.item_count, 1)
+
+  let weight = method === 'by_quantity' ? quantityWeight : amountWeight
+  let total = sales.reduce((sum, s) => sum + weight(s), 0)
+
+  // 金額按分で重みの合計が0円（価格0の販売だけの月）なら、経費の配賦先が消えて
+  // しまうため数量按分に切り替える（quantityWeight は必ず1以上なのでtotalは0にならない）
+  if (total === 0 && method === 'by_amount') {
+    weight = quantityWeight
+    total = sales.reduce((sum, s) => sum + weight(s), 0)
   }
 
   let assigned = 0
@@ -3299,12 +3438,23 @@ export function getMonthDetail(month: string, opts?: { tagId?: string | null }):
   const expenses = listExpenses(month)
   const expenseTotal = expenses.reduce((s, e) => s + e.amount, 0)
 
+  // 明細（expense_line）があるレシートは明細ごとの項目で、無いレシートは親の項目で集計する
+  // （複数項目にまたがるレシートを先頭の項目にまとめて計上しない）
   const expense_by_category = db.prepare(`
-    SELECT category, COALESCE(SUM(amount), 0) AS amount
-    FROM expense WHERE month = ?
+    SELECT category, COALESCE(SUM(amount), 0) AS amount FROM (
+      SELECT el.category AS category, el.amount AS amount
+        FROM expense e
+        JOIN expense_line el ON el.expense_id = e.id
+       WHERE e.month = ?
+      UNION ALL
+      SELECT e.category AS category, e.amount AS amount
+        FROM expense e
+       WHERE e.month = ?
+         AND NOT EXISTS (SELECT 1 FROM expense_line el WHERE el.expense_id = e.id)
+    )
     GROUP BY category
     ORDER BY category
-  `).all(month) as Array<{ category: ExpenseCategory; amount: number }>
+  `).all(month, month) as Array<{ category: ExpenseCategory; amount: number }>
 
   const bookRow = db.prepare(`
     SELECT alloc_method, closed_at, sales_count, revenue, gross_profit, expense_total, net_profit
@@ -4268,9 +4418,7 @@ export function updateShopAccount(
   }
   if (patch.default_shipping_fee !== undefined) {
     const fee = patch.default_shipping_fee
-    if (fee !== null && (!Number.isInteger(fee) || fee < 0)) {
-      throw new Error('送料は 0 以上の整数で')
-    }
+    if (fee !== null) assertYen('送料', fee)
     put('default_shipping_fee', fee)
   }
 
@@ -4310,6 +4458,7 @@ export function listShippingMethods(): ShippingMethod[] {
 export function saveShippingMethod(
   m: Partial<ShippingMethod> & { name: string; fee: number },
 ): void {
+  assertYen('料金', m.fee)
   if (m.id) {
     db.prepare(
       'UPDATE shipping_method SET name = ?, carrier = ?, fee = ?, sort_order = ? WHERE id = ?',
@@ -4587,6 +4736,43 @@ export function listSaleLines(saleId: string): InventoryItem[] {
   return attachInventoryTags(items)
 }
 
+/**
+ * 粗利の見積もり（AllocateDrawer が使う。画面で再計算しないための共通計算）。
+ * 手数料は現在の fee_rate_bp で floor、送料は発送方法の料金（無効化・削除済み＝is_active=0でも
+ * 引く。shipping_method_id が無ければ 0）、原価は渡した在庫の landed_cost の合計。
+ * 既存の販売・手数料率は変えない（見るだけ）。
+ */
+export function estimateSaleProfit(input: {
+  price: number
+  shipping_method_id: string | null
+  packaging_cost?: number
+  inventory_item_ids: string[]
+}): { fee: number; shipping_fee: number; packaging_cost: number; cost: number; gross_profit: number } {
+  const rateBp = setting('fee_rate_bp', 1000)
+  const fee = calcFee(input.price, rateBp)
+
+  let shipping_fee = 0
+  if (input.shipping_method_id) {
+    const m = db.prepare('SELECT fee FROM shipping_method WHERE id = ?')
+      .get(input.shipping_method_id) as { fee: number } | undefined
+    shipping_fee = m?.fee ?? 0
+  }
+
+  const packaging_cost = input.packaging_cost ?? 0
+
+  let cost = 0
+  if (input.inventory_item_ids.length > 0) {
+    const ph = input.inventory_item_ids.map(() => '?').join(',')
+    const row = db.prepare(
+      `SELECT COALESCE(SUM(landed_cost), 0) AS c FROM inventory_item WHERE id IN (${ph})`,
+    ).get(...input.inventory_item_ids) as { c: number }
+    cost = row.c
+  }
+
+  const gross_profit = input.price - fee - shipping_fee - packaging_cost - cost
+  return { fee, shipping_fee, packaging_cost, cost, gross_profit }
+}
+
 // ============================================================
 // データのリセット（テスト運用開始のやり直し用）
 //
@@ -4611,6 +4797,7 @@ export function resetData(): void {
       DELETE FROM collector_run;
       DELETE FROM expense;
       DELETE FROM month_book;
+      DELETE FROM sale_exclusion;
     `)
   })
   tx()

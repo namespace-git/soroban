@@ -916,6 +916,14 @@ export interface SorobanApi {
   /** メルカリ→有効な仕入先アカウントの順に直列で走る。1回分がまとめて返る（先頭がメルカリ） */
   collect(): Promise<CollectorRun[]>
   openLogin(): Promise<void>
+  /**
+   * 粗利の見積もり（画面で再計算しないための共通計算）。手数料は現在の手数料率、送料は発送方法の料金
+   * （無効化・削除済みの発送方法でも料金を引く）、原価は在庫の landed_cost の合計
+   */
+  estimateSaleProfit(input: { price: number; shipping_method_id: string | null; packaging_cost?: number; inventory_item_ids: string[] }): Promise<{ fee: number; shipping_fee: number; packaging_cost: number; cost: number; gross_profit: number }>
+  /** 取り込んだ販売を削除したときに残る「もう取り込まない」記録。設定 → データ で見て解除できる */
+  listSaleExclusions(): Promise<Array<{ mercari_item_id: string; title: string; excluded_at: string }>>
+  removeSaleExclusion(mercariItemId: string): Promise<void>
   /** 仕入先アカウント（メロジョイ）のログイン画面を開く。アカウントごとに別プロファイル */
   openShopLogin(shopAccountId: string): Promise<void>
   listRuns(limit?: number): Promise<CollectorRun[]>

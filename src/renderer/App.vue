@@ -36,6 +36,9 @@ export type GotoPayload = {
   status?: SaleStatus
   /** 売上タブを月で絞る（YYYY-MM。グラフの月をクリックしたとき） */
   month?: string
+  /** 在庫タブの状態（ホームの長期滞留から：'all'）と、滞留日数の下限 */
+  inventoryStatus?: 'unlisted' | 'listed' | 'sold' | 'other' | 'all'
+  agingMin?: number
 }
 
 const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [

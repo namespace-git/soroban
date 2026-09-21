@@ -59,7 +59,17 @@ function createMainWindow(): void {
 // 1つが失敗しても次へ進む（例外は畳んで返す設計だが、念のためここでも囲う）。
 // ------------------------------------------------------------
 
-async function collectAll(silent: boolean): Promise<CollectorRun[]> {
+// 起動時収集（collectInBackground）と手動収集（IPC 'collect'）が同時に走ると、メルカリ・
+// メロジョイのウィンドウが並行して開いてしまう。実行中の Promise を共有し、同時には1つだけに絞る
+let collectAllRunning: Promise<CollectorRun[]> | null = null
+
+export function collectAll(silent: boolean): Promise<CollectorRun[]> {
+  if (collectAllRunning) return collectAllRunning
+  collectAllRunning = runCollectAll(silent).finally(() => { collectAllRunning = null })
+  return collectAllRunning
+}
+
+async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
   const runs: CollectorRun[] = []
   applog.log('collector', 'collect_start', `収集を開始（silent=${silent}）`)
 
@@ -224,6 +234,9 @@ function registerIpc(): void {
 
   handle('collect', () => collectAll(db.getSettings().collect_show_window !== '1'))
   handle('openLogin', () => collector.openLoginWindow())
+  handle('estimateSaleProfit', (input) => db.estimateSaleProfit(input))
+  handle('listSaleExclusions', () => db.listSaleExclusions())
+  handle('removeSaleExclusion', (id) => db.removeSaleExclusion(id))
   handle('openShopLogin', (id) => collectorMellojoy.openShopLoginWindow(id))
   handle('listRuns', (limit) => db.listRuns(limit))
 

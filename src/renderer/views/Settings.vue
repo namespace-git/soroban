@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
 import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats } from '../../shared/types'
+
+type SaleExclusion = { mercari_item_id: string; title: string; excluded_at: string }
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
@@ -28,9 +30,10 @@ const loaded = ref(false)
 const updateStatus = ref<UpdateStatus | null>(null)
 const checkingUpdate = ref(false)
 const installingUpdate = ref(false)
+const saleExclusions = ref<SaleExclusion[]>([])
 
 async function load() {
-  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes] = await Promise.all([
+  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes] = await Promise.all([
     window.soroban.listShippingMethods(),
     window.soroban.getSettings(),
     window.soroban.listRuns(10),
@@ -38,6 +41,7 @@ async function load() {
     window.soroban.listTags(),
     window.soroban.checkForUpdate(),
     window.soroban.listShopAccountStats(),
+    window.soroban.listSaleExclusions(),
   ])
   methods.value = methodsRes
   settings.value = settingsRes
@@ -46,6 +50,7 @@ async function load() {
   tags.value = tagsRes
   updateStatus.value = updateRes
   shopStats.value = shopStatsRes
+  saleExclusions.value = exclusionsRes
   loaded.value = true
 }
 onMounted(load)
@@ -294,6 +299,12 @@ async function deleteTag(t: Tag) {
   await window.soroban.deleteTag(t.id)
   tags.value = await window.soroban.listTags()
   changed()
+}
+
+async function restoreSaleExclusion(e: SaleExclusion) {
+  await window.soroban.removeSaleExclusion(e.mercari_item_id)
+  saleExclusions.value = await window.soroban.listSaleExclusions()
+  toast('戻しました。次の取り込みで復活します', 'ok')
 }
 
 async function resetData() {
@@ -636,6 +647,28 @@ const runLabel: Record<string, string> = {
           </p>
           <button class="danger" @click="resetData">取引データを初期化</button>
         </div>
+
+        <div v-if="saleExclusions.length" class="exclusions-zone">
+          <p class="panel-title">取り込まない販売</p>
+          <table class="compact">
+            <thead>
+              <tr><th>商品名</th><th>出品ID</th><th>除外日</th><th></th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="e in saleExclusions" :key="e.mercari_item_id">
+                <td>{{ e.title }}</td>
+                <td class="faint">{{ e.mercari_item_id }}</td>
+                <td class="faint nowrap">{{ e.excluded_at }}</td>
+                <td class="actions">
+                  <button class="sm ghost" @click="restoreSaleExclusion(e)">戻す</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="faint hint">
+            取り込んだ販売を削除すると、次の取り込みで戻らないようにここに記録されます。
+          </p>
+        </div>
       </div>
 
       <!-- アプリの更新 -->
@@ -715,6 +748,13 @@ const runLabel: Record<string, string> = {
   padding-top: 16px;
   border-top: 1px solid var(--line-soft);
 }
+
+.exclusions-zone {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+.exclusions-zone .panel-title { margin: 0 0 8px; }
 
 .add-row { margin: 12px 0 0; }
 .add-row button { display: inline-flex; align-items: center; gap: 6px; }

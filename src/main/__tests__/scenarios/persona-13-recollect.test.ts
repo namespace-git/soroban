@@ -56,18 +56,50 @@ describe('ペルソナ13：二度取り込まれる人', () => {
     expect(sale.note).toBe('梱包を厚めにした')
   })
 
-  it('updateCollectedActuals：shipping_source=actualかつsold_atが同じなら再適用しても更新しない（差分適用）', () => {
+  it('updateCollectedActuals：取得できた値（fee/shipping_fee/sold_at/status）が保存値と全部同じなら再適用しない', () => {
     db.insertCollected([{
       mercariItemId: 'stable-1', title: '確定済みの商品', price: 1000, soldAt: '2026-07-06', shippingFee: 210,
     }])
     const before = db.listSales().find(s => s.mercari_item_id === 'stable-1')!
     expect(before.shipping_source).toBe('actual')
 
-    const updated = db.updateCollectedActuals([
-      { mercariItemId: 'stable-1', soldAt: '2026-07-06', fee: 999, shippingFee: 999 },
+    // 1回目：statusがまだ付いていないので completed にする分だけ更新される
+    const firstRun = db.updateCollectedActuals([
+      { mercariItemId: 'stable-1', soldAt: '2026-07-06', fee: before.fee, shippingFee: 210 },
     ])
-    expect(updated).toBe(0)
+    expect(firstRun).toBe(1)
+    expect(db.listSales().find(s => s.mercari_item_id === 'stable-1')!.status).toBe('completed')
+
+    // 2回目：fee・shipping_fee・sold_at・status のどれも同じなので再適用しない
+    const secondRun = db.updateCollectedActuals([
+      { mercariItemId: 'stable-1', soldAt: '2026-07-06', fee: before.fee, shippingFee: 210 },
+    ])
+    expect(secondRun).toBe(0)
     const after = db.listSales().find(s => s.mercari_item_id === 'stable-1')!
     expect(after.shipping_fee).toBe(210) // 変わらない
+  })
+
+  it('updateCollectedActuals：一度 completed になった後でも、送料の実額が変われば取りこぼさず反映する（¥0→¥210）', () => {
+    db.insertCollected([
+      { mercariItemId: 'zero-then-actual', title: '送料あとから判明', price: 1000, soldAt: '2026-07-06' },
+    ])
+    // 最初は取引詳細から送料が取れず0円・未確定のまま、販売履歴で完了だけ先に反映される
+    db.updateCollectedActuals([
+      { mercariItemId: 'zero-then-actual', soldAt: '2026-07-06', fee: 100, shippingFee: 0 },
+    ])
+    let sale = db.listSales().find(s => s.mercari_item_id === 'zero-then-actual')!
+    expect(sale.shipping_fee).toBe(0)
+    expect(sale.is_shipping_confirmed).toBe(0)
+    expect(sale.status).toBe('completed')
+
+    // 後日の再収集で実額（¥210）が取れた。旧実装は shipping_source==='actual' かつ
+    // status==='completed' で無条件にスキップしていたため、この更新が握りつぶされていた
+    const updated = db.updateCollectedActuals([
+      { mercariItemId: 'zero-then-actual', soldAt: '2026-07-06', fee: 100, shippingFee: 210 },
+    ])
+    expect(updated).toBe(1)
+    sale = db.listSales().find(s => s.mercari_item_id === 'zero-then-actual')!
+    expect(sale.shipping_fee).toBe(210)
+    expect(sale.is_shipping_confirmed).toBe(1)
   })
 })
