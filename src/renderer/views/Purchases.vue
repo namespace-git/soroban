@@ -90,12 +90,15 @@ const sortedPurchases = computed(() =>
 
 const searchText = ref('')
 const period = ref<Period>('all')
+/** 仕入先の絞り込み。空文字列なら「すべて」 */
+const shopAccountFilter = ref('')
 const filteredPurchases = computed(() =>
   sortedPurchases.value.filter(p =>
     matchesSearch(
       [p.first_line_name, p.order_no, p.shop_account_name, p.note, ...p.tags.map(t => t.name)],
       searchText.value,
-    ) && inPeriod(p.ordered_at, period.value),
+    ) && inPeriod(p.ordered_at, period.value)
+    && (!shopAccountFilter.value || p.shop_account_id === shopAccountFilter.value),
   ),
 )
 
@@ -103,6 +106,17 @@ const filteredPurchases = computed(() =>
 const periodTotalCost = computed(() =>
   filteredPurchases.value.filter(p => p.status !== 'draft').reduce((s, p) => s + p.total_cost, 0),
 )
+
+/** 仕入先で絞ったときの明細・商品計・送料・支払合計（絞り込み後の行から。下書きは価格未入力なので除く） */
+const shopAccountSummary = computed(() => {
+  const rows = filteredPurchases.value.filter(p => p.status !== 'draft')
+  return {
+    lineCount: rows.reduce((s, p) => s + p.line_count, 0),
+    subtotal: rows.reduce((s, p) => s + p.subtotal, 0),
+    shippingFee: rows.reduce((s, p) => s + p.shipping_fee, 0),
+    totalCost: rows.reduce((s, p) => s + p.total_cost, 0),
+  }
+})
 
 function previewModelCode(line: PurchaseLineInput): string {
   if (line.model_code) return line.model_code
@@ -500,10 +514,19 @@ async function remove(p: PurchaseSummary) {
     </div>
 
     <div class="toolbar">
+      <select v-model="shopAccountFilter">
+        <option value="">すべての仕入先</option>
+        <option v-for="a in accounts" :key="a.id" :value="a.id">{{ a.name }}</option>
+      </select>
       <SearchBox v-model="searchText" placeholder="代表商品名・注文番号・仕入先・メモを検索" />
       <PeriodSelect v-model="period" />
       <span class="grow" />
-      <span class="faint">{{ filteredPurchases.length }}件 ／ 総原価 {{ yen(periodTotalCost) }}</span>
+      <span v-if="shopAccountFilter" class="faint">
+        {{ filteredPurchases.length }}件 ／ 明細 {{ shopAccountSummary.lineCount }} ／
+        商品計 {{ yen(shopAccountSummary.subtotal) }} ／ 送料 {{ yen(shopAccountSummary.shippingFee) }} ／
+        支払合計 {{ yen(shopAccountSummary.totalCost) }}
+      </span>
+      <span v-else class="faint">{{ filteredPurchases.length }}件 ／ 総原価 {{ yen(periodTotalCost) }}</span>
     </div>
 
     <Skeleton v-if="!loaded" :rows="5" />

@@ -10,7 +10,7 @@
 // ============================================================
 
 import type {
-  SorobanApi, ShopAccount, ShopAccountKind, ShippingMethod, ShippingSource,
+  SorobanApi, ShopAccount, ShopAccountKind, ShopAccountStats, ShippingMethod, ShippingSource,
   SaleProfit, SaleInput, SalePatch, SaleKind, SaleSource, SaleFilter, SaleTotals, SaleStatus,
   PurchaseDetail, PurchaseInput, PurchaseLine, PurchaseImportResult,
   InventoryItem, InventoryStatus, InventoryPatch,
@@ -248,6 +248,9 @@ let tags: Tag[] = [
 
 /** 商品（型番）に直接付けたタグ。型番 → タグ[]（setProductTags で置き換える） */
 const productTags = new Map<string, Tag[]>()
+
+/** 商品（型番）の表示名。型番 → 表示名（setProductName で置き換える。無い型番は最新の在庫名を使う） */
+const productCustomName = new Map<string, string>()
 
 const shippingMethods: ShippingMethod[] = [
   { id: uid(), name: 'ネコポス', carrier: 'らくらくメルカリ便', fee: 210, sort_order: 1, is_active: 1 },
@@ -1561,12 +1564,18 @@ function variantSummaryFor(model: string): VariantSummary {
     ? Math.round(relatedSales.reduce((s, x) => s + x.gross_profit, 0) / relatedSales.length)
     : null
   const sample = items[0]
+  // 最新の在庫名（表示名が無いときのフォールバック。=最後に仕入れた明細の名前）
+  const latest = items.reduce<InventoryItem | undefined>(
+    (max, i) => (!max || i.acquired_at >= max.acquired_at ? i : max), undefined,
+  )
+  const customName = productCustomName.get(model) ?? null
 
   return {
     model_code: model,
     series_code: sample?.series_code ?? null,
     material: sample?.material ?? null,
-    name: sample?.name ?? model,
+    name: customName ?? latest?.name ?? model,
+    custom_name: customName,
     purchased: items.length,
     sold: soldItems.length,
     in_stock: inStockItems.length,
@@ -2288,6 +2297,30 @@ const api: SorobanApi = {
     return wait(childIds)
   },
 
+  async mergeSplitInventory(parentId: string) {
+    const parent = inventory.find(i => i.id === parentId)
+    if (!parent) throw new Error('在庫が見つかりません')
+    const children = inventory.filter(i => i.parent_id === parentId)
+    if (!children.length) throw new Error('分割した在庫が見つかりません')
+    const blocked = children.find(c => c.status !== 'in_stock' || c.listing)
+    if (blocked) {
+      const reason = blocked.listing
+        ? '出品に引き当てています'
+        : blocked.status === 'sold' ? '販売済みです'
+        : blocked.status === 'disposed' ? '廃棄済みです'
+        : blocked.status === 'personal_use' ? '自家消費済みです'
+        : '分割し直されています'
+      throw new Error(`${blocked.item_code} が${reason}`)
+    }
+    for (const c of children) {
+      const idx = inventory.indexOf(c)
+      if (idx >= 0) inventory.splice(idx, 1)
+    }
+    parent.status = 'in_stock'
+    itemSplitAt.delete(parent.id)
+    return wait(undefined)
+  },
+
   async disposeInventory(id: string, _note: string, status: 'disposed' | 'personal_use' = 'disposed') {
     const item = inventory.find(i => i.id === id)
     if (!item) throw new Error('在庫が見つかりません')
@@ -2493,6 +2526,28 @@ const api: SorobanApi = {
       if (sale) recalcSaleInheritedTags(sale)
     }
     return wait(undefined)
+  },
+
+  /** 型番の表示名を付ける／外す（null）。仕入明細・在庫の元の名前は変えない */
+  async setProductName(modelCode: string, name: string | null) {
+    if (name) productCustomName.set(modelCode, name)
+    else productCustomName.delete(modelCode)
+    return wait(undefined)
+  },
+
+  /** 仕入先ごとの累計（確定した仕入のみ）。注文数・点数（明細の数量合計）・支払合計・最終注文日 */
+  async listShopAccountStats(): Promise<ShopAccountStats[]> {
+    const confirmed = purchases.filter(p => p.status === 'confirmed')
+    const rows = shopAccounts.map(a => {
+      const own = confirmed.filter(p => p.shop_account_id === a.id)
+      const items = own.reduce((s, p) => s + p.lines.reduce((ls, l) => ls + l.quantity, 0), 0)
+      const total_cost = own.reduce((s, p) => s + p.total_cost, 0)
+      const last_ordered_at = own.reduce<string | null>(
+        (max, p) => (!max || p.ordered_at > max ? p.ordered_at : max), null,
+      )
+      return { shop_account_id: a.id, orders: own.length, items, total_cost, last_ordered_at }
+    })
+    return wait(rows)
   },
 
   async listVariantSummary(sort = 'total_profit') {

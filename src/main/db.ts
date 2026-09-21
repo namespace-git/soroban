@@ -15,7 +15,7 @@ import type {
   ProductMonthPoint, ProductSummary, PurchaseDetail,
   PurchaseDraftInput, PurchaseImportResult, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
   PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleStatus, SaleTotals,
-  SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, Tag, TimelineEvent, VariantSummary,
+  SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, ShopAccountStats, Tag, TimelineEvent, VariantSummary,
   CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
 
@@ -976,6 +976,22 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '20')
          ON CONFLICT(key) DO UPDATE SET value = '20'`,
+    ).run()
+  }
+
+  if (version < 21) {
+    // 型番ごとの表示名（人が上書き）。新規テーブルなので ALTER 不要。resetData() では消さない
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS product_name (
+        model_code TEXT PRIMARY KEY,
+        name       TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '21')
+         ON CONFLICT(key) DO UPDATE SET value = '21'`,
     ).run()
   }
 
@@ -2830,6 +2846,71 @@ export function splitInventory(id: string, count: number): string[] {
   return childIds
 }
 
+/**
+ * 分割を戻す：子が全部 in_stock で、どの出品にも引き当てられていない（listing_line にも
+ * sale_line にも無い）ときだけ、子を消して親を in_stock に戻す。
+ * 親の landed_cost・item_code・acquired_at はここでも一切書き換えない
+ * （子の landed_cost の合計は生成時に親と一致しているはず。崩れていたら止める）。
+ * 子のタグ・メモは親に寄せる（タグは重複を無視、メモは改行で追記）。子の item_code は欠番のまま。
+ */
+export function mergeSplitInventory(parentId: string): void {
+  const parent = db.prepare('SELECT * FROM inventory_item WHERE id = ?').get(parentId) as
+    | { id: string; status: InventoryStatus; landed_cost: number; note: string | null }
+    | undefined
+  if (!parent) throw new Error('在庫が見つかりません')
+  if (parent.status !== 'split') throw new Error('分割した在庫ではありません')
+
+  const children = db.prepare('SELECT * FROM inventory_item WHERE parent_id = ?').all(parentId) as
+    Array<{ id: string; item_code: string; landed_cost: number; status: InventoryStatus; note: string | null }>
+  if (children.length === 0) throw new Error('分割した子が見つかりません')
+
+  const reasons: string[] = []
+  for (const c of children) {
+    if (c.status === 'sold') reasons.push(`${c.item_code} が販売済みです`)
+    else if (c.status === 'disposed' || c.status === 'personal_use') {
+      reasons.push(`${c.item_code} が廃棄／自家消費済みです`)
+    } else if (c.status === 'split') {
+      reasons.push(`${c.item_code} がさらに分割されています（先にそちらを戻してください）`)
+    }
+
+    const listed = db.prepare('SELECT COUNT(*) AS c FROM listing_line WHERE inventory_item_id = ?')
+      .get(c.id) as { c: number }
+    if (listed.c > 0) reasons.push(`${c.item_code} が出品に引き当て中です`)
+
+    const sold = db.prepare('SELECT COUNT(*) AS c FROM sale_line WHERE inventory_item_id = ?')
+      .get(c.id) as { c: number }
+    if (sold.c > 0) reasons.push(`${c.item_code} が販売に紐付いています`)
+  }
+  if (reasons.length > 0) throw new Error(reasons.join('、'))
+
+  const costSum = children.reduce((sum, c) => sum + c.landed_cost, 0)
+  if (costSum !== parent.landed_cost) throw new Error('原価の合計が親と一致しません')
+
+  const tx = db.transaction(() => {
+    const copyTags = db.prepare(`
+      INSERT OR IGNORE INTO inventory_tag (inventory_item_id, tag_id)
+      SELECT ?, tag_id FROM inventory_tag WHERE inventory_item_id = ?
+    `)
+    for (const c of children) copyTags.run(parentId, c.id)
+
+    const mergedNote = [parent.note, ...children.map(c => c.note)]
+      .filter((n): n is string => !!n && n.trim() !== '')
+      .join('\n')
+    if (mergedNote !== (parent.note ?? '')) {
+      db.prepare('UPDATE inventory_item SET note = ? WHERE id = ?').run(mergedNote || null, parentId)
+    }
+
+    for (const c of children) {
+      db.prepare('DELETE FROM inventory_tag WHERE inventory_item_id = ?').run(c.id)
+      db.prepare('DELETE FROM inventory_item WHERE id = ?').run(c.id)
+    }
+
+    db.prepare(`UPDATE inventory_item SET status = 'in_stock', updated_at = datetime('now') WHERE id = ?`)
+      .run(parentId)
+  })
+  tx()
+}
+
 export function disposeInventory(
   id: string,
   note: string,
@@ -3826,6 +3907,24 @@ export function setProductTags(modelCode: string, tagIds: string[]): void {
   tx()
 }
 
+/**
+ * 型番の表示名を人が上書きする（商品ページ）。trim して空/null なら消し、
+ * variant_summary.name は最新の在庫名に戻る。modelCode は在庫に無くても保存してよい
+ * （型番の入力ミスは画面側で防ぐ）。resetData() では消さない（shop_alias と同じ扱い）
+ */
+export function setProductName(modelCode: string, name: string | null): void {
+  const trimmed = name?.trim()
+  if (!trimmed) {
+    db.prepare('DELETE FROM product_name WHERE model_code = ?').run(modelCode)
+    return
+  }
+  db.prepare(`
+    INSERT INTO product_name (model_code, name, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(model_code) DO UPDATE SET name = excluded.name, updated_at = datetime('now')
+  `).run(modelCode, trimmed)
+}
+
 export function getDashboard(): DashboardStats {
   const one = <T>(sql: string, ...v: unknown[]) => db.prepare(sql).get(...v) as T
 
@@ -4109,6 +4208,27 @@ export function listShopAccounts(): ShopAccount[] {
     Array<Omit<ShopAccount, 'auto_tags'>>
   const tagMap = loadTagsFor('shop_account_tag', 'shop_account_id', rows.map(r => r.id))
   return rows.map(r => ({ ...r, auto_tags: tagMap.get(r.id) ?? [] }))
+}
+
+/**
+ * 仕入先ごとの累計（確定済みの仕入だけ。下書きは含めない）。
+ * total_cost は listPurchases の total_cost（商品計＋送料＋その他−割引）の合計と一致する。
+ * 仕入が0件の仕入先も0件・null で返す（LEFT JOIN）
+ */
+export function listShopAccountStats(): ShopAccountStats[] {
+  return db.prepare(`
+    SELECT
+      sa.id AS shop_account_id,
+      COUNT(DISTINCT p.id) AS orders,
+      COALESCE(SUM(pl.quantity), 0) AS items,
+      COALESCE(SUM(pl.unit_price * pl.quantity + pl.allocated_cost), 0) AS total_cost,
+      MAX(p.ordered_at) AS last_ordered_at
+    FROM shop_account sa
+    LEFT JOIN purchase p ON p.shop_account_id = sa.id AND p.status = 'confirmed'
+    LEFT JOIN purchase_line pl ON pl.purchase_id = p.id
+    GROUP BY sa.id
+    ORDER BY sa.name
+  `).all() as ShopAccountStats[]
 }
 
 export function createShopAccount(name: string, kind: ShopAccountKind = 'other'): string {

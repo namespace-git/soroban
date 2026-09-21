@@ -71,6 +71,14 @@ CREATE TABLE IF NOT EXISTS shop_alias (
   updated_at TEXT NOT NULL
 );
 
+-- 型番ごとの表示名（人が上書き）。無ければ variant_summary.name は最新の在庫名になる。
+-- resetData() では消さない（shop_alias と同じ扱い）
+CREATE TABLE IF NOT EXISTS product_name (
+  model_code TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 -- fee_rate_bp: ベーシスポイント。1000 = 10.00%
 -- 小数を避けるため整数で持つ
 -- collect_interval_h: 2026-09-19 に 6 時間から 1 時間へ変更（既存DBは migrate() で更新）
@@ -676,9 +684,13 @@ SELECT
   (SELECT i2.material FROM inventory_item i2
      WHERE i2.model_code = base.model_code
      ORDER BY i2.acquired_at DESC, i2.created_at DESC LIMIT 1) AS material,
-  (SELECT i2.name FROM inventory_item i2
-     WHERE i2.model_code = base.model_code
-     ORDER BY i2.acquired_at DESC, i2.created_at DESC LIMIT 1) AS name,
+  COALESCE(
+    (SELECT name FROM product_name WHERE model_code = base.model_code),
+    (SELECT i2.name FROM inventory_item i2
+       WHERE i2.model_code = base.model_code
+       ORDER BY i2.acquired_at DESC, i2.created_at DESC LIMIT 1)
+  ) AS name,
+  (SELECT name FROM product_name WHERE model_code = base.model_code) AS custom_name,
   (SELECT COUNT(*) FROM inventory_item i2
      WHERE i2.model_code = base.model_code AND i2.status != 'split') AS purchased,
   (SELECT COUNT(*) FROM inventory_item i2

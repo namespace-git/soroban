@@ -37,6 +37,7 @@ const api: SorobanApi = {
   listInventory: invoke('listInventory'),
   updateInventory: invoke('updateInventory'),
   splitInventory: invoke('splitInventory'),
+  mergeSplitInventory: invoke('mergeSplitInventory'),
   disposeInventory: invoke('disposeInventory'),
 
   listMonthly: invoke('listMonthly'),
@@ -62,6 +63,8 @@ const api: SorobanApi = {
   setInventoryTags: invoke('setInventoryTags'),
   setPurchaseTags: invoke('setPurchaseTags'),
   setProductTags: invoke('setProductTags'),
+  setProductName: invoke('setProductName'),
+  listShopAccountStats: invoke('listShopAccountStats'),
   listVariantSummary: invoke('listVariantSummary'),
 
   listProducts: invoke('listProducts'),

@@ -70,6 +70,15 @@ export type Material = 'ムースクリーム' | 'ねっとりヨーグルト' |
 // マスタ
 // ------------------------------------------------------------
 
+export interface ShopAccountStats {
+  shop_account_id: string
+  orders: number
+  items: number
+  /** 商品計＋送料＋その他−割引 の合計 */
+  total_cost: number
+  last_ordered_at: string | null
+}
+
 export interface ShopAccount {
   id: string
   name: string
@@ -483,8 +492,10 @@ export interface VariantSummary {
   model_code: string
   series_code: string | null
   material: Material | null
-  /** 最新の在庫名 */
+  /** 表示名。custom_name があればそれ、無ければ最新の在庫名 */
   name: string
+  /** 人が付けた表示名（setProductName）。無ければ null */
+  custom_name: string | null
   purchased: number
   sold: number
   in_stock: number
@@ -800,6 +811,12 @@ export interface SorobanApi {
    * 子は新しい在庫コードを持ち、名前は「元の名前（分割 1/2）」。親は split になる。子の id を返す
    */
   splitInventory(id: string, count: number): Promise<string[]>
+  /**
+   * 分割を戻す（親 id）。子が全部 未出品 で、どの出品にも引き当てられていないときだけ。
+   * 子を消して親を未出品に戻す。親の原価は分割前のまま（子の合計と一致）。子のタグ・メモは親に寄せる。
+   * 戻せないときは理由を Error（例：S-0023 が販売済み）
+   */
+  mergeSplitInventory(parentId: string): Promise<void>
   /** 在庫から外す。廃棄（disposed）か自家消費（personal_use）。既定は disposed */
   disposeInventory(id: string, note: string, status?: 'disposed' | 'personal_use'): Promise<void>
 
@@ -841,6 +858,10 @@ export interface SorobanApi {
   setPurchaseTags(purchaseId: string, tagIds: string[]): Promise<void>
   /** 商品（型番）のタグを丸ごと置き換える */
   setProductTags(modelCode: string, tagIds: string[]): Promise<void>
+  /** 型番の表示名を付ける／外す（null）。仕入明細・在庫の元の名前は変えない。商品タブ・ランキング・在庫・売上の表示に使う */
+  setProductName(modelCode: string, name: string | null): Promise<void>
+  /** 仕入先ごとの累計（確定した仕入）。注文数・点数・支払合計（総原価）・最終注文日 */
+  listShopAccountStats(): Promise<ShopAccountStats[]>
   listVariantSummary(sort?: 'total_profit' | 'avg_profit' | 'sold'): Promise<VariantSummary[]>
 
   // 商品（型番）ページ・在庫の履歴

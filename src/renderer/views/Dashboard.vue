@@ -222,7 +222,7 @@ const runLabel: Record<string, string> = {
                   @click="goto('products', { modelCode: v.model_code })"
                 >
                   <td><StatusChip tone="neutral" :label="v.model_code" /></td>
-                  <td class="ranking-name">{{ v.name }}</td>
+                  <td class="ranking-name" :title="v.name">{{ v.name }}</td>
                   <td class="num">{{ v.in_stock }}</td>
                   <td class="num">{{ v.sold }}</td>
                   <td class="num">{{ v.avg_price != null ? yen(v.avg_price) : '—' }}</td>
@@ -408,10 +408,22 @@ const runLabel: Record<string, string> = {
 
 .ranking-table { table-layout: fixed; }
 .ranking-row { cursor: pointer; }
+/* 型番・数値列は狭く固定し、商品名の列に幅を残す */
+.ranking-table th:nth-child(1), .ranking-table td:nth-child(1) { width: 80px; }
+.ranking-table th:nth-child(3), .ranking-table td:nth-child(3),
+.ranking-table th:nth-child(4), .ranking-table td:nth-child(4) { width: 52px; }
+.ranking-table th:nth-child(5), .ranking-table td:nth-child(5),
+.ranking-table th:nth-child(6), .ranking-table td:nth-child(6) { width: 84px; }
+.ranking-table th:nth-child(7), .ranking-table td:nth-child(7) { width: 92px; }
+/* 商品名は1行省略をやめ、2行まで折り返して省略する */
 .ranking-name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.35;
 }
 
 @media (max-width: 1099px) {

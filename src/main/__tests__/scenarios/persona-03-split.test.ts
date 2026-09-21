@@ -61,4 +61,33 @@ describe('ペルソナ03：ばらす人', () => {
     expect(point.sold).toBe(2)
     expect(point.in_stock).toBe(2)
   })
+
+  it('箱1点(原価2400)を3つに分割→間違えたので戻す→親がin_stock、原価2400のまま', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-05-01',
+      shipping_fee: 0,
+      lines: [{ name: '【W002】ケース', unit_price: 2400, quantity: 1 }],
+    })
+    const parent = db.listInventory('in_stock')[0]
+    expect(parent.landed_cost).toBe(2400)
+
+    const childIds = db.splitInventory(parent.id, 3)
+    expect(childIds).toHaveLength(3)
+    expect(db.listInventory('in_stock').some(i => i.id === parent.id)).toBe(false)
+
+    // 間違えて分けたので戻す
+    db.mergeSplitInventory(parent.id)
+
+    const inStock = db.listInventory('in_stock')
+    expect(inStock).toHaveLength(1)
+    expect(inStock[0].id).toBe(parent.id)
+    expect(inStock[0].landed_cost).toBe(2400)
+    expect(db.listInventory('split')).toHaveLength(0)
+
+    // 商品ページも分割前に戻る
+    const product = db.getProduct('W002')!
+    expect(product.purchased).toBe(1)
+    expect(product.in_stock).toBe(1)
+  })
 })

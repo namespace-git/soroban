@@ -476,6 +476,104 @@ describe('db（:memory:）', () => {
     for (const child of inStock) expect(child.parent_id).toBe(parent.id)
   })
 
+  describe('mergeSplitInventory：分割を戻す', () => {
+    it('3分割した直後に戻す→親がin_stock、子は0件、原価とitem_codeは親のまま', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '間違えて分けた', unit_price: 1000, quantity: 1 }],
+      })
+      const parent = db.listInventory('in_stock')[0]
+      const childIds = db.splitInventory(parent.id, 3)
+
+      db.mergeSplitInventory(parent.id)
+
+      const inStock = db.listInventory('in_stock')
+      expect(inStock).toHaveLength(1)
+      expect(inStock[0].id).toBe(parent.id)
+      expect(inStock[0].item_code).toBe(parent.item_code)
+      expect(inStock[0].landed_cost).toBe(1000)
+      expect(db.listInventory('split')).toHaveLength(0)
+
+      for (const childId of childIds) {
+        expect(db.listInventory('in_stock').some(i => i.id === childId)).toBe(false)
+      }
+    })
+
+    it('子のタグ・メモは親に寄せる', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'タグ付き分割', unit_price: 900, quantity: 1 }],
+      })
+      const parent = db.listInventory('in_stock')[0]
+      const tagId = db.createTag('レア')
+      const childIds = db.splitInventory(parent.id, 3)
+      db.setInventoryTags(childIds[0], [tagId])
+      db.updateInventory(childIds[1], { note: '傷あり' })
+
+      db.mergeSplitInventory(parent.id)
+
+      const merged = db.listInventory('in_stock')[0]
+      expect(merged.tags.map(t => t.id)).toEqual([tagId])
+      expect(merged.note).toBe('傷あり')
+    })
+
+    it('子が1点でも販売済みならErrorにitem_codeを含み、何も変わらない', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '一部売れた分割', unit_price: 900, quantity: 1 }],
+      })
+      const parent = db.listInventory('in_stock')[0]
+      const childIds = db.splitInventory(parent.id, 3)
+      const soldChild = db.listInventory('in_stock').find(i => i.id === childIds[0])!
+
+      const saleId = db.createSale({ title: '一部売れた分割', sold_at: '2026-01-06', price: 500 })
+      db.linkInventory(saleId, [soldChild.id])
+
+      expect(() => db.mergeSplitInventory(parent.id)).toThrow(soldChild.item_code)
+
+      // 何も変わっていない
+      expect(db.listInventory('split').some(i => i.id === parent.id)).toBe(true)
+      expect(db.listInventory('in_stock').filter(i => childIds.includes(i.id))).toHaveLength(2)
+    })
+
+    it('子が出品に引き当て中ならError', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '引き当て中の分割', unit_price: 900, quantity: 1 }],
+      })
+      const parent = db.listInventory('in_stock')[0]
+      const childIds = db.splitInventory(parent.id, 2)
+      db.upsertListings([
+        { mercariItemId: 'LMERGE', title: '引き当て中の分割', price: 1500, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LMERGE', [childIds[0]])
+
+      expect(() => db.mergeSplitInventory(parent.id)).toThrow('引き当て中')
+    })
+
+    it('孫まで分割されているとError「さらに分割」', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '孫分割', unit_price: 900, quantity: 1 }],
+      })
+      const parent = db.listInventory('in_stock')[0]
+      const childIds = db.splitInventory(parent.id, 2)
+      db.splitInventory(childIds[0], 2)
+
+      expect(() => db.mergeSplitInventory(parent.id)).toThrow('さらに分割')
+    })
+  })
+
   it('自動紐付け：型番が完全一致すれば先入先出で自動確定、在庫が尽きたら未紐付けのまま', () => {
     db.createPurchase({
       shop_account_id: shopId,
@@ -1205,7 +1303,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('20')
+      expect(db.getSettings().schema_version).toBe('21')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1294,6 +1392,79 @@ describe('db（:memory:）', () => {
     expect(summary.total_profit).toBe(340)
   })
 
+  it('setProductName：表示名を上書きし、nullで最新の在庫名に戻る', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      shipping_fee: 0,
+      lines: [{ name: 'ムースクリーム（箱）旧名【Z078-2】', unit_price: 1000, quantity: 1 }],
+    })
+
+    db.setProductName('Z078-2', 'ムースクリーム（箱）')
+
+    const products = db.listProducts()
+    const p = products.find(x => x.model_code === 'Z078-2')!
+    expect(p.name).toBe('ムースクリーム（箱）')
+    expect(p.custom_name).toBe('ムースクリーム（箱）')
+
+    const variants = db.listVariantSummary()
+    const v = variants.find(x => x.model_code === 'Z078-2')!
+    expect(v.name).toBe('ムースクリーム（箱）')
+    expect(v.custom_name).toBe('ムースクリーム（箱）')
+
+    db.setProductName('Z078-2', null)
+    const after = db.listProducts().find(x => x.model_code === 'Z078-2')!
+    expect(after.name).toBe('ムースクリーム（箱）旧名【Z078-2】')
+    expect(after.custom_name).toBeNull()
+  })
+
+  it('listShopAccountStats：確定済みの仕入だけ集計、下書きは含めない。仕入0件は0で返す', () => {
+    const otherShopId = db.createShopAccount('仕入なしアカウント')
+
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      shipping_fee: 300,
+      lines: [
+        { name: '商品A', unit_price: 1000, quantity: 2 },
+      ],
+    })
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-10',
+      shipping_fee: 0,
+      lines: [
+        { name: '商品B', unit_price: 500, quantity: 1 },
+      ],
+    })
+    db.createPurchaseDraft({
+      import_key: 'draft-for-stats',
+      shop_account_id: shopId,
+      ordered_at: '2026-09-05',
+      lines: [{ name: '下書き商品', unit_price: 0, quantity: 1 }],
+    })
+
+    const purchases = db.listPurchases().filter(p => p.shop_account_id === shopId && p.status === 'confirmed')
+    const expectedTotal = purchases.reduce((s, p) => s + p.total_cost, 0)
+
+    const stats = db.listShopAccountStats()
+    const mine = stats.find(s => s.shop_account_id === shopId)!
+    expect(mine.orders).toBe(2)
+    expect(mine.items).toBe(3)
+    expect(mine.total_cost).toBe(expectedTotal)
+    expect(mine.last_ordered_at).toBe('2026-09-10')
+
+    const other = stats.find(s => s.shop_account_id === otherShopId)!
+    expect(other.orders).toBe(0)
+    expect(other.items).toBe(0)
+    expect(other.total_cost).toBe(0)
+    expect(other.last_ordered_at).toBeNull()
+  })
+
+  it('migrate：schema_versionが21になる', () => {
+    expect(db.getSettings().schema_version).toBe('21')
+  })
+
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
     const dir = mkdtempSync(join(tmpdir(), 'soroban-migrate-'))
     const path = join(dir, 'legacy.db')
@@ -1377,7 +1548,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('20')
+      expect(db.getSettings().schema_version).toBe('21')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1411,7 +1582,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('20')
+      expect(db.getSettings().schema_version).toBe('21')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })

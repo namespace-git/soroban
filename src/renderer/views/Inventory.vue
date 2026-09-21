@@ -248,6 +248,29 @@ async function split(item: InventoryItem) {
   }
 }
 
+// --- 分割を戻す（結合）。子の行・「その他」で見える親の行（status==='split'）の両方から呼ぶ ---
+function mergeMessage(item: InventoryItem): string {
+  const parentId = item.parent_id ?? item.id
+  const siblings = items.value.filter(i => i.parent_id === parentId)
+  if (!siblings.length) return '同じ親から分けた在庫がまとめて1点に戻ります'
+  const [first, ...rest] = siblings
+  const label = rest.length ? `${first.item_code} ほか${rest.length}点` : first.item_code
+  return `同じ親から分けた在庫（${label}）が1点に戻ります`
+}
+
+async function mergeSplit(item: InventoryItem) {
+  const parentId = item.parent_id ?? item.id
+  if (!await confirmDialog('分割を戻しますか？', { message: mergeMessage(item), okLabel: '戻す' })) return
+  try {
+    await window.soroban.mergeSplitInventory(parentId)
+    await load()
+    changed()
+    toast('分割を戻しました', 'ok')
+  } catch (e) {
+    toast((e as Error).message, 'warn')
+  }
+}
+
 async function editModelCode(item: InventoryItem) {
   const input = await ask('型番', { initial: item.model_code ?? '', placeholder: '例：Z078-2' })
   if (input === null) return
@@ -391,9 +414,19 @@ async function editNote(item: InventoryItem) {
               <template v-if="i.status === 'in_stock'">
                 <button class="sm ghost" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
                 <button class="sm ghost" @click="split(i)" title="この在庫を複数点に分ける">分割</button>
+                <button
+                  v-if="i.parent_id" class="sm ghost" @click="mergeSplit(i)"
+                  title="同じ親から分けた在庫を全部まとめて、分割前の1点に戻します"
+                >分割を戻す</button>
                 <button class="sm ghost" @click="editNote(i)" title="メモを編集する">メモ</button>
                 <button class="sm ghost" @click="dispose(i, 'disposed')" title="在庫から外して廃棄にする">廃棄</button>
                 <button class="sm ghost" @click="dispose(i, 'personal_use')" title="在庫から外して自家消費にする">自家消費</button>
+              </template>
+              <template v-else-if="i.status === 'split'">
+                <button
+                  class="sm ghost" @click="mergeSplit(i)"
+                  title="同じ親から分けた在庫を全部まとめて、分割前の1点に戻します"
+                >戻す</button>
               </template>
             </td>
           </tr>

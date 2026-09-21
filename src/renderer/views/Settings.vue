@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
-import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus } from '../../shared/types'
+import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
@@ -15,11 +15,14 @@ const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 
+const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
+
 const methods = ref<ShippingMethod[]>([])
 const settings = ref<Record<string, string>>({})
 const runs = ref<CollectorRun[]>([])
 const accounts = ref<ShopAccount[]>([])
 const tags = ref<Tag[]>([])
+const shopStats = ref<ShopAccountStats[]>([])
 const saved = ref('')
 const loaded = ref(false)
 const updateStatus = ref<UpdateStatus | null>(null)
@@ -27,13 +30,14 @@ const checkingUpdate = ref(false)
 const installingUpdate = ref(false)
 
 async function load() {
-  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes] = await Promise.all([
+  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes] = await Promise.all([
     window.soroban.listShippingMethods(),
     window.soroban.getSettings(),
     window.soroban.listRuns(10),
     window.soroban.listShopAccounts(),
     window.soroban.listTags(),
     window.soroban.checkForUpdate(),
+    window.soroban.listShopAccountStats(),
   ])
   methods.value = methodsRes
   settings.value = settingsRes
@@ -41,9 +45,14 @@ async function load() {
   accounts.value = accountsRes
   tags.value = tagsRes
   updateStatus.value = updateRes
+  shopStats.value = shopStatsRes
   loaded.value = true
 }
 onMounted(load)
+
+function statsFor(accountId: string): ShopAccountStats | null {
+  return shopStats.value.find(s => s.shop_account_id === accountId) ?? null
+}
 
 // --- アプリの更新（GitHub Releases） ---
 
@@ -83,6 +92,7 @@ const updateResultText = computed(() => {
 // 仕入タブでアカウントを増やしたら、こちらの一覧も追従させる
 watch(revision, async () => {
   accounts.value = await window.soroban.listShopAccounts()
+  shopStats.value = await window.soroban.listShopAccountStats()
 })
 
 function flash(msg: string) {
@@ -490,8 +500,16 @@ const runLabel: Record<string, string> = {
           <tbody>
             <tr v-for="a in accounts" :key="a.id">
               <td class="name-cell">
-                <span :class="{ faint: !a.is_active }">{{ a.name }}</span>
-                <StatusChip v-if="!a.is_active" tone="neutral" label="無効" />
+                <div>
+                  <span :class="{ faint: !a.is_active }">{{ a.name }}</span>
+                  <StatusChip v-if="!a.is_active" tone="neutral" label="無効" />
+                </div>
+                <p class="faint stats-line">
+                  <template v-if="statsFor(a.id)">
+                    累計：注文 {{ statsFor(a.id)!.orders }}・点数 {{ statsFor(a.id)!.items }}・支払 {{ yen(statsFor(a.id)!.total_cost) }}・最終 {{ statsFor(a.id)!.last_ordered_at ?? '—' }}
+                  </template>
+                  <template v-else>累計：なし</template>
+                </p>
               </td>
               <td>
                 <select :value="a.kind" @change="updateAccountKind(a, ($event.target as HTMLSelectElement).value as ShopAccountKind)">
@@ -705,6 +723,7 @@ const runLabel: Record<string, string> = {
    名前セルの位置がずれる）。中身側で縦位置と間隔を合わせる */
 .name-cell > * { vertical-align: middle; }
 .name-cell > * + * { margin-left: 8px; }
+.stats-line { margin: 4px 0 0; font-size: var(--fs-12); }
 
 .accounts-table select {
   border-color: transparent;

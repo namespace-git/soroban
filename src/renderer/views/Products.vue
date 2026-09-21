@@ -13,6 +13,7 @@ import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
 import SortTh from '../components/SortTh.vue'
 import { useSort } from '../composables/useSort'
+import type { PromptOptions } from '../components/InputDialog.vue'
 
 type SortKey = 'name' | 'in_stock' | 'purchase_total' | 'avg_cost' | 'avg_price' | 'avg_profit' | 'total_profit' | 'last_purchased_at' | 'last_sold_at'
 type ChipInfo = { tone: 'neutral' | 'ok' | 'warn' | 'info'; label: string }
@@ -20,6 +21,7 @@ type ChipInfo = { tone: 'neutral' | 'ok' | 'warn' | 'info'; label: string }
 const revision = inject<Ref<number>>('revision')!
 // ダッシュボードの型番ランキングから goto('products', { modelCode }) で開かれたときに読む
 const gotoPayload = inject<Ref<{ modelCode?: string } | null>>('gotoPayload', ref(null))
+const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -100,6 +102,16 @@ async function onProductTagCreate(name: string) {
   await window.soroban.setProductTags(tagPickerModelCode.value, [...tagPickerSelected.value, newTagId])
   await load()
   if (detail.value?.model_code === tagPickerModelCode.value) await openDetail(tagPickerModelCode.value)
+}
+
+// --- 表示名：仕入明細・在庫の元の名前とは別に、商品タブでの見た目だけ変える ---
+
+async function renameProduct(modelCode: string, currentName: string | null): Promise<void> {
+  const input = await ask('商品名（表示名）', { initial: currentName ?? '', placeholder: '空にすると元の名前に戻ります' })
+  if (input === null) return
+  await window.soroban.setProductName(modelCode, input.trim() || null)
+  await load()
+  if (detail.value?.model_code === modelCode) await openDetail(modelCode)
 }
 
 const filteredProducts = computed(() =>
@@ -243,8 +255,13 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
                 <div class="item-name">{{ p.name }}</div>
                 <div class="chip-row">
                   <StatusChip tone="neutral" :label="p.model_code" />
+                  <StatusChip
+                    v-if="p.custom_name" tone="neutral" label="表示名"
+                    title="仕入明細の元の名前とは別に付けた表示名"
+                  />
                   <StatusChip v-for="t in p.tags" :key="t.id" tone="info" :label="t.name" />
                   <button class="sm ghost" @click.stop="openProductTagPicker(p.model_code, $event)" title="タグを編集する">タグ</button>
+                  <button class="sm ghost" @click.stop="renameProduct(p.model_code, p.custom_name ?? p.name)" title="表示名を変える">名前</button>
                 </div>
               </td>
               <td class="num">{{ p.in_stock }}</td>
@@ -296,8 +313,13 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
           <div class="detail-head-text">
             <div class="chip-row">
               <StatusChip tone="neutral" :label="detail.model_code" />
+              <StatusChip
+                v-if="detail.custom_name" tone="neutral" label="表示名"
+                title="仕入明細の元の名前とは別に付けた表示名"
+              />
               <StatusChip v-for="t in detail.tags" :key="t.id" tone="info" :label="t.name" />
               <button class="sm ghost" @click="openProductTagPicker(detail.model_code, $event)" title="タグを編集する">タグ</button>
+              <button class="sm ghost" @click="renameProduct(detail.model_code, detail.custom_name ?? detail.name)" title="表示名を変える">名前</button>
             </div>
             <h2 class="detail-name">{{ detail.name }}</h2>
             <p class="faint tag-hint">この型番の在庫と販売に引き継がれます</p>
