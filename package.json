@@ -29,7 +29,7 @@
     "@vitejs/plugin-vue": "^5.1.4",
     "cross-env": "^10.1.0",
     "electron": "^32.2.0",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^2.3.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.10",
@@ -87,18 +87,7 @@
     "icon": "build/icon.png",
     "dmg": {
       "title": "Soroban ${version}",
-      "contents": [
-        {
-          "x": 130,
-          "y": 220
-        },
-        {
-          "x": 410,
-          "y": 220,
-          "type": "link",
-          "path": "/Applications"
-        }
-      ]
+      "sign": false
     },
     "artifactName": "soroban-${version}-${arch}.${ext}"
   },
