@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>仕入（注文伝票）モック</title>
+<style>
+:root{--canvas:#f6f6f3;--surface:#fff;--surface-hi:#f3f2ee;--line:#e6e4dd;--line-soft:#efede8;--text:#26262a;--text-dim:#63636a;--text-faint:#97979e;--brand:#f5c842;--brand-soft:#fff6dd;--brand-ink:#7a5a00;--primary:#2b2b30;--profit:#2f9e5a;--profit-bg:#e6f6ec;--loss:#d9463f;--warn:#b45f06;--warn-bg:#fff0e0;--warn-line:#f2b26b;--info:#2f6fcf;--info-bg:#e8f0fc;--radius:14px;--radius-md:10px;--shadow-1:0 2px 10px rgba(40,35,20,.06);--font:"M PLUS 2","Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--text);font:14px/1.5 var(--font)}
+.app{display:grid;grid-template-columns:88px 1fr;min-height:100vh}
+.nav{background:#fff;border-right:1px solid var(--line);padding:16px 0;text-align:center;font-size:11px;color:var(--text-faint)}
+.nav .mark{width:36px;height:36px;border-radius:50%;background:var(--brand);margin:0 auto 4px;display:grid;place-items:center;font-weight:800}
+.nav .item{padding:12px 0}.nav .item.active{color:var(--text);font-weight:700}
+.main{padding:20px 28px 40px;max-width:1240px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.topbar .search{flex:0 0 260px;border:1px solid var(--line);border-radius:999px;padding:8px 14px;color:var(--text-faint);background:#fff}
+.topbar .mini{font-size:13px;background:var(--brand-soft);color:var(--brand-ink);border-radius:999px;padding:6px 12px;font-weight:700}
+.topbar .grow{flex:1}.topbar .last{font-size:13px;color:var(--text-dim)}
+.btn{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;font:inherit;font-size:13px;cursor:pointer}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}.btn.sm{padding:4px 10px;font-size:12px}
+.head{display:flex;align-items:center;gap:12px;margin-bottom:12px}h1{font-size:20px;margin:0}
+.accounts{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+.acc{background:#fff;border-radius:var(--radius-md);box-shadow:var(--shadow-1);padding:10px 14px;border:2px solid transparent;cursor:pointer}
+.acc.active{border-color:var(--primary)}.acc .l{font-size:12px;color:var(--text-dim);display:flex;gap:6px;align-items:center}
+.acc .v{font-size:20px;font-weight:800;line-height:1.2}.acc .s{font-size:12px;color:var(--text-faint)}
+.acc .badge{background:var(--warn-bg);color:var(--warn);border-radius:999px;padding:0 7px;font-size:11px;font-weight:700}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px;font-size:13px;color:var(--text-dim);flex-wrap:wrap}
+.toolbar select,.toolbar .sbox{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:#fff}
+.toolbar .sbox{color:var(--text-faint);min-width:240px}
+.slip{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow-1);margin-bottom:12px;overflow:hidden}
+.slip .top{display:grid;grid-template-columns:1fr auto;gap:12px;padding:12px 16px 8px;align-items:start}
+.slip .who{display:flex;gap:10px;align-items:center}
+.slip .mark{width:36px;height:36px;border-radius:8px;display:grid;place-items:center;font-weight:800;background:var(--brand-soft);color:var(--brand-ink)}
+.slip .t1{font-weight:700}.slip .t2{font-size:12px;color:var(--text-dim)}
+.chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;background:var(--surface-hi);color:var(--text-dim);margin-left:4px;vertical-align:middle}
+.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.info{background:var(--info-bg);color:var(--info)}.chip.ok{background:var(--profit-bg);color:var(--profit)}.chip.code{background:var(--brand-soft);color:var(--brand-ink);font-weight:700;margin-left:0;margin-right:4px}
+.ship{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-faint)}
+.ship .st{display:flex;align-items:center;gap:4px}.ship .dot{width:8px;height:8px;border-radius:50%;background:var(--line)}
+.ship .st.done .dot{background:var(--profit)}.ship .st.done{color:var(--text-dim)}.ship .st.now .dot{background:var(--info)}.ship .st.now{color:var(--info);font-weight:700}
+.ship .bar{width:26px;height:2px;background:var(--line)}.ship .bar.done{background:var(--profit)}
+.lines{padding:0 16px 10px}
+.line{display:grid;grid-template-columns:1fr 70px 90px 100px 1fr;gap:10px;align-items:center;padding:6px 0;border-top:1px solid var(--line-soft);font-size:13px}
+.line:first-child{border-top:0}
+.line .n{font-weight:600}.num{text-align:right;font-variant-numeric:tabular-nums}.dim{color:var(--text-faint);font-size:12px}
+.items{display:flex;flex-wrap:wrap;gap:4px}
+.total{display:flex;justify-content:flex-end;gap:18px;padding:8px 16px 12px;font-size:13px;color:var(--text-dim);border-top:1px solid var(--line-soft);background:var(--surface-hi)}
+.total b{color:var(--text);font-size:14px}
+.total .pay{font-size:16px;color:var(--text);font-weight:800}
+.ops{display:flex;gap:8px;align-items:center;justify-content:flex-end;font-size:12px;color:var(--text-faint)}
+.ops span{cursor:pointer}
+.foot{margin-top:12px;font-size:12px;color:var(--text-faint)}
+.note{position:fixed;right:16px;bottom:16px;background:#26262a;color:#fff;font-size:12px;padding:8px 12px;border-radius:8px;opacity:.85}
+input.price{width:80px;font:inherit;font-size:13px;border:1px solid var(--warn-line);background:var(--warn-bg);border-radius:6px;padding:3px 6px;text-align:right}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="nav">
+    <div class="mark">そ</div>そろばん
+    <div class="item">ホーム</div><div class="item">売上</div><div class="item active">仕入</div><div class="item">在庫</div><div class="item">商品</div><div class="item">月次</div><div class="item">経費</div><div class="item">設定</div><div class="item">ヘルプ</div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div class="search">すべてから探す（Ctrl+K）</div>
+      <div class="mini">今月の粗利 ¥5,249 ／ 純利益 ¥5,049</div>
+      <div class="grow"></div>
+      <div class="last">最終取り込み 09/21 19:08</div>
+      <button class="btn primary">取り込む</button>
+    </div>
+    <div class="head"><h1>仕入</h1><span style="flex:1"></span><button class="btn">CSV で一括登録</button><button class="btn primary">＋ 仕入を登録</button></div>
+
+    <!-- 仕入先ごとの「今月いくら払う」。押すと絞る -->
+    <div class="accounts">
+      <div class="acc active"><div class="l">すべて ・ 今月</div><div class="v">¥98,500</div><div class="s">10 注文 ・ 27 点</div></div>
+      <div class="acc"><div class="l">メロジョイA <span class="badge">下書き 1</span></div><div class="v">¥54,650</div><div class="s">4 注文 ・ 到着待ち 1</div></div>
+      <div class="acc"><div class="l">メロジョイB <span class="chip warn">ログインが必要</span></div><div class="v">¥34,050</div><div class="s">3 注文</div></div>
+      <div class="acc"><div class="l">TikTok Shop（菜緒）</div><div class="v">¥9,800</div><div class="s">1 注文 ・ 手入力</div></div>
+    </div>
+
+    <div class="toolbar">
+      <select><option>今月</option><option>先月</option><option>すべて</option></select>
+      <select><option>すべての状態</option><option>価格未入力</option><option>到着待ち</option></select>
+      <select><option>すべてのタグ</option></select>
+      <span class="sbox">代表商品名・注文番号・仕入先・メモ</span>
+      <span style="margin-left:auto">注文日 ▼</span>
+    </div>
+
+    <!-- 伝票 1：下書き（価格未入力）→ その場で入れて確定 -->
+    <div class="slip" style="border-left:4px solid var(--warn-line)">
+      <div class="top">
+        <div class="who"><div class="mark">A</div><div><div class="t1">メロジョイA ・ #MJ-202609-08 <span class="chip warn">価格未入力</span><span class="chip">自動取得</span></div><div class="t2">2026-09-19 注文 ・ 単価を入れると在庫ができます</div></div></div>
+        <div class="ship"><span class="st done"><i class="dot"></i>注文</span><i class="bar done"></i><span class="st done"><i class="dot"></i>発送</span><i class="bar"></i><span class="st now"><i class="dot"></i>配送中</span><i class="bar"></i><span class="st"><i class="dot"></i>到着</span></div>
+      </div>
+      <div class="lines">
+        <div class="line"><div><span class="n">【A012】パステルボックス</span></div><div class="num">× 2</div><div class="num"><input class="price" value="" placeholder="単価"></div><div class="num dim">—</div><div class="dim">在庫はまだ</div></div>
+        <div class="line"><div><span class="n">【Z045-2】ねっとりヨーグルト マスカットオレ</span></div><div class="num">× 1</div><div class="num"><input class="price" value="" placeholder="単価"></div><div class="num dim">—</div><div class="dim">在庫はまだ</div></div>
+      </div>
+      <div class="total"><span>商品計 <b>—</b></span><span>送料 <b>¥800</b></span><span>割引 <b>¥0</b></span><span class="pay">支払 —</span><button class="btn sm primary">確定して在庫を作る</button></div>
+    </div>
+
+    <!-- 伝票 2：確定済み・配送中 -->
+    <div class="slip">
+      <div class="top">
+        <div class="who"><div class="mark">A</div><div><div class="t1">メロジョイA ・ #MJ-202609-07 <span class="chip">自動取得</span><span class="chip">セール</span></div><div class="t2">2026-09-01 注文 ・ 3 明細 ・ 4 点</div></div></div>
+        <div class="ship"><span class="st done"><i class="dot"></i>注文</span><i class="bar done"></i><span class="st done"><i class="dot"></i>発送 09/03</span><i class="bar done"></i><span class="st now"><i class="dot"></i>配送中</span><i class="bar"></i><span class="st"><i class="dot"></i>到着</span></div>
+      </div>
+      <div class="lines">
+        <div class="line"><div><span class="n">【Z088-2】ねっとりヨーグルト プレミアム抹茶アイス</span></div><div class="num">× 2</div><div class="num">¥3,000</div><div class="num">原価 ¥3,198<span class="dim">/点</span></div><div class="items"><span class="chip code">S-0020</span><span class="chip ok">販売済 ¥3,300</span><span class="chip code">S-0021</span><span class="chip info">出品中</span></div></div>
+        <div class="line"><div><span class="n">【Z001-4】クリーミークリーム シーソルト</span></div><div class="num">× 1</div><div class="num">¥3,300</div><div class="num">原価 ¥3,498<span class="dim">/点</span></div><div class="items"><span class="chip code">S-0022</span><span class="chip">未出品・未着</span></div></div>
+        <div class="line"><div><span class="n">【Z012-1】もちもちもち いちごみるく</span></div><div class="num">× 1</div><div class="num">¥3,600</div><div class="num">原価 ¥3,806<span class="dim">/点</span></div><div class="items"><span class="chip code">S-0023</span><span class="chip">未出品・未着</span></div></div>
+      </div>
+      <div class="total"><span>商品計 <b>¥12,900</b></span><span>送料 <b>¥800</b>（金額で按分）</span><span class="pay">支払 ¥13,700</span><span class="ops"><span>タグ</span><span>メモ</span><span>配送</span><span>⋯</span></span></div>
+    </div>
+
+    <!-- 伝票 3：手入力（TikTok） -->
+    <div class="slip">
+      <div class="top">
+        <div class="who"><div class="mark" style="background:var(--surface-hi);color:var(--text-dim)">TT</div><div><div class="t1">TikTok Shop（菜緒） ・ 586150211321562869 <span class="chip">手入力</span></div><div class="t2">2026-09-19 注文 ・ 1 明細 ・ 1 点</div></div></div>
+        <div class="ship"><span class="st done"><i class="dot"></i>注文</span><i class="bar done"></i><span class="st done"><i class="dot"></i>発送</span><i class="bar done"></i><span class="st done"><i class="dot"></i>配送</span><i class="bar done"></i><span class="st done"><i class="dot"></i>到着 09/21</span></div>
+      </div>
+      <div class="lines">
+        <div class="line"><div><span class="n">【A039】ムースクリーム メロジョイ極み・鮨</span></div><div class="num">× 1</div><div class="num">¥2,899</div><div class="num">原価 ¥3,298<span class="dim">/点</span></div><div class="items"><span class="chip code">S-0040</span><span class="chip">未出品</span></div></div>
+      </div>
+      <div class="total"><span>商品計 <b>¥2,899</b></span><span>送料 <b>¥399</b></span><span class="pay">支払 ¥3,298</span><span class="ops"><span>タグ</span><span>メモ</span><span>配送</span><span>⋯</span></span></div>
+    </div>
+
+    <p class="foot">1 枚＝1 注文。支払額と、それぞれの点の原価・いまの状態（未出品／出品中／販売済）を同じ紙で読めます。</p>
+  </main>
+</div>
+<div class="note">モック：静的な画面（数字はダミー）</div>
+</body>
+</html>

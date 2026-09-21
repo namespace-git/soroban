@@ -1,13 +1,17 @@
 <script setup lang="ts">
-// 売上タブの上部：サマリの stat-card 3枚 と、直近12か月のグラフ。
+// 売上タブの上部：今月の粗利カードと、直近12か月のグラフ。
+// 「出品中」「売れた・要入力」は Sales.vue の進捗ストリップ（StageStrip、getSalesProgress）が
+// 同じ数字をより詳しく出すため、ここでは重複させない（同じことをする表示を2つ作らない）。
 // 合計は既存データを足すだけ（利益の再計算はしない）。
 //
 // グラフは本来 MiniChart.vue を流用する予定だったが、MiniChart.vue はこのタスクでは
 // 読み取り専用（他エージェントの担当範囲外の可能性があるファイル）として指定されたため、
 // 系列を増やす改修を加えられなかった。売上（棒）・粗利（線）・純利益（線）は負値になり得るため
 // 0 を中心にした独自の簡易 SVG で描画している（親セッションへの申し送り事項）。
+// 積み上げ（仕入先・タグごと）は MonthlySummary に内訳が無いため、従来どおり単色のまま
+// （無理に変えない。データが増えたら本来の積み上げに直せる）。
 import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
-import type { MonthlySummary, Listing, SaleProfit, SaleKind } from '../../shared/types'
+import type { MonthlySummary, SaleKind } from '../../shared/types'
 import { thisMonthLocal } from '../../shared/date'
 import Icon from './Icon.vue'
 import Skeleton from './Skeleton.vue'
@@ -15,24 +19,15 @@ import Skeleton from './Skeleton.vue'
 const revision = inject<Ref<number>>('revision')!
 // 売上タブ内で引き当て・送料・紐付けを変えた直後にも数字を更新する
 const dataRevision = inject<Ref<number>>('dataRevision', ref(0))
-const goto = inject<(t: string, payload?: { stage?: 'listed' | 'pending' | 'done' | 'all'; month?: string }) => void>('goto')!
+const goto = inject<(t: string, payload?: { stage?: 'all'; month?: string }) => void>('goto')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 const monthly = ref<MonthlySummary[]>([])
-const listings = ref<Listing[]>([])
-const pending = ref<SaleProfit[]>([])
 const loaded = ref(false)
 
 async function load() {
-  const [m, l, p] = await Promise.all([
-    window.soroban.listMonthly(),
-    window.soroban.listListings({ status: ['active', 'suspended'] }),
-    window.soroban.listSales({ onlyPending: true }),
-  ])
-  monthly.value = m
-  listings.value = l
-  pending.value = p
+  monthly.value = await window.soroban.listMonthly()
   loaded.value = true
 }
 onMounted(load)
@@ -41,17 +36,6 @@ watch([revision, dataRevision], load)
 // --- 今月の粗利（転売のみ。ホームの主要指標と同じ考え方） ---
 const thisMonthSummary = computed(() =>
   monthly.value.find(m => m.month === thisMonthLocal() && m.kind === 'resale') ?? null,
-)
-
-// --- 出品中 ---
-const listingProfitSum = computed(() =>
-  listings.value.reduce((s, l) => s + (l.expected_profit ?? 0), 0),
-)
-
-// --- 未処理 ---
-const pendingShippingCount = computed(() => pending.value.filter(s => !s.is_shipping_confirmed).length)
-const pendingUnmatchedCount = computed(() =>
-  pending.value.filter(s => s.kind === 'resale' && s.unmatched === 1).length,
 )
 
 // --- グラフ：直近12か月。売上（棒）＋粗利（線）＋純利益（線） ---
@@ -208,30 +192,13 @@ const gridLines = computed(() => domainMin.value < 0
 <template>
   <div class="sales-summary">
     <Skeleton v-if="!loaded" kind="stats" />
-    <div v-else class="stat-row">
-      <div class="stat-card brand">
-        <span class="stat-card-label">今月の粗利</span>
-        <span class="stat-card-value">{{ yen(thisMonthSummary?.gross_profit ?? 0) }}</span>
-        <span class="stat-card-sub">
-          売上 {{ yen(thisMonthSummary?.revenue ?? 0) }} ・ 件数 {{ thisMonthSummary?.sales_count ?? 0 }} 件
-          ・ 純利益 {{ yen(thisMonthSummary?.net_profit ?? 0) }}
-        </span>
-      </div>
-
-      <div class="stat-card cream">
-        <span class="stat-card-label">出品中</span>
-        <span class="stat-card-value">{{ listings.length }}<span class="unit">件</span></span>
-        <span class="stat-card-sub">見込み粗利の合計 {{ yen(listingProfitSum) }}</span>
-        <span class="stat-card-sub">送料は決めた分だけ引いています</span>
-      </div>
-
-      <div class="stat-card cream">
-        <span class="stat-card-label">売れた・要入力</span>
-        <span class="stat-card-value">{{ pending.length }}<span class="unit">件</span></span>
-        <span class="stat-card-sub">
-          送料未入力 {{ pendingShippingCount }}・未紐付け {{ pendingUnmatchedCount }}
-        </span>
-      </div>
+    <div v-else class="stat-card brand">
+      <span class="stat-card-label">今月の粗利</span>
+      <span class="stat-card-value">{{ yen(thisMonthSummary?.gross_profit ?? 0) }}</span>
+      <span class="stat-card-sub">
+        売上 {{ yen(thisMonthSummary?.revenue ?? 0) }} ・ 件数 {{ thisMonthSummary?.sales_count ?? 0 }} 件
+        ・ 純利益 {{ yen(thisMonthSummary?.net_profit ?? 0) }}
+      </span>
     </div>
 
     <div class="panel chart-panel">
@@ -322,14 +289,8 @@ const gridLines = computed(() => domainMin.value < 0
   margin-bottom: 20px;
 }
 
-.stat-row {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-}
 .stat-card { padding-top: 12px; padding-bottom: 12px; }
 .stat-card-label { font-size: var(--fs-12); font-weight: 600; }
-.stat-card.cream .stat-card-label { color: var(--brand-ink); }
 .stat-card-value {
   font-size: var(--fs-36);
   font-weight: 700;
@@ -339,7 +300,6 @@ const gridLines = computed(() => domainMin.value < 0
 .stat-card.brand .stat-card-value { font-size: var(--fs-44); }
 .stat-card-sub { font-size: var(--fs-12); color: var(--text-dim); }
 .stat-card.brand .stat-card-sub { color: var(--text); opacity: .75; }
-.unit { font-size: var(--fs-12); font-weight: 400; margin-left: 2px; }
 
 .chart-panel .section-head select { margin-right: 4px; }
 
@@ -406,9 +366,5 @@ const gridLines = computed(() => domainMin.value < 0
   margin: 4px 0 0;
   font-size: var(--fs-12);
   color: var(--text-faint);
-}
-
-@media (max-width: 1099px) {
-  .stat-row { grid-template-columns: 1fr; }
 }
 </style>

@@ -8,7 +8,9 @@ export type Period =
   | 'this_month'
   | 'last_month'
   | 'last_3_months'
+  | 'last_6_months'
   | 'this_year'
+  | 'last_year'
   | { from: string; to: string }
 
 function pad(n: number): string {
@@ -30,8 +32,12 @@ export function periodRange(p: Period, today: string = todayLocal()): { from: st
       return { from: fmt(new Date(y, m - 2, 1)), to: fmt(new Date(y, m - 1, 0)) }
     case 'last_3_months':
       return { from: fmt(new Date(y, m - 3, 1)), to: fmt(new Date(y, m, 0)) }
+    case 'last_6_months':
+      return { from: fmt(new Date(y, m - 6, 1)), to: fmt(new Date(y, m, 0)) }
     case 'this_year':
       return { from: fmt(new Date(y, 0, 1)), to: fmt(new Date(y, 11, 31)) }
+    case 'last_year':
+      return { from: fmt(new Date(y - 1, 0, 1)), to: fmt(new Date(y - 1, 11, 31)) }
     default:
       return null
   }
@@ -52,14 +58,16 @@ export function inPeriod(date: string | null | undefined, p: Period): boolean {
 const props = defineProps<{ modelValue: Period }>()
 const emit = defineEmits<{ 'update:modelValue': [Period] }>()
 
-type Mode = 'all' | 'this_month' | 'last_month' | 'last_3_months' | 'this_year' | 'custom'
+type Mode = 'all' | 'this_month' | 'last_month' | 'last_3_months' | 'last_6_months' | 'this_year' | 'last_year' | 'custom'
 
 const OPTIONS: Array<{ value: Mode; label: string }> = [
   { value: 'all', label: 'すべて' },
   { value: 'this_month', label: '今月' },
   { value: 'last_month', label: '先月' },
   { value: 'last_3_months', label: '直近3か月' },
+  { value: 'last_6_months', label: '直近6か月' },
   { value: 'this_year', label: '今年' },
+  { value: 'last_year', label: '昨年' },
   { value: 'custom', label: '期間を指定…' },
 ]
 

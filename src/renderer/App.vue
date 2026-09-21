@@ -7,6 +7,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 import type { ConfirmChoice } from './components/ConfirmDialog.vue'
 import SearchBox from './components/SearchBox.vue'
 import GlobalSearch from './components/GlobalSearch.vue'
+import ProfitStripBar from './components/ProfitStripBar.vue'
 import Dashboard from './views/Dashboard.vue'
 import Sales from './views/Sales.vue'
 import Purchases from './views/Purchases.vue'
@@ -16,7 +17,7 @@ import Monthly from './views/Monthly.vue'
 import Expenses from './views/Expenses.vue'
 import Settings from './views/Settings.vue'
 import Help from './views/Help.vue'
-import type { CollectorRun, DashboardStats, SaleStatus, SearchHit, UpdateStatus } from '../shared/types'
+import type { CollectorRun, DashboardStats, ProfitStrip, SaleStatus, SearchHit, UpdateStatus } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 
 type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'expenses' | 'settings' | 'help'
@@ -47,8 +48,8 @@ const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [
   { key: 'purchases', label: '仕入', icon: 'purchase' },
   { key: 'inventory', label: '在庫', icon: 'inventory' },
   { key: 'products', label: '商品', icon: 'product' },
-  { key: 'monthly', label: '月次', icon: 'monthly' },
   { key: 'expenses', label: '経費', icon: 'receipt' },
+  { key: 'monthly', label: '月次', icon: 'monthly' },
   { key: 'settings', label: '設定', icon: 'settings' },
   { key: 'help', label: 'ヘルプ', icon: 'help' },
 ]
@@ -137,11 +138,38 @@ async function loadStats() {
   pendingCount.value = pending.length
 }
 
+// トップバーの「今月の粗利／純利益」ピル。全タブで常に表示する
+const profitStrip = ref<ProfitStrip | null>(null)
+provide('profitStrip', profitStrip)
+
+async function loadProfitStrip() {
+  // モックが getInbox にまだ対応していないとき（renderer-review 用）は getDashboard で代用する
+  if (typeof window.soroban.getInbox === 'function') {
+    profitStrip.value = (await window.soroban.getInbox()).strip
+    return
+  }
+  const m = (await window.soroban.getDashboard()).thisMonth
+  profitStrip.value = m
+    ? {
+        month: m.month,
+        gross_profit: m.gross_profit,
+        net_profit: m.net_profit,
+        revenue: m.revenue,
+        sales_count: m.sales_count,
+        pending_profit_estimate: 0,
+        pending_count: 0,
+        awaiting_payout: 0,
+        awaiting_payout_count: 0,
+        last_month: null,
+      }
+    : null
+}
+
 // 子の view がデータを変更したら呼ぶ。バッジと取り込み状態を再読み込みし、
 // 同じ画面に居る兄弟（売上サマリなど）にも知らせる（revision は取り込み後だけ動く）
 const dataRevision = ref(0)
 provide('dataRevision', dataRevision)
-provide('changed', () => { loadStats(); dataRevision.value++ })
+provide('changed', () => { loadStats(); loadProfitStrip(); dataRevision.value++ })
 
 // window.prompt() は Electron では動かないため、入力ダイアログを共通で用意する
 type PromptState = { title: string; opts: PromptOptions; resolve: (v: string | null) => void }
@@ -313,6 +341,7 @@ async function installUpdateFromBanner() {
 
 onMounted(() => {
   loadStats()
+  loadProfitStrip()
   // 起動時の自動取り込みが終わったら知らせる
   ;(window as any).sorobanEvents?.onCollectDone((runs: CollectorRun[]) => {
     reportRun(runs)
@@ -329,8 +358,9 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
 })
 
-// 子側の revision カウンタが動くたびに要対応件数・取り込み状態も更新する
-watch(revision, loadStats)
+// 子側の revision カウンタが動くたびに要対応件数・取り込み状態・利益ピルも更新する
+watch(revision, () => { loadStats(); loadProfitStrip() })
+watch(dataRevision, loadProfitStrip)
 </script>
 
 <template>
@@ -341,18 +371,20 @@ watch(revision, loadStats)
         <span class="brand-mark-text">そろばん</span>
       </div>
       <nav class="nav-list">
-        <button
-          v-for="t in tabs" :key="t.key"
-          class="nav-item"
-          :class="{ active: tab === t.key }"
-          :aria-current="tab === t.key ? 'page' : undefined"
-          :title="t.label"
-          @click="tab = t.key"
-        >
-          <Icon :name="t.icon" :size="20" />
-          <span class="nav-label">{{ t.label }}</span>
-          <span v-if="t.key === 'sales' && needsTotal > 0" class="nav-badge">{{ needsTotal }}</span>
-        </button>
+        <template v-for="t in tabs" :key="t.key">
+          <hr v-if="t.key === 'settings'" class="nav-divider" />
+          <button
+            class="nav-item"
+            :class="{ active: tab === t.key }"
+            :aria-current="tab === t.key ? 'page' : undefined"
+            :title="t.label"
+            @click="tab = t.key"
+          >
+            <Icon :name="t.icon" :size="20" />
+            <span class="nav-label">{{ t.label }}</span>
+            <span v-if="t.key === 'sales' && needsTotal > 0" class="nav-badge">{{ needsTotal }}</span>
+          </button>
+        </template>
       </nav>
       <div class="grow" />
       <div class="nav-version faint">v0.1</div>
@@ -364,6 +396,9 @@ watch(revision, loadStats)
         <div ref="searchWrap" class="global-search">
           <SearchBox v-model="searchQuery" placeholder="すべてから探す（Ctrl+K）" />
         </div>
+        <button class="topbar-profit-btn" title="ホームで詳しく見る" @click="goto('dashboard')">
+          <ProfitStripBar compact :strip="profitStrip" />
+        </button>
         <span class="run-status" :class="{ warn: runIsWarn }">
           <Icon v-if="runIsWarn" name="alert" :size="14" />
           {{ runStatusText }}
@@ -542,6 +577,15 @@ watch(revision, loadStats)
 }
 
 .global-search { flex-shrink: 0; }
+
+.topbar-profit-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: auto;
+  cursor: pointer;
+}
 
 .run-status {
   display: inline-flex;

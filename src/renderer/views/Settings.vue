@@ -200,6 +200,12 @@ async function backup() {
   flash(p ? `バックアップしました：${p}` : '中止しました')
 }
 
+async function restore() {
+  const result = await window.soroban.restoreBackup()
+  // restarting: true ならアプリがそのまま再起動する。null はダイアログのキャンセル（選択・確認どちらも）
+  if (!result) flash('中止しました')
+}
+
 // テンプレートから window は参照できないので包む
 function revealFolder() {
   return window.soroban.revealDbFolder()
@@ -681,12 +687,19 @@ const runLabel: Record<string, string> = {
           月に1回はバックアップを取ってください。
         </p>
         <p class="faint hint">
-          不具合の報告は、このバックアップファイルを送ってください（操作ログも14日分入っています）。
+          データベース・レシート画像・サムネ・操作ログ（14 日分）が 1 つの zip に入ります。
+          不具合の報告はこのファイルを送ってください。別のパソコンへの引っ越しにも。
         </p>
         <div class="row">
           <button @click="exportCsv"><Icon name="download" :size="16" /> 売上をCSVで書き出す</button>
-          <button @click="backup"><Icon name="download" :size="16" /> データベースをバックアップ</button>
+          <button @click="backup"><Icon name="download" :size="16" /> バックアップを保存（zip）</button>
           <button class="ghost" @click="revealFolder"><Icon name="folder" :size="16" /> 保存フォルダを開く</button>
+        </div>
+        <div class="danger-zone">
+          <p class="faint hint">
+            zip（または以前の .db）を選ぶと、今のデータを退避してから置き換え、再起動します。
+          </p>
+          <button class="danger" @click="restore"><Icon name="refresh" :size="16" /> バックアップから復元</button>
         </div>
         <div class="danger-zone">
           <p class="faint hint">

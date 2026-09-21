@@ -281,7 +281,7 @@ input, textarea { caret-color: var(--accent); }
   width: 28px;
   height: 28px;
   border-radius: 999px;
-  background: var(--brand);
+  background: var(--brand-icon);
   color: var(--text);
   flex-shrink: 0;
 }
@@ -506,6 +506,37 @@ tr.total-row.loss > td {
   white-space: nowrap;
 }
 
+/* --- StatusPill（v0.2）。意味の強い状態は塗り（solid-*）、それ以外は薄い地。
+   StatusChip とは別トーン体系（既存画面はそのまま StatusChip を使う） --- */
+.pill-base {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--fs-12);
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.pill-solid-ok   { background: var(--profit-pill); color: var(--profit); }
+.pill-solid-loss { background: var(--loss-pill); color: #fff; }
+.pill-solid-warn { background: var(--warn-solid); color: #fff; }
+.pill-solid-info { background: var(--info); color: #fff; }
+.pill-neutral    { background: var(--surface-hi); color: var(--text-dim); }
+.pill-ok         { background: var(--profit-bg); color: var(--profit); }
+.pill-warn       { background: var(--warn-bg); color: var(--warn); }
+.pill-info       { background: var(--info-bg); color: var(--info); }
+.pill-brand      { background: var(--brand); color: var(--text); }
+
+/* --- 段階ストリップ（StageStrip）。売上タブの進捗などで使う横並びの段階カード。
+   1024px 幅でも 5 枚が 1 行に収まるよう、最小幅を持たせつつ縮む --- */
+.stage-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 /* --- 空状態 --- */
 
 .empty {
@@ -542,6 +573,12 @@ tr.total-row.loss > td {
 
 /* --- ナビ --- */
 
+.nav-divider {
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  margin: 8px 6px;
+}
+
 .nav-badge {
   display: inline-flex;
   align-items: center;
@@ -555,4 +592,18 @@ tr.total-row.loss > td {
   font-size: var(--fs-12);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+/* --- 上部バーの利益ピル（ProfitStripBar の compact モード） --- */
+
+.topbar .profit-mini {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--fs-13);
+  font-weight: 700;
+  color: var(--brand-ink);
+  background: var(--brand-soft);
+  border-radius: 999px;
+  padding: 6px 14px;
+  white-space: nowrap;
 }

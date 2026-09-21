@@ -1,9 +1,9 @@
 <script setup lang="ts">
-// 月次タブ：1か月の明細。販売・経費・按分・仕入先への支払い・締めをまとめて見る。
+// 月次タブ：1か月の「販売ごとの表」。月次タブ（Monthly.vue）の計算書の下に、最初から開いた状態で表示する。
+// 締め・片付けるもの・仕入先への支払いは Monthly.vue が持つ（getMonthStatement とあわせて計算書・右カラムを作る）。
 // 金額はすべて main（getMonthDetail）から来た値をそのまま出すだけで、ここでは再計算しない。
 import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { MonthDetail, MonthSaleRow, MonthTotals, AllocMethod, Expense, ExpenseCategory, Tag } from '../../shared/types'
-import { thisMonthLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import CodeChip from '../components/CodeChip.vue'
@@ -11,13 +11,12 @@ import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 
 const props = defineProps<{ month: string }>()
-const emit = defineEmits<{ back: [] }>()
+// loaded：親（Monthly.vue）が締め・片付けるもの・仕入先への支払いの表示に使う
+// allocChanged：按分方法を変えたとき。親の計算書（タグ別の集計）を作り直す必要がある
+const emit = defineEmits<{ loaded: [detail: MonthDetail]; allocChanged: [] }>()
 
-const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
-const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const goto = inject<(t: string, payload?: { stage?: 'listed' | 'pending' | 'done' | 'all'; month?: string }) => void>('goto')!
 const revision = inject<Ref<number>>('revision')!
-const changed = inject<() => void>('changed', () => {})
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -34,12 +33,12 @@ const detail = ref<MonthDetail | null>(null)
 const loaded = ref(false)
 const tagFilter = ref('')
 const allTags = ref<Tag[]>([])
-const showPersonal = ref(false)
 
 async function load() {
   loaded.value = false
   detail.value = await window.soroban.getMonthDetail(props.month, { tagId: tagFilter.value || null })
   loaded.value = true
+  if (detail.value) emit('loaded', detail.value)
 }
 async function loadTags() {
   allTags.value = await window.soroban.listTags()
@@ -51,7 +50,6 @@ onMounted(async () => {
 })
 watch(() => props.month, async () => {
   tagFilter.value = ''
-  showPersonal.value = false
   await load()
 })
 watch(tagFilter, load)
@@ -60,39 +58,15 @@ watch(revision, async () => {
   await load()
 })
 
-// --- 締め ---
-
-const isEnded = computed(() => props.month < thisMonthLocal())
-
-function formatDateTime(iso: string): string {
-  const d = new Date(iso)
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
-
-async function doClose() {
-  const ok = await confirmDialog(`${props.month} を締めますか？`, { message: '数字を記録します', okLabel: '締める' })
-  if (!ok) return
-  await window.soroban.closeMonth(props.month)
-  await load()
-  changed()
-  toast('締めました', 'ok')
-}
-
-async function doReopen() {
-  if (!await confirmDialog('締めを解除しますか？', { okLabel: '解除する' })) return
-  await window.soroban.reopenMonth(props.month)
-  await load()
-  changed()
-  toast('締めを解除しました', 'ok')
-}
+// 親（Monthly.vue）が締め・解除のあとに呼ぶ（締め状態は detail 側の値なので作り直しが要る）
+defineExpose({ load })
 
 // --- 按分方法 ---
 
 async function setAlloc(method: string) {
   await window.soroban.setMonthAllocMethod(props.month, method as AllocMethod)
   await load()
-  changed()
+  emit('allocChanged')
 }
 
 // --- タグの絞り込み候補：出どころで分ける（Sales.vue と同じ考え方） ---
@@ -147,70 +121,10 @@ function expenseContent(e: Expense): string {
 </script>
 
 <template>
-  <div class="page">
-    <button class="ghost back-btn" @click="emit('back')">
-      <Icon name="arrow-right" :size="14" class="flip" /> 月次へ
-    </button>
-
-    <div class="page-head">
-      <h1 class="page-title">{{ month }} の明細</h1>
-      <span class="grow" />
-      <template v-if="detail">
-        <template v-if="detail.close">
-          <StatusChip tone="ok" :label="`締め済み ${formatDateTime(detail.close.closed_at)}`" />
-          <button class="sm ghost" @click="doReopen">締めを解除</button>
-        </template>
-        <template v-else-if="isEnded">
-          <button class="primary" @click="doClose">この月を締める</button>
-        </template>
-        <span v-else class="faint">月が終わってから締められます</span>
-      </template>
-    </div>
-
-    <p v-if="detail?.changed_since_close" class="changed-note">
-      締めた後に数字が変わっています（締め時：純利益 {{ yen(detail.close!.net_profit) }} → 今：{{ yen(detail.totals.net_profit) }}）
-    </p>
-
+  <div class="sales-block">
     <Skeleton v-if="!loaded" :rows="6" />
 
     <template v-else-if="detail">
-      <!-- 片付けるもの -->
-      <div v-if="detail.pending.unconfirmed_shipping > 0 || detail.pending.unmatched > 0" class="panel pending-panel">
-        <Icon name="alert" :size="16" />
-        <span v-if="detail.pending.unconfirmed_shipping > 0">送料未入力 {{ detail.pending.unconfirmed_shipping }} 件</span>
-        <span v-if="detail.pending.unmatched > 0">未紐付け {{ detail.pending.unmatched }} 件</span>
-        <span class="grow" />
-        <button class="sm link-btn" @click="goto('sales', { stage: 'pending', month })">売上タブで片付ける</button>
-      </div>
-
-      <!-- 合計カード -->
-      <div class="stat-row">
-        <div class="stat-card brand">
-          <span class="stat-card-label">売上</span>
-          <span class="stat-card-value">{{ yen(detail.totals.revenue) }}</span>
-          <span class="stat-card-sub">件数 {{ detail.totals.sales_count }} 件</span>
-        </div>
-        <div class="stat-card cream">
-          <span class="stat-card-label">粗利</span>
-          <span class="stat-card-value">
-            <strong :class="detail.totals.gross_profit >= 0 ? 'profit' : 'loss'">{{ yen(detail.totals.gross_profit) }}</strong>
-          </span>
-          <span class="stat-card-sub">
-            手数料 {{ yen(detail.totals.total_fee) }} ・ 送料 {{ yen(detail.totals.total_shipping) }} ・ 原価 {{ yen(detail.totals.total_cost) }}
-          </span>
-        </div>
-        <div class="stat-card cream">
-          <span class="stat-card-label">経費</span>
-          <span class="stat-card-value">{{ yen(detail.totals.expense_total) }}</span>
-        </div>
-        <div class="stat-card cream">
-          <span class="stat-card-label">純利益</span>
-          <span class="stat-card-value">
-            <strong :class="detail.totals.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(detail.totals.net_profit) }}</strong>
-          </span>
-        </div>
-      </div>
-
       <!-- 絞り込み -->
       <div class="toolbar">
         <select v-model="tagFilter">
@@ -345,94 +259,12 @@ function expenseContent(e: Expense): string {
         <EmptyState v-else title="この月の経費はまだありません" />
         <p class="faint expenses-note">経費はこの画面では登録できません。経費タブで登録してください</p>
       </div>
-
-      <!-- 仕入先への支払い -->
-      <div class="panel table-panel">
-        <div class="section-head">
-          <span class="section-head-icon"><Icon name="purchase" :size="16" /></span>
-          <h2 class="section-head-title">仕入先への支払い</h2>
-        </div>
-        <table v-if="detail.purchases_by_account.length" class="compact">
-          <thead>
-            <tr>
-              <th>仕入先</th>
-              <th class="num">件数</th>
-              <th class="num">支払合計</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="p in detail.purchases_by_account" :key="p.shop_account_id">
-              <td>{{ p.shop_account_name }}</td>
-              <td class="num">{{ p.count }}</td>
-              <td class="num">{{ yen(p.total_cost) }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <EmptyState v-else title="この月に注文した仕入はありません" />
-        <p class="faint">その月に注文した仕入（確定分）</p>
-      </div>
-
-      <!-- 私物（参考） -->
-      <div class="panel">
-        <button class="sm ghost" @click="showPersonal = !showPersonal">
-          私物 {{ detail.personal_sales.length }} 件を{{ showPersonal ? '隠す' : '表示' }}
-        </button>
-        <template v-if="showPersonal">
-          <p class="faint personal-note">私物の販売は按分の対象外です（参考表示）</p>
-          <table v-if="detail.personal_sales.length" class="compact">
-            <thead>
-              <tr>
-                <th>販売日</th>
-                <th>商品</th>
-                <th class="num">価格</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="s in detail.personal_sales" :key="s.id">
-                <td class="dim nowrap">{{ s.sold_at }}</td>
-                <td>{{ s.title }}</td>
-                <td class="num">{{ yen(s.price) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </template>
-      </div>
     </template>
   </div>
 </template>
 
 <style scoped>
-.back-btn { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 12px; }
-.back-btn .flip { transform: scaleX(-1); }
-
-.changed-note {
-  margin: -8px 0 16px;
-  padding: 10px 14px;
-  border-radius: var(--radius-md);
-  color: var(--warn);
-  background: var(--warn-bg);
-  border: 1px solid var(--warn-line);
-  font-size: var(--fs-13);
-}
-
-.pending-panel {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-  padding: 12px 16px;
-  color: var(--warn);
-  background: var(--warn-bg);
-  border: 1px solid var(--warn-line);
-  font-size: var(--fs-13);
-}
-
-.stat-row {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 16px;
-}
+.sales-block { margin-top: 16px; }
 
 .toolbar { margin-bottom: 12px; }
 
@@ -470,9 +302,4 @@ function expenseContent(e: Expense): string {
 .item-name { font-size: var(--fs-14); font-weight: 500; }
 
 .expenses-note { margin: 12px 20px 16px; }
-.personal-note { margin: 10px 0 0; }
-
-@media (max-width: 1099px) {
-  .stat-row { grid-template-columns: repeat(2, 1fr); }
-}
 </style>

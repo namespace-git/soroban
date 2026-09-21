@@ -6,6 +6,7 @@ export type IconName =
   | 'plus' | 'close' | 'trash' | 'link' | 'unlink' | 'check' | 'alert'
   | 'search' | 'arrow-right' | 'refresh' | 'login' | 'external' | 'folder' | 'download' | 'note'
   | 'product' | 'history' | 'listing' | 'help' | 'receipt'
+  | 'inbox' | 'truck' | 'sparkle' | 'check-circle' | 'clock'
 
 const props = withDefaults(defineProps<{ name: IconName; size?: number }>(), {
   size: 20,
@@ -142,6 +143,29 @@ const paths: Record<IconName, string> = {
     <line x1="7.5" y1="7" x2="12.5" y2="7" />
     <line x1="7.5" y1="10" x2="12.5" y2="10" />
     <line x1="7.5" y1="13" x2="10.5" y2="13" />
+  `,
+  inbox: `
+    <path d="M3 10 H7 L8.5 12.5 H11.5 L13 10 H17" />
+    <path d="M3 10 V16 A1 1 0 0 0 4 17 H16 A1 1 0 0 0 17 16 V10" />
+    <path d="M3 10 L5.3 4 H14.7 L17 10" />
+  `,
+  truck: `
+    <path d="M3 6 H12 V14 H3 Z" />
+    <path d="M12 9 H15.3 L17 11.2 V14 H12" />
+    <circle cx="6.2" cy="15.5" r="1.5" />
+    <circle cx="14.3" cy="15.5" r="1.5" />
+  `,
+  sparkle: `
+    <path d="M9.5 3 L10.8 8 L15.8 9.3 L10.8 10.6 L9.5 15.6 L8.2 10.6 L3.2 9.3 L8.2 8 Z" />
+    <path d="M15.8 3.2 L16.3 5 L18 5.5 L16.3 6 L15.8 7.8 L15.3 6 L13.6 5.5 L15.3 5 Z" />
+  `,
+  'check-circle': `
+    <circle cx="10" cy="10" r="7" />
+    <polyline points="7,10.2 9.2,12.5 13.3,7.7" />
+  `,
+  clock: `
+    <circle cx="10" cy="10" r="7" />
+    <polyline points="10,6 10,10.3 13,12" />
   `,
 }
 

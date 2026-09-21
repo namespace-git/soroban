@@ -23,6 +23,9 @@ import type {
   AllocMethod, MonthClose, MonthDetail, MonthSaleRow, MonthTotals,
   SearchHit,
   UpdateStatus,
+  Inbox, InboxGroup, InboxItem, InboxKind, ProfitStrip, ReminderType,
+  SalesProgress, InventoryOverview, InventoryGroupFilter, InventoryGroup,
+  ProductKarte, MonthStatement, PurchaseAccountCard,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 import { matchesSearch } from '../components/SearchBox.vue'
@@ -445,9 +448,13 @@ function addTiktokPurchase(opts: {
   orderedAt: string
   shippingFee: number
   lines: Array<{ name: string; price: number; qty: number }>
+  /** 自動取得が無い仕入先向けに、到着状態を手で入れておける（reminder の見本用） */
+  fulfillment?: Fulfillment | null
 }): void {
   const purchaseId = uid()
   const orderNo = `TK-${opts.orderedAt.replace(/-/g, '').slice(0, 6)}-${pad(purchases.length + 1)}`
+  const fulfillment = opts.fulfillment ?? null
+  const { shipped_at, delivered_at } = fulfillmentDates(opts.orderedAt, fulfillment)
   const bases = opts.lines.map(l => l.price * l.qty)
   const shares = allocateAmount(bases, opts.shippingFee)
 
@@ -494,7 +501,7 @@ function addTiktokPurchase(opts: {
         note: null,
         tags: [],
         inherited_tags: [],
-        fulfillment: null,
+        fulfillment,
         thumb_url: null,
         listing: null,
       })
@@ -517,9 +524,9 @@ function addTiktokPurchase(opts: {
     discount: 0,
     note: null,
     import_key: null,
-    fulfillment: null,
-    shipped_at: null,
-    delivered_at: null,
+    fulfillment,
+    shipped_at,
+    delivered_at,
     line_count: lines.length,
     first_line_name: lines[0]?.name ?? null,
     first_model_code: lines[0]?.model_code ?? null,
@@ -626,6 +633,8 @@ function buildInitialPurchasesAndInventory(): void {
       { name: 'ハンドクリーム 3本セット', price: 800, qty: 3 },
       { name: '折りたたみ傘 軽量', price: 1200, qty: 2 },
     ],
+    // TikTok は自動取得が無いため到着状態は手入力。発送から日が経った見本（reminder の delivery）
+    fulfillment: 'shipped',
   })
   addDraftPurchase({
     shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(5)),
@@ -654,6 +663,16 @@ const saleLines = new Map<string, string[]>()
 
 /** 取り込んだ販売（source==='collector'）を削除したときの「もう取り込まない」記録。設定→データで見て解除できる */
 let saleExclusions: Array<{ mercari_item_id: string; title: string; excluded_at: string }> = []
+
+/** ホームの「忘れていませんか」を snoozeReminder で 7 日隠すための記録。キー→隠す期限（YYYY-MM-DD） */
+const reminderSnoozes = new Map<string, string>()
+function reminderKey(type: ReminderType, id?: string | null): string {
+  return `${type}:${id ?? ''}`
+}
+function isReminderSnoozed(type: ReminderType, id?: string | null): boolean {
+  const until = reminderSnoozes.get(reminderKey(type, id))
+  return !!until && until > todayLocal()
+}
 
 function priceFor(i: number): number {
   return 800 + (((i * 733) % 60) * 100) // 800〜6800円、100円刻み
@@ -1045,11 +1064,12 @@ const MOCK_RECEIPT_DRAFT: ReceiptDraft = {
   occurred_at: '2026-09-15',
   total: 920,
   lines: [
-    { name: 'ビニール袋 100枚', unit_price: 110, quantity: 1, category: 'packaging' },
-    { name: 'OPP袋 A4', unit_price: 110, quantity: 2, category: 'packaging' },
-    { name: '緩衝材 プチプチ', unit_price: 330, quantity: 1, category: 'packaging' },
-    { name: 'レジ袋小 3', unit_price: 220, quantity: 1, category: 'packaging' },
+    { name: 'ビニール袋 100枚', unit_price: 110, quantity: 1, category: 'packaging', box: [250, 80, 280, 500] },
+    { name: 'OPP袋 A4', unit_price: 110, quantity: 2, category: 'packaging', box: [300, 80, 330, 500] },
+    { name: '緩衝材 プチプチ', unit_price: 330, quantity: 1, category: 'packaging', box: [350, 80, 380, 500] },
+    { name: 'レジ袋小 3', unit_price: 220, quantity: 1, category: 'packaging', box: [400, 80, 430, 500] },
   ],
+  boxes: { shop: [20, 80, 60, 600], date: [120, 80, 150, 500], total: [700, 80, 740, 900] },
   tax: 40,
   warnings: ['「レジ袋小 3」は袋代として梱包費にしました'],
   raw_text: [
@@ -1798,6 +1818,352 @@ function buildItemTimeline(item: InventoryItem): ItemTimeline {
   return { item, events, sale: sale ?? null, purchase }
 }
 
+// ------------------------------------------------------------
+// v0.2 画面（受信箱・進捗・在庫グループ・カルテ・計算書・仕入先カード）の下ごしらえ
+// ------------------------------------------------------------
+
+/** MM/DD に売れた ・ ¥3,400 ・ 買い手 taka ・ 発送方法 ネコポス の形（ホームの受信箱・要対応の1行） */
+function formatSaleDetail(sale: SaleProfit): string {
+  const [, m, d] = sale.sold_at.split('-')
+  const parts = [`${Number(m)}/${Number(d)} に売れた`, `¥${sale.price.toLocaleString('ja-JP')}`]
+  if (sale.buyer) parts.push(`買い手 ${sale.buyer}`)
+  const methodName = sale.shipping_method_id
+    ? shippingMethods.find(x => x.id === sale.shipping_method_id)?.name ?? null
+    : null
+  parts.push(`発送方法 ${methodName ?? '未定'}`)
+  return parts.join(' ・ ')
+}
+
+/** 型番が1つだけの未紐付け販売に対する、先入先出の自動確定候補（M-06 と同じ規則） */
+function linkCandidate(sale: SaleProfit): InventoryItem | null {
+  if (sale.model_codes.length !== 1) return null
+  return takeOldestByModel(sale.model_codes[0]) ?? null
+}
+
+/** 有効な発送方法の料金の中央値（送料未入力の見込み計算に使う） */
+function shippingFeeMedian(): number {
+  const fees = shippingMethods.filter(m => m.is_active).map(m => m.fee).sort((a, b) => a - b)
+  if (fees.length === 0) return 0
+  const mid = Math.floor(fees.length / 2)
+  return fees.length % 2 ? fees[mid] : Math.round((fees[mid - 1] + fees[mid]) / 2)
+}
+
+function shippingFeeBounds(): { min: number; max: number } {
+  const fees = shippingMethods.filter(m => m.is_active).map(m => m.fee)
+  if (fees.length === 0) return { min: 0, max: 0 }
+  return { min: Math.min(...fees), max: Math.max(...fees) }
+}
+
+/**
+ * 送料未入力・未紐付けの販売 1 件の見込み粗利（ホームの利益ストリップ pending_profit_estimate 用）。
+ * 送料は選択済みならそれ、無ければ発送方法の料金の中央値。原価は紐付け済みならそれ、
+ * 無ければ型番一致の候補1点（無ければ0）
+ */
+function estimateSalePendingProfit(sale: SaleProfit): number {
+  const shipping = sale.is_shipping_confirmed ? sale.shipping_fee : shippingFeeMedian()
+  const cost = sale.kind === 'resale' && sale.unmatched
+    ? (linkCandidate(sale)?.landed_cost ?? sale.cost)
+    : sale.cost
+  return sale.price - sale.fee - shipping - sale.packaging_cost - cost
+}
+
+/**
+ * 受信箱の1行の粗利プレビュー（min/max）。送料が未確定なら発送方法の料金の幅、
+ * 未紐付けなら候補在庫の原価の幅で見込みを出す（確定していれば min=max）
+ */
+function profitHintFor(sale: SaleProfit): { min: number; max: number } {
+  const shipBounds = sale.is_shipping_confirmed
+    ? { min: sale.shipping_fee, max: sale.shipping_fee }
+    : shippingFeeBounds()
+
+  let costBounds: { min: number; max: number }
+  if (sale.kind === 'resale' && sale.unmatched) {
+    const single = linkCandidate(sale)
+    if (single) {
+      costBounds = { min: single.landed_cost, max: single.landed_cost }
+    } else {
+      const costs = inventory
+        .filter(i => i.status === 'in_stock' && i.model_code && sale.model_codes.includes(i.model_code))
+        .map(i => i.landed_cost)
+      costBounds = costs.length ? { min: Math.min(...costs), max: Math.max(...costs) } : { min: 0, max: 0 }
+    }
+  } else {
+    costBounds = { min: sale.cost, max: sale.cost }
+  }
+
+  return {
+    min: sale.price - sale.fee - shipBounds.max - sale.packaging_cost - costBounds.max,
+    max: sale.price - sale.fee - shipBounds.min - sale.packaging_cost - costBounds.min,
+  }
+}
+
+/** 在庫 1 点の状態バケット。listInventoryGroups・getInventoryOverview で共通 */
+type InventoryBucket = 'unlisted_arrived' | 'not_arrived' | 'listed' | 'sold' | 'other'
+function inventoryBucket(i: InventoryItem): InventoryBucket {
+  if (i.status === 'sold') return 'sold'
+  if (i.status !== 'in_stock') return 'other'
+  if (i.listing) return 'listed'
+  if (i.fulfillment === 'delivered' || i.fulfillment === null) return 'unlisted_arrived'
+  return 'not_arrived' // pending / shipped
+}
+
+/** 型番なし（model_code が null）のグループの平均。variantSummaryFor はタイトルの型番一致で拾うため、
+ *  型番を持たない在庫には使えない。紐付いた販売から直接拾う */
+function groupAveragesFor(items: InventoryItem[]): { avg_price: number | null; avg_profit: number | null } {
+  const relatedSales = new Map<string, SaleProfit>()
+  for (const it of items) {
+    if (it.status !== 'sold') continue
+    const s = saleForItem(it.id)
+    if (s) relatedSales.set(s.id, s)
+  }
+  const rows = [...relatedSales.values()]
+  if (!rows.length) return { avg_price: null, avg_profit: null }
+  return {
+    avg_price: Math.round(rows.reduce((s, x) => s + x.price, 0) / rows.length),
+    avg_profit: Math.round(rows.reduce((s, x) => s + x.gross_profit, 0) / rows.length),
+  }
+}
+
+/** その型番の代表サムネイル（紐付いた販売のうち最新のもの。無ければ null） */
+function groupThumbFor(items: InventoryItem[]): string | null {
+  const soldSales = items
+    .filter(i => i.status === 'sold')
+    .map(i => saleForItem(i.id))
+    .filter((s): s is SaleProfit => !!s)
+    .sort((a, b) => b.sold_at.localeCompare(a.sold_at))
+  return soldSales[0]?.thumb_url ?? null
+}
+
+/** MonthSaleRow[] からタグ別の集計を作る（直接＋派生タグ、重複タグは両方に数える） */
+function computeByTag(rows: MonthSaleRow[]): { by_tag: MonthStatement['by_tag']; multi_tag_count: number } {
+  const map = new Map<string, { tag: Tag; count: number; gross_profit: number; allocated_expense: number; net_profit: number }>()
+  let multiTagCount = 0
+  for (const r of rows) {
+    const allTags = new Map<string, Tag>()
+    for (const t of r.tags) allTags.set(t.id, t)
+    for (const t of r.inherited_tags) allTags.set(t.id, t)
+    if (allTags.size >= 2) multiTagCount += 1
+    for (const t of allTags.values()) {
+      const cur = map.get(t.id) ?? { tag: t, count: 0, gross_profit: 0, allocated_expense: 0, net_profit: 0 }
+      cur.count += 1
+      cur.gross_profit += r.gross_profit
+      cur.allocated_expense += r.allocated_expense
+      cur.net_profit += r.net_profit
+      map.set(t.id, cur)
+    }
+  }
+  return { by_tag: [...map.values()], multi_tag_count: multiTagCount }
+}
+
+/** ホームの「今やること」を組み立てる */
+function buildInbox(): Inbox {
+  const month = thisMonthLocal()
+  const monthly = withExpenses([...monthlyFromSales(sales), ...extraOlderMonths()])
+  const thisMonthRow = monthly.find(m => m.month === month && m.kind === 'resale') ?? null
+  const lastMonth = monthAgoStr(1)
+  const lastMonthRow = monthly.find(m => m.month === lastMonth && m.kind === 'resale') ?? null
+
+  const pendingRows = sales.filter(s => !s.is_shipping_confirmed || (s.kind === 'resale' && s.unmatched === 1))
+  const awaitingRows = sales.filter(s => s.status === 'shipped' || s.status === 'delivered')
+
+  const strip: ProfitStrip = {
+    month,
+    gross_profit: thisMonthRow?.gross_profit ?? 0,
+    net_profit: thisMonthRow?.net_profit ?? 0,
+    revenue: thisMonthRow?.revenue ?? 0,
+    sales_count: thisMonthRow?.sales_count ?? 0,
+    pending_profit_estimate: pendingRows.reduce((s, x) => s + estimateSalePendingProfit(x), 0),
+    pending_count: pendingRows.length,
+    awaiting_payout: awaitingRows.reduce((s, x) => s + (x.price - x.fee), 0),
+    awaiting_payout_count: awaitingRows.length,
+    last_month: lastMonthRow ? { month: lastMonth, net_profit: lastMonthRow.net_profit, closed: lastMonthRow.closed } : null,
+  }
+
+  const groups: InboxGroup[] = []
+
+  const shipItems = sales.filter(s => s.status === 'waiting_shipment')
+  if (shipItems.length) {
+    groups.push({
+      kind: 'ship',
+      label: '発送してください',
+      hint: '売れた商品を発送します',
+      items: shipItems.map(s => ({
+        kind: 'ship' as InboxKind,
+        id: s.id,
+        title: s.title,
+        detail: formatSaleDetail(s),
+        thumb_url: s.thumb_url,
+        sale: s,
+        profit_hint: profitHintFor(s),
+      })),
+    })
+  }
+
+  const shippingItems = sales.filter(s => !s.is_shipping_confirmed)
+  if (shippingItems.length) {
+    groups.push({
+      kind: 'shipping',
+      label: '送料を入力',
+      hint: '発送方法を選ぶと送料が決まります',
+      items: shippingItems.map(s => ({
+        kind: 'shipping' as InboxKind,
+        id: s.id,
+        title: s.title,
+        detail: formatSaleDetail(s),
+        thumb_url: s.thumb_url,
+        sale: s,
+        profit_hint: profitHintFor(s),
+      })),
+    })
+  }
+
+  const linkItems = sales.filter(s => s.kind === 'resale' && s.unmatched === 1)
+  if (linkItems.length) {
+    groups.push({
+      kind: 'link',
+      label: '在庫と紐付け',
+      hint: '売れた商品がどの在庫か決めます',
+      items: linkItems.map(s => {
+        const cand = linkCandidate(s)
+        return {
+          kind: 'link' as InboxKind,
+          id: s.id,
+          title: s.title,
+          detail: formatSaleDetail(s),
+          thumb_url: s.thumb_url,
+          sale: s,
+          candidate: cand
+            ? { inventory_item_id: cand.id, item_code: cand.item_code, landed_cost: cand.landed_cost, acquired_at: cand.acquired_at }
+            : null,
+          profit_hint: profitHintFor(s),
+        }
+      }),
+    })
+  }
+
+  const confirmItems = purchases.filter(p => p.status === 'draft')
+  if (confirmItems.length) {
+    groups.push({
+      kind: 'confirm',
+      label: '仕入を確定',
+      hint: '価格が入った下書きを確定して在庫にします',
+      items: confirmItems.map(p => ({
+        kind: 'confirm' as InboxKind,
+        id: p.id,
+        title: p.first_line_name ?? '仕入（下書き）',
+        detail: `${p.shop_account_name} ・ ${p.ordered_at} 注文`,
+        thumb_url: null,
+        purchase: p,
+      })),
+    })
+  }
+
+  const collectItems = recentRunsMock().filter(r => r.status !== 'ok')
+  if (collectItems.length) {
+    groups.push({
+      kind: 'collect',
+      label: '取り込みを確認',
+      hint: 'ログインが切れているか、取得に失敗しています',
+      items: collectItems.map(r => ({
+        kind: 'collect' as InboxKind,
+        id: r.id,
+        title: r.source === 'mercari' ? 'メルカリの取り込み' : `${r.shop_account_name ?? '仕入先'} の取り込み`,
+        detail: r.message ?? (r.status === 'auth_required' ? 'ログインが必要です' : '取得に失敗しました'),
+        thumb_url: null,
+        run: r,
+      })),
+    })
+  }
+
+  const reminderItems: InboxItem[] = []
+  const today = todayLocal()
+  const dayOfMonth = Number(today.split('-')[2])
+
+  // manual_purchase：TikTok の最後の仕入から7日
+  for (const acc of shopAccounts.filter(a => a.kind === 'tiktok' && a.is_active)) {
+    const last = purchases
+      .filter(p => p.shop_account_id === acc.id)
+      .reduce<string | null>((max, p) => (!max || p.ordered_at > max ? p.ordered_at : max), null)
+    if (last && diffDays(last) >= 7 && !isReminderSnoozed('manual_purchase')) {
+      reminderItems.push({
+        kind: 'reminder',
+        id: 'manual_purchase',
+        title: `${acc.name} の仕入を確認`,
+        detail: `最後の仕入から ${diffDays(last)} 日`,
+        thumb_url: null,
+        reminder: { type: 'manual_purchase', action_label: '確認した' },
+      })
+    }
+  }
+
+  // delivery：自動取得が無い仕入先（メロジョイ以外）で、手入力の到着状態が「発送済み」のまま5日
+  for (const p of purchases) {
+    if (p.status !== 'confirmed' || p.fulfillment !== 'shipped' || !p.shipped_at) continue
+    const shop = shopAccounts.find(a => a.id === p.shop_account_id)
+    if (shop?.kind === 'mellojoy') continue // メロジョイは次の取り込みで自動的に戻る
+    if (diffDays(p.shipped_at) < 5) continue
+    if (isReminderSnoozed('delivery', p.id)) continue
+    reminderItems.push({
+      kind: 'reminder',
+      id: 'delivery',
+      title: `${p.shop_account_name} の到着を確認`,
+      detail: `発送から ${diffDays(p.shipped_at)} 日・${p.order_no ?? '（下書き）'}`,
+      thumb_url: null,
+      reminder: { type: 'delivery', action_label: '確認した', purchase_id: p.id },
+    })
+  }
+
+  // expense：今月の経費が0件、かつ10日以降
+  const thisMonthExpenses = expenses.filter(e => e.month === month)
+  if (thisMonthExpenses.length === 0 && dayOfMonth >= 10 && !isReminderSnoozed('expense')) {
+    reminderItems.push({
+      kind: 'reminder',
+      id: 'expense',
+      title: '今月の経費を記録',
+      detail: '今月はまだ経費の記録がありません',
+      thumb_url: null,
+      reminder: { type: 'expense', action_label: '記録する' },
+    })
+  }
+
+  // close_month：先月が未締めのまま、かつ3日以降
+  if (!monthBookEntry(lastMonth).close && dayOfMonth >= 3 && !isReminderSnoozed('close_month', lastMonth)) {
+    reminderItems.push({
+      kind: 'reminder',
+      id: 'close_month',
+      title: `${lastMonth} を締める`,
+      detail: '先月の月次がまだ締まっていません',
+      thumb_url: null,
+      reminder: { type: 'close_month', action_label: '締める', month: lastMonth },
+    })
+  }
+
+  if (reminderItems.length) {
+    groups.push({ kind: 'reminder', label: '忘れていませんか', hint: '', items: reminderItems })
+  }
+
+  const warnDays = Number(settings.aging_warn_days ?? '90')
+  const agingItems = inventory.filter(i => i.status === 'in_stock' && i.aging_days > warnDays)
+  const unallocatedListings = listingRecords.filter(
+    r => (r.status === 'active' || r.status === 'suspended') && (listingItems.get(r.mercari_item_id) ?? []).length === 0,
+  ).length
+  const products = allModelCodes().map(buildProductSummary)
+  const topModel = products.slice().sort((a, b) => b.total_profit - a.total_profit)[0] ?? null
+
+  return {
+    strip,
+    groups,
+    done_today: 4,
+    review: {
+      aging_count: agingItems.length,
+      aging_days: warnDays,
+      unallocated_listings: unallocatedListings,
+      last_month_unclosed: monthBookEntry(lastMonth).close ? null : lastMonth,
+      top_model: topModel ? { model_code: topModel.model_code, name: topModel.name, total_profit: topModel.total_profit } : null,
+    },
+  }
+}
+
 const api: SorobanApi = {
   async getDashboard(): Promise<DashboardStats> {
     const needsShipment = sales.filter(s => s.status === 'waiting_shipment').length
@@ -1820,6 +2186,250 @@ const api: SorobanApi = {
       stockCount, stockValue, agingCount, thisMonth, lastRun,
       recentRuns: recentRunsMock(),
     })
+  },
+
+  async getInbox(): Promise<Inbox> {
+    return wait(buildInbox())
+  },
+
+  async snoozeReminder(type: ReminderType, id?: string | null) {
+    reminderSnoozes.set(reminderKey(type, id ?? null), todayLocal(daysAgo(-7)))
+    return wait(undefined)
+  },
+
+  async getSalesProgress(): Promise<SalesProgress> {
+    const month = thisMonthLocal()
+    const listedRecs = listingRecords.filter(r => r.status === 'active').map(buildListing)
+    const listedCount = listedRecs.reduce((s, l) => s + l.items.length, 0)
+    const listedProfit = listedRecs.reduce((s, l) => s + (l.expected_profit ?? 0), 0)
+    const unallocated = listedRecs.filter(l => l.items.length === 0).length
+
+    const toShip = sales.filter(s => s.status === 'waiting_shipment')
+    const inTransit = sales.filter(s => s.status === 'shipped' || s.status === 'delivered')
+    const completed = sales.filter(s => s.status === 'completed' && s.completed_at?.slice(0, 7) === month)
+
+    const needsShipping = sales.filter(s => !s.is_shipping_confirmed).length
+    const needsLink = sales.filter(s => s.kind === 'resale' && s.unmatched === 1).length
+    const done = sales.filter(s => s.is_shipping_confirmed && !(s.kind === 'resale' && s.unmatched === 1)).length
+
+    return wait({
+      listed: { count: listedCount, expected_profit: listedProfit, unallocated },
+      to_ship: { count: toShip.length, revenue: toShip.reduce((s, x) => s + x.price, 0) },
+      in_transit: { count: inTransit.length, revenue: inTransit.reduce((s, x) => s + x.price, 0) },
+      completed_this_month: { count: completed.length, revenue: completed.reduce((s, x) => s + x.price, 0) },
+      all: sales.length,
+      inputs: { needs_shipping: needsShipping, needs_link: needsLink, done },
+    })
+  },
+
+  async getInventoryOverview(): Promise<InventoryOverview> {
+    const warnDays = Number(settings.aging_warn_days ?? '90')
+    const unlistedArrived = inventory.filter(i => inventoryBucket(i) === 'unlisted_arrived')
+    const notArrived = inventory.filter(i => inventoryBucket(i) === 'not_arrived')
+    const listedRecs = listingRecords
+      .filter(r => r.status === 'active' || r.status === 'suspended')
+      .map(buildListing)
+      .filter(l => l.items.length > 0)
+    const listedCount = listedRecs.reduce((s, l) => s + l.items.length, 0)
+    const listedProfit = listedRecs.reduce((s, l) => s + (l.expected_profit ?? 0), 0)
+    const agingItems = inventory.filter(i => i.status === 'in_stock' && i.aging_days > warnDays)
+
+    return wait({
+      unlisted_arrived: { count: unlistedArrived.length, cost: unlistedArrived.reduce((s, i) => s + i.landed_cost, 0) },
+      not_arrived: { count: notArrived.length, cost: notArrived.reduce((s, i) => s + i.landed_cost, 0) },
+      listed: { count: listedCount, expected_profit: listedProfit },
+      aging: { count: agingItems.length, cost: agingItems.reduce((s, i) => s + i.landed_cost, 0), days: warnDays },
+    })
+  },
+
+  async listInventoryGroups(filter: InventoryGroupFilter): Promise<InventoryGroup[]> {
+    const byModel = new Map<string | null, InventoryItem[]>()
+    for (const it of inventory) {
+      const key = it.model_code
+      const arr = byModel.get(key) ?? []
+      arr.push(it)
+      byModel.set(key, arr)
+    }
+
+    const groups: InventoryGroup[] = []
+    for (const [model, items] of byModel) {
+      const buckets = { unlisted_arrived: 0, not_arrived: 0, listed: 0, sold: 0 }
+      for (const it of items) {
+        const b = inventoryBucket(it)
+        if (b === 'unlisted_arrived' || b === 'not_arrived' || b === 'listed' || b === 'sold') buckets[b] += 1
+      }
+
+      const filtered = items
+        .filter(i => {
+          if (filter === 'all') return true
+          const b = inventoryBucket(i)
+          if (filter === 'unlisted') return b === 'unlisted_arrived' || b === 'not_arrived'
+          return b === filter
+        })
+        .slice()
+        .sort((a, b) => b.aging_days - a.aging_days)
+      if (filter !== 'all' && filtered.length === 0) continue
+
+      const inStockItems = items.filter(i => i.status === 'in_stock')
+      const oldest = inStockItems.reduce<InventoryItem | null>(
+        (min, i) => (!min || i.acquired_at < min.acquired_at ? i : min), null,
+      )
+      const latest = items.reduce<InventoryItem | undefined>(
+        (max, i) => (!max || i.acquired_at >= max.acquired_at ? i : max), undefined,
+      )
+      const averages = model ? variantSummaryFor(model) : groupAveragesFor(items)
+      const totalCost = items.reduce((s, i) => s + i.landed_cost, 0)
+      const customName = model ? productCustomName.get(model) ?? null : null
+
+      groups.push({
+        model_code: model,
+        name: customName ?? latest?.name ?? (model ?? '型番なし'),
+        thumb_url: groupThumbFor(items),
+        tags: model ? (productTags.get(model) ?? []) : [],
+        unlisted: buckets.unlisted_arrived + buckets.not_arrived,
+        unlisted_arrived: buckets.unlisted_arrived,
+        not_arrived: buckets.not_arrived,
+        listed: buckets.listed,
+        sold: buckets.sold,
+        avg_price: averages.avg_price,
+        avg_profit: averages.avg_profit,
+        cost_per_item: items.length ? Math.round(totalCost / items.length) : null,
+        oldest_acquired_at: oldest?.acquired_at ?? null,
+        oldest_aging_days: oldest?.aging_days ?? null,
+        items: filtered,
+      })
+    }
+
+    groups.sort((a, b) => {
+      if (a.model_code === null) return 1
+      if (b.model_code === null) return -1
+      return a.model_code.localeCompare(b.model_code)
+    })
+    return wait(groups)
+  },
+
+  async getProductKarte(modelCode: string): Promise<ProductKarte> {
+    if (!allModelCodes().includes(modelCode)) throw new Error('商品が見つかりません')
+    const summary = buildProductSummary(modelCode)
+    const items = inventory
+      .filter(i => i.model_code === modelCode)
+      .slice()
+      .sort((a, b) => (a.acquired_at < b.acquired_at ? 1 : a.acquired_at > b.acquired_at ? -1 : 0))
+    const modelSales = linkedSalesForModel(modelCode)
+      .slice()
+      .sort((a, b) => (a.sold_at < b.sold_at ? 1 : a.sold_at > b.sold_at ? -1 : 0))
+    const listings = listingRecords
+      .filter(r => r.model_codes.includes(modelCode))
+      .map(buildListing)
+      .sort((a, b) => (a.first_seen_at < b.first_seen_at ? 1 : -1))
+
+    const sourceLine = purchases
+      .flatMap(p => p.lines)
+      .find(l => l.model_code === modelCode)
+    const source_name = sourceLine && sourceLine.name !== summary.name ? sourceLine.name : null
+
+    const inStockItems = items.filter(i => i.status === 'in_stock')
+    const arrived = inStockItems.filter(i => i.fulfillment === 'delivered' || i.fulfillment === null)
+    const notArrived = inStockItems.filter(i => i.fulfillment === 'pending' || i.fulfillment === 'shipped')
+
+    const activeListings = listings.filter(l => l.status === 'active' || l.status === 'suspended')
+    const listedProfit = activeListings.reduce((s, l) => s + (l.expected_profit ?? 0), 0)
+
+    const cutoff = todayLocal(daysAgo(90))
+    const recentSales = modelSales.filter(s => s.sold_at >= cutoff)
+
+    const prices = modelSales.map(s => s.price)
+    const totalRevenue = modelSales.reduce((s, x) => s + x.price, 0)
+    const totalProfit = modelSales.reduce((s, x) => s + x.gross_profit, 0)
+
+    const lastLinkedSale = modelSales.slice().sort((a, b) => (a.sold_at < b.sold_at ? 1 : -1))[0] ?? null
+    const defaultItem = items.find(i => i.status === 'in_stock' && !i.listing) ?? null
+
+    return wait({
+      summary,
+      source_name,
+      in_stock: { count: inStockItems.length, arrived: arrived.length, not_arrived: notArrived.length, cost: inStockItems.reduce((s, i) => s + i.landed_cost, 0) },
+      listed: { count: activeListings.length, price_total: activeListings.reduce((s, l) => s + l.price, 0), expected_profit: listedProfit },
+      sold_recent: { count: recentSales.length, days: 90 },
+      price_range: prices.length ? { min: Math.min(...prices), max: Math.max(...prices) } : null,
+      profit_rate: totalRevenue > 0 ? Math.round((totalProfit / totalRevenue) * 100) : null,
+      items,
+      sales: modelSales,
+      listings,
+      estimate_default: {
+        inventory_item_id: defaultItem?.id ?? null,
+        shipping_method_id: lastLinkedSale?.shipping_method_id ?? null,
+      },
+    })
+  },
+
+  async getMonthStatement(month: string): Promise<MonthStatement> {
+    const detail = buildMonthDetail(month, null)
+    const revenue = detail.totals.revenue
+    const grossProfit = detail.totals.gross_profit
+    const netProfit = detail.totals.net_profit
+    const { by_tag, multi_tag_count } = computeByTag(detail.sales)
+    const awaitingRows = sales.filter(s => s.sold_at.slice(0, 7) === month && (s.status === 'shipped' || s.status === 'delivered'))
+
+    return wait({
+      month,
+      sales_count: detail.totals.sales_count,
+      revenue,
+      fee: detail.totals.total_fee,
+      shipping: detail.totals.total_shipping,
+      shipping_actual_count: detail.sales.filter(s => s.shipping_source === 'actual').length,
+      packaging: detail.totals.total_packaging,
+      cost: detail.totals.total_cost,
+      cost_items: detail.sales.reduce((s, x) => s + x.item_count, 0),
+      gross_profit: grossProfit,
+      gross_rate: revenue > 0 ? Math.round((grossProfit / revenue) * 100) : null,
+      expenses: detail.expense_by_category,
+      expense_total: detail.totals.expense_total,
+      net_profit: netProfit,
+      net_rate: revenue > 0 ? Math.round((netProfit / revenue) * 100) : null,
+      awaiting_payout: awaitingRows.reduce((s, x) => s + (x.price - x.fee), 0),
+      personal_revenue: detail.personal_sales.reduce((s, x) => s + x.price, 0),
+      purchase_paid: detail.purchases_by_account.reduce((s, a) => s + a.total_cost, 0),
+      by_tag,
+      multi_tag_count,
+    })
+  },
+
+  async listPurchaseAccountCards(from: string | null, to: string | null): Promise<PurchaseAccountCard[]> {
+    const inRange = (d: string) => (!from || d >= from) && (!to || d <= to)
+    const confirmedInRange = purchases.filter(p => p.status === 'confirmed' && inRange(p.ordered_at))
+    const runsSorted = sortedRuns()
+
+    const buildCard = (shopId: string | null, name: string, kind: ShopAccountKind | null): PurchaseAccountCard => {
+      const own = shopId ? confirmedInRange.filter(p => p.shop_account_id === shopId) : confirmedInRange
+      const items = own.reduce((s, p) => s + p.lines.reduce((ls, l) => ls + l.quantity, 0), 0)
+      const total_cost = own.reduce((s, p) => s + p.total_cost, 0)
+      const drafts = (shopId
+        ? purchases.filter(p => p.status === 'draft' && p.shop_account_id === shopId)
+        : purchases.filter(p => p.status === 'draft')
+      ).length
+      const notArrived = (shopId
+        ? purchases.filter(p => p.status === 'confirmed' && p.shop_account_id === shopId)
+        : purchases.filter(p => p.status === 'confirmed')
+      ).filter(p => p.fulfillment === 'pending' || p.fulfillment === 'shipped').length
+      const lastRun = shopId ? runsSorted.find(r => r.shop_account_id === shopId) ?? null : null
+
+      return {
+        shop_account_id: shopId,
+        name,
+        kind,
+        orders: own.length,
+        items,
+        total_cost,
+        drafts,
+        not_arrived: notArrived,
+        auth_required: lastRun?.status === 'auth_required',
+      }
+    }
+
+    const cards = [buildCard(null, 'すべて', null)]
+    for (const shop of shopAccounts) cards.push(buildCard(shop.id, shop.name, shop.kind))
+    return wait(cards)
   },
 
   async listSales(filter) {
@@ -2136,7 +2746,7 @@ const api: SorobanApi = {
       const input = inputs[i]
       const orderNo = input.order_no ?? null
       if (orderNo) {
-        const key = `${input.shop_account_id} ${orderNo}`
+        const key = `${input.shop_account_id}|${orderNo}`
         const existsAlready = purchases.some(p => p.shop_account_id === input.shop_account_id && p.order_no === orderNo)
         if (existsAlready || seenInBatch.has(key)) {
           skipped.push({ index: i, reason: `この仕入先には注文番号「${orderNo}」の仕入が既にあります` })
@@ -2970,6 +3580,11 @@ const api: SorobanApi = {
 
   async backupDb() {
     return wait('~/Desktop/soroban-backup.db')
+  },
+
+  async restoreBackup() {
+    // 復元は実際にはアプリを再起動する。モックでは何もしない（選ぶダイアログもキャンセル扱い）
+    return new Promise(resolve => setTimeout(() => resolve(null), 1000))
   },
 
   async revealDbFolder() {

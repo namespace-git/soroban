@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol } from 'electron'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { writeFileSync, copyFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import * as db from './db'
 import * as collector from './collector'
 import * as collectorMellojoy from './collector-mellojoy'

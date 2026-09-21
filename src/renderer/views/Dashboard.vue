@@ -1,99 +1,154 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
-import type { DashboardStats, VariantSummary, SaleStatus } from '../../shared/types'
+// ホーム＝受信箱。「今やること」を1本のリストに束ね、上から順に片付ければ終わる形にする。
+// 数字・文言（title/detail/profit_hint）は main（getInbox）が組み立て済みのものをそのまま出す。
+// レンダラー側では利益を再計算しない。
+import { ref, reactive, computed, onMounted, watch, inject, type Ref } from 'vue'
+import type { Inbox, InboxItem, ShippingMethod, DashboardStats } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
+import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 
-const stats = ref<DashboardStats | null>(null)
 const revision = inject<Ref<number>>('revision')!
+const changed = inject<() => void>('changed', () => {})
 const goto = inject<(t: string, payload?: {
   modelCode?: string
   stage?: 'listed' | 'pending' | 'done' | 'all'
   onlyUnallocated?: boolean
-  status?: SaleStatus
+  focusId?: string
+  month?: string
   inventoryStatus?: 'unlisted' | 'listed' | 'sold' | 'other' | 'all'
   agingMin?: number
 }) => void>('goto')!
 
+// App.vue のヘッダの「取り込む」があればそれに任せる（通知・件数更新まで面倒を見てくれる）。
+// 無ければ window.soroban.collect() を直接呼ぶ（Dashboard 単体表示など）
+const injectedCollect = inject<(() => Promise<void>) | undefined>('collect', undefined)
+
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
-// 在庫の長期滞留とみなす日数（在庫タブ・設定タブと同じ設定値）
-const agingWarnDays = ref(90)
+const inbox = ref<Inbox | null>(null)
+// 「見直すもの」の在庫カード（点数・原価）は getInbox に無いので getDashboard から補う
+const dashboard = ref<DashboardStats | null>(null)
+const methods = ref<ShippingMethod[]>([])
 
 async function load() {
-  const [dashboard, settings] = await Promise.all([
+  const [ib, dash, m] = await Promise.all([
+    window.soroban.getInbox(),
     window.soroban.getDashboard(),
-    window.soroban.getSettings(),
+    window.soroban.listShippingMethods(),
   ])
-  stats.value = dashboard
-  agingWarnDays.value = Number(settings.aging_warn_days ?? 90)
+  inbox.value = ib
+  dashboard.value = dash
+  methods.value = m
 }
 onMounted(load)
 watch(revision, load)
 
-// 取り込み元ごとの直近1件のうち、ok以外（=要対応の先頭に出す対象）
-const failedRuns = computed(() => (stats.value?.recentRuns ?? []).filter(r => r.status !== 'ok'))
+const totalItems = computed(() => (inbox.value?.groups ?? []).reduce((sum, g) => sum + g.items.length, 0))
 
-function runSourceLabel(r: { source: string; shop_account_name: string | null }): string {
-  return r.source === 'mercari' ? 'メルカリの取り込み' : `メロジョイ（${r.shop_account_name ?? '不明'}）の取り込み`
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max) + '…' : s
-}
-
-// recentRuns はメルカリ・仕入先アカウントの実行をまとめて返すため、取り込み動作自体は1本
-// （collect() が内部でメルカリ→有効な仕入先の順に直列で走る。口座単位の再実行はできない）
-// App.vue のヘッダの「取り込む」があればそれに任せる（通知・件数更新まで面倒を見てくれる）。
-// 無ければ window.soroban.collect() を直接呼ぶ
-const injectedCollect = inject<(() => Promise<void>) | undefined>('collect', undefined)
-const collecting = ref(false)
-async function retryCollect() {
-  collecting.value = true
+// 操作中の行は disabled にする（連打防止）。key は InboxItem.id
+const busy = reactive(new Set<string>())
+async function withBusy(id: string, fn: () => Promise<void>) {
+  busy.add(id)
   try {
-    if (injectedCollect) {
-      await injectedCollect()
-    } else {
-      await window.soroban.collect()
-      revision.value++
-    }
+    await fn()
+    await load()
+    changed()
   } finally {
-    collecting.value = false
+    busy.delete(id)
   }
 }
 
-// ログインが必要なときは、まずログインのウィンドウを開くだけにする（取り込みは人が「取り込む」を押す）
+function placeholderChar(title: string): string {
+  const bracket = title.match(/【([^】]+)】/)
+  const c = (bracket ? bracket[1] : title.trim()).charAt(0)
+  return (c || '?').toUpperCase()
+}
+
+// profit_hint は数値だけを main が返す。文言（「送料を入れると」「紐付けると」「約」）はここで組む
+function profitHintText(kind: string, hint: { min: number; max: number } | null | undefined): string | null {
+  if (!hint) return null
+  const verb = kind === 'shipping' ? '送料を入れると粗利 ' : kind === 'link' ? '紐付けると粗利 ' : '粗利 '
+  return hint.min === hint.max ? `${verb}約 ${yen(hint.min)}` : `${verb}${yen(hint.min)}〜${yen(hint.max)}`
+}
+
+// --- ship / shipping：行内の発送方法セレクト ---
+async function setShipping(item: InboxItem, methodId: string) {
+  if (!item.sale) return
+  await withBusy(item.id, () => window.soroban.updateSale(item.sale!.id, { shipping_method_id: methodId || null }))
+}
+
+// --- link：候補を紐付ける／私物にする ---
+async function linkCandidate(item: InboxItem) {
+  if (!item.sale || !item.candidate) return
+  await withBusy(item.id, () => window.soroban.linkInventory(item.sale!.id, [item.candidate!.inventory_item_id]))
+}
+async function markPersonal(item: InboxItem) {
+  if (!item.sale) return
+  await withBusy(item.id, () => window.soroban.updateSale(item.sale!.id, { kind: 'personal' }))
+}
+function gotoSaleAll(item: InboxItem) {
+  goto('sales', { stage: 'all', focusId: item.sale?.id })
+}
+
+// --- confirm：仕入の価格入力は仕入タブへ ---
+function goConfirmPurchase(item: InboxItem) {
+  if (!item.purchase) return
+  goto('purchases', { focusId: item.purchase.id })
+}
+
+// --- collect：取り込みの問題 ---
+async function retryCollect(item: InboxItem) {
+  busy.add(item.id)
+  try {
+    if (injectedCollect) await injectedCollect()
+    else await window.soroban.collect()
+    await load()
+  } finally {
+    busy.delete(item.id)
+  }
+}
 async function openLoginForRun() {
   await window.soroban.openLogin()
 }
 
-// 要対応の合計（発送待ち＋送料未入力＋未紐付け＋価格未入力の仕入＋未引き当ての出品）
-const needsTotal = computed(() => {
-  if (!stats.value) return 0
-  return stats.value.needsShipment + stats.value.needsShipping + stats.value.needsMatch
-    + stats.value.needsPurchaseConfirm + stats.value.needsListingAllocation
-})
-
-// 型番ランキング
-const variants = ref<VariantSummary[]>([])
-const variantsLoaded = ref(false)
-const variantSort = ref<'total_profit' | 'avg_profit' | 'sold'>('total_profit')
-
-async function loadVariants() {
-  variantsLoaded.value = false
-  variants.value = (await window.soroban.listVariantSummary(variantSort.value)).slice(0, 8)
-  variantsLoaded.value = true
+// --- reminder：自分で入れるものの導線とスヌーズ ---
+function reminderAction(item: InboxItem) {
+  const r = item.reminder
+  if (!r) return
+  if (r.type === 'manual_purchase') goto('purchases')
+  else if (r.type === 'delivery' && r.purchase_id) {
+    void withBusy(item.id, () => window.soroban.updatePurchaseFulfillment(r.purchase_id!, 'delivered'))
+  } else if (r.type === 'expense') goto('expenses')
+  else if (r.type === 'close_month') goto('monthly', { month: r.month })
 }
-onMounted(loadVariants)
-watch(revision, loadVariants)
-watch(variantSort, loadVariants)
+async function snooze(item: InboxItem) {
+  const r = item.reminder
+  if (!r) return
+  await withBusy(item.id, () => window.soroban.snoozeReminder(r.type, r.purchase_id ?? r.month ?? null))
+}
 
-const runLabel: Record<string, string> = {
-  ok: '正常',
-  empty: '0件（要確認）',
-  auth_required: 'ログインが必要',
-  failed: '失敗',
+// --- 取引画面を開く（メルカリを既定ブラウザで） ---
+async function openTransaction(item: InboxItem) {
+  if (!item.sale?.mercari_item_id) return
+  await window.soroban.openMercari('transaction', item.sale.mercari_item_id)
+}
+
+// --- 見直すもの ---
+function gotoAging() {
+  goto('inventory', { inventoryStatus: 'all', agingMin: inbox.value?.review.aging_days ?? 90 })
+}
+function gotoUnallocated() {
+  goto('sales', { stage: 'listed', onlyUnallocated: true })
+}
+function gotoMonth() {
+  const m = inbox.value?.review.last_month_unclosed
+  goto('monthly', m ? { month: m } : undefined)
+}
+function gotoTopModel() {
+  const code = inbox.value?.review.top_model?.model_code
+  if (code) goto('products', { modelCode: code })
 }
 </script>
 
@@ -103,373 +158,375 @@ const runLabel: Record<string, string> = {
       <h1 class="page-title">ホーム</h1>
     </div>
 
-    <template v-if="stats">
-      <div class="home-grid">
-        <!-- 主要指標。ここだけ見れば今の状態がわかる -->
-        <div class="home-summary">
-          <div class="stat-card brand">
-            <span class="stat-card-label">今月の粗利</span>
-            <span class="stat-card-value">{{ yen(stats.thisMonth?.gross_profit ?? 0) }}</span>
-            <span class="stat-card-sub">
-              売上 {{ yen(stats.thisMonth?.revenue ?? 0) }} ・ 件数 {{ stats.thisMonth?.sales_count ?? 0 }} 件
-              ・ 純利益 {{ yen(stats.thisMonth?.net_profit ?? 0) }}
-            </span>
-          </div>
-
-          <div class="stat-card cream">
-            <span class="stat-card-label">要対応</span>
-            <span class="stat-card-value">{{ needsTotal }}<span class="unit">件</span></span>
-          </div>
-
-          <div class="stat-card cream">
-            <span class="stat-card-label">在庫</span>
-            <span class="stat-card-value">{{ stats.stockCount }}<span class="unit">点</span></span>
-            <span class="stat-card-sub">{{ yen(stats.stockValue) }}</span>
-            <button
-              v-if="stats.agingCount > 0"
-              type="button"
-              class="stat-card-sub warn aging-btn"
-              @click="goto('inventory', { inventoryStatus: 'all', agingMin: agingWarnDays })"
-            >
-              長期滞留 {{ stats.agingCount }} 点
-            </button>
-          </div>
+    <template v-if="inbox">
+      <!-- 上：利益ストリップ（ProfitStripBar 相当。共通部品が無いためここに直接実装） -->
+      <div class="profit-strip">
+        <div class="stat-card brand">
+          <span class="stat-card-label">今月の粗利</span>
+          <span class="stat-card-value">{{ yen(inbox.strip.gross_profit) }}</span>
+          <span class="stat-card-sub">
+            売上 {{ yen(inbox.strip.revenue) }} ・ {{ inbox.strip.sales_count }} 件 ・ 純利益 {{ yen(inbox.strip.net_profit) }}
+          </span>
         </div>
-
-        <!-- 要対応の内訳と型番ランキング -->
-        <div class="home-detail">
-          <div class="panel">
-            <div class="section-head">
-              <span class="section-head-icon"><Icon name="alert" :size="16" /></span>
-              <h2 class="section-head-title">要対応</h2>
-              <StatusChip v-if="failedRuns.length" tone="warn" label="取り込みに問題" />
-            </div>
-
-            <div
-              v-for="r in failedRuns" :key="r.id"
-              class="need-row run-need-row"
-            >
-              <StatusChip tone="warn" :label="runLabel[r.status] ?? r.status" />
-              <span class="run-need-text">
-                <span class="need-desc">{{ runSourceLabel(r) }}</span>
-                <span v-if="r.message" class="faint">{{ truncate(r.message, 80) }}</span>
-              </span>
-              <span class="grow" />
-              <button
-                v-if="r.status === 'auth_required'"
-                class="sm link-btn"
-                title="ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください"
-                @click="openLoginForRun"
-              >ログインする</button>
-              <button v-else class="sm link-btn" :disabled="collecting" @click="retryCollect">
-                もう一度取り込む
-              </button>
-            </div>
-
-            <button
-              class="need-row"
-              :class="{ zero: stats.needsShipment === 0 }"
-              @click="goto('sales', { stage: 'all', status: 'waiting_shipment' })"
-            >
-              <span class="need-count">{{ stats.needsShipment }}</span>
-              <span class="need-desc">発送してください</span>
-              <span class="grow" />
-              <span class="pill">開く <Icon name="arrow-right" :size="12" /></span>
-            </button>
-            <button
-              class="need-row"
-              :class="{ zero: stats.needsShipping === 0 }"
-              @click="goto('sales', { stage: 'pending' })"
-            >
-              <span class="need-count">{{ stats.needsShipping }}</span>
-              <span class="need-desc">送料が未入力</span>
-              <span class="grow" />
-              <span class="pill">開く <Icon name="arrow-right" :size="12" /></span>
-            </button>
-            <button
-              class="need-row"
-              :class="{ zero: stats.needsMatch === 0 }"
-              @click="goto('sales', { stage: 'pending' })"
-            >
-              <span class="need-count">{{ stats.needsMatch }}</span>
-              <span class="need-desc">仕入が未紐付け</span>
-              <span class="grow" />
-              <span class="pill">開く <Icon name="arrow-right" :size="12" /></span>
-            </button>
-            <button
-              class="need-row"
-              :class="{ zero: stats.needsPurchaseConfirm === 0 }"
-              @click="goto('purchases')"
-            >
-              <span class="need-count">{{ stats.needsPurchaseConfirm }}</span>
-              <span class="need-desc">価格未入力の仕入</span>
-              <span class="grow" />
-              <span class="pill">開く <Icon name="arrow-right" :size="12" /></span>
-            </button>
-            <button
-              class="need-row"
-              :class="{ zero: stats.needsListingAllocation === 0 }"
-              @click="goto('sales', { stage: 'listed', onlyUnallocated: true })"
-            >
-              <span class="need-count">{{ stats.needsListingAllocation }}</span>
-              <span class="need-desc">未引き当ての出品</span>
-              <span class="grow" />
-              <span class="pill">開く <Icon name="arrow-right" :size="12" /></span>
-            </button>
-
-            <p class="faint hint">
-              送料と紐付けを入れると利益が確定します。1件10秒で終わります。
-            </p>
-          </div>
-
-          <div class="panel">
-            <div class="section-head">
-              <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
-              <h2 class="section-head-title">型番ランキング</h2>
-              <span class="grow" />
-              <select v-model="variantSort">
-                <option value="total_profit">粗利合計</option>
-                <option value="avg_profit">平均粗利</option>
-                <option value="sold">販売数</option>
-              </select>
-            </div>
-            <Skeleton v-if="!variantsLoaded" :rows="4" />
-            <table v-else-if="variants.length" class="compact ranking-table">
-              <thead>
-                <tr>
-                  <th>型番</th>
-                  <th>商品</th>
-                  <th class="num">在庫</th>
-                  <th class="num">販売</th>
-                  <th class="num">平均売価</th>
-                  <th class="num">平均粗利</th>
-                  <th class="num">粗利計</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="v in variants" :key="v.model_code"
-                  class="ranking-row"
-                  @click="goto('products', { modelCode: v.model_code })"
-                >
-                  <td><StatusChip tone="neutral" :label="v.model_code" /></td>
-                  <td class="ranking-name" :title="v.name">{{ v.name }}</td>
-                  <td class="num">{{ v.in_stock }}</td>
-                  <td class="num">{{ v.sold }}</td>
-                  <td class="num">{{ v.avg_price != null ? yen(v.avg_price) : '—' }}</td>
-                  <td
-                    class="num"
-                    :class="v.avg_profit != null ? (v.avg_profit >= 0 ? 'profit' : 'loss') : ''"
-                  >{{ v.avg_profit != null ? yen(v.avg_profit) : '—' }}</td>
-                  <td class="num">
-                    <strong :class="v.total_profit >= 0 ? 'profit' : 'loss'">{{ yen(v.total_profit) }}</strong>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-            <p v-else class="dim">型番付きの在庫・販売が増えると、ここに実績が並びます</p>
-          </div>
+        <div class="stat-card">
+          <span class="stat-card-label">入力すれば増える見込み</span>
+          <span class="stat-card-value dim">+{{ yen(inbox.strip.pending_profit_estimate) }}</span>
+          <span class="stat-card-sub">送料・紐付け待ち {{ inbox.strip.pending_count }} 件（下の「今やること」）</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card-label">売上金の反映待ち</span>
+          <span class="stat-card-value dim">{{ yen(inbox.strip.awaiting_payout) }}</span>
+          <span class="stat-card-sub">発送済み・受取評価待ち {{ inbox.strip.awaiting_payout_count }} 件</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card-label">先月の純利益</span>
+          <span class="stat-card-value dim">{{ inbox.strip.last_month ? yen(inbox.strip.last_month.net_profit) : '—' }}</span>
+          <span class="stat-card-sub">
+            <template v-if="inbox.strip.last_month">
+              {{ inbox.strip.last_month.closed ? '締め済み' : '未締め' }} ・ {{ inbox.strip.last_month.month }}
+            </template>
+            <template v-else>データなし</template>
+          </span>
         </div>
       </div>
 
-      <!-- 取り込み -->
-      <template v-if="stats.recentRuns.length">
-        <template v-for="r in stats.recentRuns" :key="r.id">
-          <div class="intake">
-            <StatusChip
-              :tone="r.status === 'ok' ? 'ok' : 'warn'"
-              :label="runLabel[r.status] ?? r.status"
-            />
-            <span class="dim">{{ runSourceLabel(r) }}</span>
-            <span class="dim">{{ new Date(r.started_at).toLocaleString('ja-JP') }}</span>
-            <span class="faint">取得 {{ r.fetched }}／追加 {{ r.inserted }}</span>
+      <div class="inbox-grid">
+        <!-- 左（主）：今やること -->
+        <section class="panel inbox-panel">
+          <div class="inbox-head">
+            <h2 class="section-head-title">今やること</h2>
+            <span class="dim">{{ totalItems }} 件 ・ 上から順に片付ければ終わり</span>
           </div>
-          <p v-if="r.message" class="faint intake-msg">{{ r.message }}</p>
-        </template>
-      </template>
-      <template v-else>
-        <div v-if="stats.lastRun" class="intake">
-          <StatusChip
-            :tone="stats.lastRun.status === 'ok' ? 'ok' : 'warn'"
-            :label="runLabel[stats.lastRun.status] ?? stats.lastRun.status"
-          />
-          <span class="dim">
-            {{ new Date(stats.lastRun.started_at).toLocaleString('ja-JP') }}
-          </span>
-          <span class="faint">
-            取得 {{ stats.lastRun.fetched }}／追加 {{ stats.lastRun.inserted }}
-          </span>
-        </div>
-        <p v-if="stats.lastRun?.message" class="faint intake-msg">{{ stats.lastRun.message }}</p>
-      </template>
-      <p v-if="!stats.lastRun" class="dim intake">
-        まだ取り込んでいません。右上の「取り込む」を押してください。
-      </p>
+
+          <EmptyState v-if="totalItems === 0" title="今日やることはありません" />
+
+          <template v-else>
+            <div v-for="group in inbox.groups" :key="group.kind" v-show="group.items.length" class="group">
+              <p class="group-title">
+                <span class="group-label">{{ group.label }}</span>
+                <span class="n" :class="{ soft: group.kind === 'reminder' }">{{ group.items.length }}</span>
+                <span class="group-hint">{{ group.hint }}</span>
+              </p>
+
+              <div v-for="item in group.items" :key="item.id" class="inbox-row">
+                <div class="row-thumb">
+                  <img v-if="item.thumb_url" class="row-thumb-img" :src="item.thumb_url" alt="" loading="lazy" />
+                  <span v-else class="row-thumb-ph" :class="{ warn: group.kind === 'collect' }">
+                    {{ group.kind === 'collect' ? '!' : placeholderChar(item.title) }}
+                  </span>
+                </div>
+
+                <div class="row-main">
+                  <div class="row-title">
+                    <span>{{ item.title }}</span>
+                    <StatusChip v-if="group.kind === 'ship'" tone="warn" label="発送してください" />
+                    <StatusChip v-if="group.kind === 'confirm' && item.purchase" tone="neutral" :label="item.purchase.shop_account_name" />
+                  </div>
+                  <div class="row-detail">
+                    <span class="dim">{{ item.detail }}</span>
+                    <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint">
+                      ・ {{ profitHintText(group.kind, item.profit_hint) }}
+                    </b>
+                  </div>
+                </div>
+
+                <div class="row-act">
+                  <!-- 発送する：発送方法が未定ならセレクトを出す -->
+                  <template v-if="group.kind === 'ship'">
+                    <select
+                      v-if="!item.sale?.shipping_method_id"
+                      class="invalid"
+                      :disabled="busy.has(item.id)"
+                      @change="setShipping(item, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option value="">選択…</option>
+                      <option v-for="m in methods" :key="m.id" :value="m.id">{{ m.name }}　{{ yen(m.fee) }}</option>
+                    </select>
+                    <button class="sm" :disabled="busy.has(item.id)" @click="openTransaction(item)">
+                      取引画面を開く <Icon name="external" :size="12" />
+                    </button>
+                  </template>
+
+                  <!-- 送料を入れる：セレクトを選べばその場で行が消える -->
+                  <template v-else-if="group.kind === 'shipping'">
+                    <select
+                      class="invalid"
+                      :disabled="busy.has(item.id)"
+                      @change="setShipping(item, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option value="">選択…</option>
+                      <option v-for="m in methods" :key="m.id" :value="m.id">{{ m.name }}　{{ yen(m.fee) }}</option>
+                    </select>
+                  </template>
+
+                  <!-- 在庫を紐付ける -->
+                  <template v-else-if="group.kind === 'link'">
+                    <template v-if="item.candidate">
+                      <button class="sm" :disabled="busy.has(item.id)" @click="linkCandidate(item)">
+                        {{ item.candidate.item_code }} を紐付ける
+                      </button>
+                      <button class="link-action" @click="gotoSaleAll(item)">他の在庫</button>
+                    </template>
+                    <template v-else>
+                      <button class="sm" :disabled="busy.has(item.id)" @click="gotoSaleAll(item)">在庫を選ぶ</button>
+                      <button class="link-action" :disabled="busy.has(item.id)" @click="markPersonal(item)">私物にする</button>
+                    </template>
+                  </template>
+
+                  <!-- 仕入の価格を入れる -->
+                  <template v-else-if="group.kind === 'confirm'">
+                    <button class="sm" @click="goConfirmPurchase(item)">価格を入れて確定</button>
+                  </template>
+
+                  <!-- 取り込みの問題 -->
+                  <template v-else-if="group.kind === 'collect'">
+                    <button
+                      v-if="item.run?.status === 'auth_required'"
+                      class="sm"
+                      title="ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください"
+                      @click="openLoginForRun"
+                    >ログインする</button>
+                    <button v-else class="sm" :disabled="busy.has(item.id)" @click="retryCollect(item)">もう一度取り込む</button>
+                  </template>
+
+                  <!-- 忘れていませんか -->
+                  <template v-else-if="group.kind === 'reminder'">
+                    <button
+                      v-if="item.reminder"
+                      class="sm"
+                      :disabled="busy.has(item.id)"
+                      @click="reminderAction(item)"
+                    >{{ item.reminder.action_label }}</button>
+                    <button class="link-action" :disabled="busy.has(item.id)" @click="snooze(item)">今はいい</button>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <p class="done-row faint">✓ 今日片付けたもの {{ inbox.done_today }} 件</p>
+          <p class="faint foot">送料と紐付けを入れると利益が確定します。1 件 10 秒。</p>
+        </section>
+
+        <!-- 右：見直すもの -->
+        <aside class="side-col">
+          <div class="stat-card cream">
+            <span class="stat-card-label">在庫</span>
+            <span class="stat-card-value">{{ dashboard?.stockCount ?? 0 }}<span class="unit">点</span></span>
+            <span class="stat-card-sub">{{ yen(dashboard?.stockValue ?? 0) }}</span>
+          </div>
+
+          <div class="panel review-panel">
+            <h3 class="panel-title">見直すもの</h3>
+            <button class="review-row" @click="gotoAging">
+              <span>長期滞留（{{ inbox.review.aging_days }}日以上）</span>
+              <b>{{ inbox.review.aging_count }} 点 →</b>
+            </button>
+            <button class="review-row" @click="gotoUnallocated">
+              <span>未引き当ての出品</span>
+              <b>{{ inbox.review.unallocated_listings }} 件 →</b>
+            </button>
+            <button class="review-row" @click="gotoMonth">
+              <span>先月の締め</span>
+              <b>{{ inbox.review.last_month_unclosed ? 'まだ' : '済み' }} →</b>
+            </button>
+            <button v-if="inbox.review.top_model" class="review-row" @click="gotoTopModel">
+              <span>よく売れている型番</span>
+              <b>{{ inbox.review.top_model.model_code }} →</b>
+            </button>
+          </div>
+        </aside>
+      </div>
     </template>
 
     <template v-else>
-      <div class="home-grid">
-        <div class="home-summary">
-          <div class="stat-card brand"><Skeleton kind="stats" /></div>
-          <div class="stat-card cream"><Skeleton kind="stats" /></div>
-          <div class="stat-card cream"><Skeleton kind="stats" /></div>
-        </div>
-        <div class="home-detail">
-          <div class="panel">
-            <div class="section-head">
-              <span class="section-head-icon"><Icon name="alert" :size="16" /></span>
-              <h2 class="section-head-title">要対応</h2>
-            </div>
-            <Skeleton kind="stats" />
+      <div class="profit-strip">
+        <div class="stat-card brand"><Skeleton kind="stats" /></div>
+        <div class="stat-card"><Skeleton kind="stats" /></div>
+        <div class="stat-card"><Skeleton kind="stats" /></div>
+        <div class="stat-card"><Skeleton kind="stats" /></div>
+      </div>
+      <div class="inbox-grid">
+        <section class="panel inbox-panel">
+          <div class="inbox-head">
+            <h2 class="section-head-title">今やること</h2>
           </div>
-          <div class="panel">
-            <div class="section-head">
-              <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
-              <h2 class="section-head-title">型番ランキング</h2>
-            </div>
+          <Skeleton :rows="6" />
+        </section>
+        <aside class="side-col">
+          <div class="stat-card cream"><Skeleton kind="stats" /></div>
+          <div class="panel review-panel">
+            <h3 class="panel-title">見直すもの</h3>
             <Skeleton :rows="4" />
           </div>
-        </div>
+        </aside>
       </div>
     </template>
   </div>
 </template>
 
 <style scoped>
-/* --- レイアウト。左：主要指標カード、右：要対応の内訳とランキング --- */
-.home-grid {
+/* --- 利益ストリップ。左端がやや広い主役カード、残り3枚は同幅 --- */
+.profit-strip {
   display: grid;
-  grid-template-columns: 300px 1fr;
-  gap: 20px;
+  grid-template-columns: 1.4fr 1fr 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.profit-strip .stat-card-value {
+  font-size: var(--fs-28);
+}
+.profit-strip .stat-card.brand .stat-card-value {
+  font-size: var(--fs-36);
+}
+.stat-card-value.dim { color: var(--text-dim); }
+.unit { font-size: var(--fs-12); font-weight: 400; margin-left: 2px; }
+
+/* --- レイアウト。左：今やること（主）、右：見直すもの --- */
+.inbox-grid {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 18px;
   align-items: start;
 }
-.home-summary {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+@media (max-width: 1099px) {
+  .inbox-grid { grid-template-columns: 1fr; }
 }
-.home-detail {
+
+.side-col {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
 }
 
-/* --- 数字のカード。基本の見た目（面・角丸・余白）は style.css の .stat-card / .brand / .cream
-       に任せる。ここでは値のタイポグラフィと修飾だけ定義する --- */
-.stat-card.brand {
-  color: var(--text);
+.inbox-panel { min-width: 0; }
+.inbox-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
 }
-.stat-card.cream {
-  color: var(--text);
-}
-.stat-card-label {
+.inbox-head h2 { margin: 0; }
+
+/* --- グループ見出し --- */
+.group { margin-top: 14px; }
+.group:first-of-type { margin-top: 0; }
+.group-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
   font-size: var(--fs-12);
+  color: var(--text-faint);
+  letter-spacing: .02em;
+}
+.group-label { font-weight: 600; color: var(--text-dim); }
+.group-hint { font-weight: 400; }
+.n {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  min-height: 18px;
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-weight: 700;
+}
+.n.soft { background: var(--surface-hi); color: var(--text-dim); }
+
+/* --- 行 --- */
+.inbox-row {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 8px;
+  border-top: 1px solid var(--line-soft);
+}
+.group > .inbox-row:first-of-type { border-top: 0; }
+
+.row-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.row-thumb-img { width: 100%; height: 100%; object-fit: cover; }
+.row-thumb-ph {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-weight: 800;
+}
+.row-thumb-ph.warn { background: var(--warn-bg); color: var(--warn); }
+
+.row-main { min-width: 0; }
+.row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   font-weight: 600;
 }
-.stat-card.cream .stat-card-label { color: var(--brand-ink); }
-.stat-card-value {
-  font-size: var(--fs-36);
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.1;
-}
-.stat-card.brand .stat-card-value { font-size: var(--fs-44); }
-.stat-card-sub {
+.row-detail {
+  margin-top: 2px;
   font-size: var(--fs-12);
-  color: var(--text-dim);
 }
-.stat-card.brand .stat-card-sub { color: var(--text); opacity: .75; }
-.stat-card-sub.warn { color: var(--warn); }
-.aging-btn {
-  display: block;
+.profit-hint { color: var(--profit); font-weight: 700; }
+
+.row-act {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.row-act select { max-width: 220px; }
+
+.link-action {
   background: transparent;
   border: none;
   padding: 0;
   height: auto;
-  text-align: left;
+  color: var(--text-dim);
+  font-size: var(--fs-12);
+  text-decoration: underline dotted;
   cursor: pointer;
-  text-decoration: underline;
-  text-decoration-color: transparent;
 }
-.aging-btn:hover { text-decoration-color: currentColor; }
-.unit { font-size: var(--fs-12); font-weight: 400; margin-left: 2px; }
+.link-action:hover:not(:disabled) { background: transparent; color: var(--text); }
 
-.section-head select { margin-left: auto; }
+.done-row {
+  margin: 14px 0 0;
+  font-size: var(--fs-12);
+}
+.foot { margin: 4px 0 0; font-size: var(--fs-12); }
 
-/* --- 要対応の行 --- */
-.need-row {
+/* --- 見直すもの --- */
+.review-panel { padding: 14px 16px; }
+.review-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
   width: 100%;
-  padding: 12px 4px;
-  background: transparent;
-  border: 0;
-  border-bottom: 1px solid var(--line-soft);
-  text-align: left;
-  height: auto;
-}
-.need-row:last-of-type { border-bottom: none; }
-.need-row:hover { background: var(--surface-hi); }
-.need-row.zero { opacity: .45; }
-.need-count {
-  font-size: var(--fs-28);
-  font-weight: 700;
-  color: var(--warn);
-  min-width: 2ch;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-.need-row.zero .need-count { color: var(--text-faint); }
-.need-desc { font-size: var(--fs-14); }
-
-/* --- 取り込み失敗の行（要対応の先頭）。カウント数字の代わりにStatusChipを置く --- */
-.run-need-row { cursor: default; }
-.run-need-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.run-need-text .faint {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.hint { margin: 12px 0 0; font-size: var(--fs-12); }
-
-.intake {
-  display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 10px;
-  margin-top: 16px;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line-soft);
+  background: transparent;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  height: auto;
+  text-align: left;
   font-size: var(--fs-13);
+  color: var(--text);
 }
-.intake-msg { margin: 4px 0 0; font-size: var(--fs-13); }
-
-.ranking-table { table-layout: fixed; }
-.ranking-row { cursor: pointer; }
-/* 型番・数値列は狭く固定し、商品名の列に幅を残す */
-.ranking-table th:nth-child(1), .ranking-table td:nth-child(1) { width: 80px; }
-.ranking-table th:nth-child(3), .ranking-table td:nth-child(3),
-.ranking-table th:nth-child(4), .ranking-table td:nth-child(4) { width: 52px; }
-.ranking-table th:nth-child(5), .ranking-table td:nth-child(5),
-.ranking-table th:nth-child(6), .ranking-table td:nth-child(6) { width: 84px; }
-.ranking-table th:nth-child(7), .ranking-table td:nth-child(7) { width: 92px; }
-/* 商品名は1行省略をやめ、2行まで折り返して省略する */
-.ranking-name {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  white-space: normal;
-  word-break: break-word;
-  line-height: 1.35;
-}
-
-@media (max-width: 1099px) {
-  .home-grid { grid-template-columns: 1fr; }
-}
+.review-row:first-of-type { border-top: 0; }
+.review-row:hover { background: var(--surface-hi); }
+.review-row b { font-size: var(--fs-14); font-weight: 700; }
 </style>

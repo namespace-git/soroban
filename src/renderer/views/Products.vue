@@ -1,31 +1,28 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
-import type { ProductSummary, ProductDetail, InventoryItem, SaleProfit, Tag } from '../../shared/types'
-import Icon from '../components/Icon.vue'
+import type { ProductSummary, ProductKarte, InventoryItem, ShippingMethod, Tag } from '../../shared/types'
 import StatusChip from '../components/StatusChip.vue'
+import StatusPill from '../components/StatusPill.vue'
 import CodeChip from '../components/CodeChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
-import MiniChart from '../components/MiniChart.vue'
-import TimelineDrawer from '../components/TimelineDrawer.vue'
 import TagPicker from '../components/TagPicker.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
-import SortTh from '../components/SortTh.vue'
-import { useSort } from '../composables/useSort'
+import { todayLocal } from '../../shared/date'
 import type { PromptOptions } from '../components/InputDialog.vue'
-
-type SortKey = 'name' | 'in_stock' | 'purchase_total' | 'avg_cost' | 'avg_price' | 'avg_profit' | 'total_profit' | 'last_purchased_at' | 'last_sold_at'
-type ChipInfo = { tone: 'neutral' | 'ok' | 'warn' | 'info'; label: string }
 
 const revision = inject<Ref<number>>('revision')!
 // ダッシュボードの型番ランキングから goto('products', { modelCode }) で開かれたときに読む
 const gotoPayload = inject<Ref<{ modelCode?: string } | null>>('gotoPayload', ref(null))
+const goto = inject<(t: string, payload?: { search?: string; focusId?: string }) => void>('goto')!
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
-// --- 一覧 ---
+// ------------------------------------------------------------
+// 左：型番の一覧
+// ------------------------------------------------------------
 
 const products = ref<ProductSummary[]>([])
 const loaded = ref(false)
@@ -33,92 +30,53 @@ const searchText = ref('')
 /** 最終販売日（last_sold_at）に対する絞り込み。既定は「すべて」 */
 const period = ref<Period>('all')
 
+type ListSort = 'profit' | 'sold' | 'stock' | 'aging'
+const listSort = ref<ListSort>('profit')
+
+/** 在庫タブ・設定タブと同じ「長期滞留」のしきい値（日数） */
+const agingWarnDays = ref(90)
+
 async function load() {
   loaded.value = false
   products.value = await window.soroban.listProducts()
   loaded.value = true
 }
-onMounted(load)
-watch(revision, load)
-
-// --- 並び替え（列見出しクリック）。既定は現状のまま粗利合計 desc ---
-const { sortKey, sortDir, toggle, sortRows } = useSort<SortKey>('total_profit', 'desc')
-function onSort(key: string) {
-  toggle(key as SortKey)
-}
-function sortValue(p: ProductSummary, key: SortKey): string | number | null {
-  switch (key) {
-    case 'name': return p.name
-    case 'in_stock': return p.in_stock
-    case 'purchase_total': return p.purchase_total
-    case 'avg_cost': return p.avg_cost
-    case 'avg_price': return p.avg_price
-    case 'avg_profit': return p.avg_profit
-    case 'total_profit': return p.total_profit
-    case 'last_purchased_at': return p.last_purchased_at
-    case 'last_sold_at': return p.last_sold_at
-  }
+async function loadSettings() {
+  const s = await window.soroban.getSettings()
+  agingWarnDays.value = Number(s.aging_warn_days ?? 90)
 }
 
-// --- 商品（型番）タグ：この型番の在庫・販売に派生で見える ---
-
-const allTags = ref<Tag[]>([])
-async function loadTags() {
-  allTags.value = await window.soroban.listTags()
+function daysSince(dateStr: string): number {
+  const [y, m, d] = dateStr.slice(0, 10).split('-').map(Number)
+  const [ty, tm, td] = todayLocal().split('-').map(Number)
+  return Math.round((new Date(ty, tm - 1, td).getTime() - new Date(y, m - 1, d).getTime()) / 86400000)
 }
-onMounted(loadTags)
-watch(revision, loadTags)
+/**
+ * 型番ごとの滞留日数はまだ集計に無いため、在庫が残っている型番に限り「最終仕入日からの経過日数」を目安にする
+ */
+function agingDays(p: ProductSummary): number | null {
+  if (p.in_stock <= 0 || !p.last_purchased_at) return null
+  return daysSince(p.last_purchased_at)
+}
+function isStagnant(p: ProductSummary): boolean {
+  const d = agingDays(p)
+  return d != null && d >= agingWarnDays.value
+}
 
-const tagPickerModelCode = ref<string | null>(null)
-const tagPickerAnchor = ref<HTMLElement | null>(null)
-const tagPickerSelected = computed(() => {
-  const target = tagPickerModelCode.value
-  if (!target) return []
-  const source = detail.value?.model_code === target ? detail.value : products.value.find(p => p.model_code === target)
-  return source?.tags.map(t => t.id) ?? []
+const filteredProducts = computed(() => {
+  const rows = products.value.filter(p =>
+    matchesSearch([p.model_code, p.name, p.custom_name, ...p.tags.map(t => t.name)], searchText.value) &&
+    inPeriod(p.last_sold_at, period.value),
+  )
+  return [...rows].sort((a, b) => {
+    switch (listSort.value) {
+      case 'sold': return b.sold - a.sold
+      case 'stock': return b.in_stock - a.in_stock
+      case 'aging': return (agingDays(b) ?? -1) - (agingDays(a) ?? -1)
+      default: return b.total_profit - a.total_profit
+    }
+  })
 })
-
-function openProductTagPicker(modelCode: string, e: MouseEvent) {
-  tagPickerModelCode.value = modelCode
-  tagPickerAnchor.value = e.currentTarget as HTMLElement
-}
-
-function closeProductTagPicker() {
-  tagPickerModelCode.value = null
-  tagPickerAnchor.value = null
-}
-
-async function onProductTagChange(tagIds: string[]) {
-  if (!tagPickerModelCode.value) return
-  await window.soroban.setProductTags(tagPickerModelCode.value, tagIds)
-  await load()
-  if (detail.value?.model_code === tagPickerModelCode.value) await openDetail(tagPickerModelCode.value)
-}
-
-async function onProductTagCreate(name: string) {
-  if (!tagPickerModelCode.value) return
-  const newTagId = await window.soroban.createTag(name)
-  await loadTags()
-  await window.soroban.setProductTags(tagPickerModelCode.value, [...tagPickerSelected.value, newTagId])
-  await load()
-  if (detail.value?.model_code === tagPickerModelCode.value) await openDetail(tagPickerModelCode.value)
-}
-
-// --- 表示名：仕入明細・在庫の元の名前とは別に、商品タブでの見た目だけ変える ---
-
-async function renameProduct(modelCode: string, currentName: string | null): Promise<void> {
-  const input = await ask('商品名（表示名）', { initial: currentName ?? '', placeholder: '空にすると元の名前に戻ります' })
-  if (input === null) return
-  await window.soroban.setProductName(modelCode, input.trim() || null)
-  await load()
-  if (detail.value?.model_code === modelCode) await openDetail(modelCode)
-}
-
-const filteredProducts = computed(() =>
-  sortRows(products.value, sortValue).filter(p =>
-    matchesSearch([p.model_code, p.name], searchText.value) && inPeriod(p.last_sold_at, period.value),
-  ),
-)
 
 // --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
 
@@ -134,298 +92,426 @@ function placeholderChar(modelCode: string, name: string): string {
   return (c || '?').toUpperCase()
 }
 
-// --- 詳細（同じページ内で切り替える） ---
+// ------------------------------------------------------------
+// 右：カルテ（getProductKarte）
+// ------------------------------------------------------------
 
-const detail = ref<ProductDetail | null>(null)
-const detailLoading = ref(false)
+const karte = ref<ProductKarte | null>(null)
+const karteLoading = ref(false)
 
-async function openDetail(modelCode: string) {
-  detail.value = null
-  detailLoading.value = true
-  detail.value = await window.soroban.getProduct(modelCode)
-  detailLoading.value = false
+async function selectProduct(modelCode: string) {
+  karteLoading.value = true
+  karte.value = await window.soroban.getProductKarte(modelCode)
+  karteLoading.value = false
+  resetEstimate()
 }
 
-function backToList() {
-  detail.value = null
+/** 選んでいる型番はそのままに、数字だけ更新する（データ更新後の再読み込み用。試算の入力は消さない） */
+async function refreshKarte() {
+  if (!karte.value) return
+  karte.value = await window.soroban.getProductKarte(karte.value.summary.model_code)
 }
 
-const listedCount = computed(() => detail.value?.items.filter(i => i.listing !== null).length ?? 0)
-const unlistedCount = computed(() => (detail.value?.items.length ?? 0) - listedCount.value)
-
-watch(revision, () => {
-  if (detail.value) openDetail(detail.value.model_code)
+onMounted(async () => {
+  await Promise.all([load(), loadSettings(), loadTags(), loadMethods()])
+  if (gotoPayload.value?.modelCode) {
+    await selectProduct(gotoPayload.value.modelCode)
+    gotoPayload.value = null
+  } else if (filteredProducts.value.length) {
+    await selectProduct(filteredProducts.value[0].model_code)
+  }
 })
 
-// 開いたあとは payload を消費する（タブを離れてまた「商品」を直接開いたときに前の型番へ飛ばないため）
-watch(gotoPayload, (p) => {
+watch(gotoPayload, async (p) => {
   if (p?.modelCode) {
-    openDetail(p.modelCode)
+    await selectProduct(p.modelCode)
     gotoPayload.value = null
   }
-}, { immediate: true })
+})
 
-// --- 在庫の履歴ドロワー ---
+watch(revision, async () => {
+  await load()
+  await loadTags()
+  if (karte.value && filteredProducts.value.some(p => p.model_code === karte.value!.summary.model_code)) {
+    await refreshKarte()
+  } else if (filteredProducts.value.length) {
+    await selectProduct(filteredProducts.value[0].model_code)
+  } else {
+    karte.value = null
+  }
+})
 
-const timelineItemId = ref<string | null>(null)
-function openTimeline(item: InventoryItem) {
-  timelineItemId.value = item.id
+const headerSubParts = computed(() => {
+  const k = karte.value
+  if (!k) return []
+  const parts: string[] = []
+  if (k.source_name && k.source_name !== k.summary.name) parts.push(k.source_name)
+  if (k.summary.series_code) parts.push(`シリーズ ${k.summary.series_code}`)
+  if (k.summary.last_purchased_at) parts.push(`最終仕入 ${k.summary.last_purchased_at}`)
+  if (k.summary.last_sold_at) parts.push(`最終販売 ${k.summary.last_sold_at}`)
+  return parts
+})
+
+/** 出品中（引き当て済みも含めて履歴の下に一行で出す） */
+const activeListings = computed(() =>
+  karte.value?.listings.filter(l => l.status === 'active' || l.status === 'suspended') ?? [],
+)
+
+// --- 型番（商品）タグ：この型番の在庫・販売に派生で見える ---
+
+const allTags = ref<Tag[]>([])
+async function loadTags() {
+  allTags.value = await window.soroban.listTags()
 }
 
-// --- 状態チップ ---
+const tagPickerModelCode = ref<string | null>(null)
+const tagPickerAnchor = ref<HTMLElement | null>(null)
+const tagPickerSelected = computed(() => {
+  const target = tagPickerModelCode.value
+  if (!target) return []
+  const source = karte.value?.summary.model_code === target ? karte.value.summary : products.value.find(p => p.model_code === target)
+  return source?.tags.map(t => t.id) ?? []
+})
 
-function itemStatusChip(i: InventoryItem): ChipInfo {
-  if (i.status === 'sold') return { tone: 'ok', label: '販売済' }
-  if (i.status === 'disposed') return { tone: 'warn', label: '廃棄' }
-  if (i.status === 'personal_use') return { tone: 'neutral', label: '自家消費' }
-  if (i.status === 'split') return { tone: 'neutral', label: '分割済' }
-  if (i.fulfillment === 'pending' || i.fulfillment === 'shipped') return { tone: 'info', label: '未着' }
-  return { tone: 'neutral', label: '在庫' }
+function openProductTagPicker(modelCode: string, e: MouseEvent) {
+  tagPickerModelCode.value = modelCode
+  tagPickerAnchor.value = e.currentTarget as HTMLElement
+}
+function closeProductTagPicker() {
+  tagPickerModelCode.value = null
+  tagPickerAnchor.value = null
+}
+async function onProductTagChange(tagIds: string[]) {
+  if (!tagPickerModelCode.value) return
+  await window.soroban.setProductTags(tagPickerModelCode.value, tagIds)
+  await load()
+  if (karte.value?.summary.model_code === tagPickerModelCode.value) await refreshKarte()
+}
+async function onProductTagCreate(name: string) {
+  if (!tagPickerModelCode.value) return
+  const newTagId = await window.soroban.createTag(name)
+  await loadTags()
+  await window.soroban.setProductTags(tagPickerModelCode.value, [...tagPickerSelected.value, newTagId])
+  await load()
+  if (karte.value?.summary.model_code === tagPickerModelCode.value) await refreshKarte()
 }
 
-const saleStatusLabel: Record<string, string> = {
-  waiting_shipment: '発送待ち',
-  shipped: '発送済み',
-  delivered: '受取済み',
-  completed: '取引完了',
+// --- 表示名：仕入明細・在庫の元の名前とは別に、商品タブでの見た目だけ変える ---
+
+async function renameProduct(modelCode: string, currentName: string | null): Promise<void> {
+  const input = await ask('商品名（表示名）', { initial: currentName ?? '', placeholder: '空にすると元の名前に戻ります' })
+  if (input === null) return
+  await window.soroban.setProductName(modelCode, input.trim() || null)
+  await load()
+  if (karte.value?.summary.model_code === modelCode) await refreshKarte()
 }
-function saleStatusChip(s: SaleProfit): ChipInfo {
-  if (!s.status) return { tone: 'neutral', label: '未取得' }
-  if (s.status === 'completed') return { tone: 'ok', label: saleStatusLabel[s.status] }
-  if (s.status === 'shipped' || s.status === 'delivered') return { tone: 'info', label: saleStatusLabel[s.status] }
-  return { tone: 'neutral', label: saleStatusLabel[s.status] }
+
+// --- 手元の在庫：状態ピル・「追跡」で在庫タブへ ---
+
+function itemStatePill(i: InventoryItem): { tone: 'info' | 'warn' | 'neutral'; label: string } {
+  if (i.listing) return { tone: 'info', label: '出品中' }
+  if (i.fulfillment === 'pending' || i.fulfillment === 'shipped') return { tone: 'warn', label: '未着' }
+  return { tone: 'neutral', label: '未出品' }
 }
+function trackItem(i: InventoryItem) {
+  goto('inventory', { focusId: i.id })
+}
+
+// ------------------------------------------------------------
+// 「この金額で売ったら？」（estimateSaleProfit。粗利は画面で計算しない）
+// ------------------------------------------------------------
+
+const methods = ref<ShippingMethod[]>([])
+async function loadMethods() {
+  methods.value = await window.soroban.listShippingMethods()
+}
+
+const estimatePrice = ref(0)
+const estimateShippingMethodId = ref<string | null>(null)
+const estimateItemId = ref<string | null>(null)
+type ProfitEstimate = { fee: number; shipping_fee: number; packaging_cost: number; cost: number; gross_profit: number }
+const estimate = ref<ProfitEstimate | null>(null)
+
+function resetEstimate() {
+  const k = karte.value
+  estimatePrice.value = k?.listings.find(l => l.status === 'active')?.price ?? k?.summary.avg_price ?? 0
+  estimateShippingMethodId.value = k?.estimate_default.shipping_method_id ?? null
+  estimateItemId.value = k?.estimate_default.inventory_item_id ?? null
+  scheduleEstimate()
+}
+
+let estimateTimer: ReturnType<typeof setTimeout> | undefined
+let estimateSeq = 0
+
+async function runEstimate() {
+  const seq = ++estimateSeq
+  if (!karte.value) { estimate.value = null; return }
+  const inventoryItemIds = estimateItemId.value ? [estimateItemId.value] : []
+  const result = await window.soroban.estimateSaleProfit({
+    price: estimatePrice.value || 0,
+    shipping_method_id: estimateShippingMethodId.value,
+    packaging_cost: 0, // まだ売れていない試算なので梱包費は考えない
+    inventory_item_ids: inventoryItemIds,
+  })
+  if (seq === estimateSeq) estimate.value = result
+}
+// 入力のたびに150msデバウンス。応答が前後しても最後に投げた要求の結果だけを反映する
+function scheduleEstimate() {
+  clearTimeout(estimateTimer)
+  estimateTimer = setTimeout(runEstimate, 150)
+}
+watch([estimatePrice, estimateShippingMethodId, estimateItemId], scheduleEstimate)
+
+const estimateProfitRate = computed(() => {
+  if (!estimate.value || !estimatePrice.value) return null
+  return Math.round((estimate.value.gross_profit / estimatePrice.value) * 100)
+})
+const estimateCompare = computed(() => {
+  const avg = karte.value?.summary.avg_profit
+  if (avg == null || !estimate.value) return null
+  if (estimate.value.gross_profit === avg) return `過去の平均 ${yen(avg)} と同じ`
+  return estimate.value.gross_profit > avg
+    ? `過去の平均 ${yen(avg)} より高い`
+    : `過去の平均 ${yen(avg)} より低い`
+})
 </script>
 
 <template>
   <div class="page">
-    <!-- 一覧 -->
-    <template v-if="!detail && !detailLoading">
-      <div class="page-head">
-        <h1 class="page-title">商品</h1>
+    <div class="page-head">
+      <h1 class="page-title">商品</h1>
+    </div>
+
+    <div class="layout">
+      <!-- 左：型番の一覧 -->
+      <div class="panel list-panel">
+        <div class="list-toolbar">
+          <SearchBox v-model="searchText" placeholder="型番・商品名・タグを検索" />
+          <select v-model="listSort" class="sort-select">
+            <option value="profit">粗利合計</option>
+            <option value="sold">売れた数</option>
+            <option value="stock">在庫が多い</option>
+            <option value="aging">滞留が長い</option>
+          </select>
+        </div>
+        <div class="list-toolbar list-toolbar-sub">
+          <PeriodSelect v-model="period" />
+          <span class="grow" />
+          <span class="faint">{{ filteredProducts.length }}件</span>
+        </div>
+
+        <Skeleton v-if="!loaded" :rows="6" />
+        <div v-else-if="filteredProducts.length" class="prow-list">
+          <button
+            v-for="p in filteredProducts" :key="p.model_code"
+            type="button"
+            class="prow" :class="{ selected: karte?.summary.model_code === p.model_code }"
+            @click="selectProduct(p.model_code)"
+          >
+            <span class="prow-thumb">
+              <img
+                v-if="showThumb(p.thumb_url, p.model_code)"
+                class="thumb" :src="p.thumb_url!" alt="" loading="lazy"
+                @error="onThumbError(p.model_code)"
+              />
+              <span v-else class="thumb-placeholder">{{ placeholderChar(p.model_code, p.name) }}</span>
+            </span>
+            <span class="prow-body">
+              <span class="prow-name">{{ p.name }}</span>
+              <span class="prow-meta">
+                <CodeChip kind="model" :code="p.model_code" />
+                <span class="dim">在庫 {{ p.in_stock }} ・ 売れた {{ p.sold }}</span>
+                <StatusPill v-if="isStagnant(p)" tone="warn" :label="`滞留 ${agingDays(p)}日`" />
+              </span>
+            </span>
+            <span class="prow-profit">
+              <span class="faint">粗利計</span>
+              <strong :class="p.total_profit >= 0 ? 'profit' : 'loss'">{{ yen(p.total_profit) }}</strong>
+            </span>
+          </button>
+        </div>
+        <EmptyState
+          v-else-if="searchText || period !== 'all'"
+          title="検索条件に一致する商品がありません"
+        />
+        <EmptyState
+          v-else
+          title="型番付きの在庫がありません"
+          hint="仕入を登録すると、ここに商品ごとの実績が並びます"
+        />
       </div>
 
-      <div class="toolbar">
-        <SearchBox v-model="searchText" placeholder="型番・商品名を検索" />
-        <PeriodSelect v-model="period" />
-        <span class="grow" />
-        <span class="faint">{{ filteredProducts.length }}件</span>
-      </div>
+      <!-- 右：選んだ型番のカルテ -->
+      <div class="karte">
+        <Skeleton v-if="karteLoading" :rows="6" />
 
-      <Skeleton v-if="!loaded" :rows="6" />
-      <div v-else-if="filteredProducts.length" class="panel table-panel">
-        <table>
-          <thead>
-            <tr>
-              <th class="col-thumb"></th>
-              <SortTh label="商品" sort-key="name" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
-              <SortTh label="在庫" sort-key="in_stock" align="right" class="col-n" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
-              <SortTh label="仕入合計" sort-key="purchase_total" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
-              <SortTh label="平均原価" sort-key="avg_cost" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
-              <SortTh
-                label="平均売価（まるごと換算）" sort-key="avg_price" align="right" class="col-amt col-wrap"
-                title="分割した子は 1/分割数 の重みで平均します。箱を 4 つに分けて 1 個 ¥1,000 で売ると ¥4,000／箱"
-                :active-key="sortKey" :dir="sortDir" @sort="onSort"
-              />
-              <SortTh
-                label="平均粗利（まるごと換算）" sort-key="avg_profit" align="right" class="col-amt col-wrap"
-                title="分割した子は 1/分割数 の重みで平均します。箱を 4 つに分けて 1 個 ¥1,000 で売ると ¥4,000／箱"
-                :active-key="sortKey" :dir="sortDir" @sort="onSort"
-              />
-              <SortTh label="粗利合計" sort-key="total_profit" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
-              <SortTh label="最終仕入" sort-key="last_purchased_at" class="col-date-sm" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
-              <SortTh label="販売" sort-key="last_sold_at" class="col-date-sm" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="p in filteredProducts" :key="p.model_code"
-              class="product-row"
-              @click="openDetail(p.model_code)"
-            >
-              <td class="thumb-cell">
-                <img
-                  v-if="showThumb(p.thumb_url, p.model_code)"
-                  class="thumb" :src="p.thumb_url!" alt="" loading="lazy"
-                  @error="onThumbError(p.model_code)"
+        <template v-else-if="karte">
+          <div class="panel karte-head">
+            <img
+              v-if="showThumb(karte.summary.thumb_url, karte.summary.model_code)"
+              class="thumb thumb-lg" :src="karte.summary.thumb_url!" alt=""
+              @error="onThumbError(karte.summary.model_code)"
+            />
+            <span v-else class="thumb-placeholder thumb-lg">{{ placeholderChar(karte.summary.model_code, karte.summary.name) }}</span>
+            <div class="karte-head-text">
+              <div class="chip-row">
+                <CodeChip kind="model" :code="karte.summary.model_code" />
+                <StatusChip
+                  v-if="karte.summary.custom_name" tone="neutral" label="表示名"
+                  title="仕入明細の元の名前とは別に付けた表示名"
                 />
-                <span v-else class="thumb-placeholder">{{ placeholderChar(p.model_code, p.name) }}</span>
-              </td>
-              <td class="item-cell">
-                <div class="item-name">{{ p.name }}</div>
-                <div class="chip-row">
-                  <StatusChip tone="neutral" :label="p.model_code" />
-                  <StatusChip
-                    v-if="p.custom_name" tone="neutral" label="表示名"
-                    title="仕入明細の元の名前とは別に付けた表示名"
-                  />
-                  <StatusChip v-for="t in p.tags" :key="t.id" tone="info" :label="t.name" />
-                  <button class="sm ghost" @click.stop="openProductTagPicker(p.model_code, $event)" title="タグを編集する">タグ</button>
-                  <button class="sm ghost" @click.stop="renameProduct(p.model_code, p.custom_name ?? p.name)" title="表示名を変える">名前</button>
-                </div>
-              </td>
-              <td class="num">{{ p.in_stock }}</td>
-              <td class="num">{{ yen(p.purchase_total) }}</td>
-              <td class="num">{{ p.avg_cost != null ? yen(p.avg_cost) : '—' }}</td>
-              <td class="num">{{ p.avg_price != null ? yen(p.avg_price) : '—' }}</td>
-              <td class="num" :class="p.avg_profit != null ? (p.avg_profit >= 0 ? 'profit' : 'loss') : ''">
-                {{ p.avg_profit != null ? yen(p.avg_profit) : '—' }}
-              </td>
-              <td class="num">
-                <strong :class="p.total_profit >= 0 ? 'profit' : 'loss'">{{ yen(p.total_profit) }}</strong>
-              </td>
-              <td class="dim last-dates">{{ p.last_purchased_at ?? '—' }}</td>
-              <td class="dim last-dates">{{ p.last_sold_at ?? '—' }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <EmptyState
-        v-else-if="searchText || period !== 'all'"
-        title="検索条件に一致する商品がありません"
-      />
-      <EmptyState
-        v-else
-        title="型番付きの在庫がありません"
-        hint="仕入を登録すると、ここに商品ごとの実績が並びます"
-      />
-    </template>
-
-    <!-- 詳細 -->
-    <template v-else>
-      <div class="page-head">
-        <button class="ghost back-btn" @click="backToList">
-          <Icon name="arrow-right" :size="14" class="flip" />
-          商品一覧
-        </button>
-      </div>
-
-      <Skeleton v-if="detailLoading" :rows="6" />
-
-      <template v-else-if="detail">
-        <div class="panel detail-head">
-          <img
-            v-if="showThumb(detail.thumb_url, detail.model_code)"
-            class="thumb thumb-lg" :src="detail.thumb_url!" alt=""
-            @error="onThumbError(detail.model_code)"
-          />
-          <span v-else class="thumb-placeholder thumb-lg">{{ placeholderChar(detail.model_code, detail.name) }}</span>
-          <div class="detail-head-text">
-            <div class="chip-row">
-              <StatusChip tone="neutral" :label="detail.model_code" />
-              <StatusChip
-                v-if="detail.custom_name" tone="neutral" label="表示名"
-                title="仕入明細の元の名前とは別に付けた表示名"
-              />
-              <StatusChip v-for="t in detail.tags" :key="t.id" tone="info" :label="t.name" />
-              <button class="sm ghost" @click="openProductTagPicker(detail.model_code, $event)" title="タグを編集する">タグ</button>
-              <button class="sm ghost" @click="renameProduct(detail.model_code, detail.custom_name ?? detail.name)" title="表示名を変える">名前</button>
+                <StatusChip v-for="t in karte.summary.tags" :key="t.id" tone="info" :label="t.name" />
+              </div>
+              <h2 class="karte-name">{{ karte.summary.name }}</h2>
+              <p v-if="headerSubParts.length" class="faint karte-sub">{{ headerSubParts.join(' ・ ') }}</p>
             </div>
-            <h2 class="detail-name">{{ detail.name }}</h2>
-            <p class="faint tag-hint">この型番の在庫と販売に引き継がれます</p>
+            <div class="karte-head-actions">
+              <button class="sm ghost" @click="openProductTagPicker(karte.summary.model_code, $event)">タグ</button>
+              <button class="sm ghost" @click="renameProduct(karte.summary.model_code, karte.summary.custom_name ?? karte.summary.name)">名前</button>
+            </div>
           </div>
-        </div>
 
-        <div class="stat-grid">
-          <div class="stat-card">
-            <span class="stat-card-label">在庫数</span>
-            <span class="stat-card-value">{{ detail.in_stock }}<span class="unit">点</span></span>
-            <span class="stat-card-sub">未出品 {{ unlistedCount }}・出品中 {{ listedCount }}</span>
+          <div class="panel">
+            <div class="stat-grid">
+              <div class="stat-card">
+                <span class="stat-card-label">手元の在庫</span>
+                <span class="stat-card-value">{{ karte.in_stock.count }}<span class="unit">点</span></span>
+                <span class="stat-card-sub">届いている {{ karte.in_stock.arrived }} ・ 未着 {{ karte.in_stock.not_arrived }} ・ 原価計 {{ yen(karte.in_stock.cost) }}</span>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">出品中</span>
+                <span class="stat-card-value">{{ karte.listed.count }}</span>
+                <span class="stat-card-sub">{{ yen(karte.listed.price_total) }} ・ 見込み粗利 {{ yen(karte.listed.expected_profit) }}</span>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">売れた</span>
+                <span class="stat-card-value">{{ karte.sold_recent.count }}</span>
+                <span class="stat-card-sub">直近 {{ karte.sold_recent.days }} 日</span>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">平均売価（まるごと換算）</span>
+                <span class="stat-card-value">{{ karte.summary.avg_price != null ? yen(karte.summary.avg_price) : '—' }}</span>
+                <span class="stat-card-sub">{{ karte.price_range ? `最低 ${yen(karte.price_range.min)} 〜 最高 ${yen(karte.price_range.max)}` : '—' }}</span>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">平均粗利（まるごと換算）</span>
+                <span class="stat-card-value" :class="karte.summary.avg_profit != null ? (karte.summary.avg_profit >= 0 ? 'profit' : 'loss') : ''">
+                  {{ karte.summary.avg_profit != null ? yen(karte.summary.avg_profit) : '—' }}
+                </span>
+                <span class="stat-card-sub">{{ karte.profit_rate != null ? `粗利率 ${karte.profit_rate}%` : '—' }}</span>
+              </div>
+            </div>
           </div>
-          <div class="stat-card">
-            <span class="stat-card-label">仕入合計</span>
-            <span class="stat-card-value">{{ yen(detail.purchase_total) }}</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-card-label">平均原価 → 平均売価</span>
-            <span class="stat-card-value compact">
-              {{ detail.avg_cost != null ? yen(detail.avg_cost) : '—' }}
-              <Icon name="arrow-right" :size="14" />
-              {{ detail.avg_price != null ? yen(detail.avg_price) : '—' }}
-            </span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-card-label">粗利合計</span>
-            <span class="stat-card-value" :class="detail.total_profit >= 0 ? 'profit' : 'loss'">
-              {{ yen(detail.total_profit) }}
-            </span>
-          </div>
-        </div>
 
-        <div class="panel">
-          <div class="section-head">
-            <span class="section-head-icon"><Icon name="inventory" :size="16" /></span>
-            <h2 class="section-head-title">在庫の増減</h2>
-            <span class="legend">
-              <span class="legend-item"><span class="dot purchase" />仕入</span>
-              <span class="legend-item"><span class="dot sold" />販売</span>
-              <span class="legend-item"><span class="dot stock" />在庫残</span>
-            </span>
+          <div class="panel">
+            <p class="panel-title">この金額で売ったら？</p>
+            <div class="calc">
+              <div class="calc-in">
+                <label class="calc-field">
+                  売価
+                  <input type="number" v-model.number="estimatePrice" min="0" />
+                </label>
+                <label class="calc-field">
+                  発送
+                  <select v-model="estimateShippingMethodId">
+                    <option :value="null">未定</option>
+                    <option v-for="m in methods" :key="m.id" :value="m.id">{{ m.name }}　{{ yen(m.fee) }}</option>
+                  </select>
+                </label>
+                <label class="calc-field">
+                  在庫
+                  <select v-model="estimateItemId" :disabled="!karte.items.length">
+                    <option v-if="!karte.items.length" :value="null">在庫なし</option>
+                    <option v-for="i in karte.items" :key="i.id" :value="i.id">
+                      {{ i.item_code }}（原価 {{ yen(i.landed_cost) }}・{{ i.acquired_at }}）
+                    </option>
+                  </select>
+                </label>
+              </div>
+              <div class="calc-out" v-if="estimate">
+                <p class="calc-out-value" :class="estimate.gross_profit >= 0 ? 'profit' : 'loss'">粗利 {{ yen(estimate.gross_profit) }}</p>
+                <p class="faint calc-out-sub">
+                  {{ yen(estimatePrice) }} − 手数料 {{ yen(estimate.fee) }} − 送料 {{ yen(estimate.shipping_fee) }}
+                  <template v-if="estimate.cost > 0"> − 原価 {{ yen(estimate.cost) }}</template>
+                  <template v-if="estimateProfitRate != null"> ・ 粗利率 {{ estimateProfitRate }}%</template>
+                  <template v-if="estimateCompare"> ・ {{ estimateCompare }}</template>
+                </p>
+              </div>
+            </div>
           </div>
-          <MiniChart v-if="detail.months.length" :months="detail.months" />
-          <p v-else class="dim">仕入・販売の記録がまだありません</p>
-        </div>
 
-        <div class="panel table-panel">
-          <p class="panel-title table-title">仕入</p>
-          <table v-if="detail.items.length" class="compact">
-            <thead>
-              <tr>
-                <th>仕入日</th>
-                <th class="num">原価</th>
-                <th>状態</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="i in detail.items" :key="i.id"
-                class="item-row"
-                @click="openTimeline(i)"
-              >
-                <td class="faint">{{ i.acquired_at }}</td>
-                <td class="num">{{ yen(i.landed_cost) }}</td>
-                <td>
-                  <div class="chip-row">
+          <div class="panel table-panel">
+            <p class="panel-title table-title">手元の在庫（{{ karte.items.length }} 点）</p>
+            <table v-if="karte.items.length" class="compact">
+              <thead>
+                <tr>
+                  <th>コード</th>
+                  <th>仕入</th>
+                  <th class="num">原価</th>
+                  <th class="num">滞留</th>
+                  <th>状態</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="i in karte.items" :key="i.id">
+                  <td>
                     <CodeChip kind="item" :code="i.item_code" />
-                    <StatusChip :tone="itemStatusChip(i).tone" :label="itemStatusChip(i).label" />
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <EmptyState v-else title="仕入の記録がありません" />
-        </div>
+                    <span v-if="i.parent_id" class="faint split-hint">分割</span>
+                  </td>
+                  <td class="faint">{{ i.shop_account_name ?? '—' }} ・ {{ i.acquired_at }}</td>
+                  <td class="num">{{ yen(i.landed_cost) }}</td>
+                  <td class="num">{{ i.aging_days }}日</td>
+                  <td><StatusPill :tone="itemStatePill(i).tone" :label="itemStatePill(i).label" /></td>
+                  <td class="num"><button class="sm ghost" @click="trackItem(i)">追跡</button></td>
+                </tr>
+              </tbody>
+            </table>
+            <EmptyState v-else title="手元の在庫がありません" />
+          </div>
 
-        <div class="panel table-panel">
-          <p class="panel-title table-title">販売</p>
-          <table v-if="detail.sales.length" class="compact">
-            <thead>
-              <tr>
-                <th>販売日</th>
-                <th class="num">価格</th>
-                <th class="num">粗利</th>
-                <th>取引状態</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="s in detail.sales" :key="s.id">
-                <td class="faint">{{ s.sold_at }}</td>
-                <td class="num">{{ yen(s.price) }}</td>
-                <td class="num" :class="s.gross_profit >= 0 ? 'profit' : 'loss'">{{ yen(s.gross_profit) }}</td>
-                <td><StatusChip :tone="saleStatusChip(s).tone" :label="saleStatusChip(s).label" /></td>
-              </tr>
-            </tbody>
-          </table>
-          <EmptyState v-else title="販売の記録がありません" />
-        </div>
-      </template>
-    </template>
+          <div class="panel table-panel">
+            <p class="panel-title table-title">販売の履歴</p>
+            <table v-if="karte.sales.length" class="compact">
+              <thead>
+                <tr>
+                  <th>販売日</th>
+                  <th>タイトル</th>
+                  <th class="num">売価</th>
+                  <th class="num">送料</th>
+                  <th class="num">原価</th>
+                  <th class="num">粗利</th>
+                  <th>買い手</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="s in karte.sales" :key="s.id">
+                  <td class="faint">{{ s.sold_at }}</td>
+                  <td class="sale-title">{{ s.title }}</td>
+                  <td class="num">{{ yen(s.price) }}</td>
+                  <td class="num">
+                    {{ yen(s.shipping_fee) }}
+                    <StatusPill v-if="!s.is_shipping_confirmed" tone="warn" label="送料未入力" />
+                  </td>
+                  <td class="num">{{ yen(s.cost) }}</td>
+                  <td class="num" :class="s.gross_profit >= 0 ? 'profit' : 'loss'">{{ yen(s.gross_profit) }}</td>
+                  <td class="faint">{{ s.buyer ?? '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <EmptyState v-else title="販売の記録がありません" />
+            <p v-if="activeListings.length" class="dim listing-note">
+              出品中：
+              <template v-for="(l, i) in activeListings" :key="l.mercari_item_id">
+                <span v-if="i > 0"> ・ </span>{{ l.listed_at }} {{ yen(l.price) }}（{{ l.items.length ? '引き当て済み' : '未引き当て' }}）<span v-if="l.likes != null"> ・いいね {{ l.likes }}</span>
+              </template>
+            </p>
+          </div>
+        </template>
 
-    <TimelineDrawer
-      :open="!!timelineItemId"
-      :inventory-item-id="timelineItemId"
-      @close="timelineItemId = null"
-    />
+        <EmptyState v-else title="型番を選ぶとここにカルテが出ます" />
+      </div>
+    </div>
 
     <TagPicker
       :open="!!tagPickerModelCode"
@@ -440,25 +526,44 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
 </template>
 
 <style scoped>
-.table-panel { padding: 0; overflow: hidden; }
-.table-panel table { table-layout: fixed; }
-.table-panel th.col-thumb { width: 64px; }
-/* 数字列は固定幅、商品列が残りを取る（商品名を 3 行に折らない） */
-.table-panel th.col-n     { width: 64px; }
-.table-panel th.col-amt   { width: 104px; }
-.table-panel th.col-date-sm { width: 84px; }
-/* 「（まるごと換算）」が入る2列は折り返しを許して2行にする */
-.table-panel th.col-wrap  { width: 116px; white-space: normal; line-height: 1.3; }
+.layout {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: 16px;
+  align-items: start;
+}
 
-.product-row { cursor: pointer; }
-.item-row { cursor: pointer; }
+/* --- 左：一覧 --- */
 
-.thumb-cell { padding-right: 4px; }
-.thumb, .thumb-placeholder {
-  width: 40px;
-  height: 40px;
+.list-panel { display: flex; flex-direction: column; gap: 10px; }
+.list-toolbar { display: flex; align-items: center; gap: 8px; }
+.list-toolbar :deep(.search-box) { width: auto; flex: 1; }
+.list-toolbar-sub { font-size: var(--fs-12); }
+.sort-select { flex-shrink: 0; }
+
+.prow-list { display: flex; flex-direction: column; }
+.prow {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 8px;
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   border-radius: var(--radius-sm);
-  flex-shrink: 0;
+}
+.prow:first-child { border-top: none; }
+.prow:hover { background: var(--surface-hi); }
+.prow.selected { background: var(--brand-soft); }
+
+.prow-thumb .thumb, .prow-thumb .thumb-placeholder {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-sm);
 }
 .thumb { object-fit: cover; display: block; }
 .thumb-placeholder {
@@ -471,66 +576,50 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
   font-size: var(--fs-14);
 }
 
-.item-cell .item-name {
-  font-size: var(--fs-14);
-  font-weight: 500;
+.prow-body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.prow-name {
+  font-size: var(--fs-13);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.prow-meta { display: flex; align-items: center; gap: 6px; font-size: var(--fs-12); flex-wrap: wrap; }
 
-.last-dates { font-size: var(--fs-12); }
+.prow-profit { text-align: right; font-size: var(--fs-12); color: var(--text-dim); display: flex; flex-direction: column; gap: 2px; }
+.prow-profit strong { font-size: var(--fs-14); }
 
-.back-btn { display: inline-flex; align-items: center; gap: 6px; }
-.back-btn .flip { transform: scaleX(-1); }
+/* --- 右：カルテ --- */
 
-.detail-head {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-.thumb-lg.thumb, .thumb-lg.thumb-placeholder {
-  width: 56px;
-  height: 56px;
-  font-size: var(--fs-16);
-}
-.detail-head-text { min-width: 0; }
-.detail-name { margin: 4px 0 0; font-size: var(--fs-20); font-weight: 700; }
-.tag-hint { margin: 4px 0 0; font-size: var(--fs-12); }
+.karte { display: flex; flex-direction: column; gap: 16px; }
+.karte-head { display: flex; align-items: center; gap: 16px; }
+.thumb-lg.thumb, .thumb-lg.thumb-placeholder { width: 56px; height: 56px; font-size: var(--fs-16); flex-shrink: 0; }
+.karte-head-text { min-width: 0; flex: 1; }
+.karte-name { margin: 4px 0 0; font-size: var(--fs-20); font-weight: 700; }
+.karte-sub { margin: 4px 0 0; font-size: var(--fs-12); }
+.karte-head-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 16px;
-  margin-bottom: 16px;
-}
-.stat-card-value.compact {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-20);
-  white-space: nowrap;
 }
 
-.section-head .legend {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  font-size: var(--fs-12);
-  color: var(--text-dim);
-}
-.legend-item { display: inline-flex; align-items: center; gap: 5px; }
-.legend .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  display: inline-block;
-}
-.legend .dot.purchase { background: var(--brand); }
-.legend .dot.sold { background: var(--profit-solid); }
-.legend .dot.stock { background: var(--text); }
+.calc { display: flex; flex-direction: column; gap: 12px; }
+.calc-in { display: flex; gap: 16px; flex-wrap: wrap; }
+.calc-field { display: flex; align-items: center; gap: 8px; font-size: var(--fs-13); }
+.calc-field input[type="number"] { width: 110px; font-weight: 700; }
+.calc-out { background: var(--profit-bg); border-radius: var(--radius-md); padding: 10px 14px; }
+.calc-out-value { margin: 0; font-size: var(--fs-20); font-weight: 800; }
+.calc-out-sub { margin: 4px 0 0; }
 
 .table-title { padding: 16px 20px 0; margin: 0 0 8px; }
+.split-hint { margin-left: 6px; }
+.sale-title { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.listing-note { padding: 4px 20px 16px; margin: 0; font-size: var(--fs-12); }
 
 @media (max-width: 1099px) {
+  .layout { grid-template-columns: 1fr; }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .table-panel { overflow-x: auto; }
 }

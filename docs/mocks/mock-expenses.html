@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>経費（レシートと並べる）モック</title>
+<style>
+:root{--canvas:#f6f6f3;--surface:#fff;--surface-hi:#f3f2ee;--line:#e6e4dd;--line-soft:#efede8;--text:#26262a;--text-dim:#63636a;--text-faint:#97979e;--brand:#f5c842;--brand-soft:#fff6dd;--brand-ink:#7a5a00;--primary:#2b2b30;--profit:#2f9e5a;--profit-bg:#e6f6ec;--loss:#d9463f;--warn:#b45f06;--warn-bg:#fff0e0;--warn-line:#f2b26b;--info:#2f6fcf;--info-bg:#e8f0fc;--radius:14px;--radius-md:10px;--shadow-1:0 2px 10px rgba(40,35,20,.06);--font:"M PLUS 2","Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--text);font:14px/1.5 var(--font)}
+.app{display:grid;grid-template-columns:88px 1fr;min-height:100vh}
+.nav{background:#fff;border-right:1px solid var(--line);padding:16px 0;text-align:center;font-size:11px;color:var(--text-faint)}
+.nav .mark{width:36px;height:36px;border-radius:50%;background:var(--brand);margin:0 auto 4px;display:grid;place-items:center;font-weight:800}
+.nav .item{padding:12px 0}.nav .item.active{color:var(--text);font-weight:700}.nav hr{border:0;border-top:1px solid var(--line);margin:8px 16px}
+.main{padding:20px 28px 40px;max-width:1280px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.topbar .search{flex:0 0 260px;border:1px solid var(--line);border-radius:999px;padding:8px 14px;color:var(--text-faint);background:#fff}
+.topbar .mini{font-size:13px;background:var(--brand-soft);color:var(--brand-ink);border-radius:999px;padding:6px 12px;font-weight:700}
+.topbar .grow{flex:1}.topbar .last{font-size:13px;color:var(--text-dim)}
+.btn{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;font:inherit;font-size:13px;cursor:pointer}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}.btn.sm{padding:4px 10px;font-size:12px}.btn.brand{background:var(--brand);border-color:var(--brand);font-weight:700}
+.head{display:flex;align-items:center;gap:12px;margin-bottom:12px}h1{font-size:20px;margin:0}
+.sum{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
+.s{background:#fff;border-radius:var(--radius-md);box-shadow:var(--shadow-1);padding:10px 14px}
+.s .l{font-size:12px;color:var(--text-dim)}.s .v{font-size:20px;font-weight:800}.s .x{font-size:11px;color:var(--text-faint)}
+.layout{display:grid;grid-template-columns:400px 1fr;gap:16px;align-items:start}
+.list{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow-1);overflow:hidden}
+.tb{padding:10px 12px;border-bottom:1px solid var(--line-soft);display:flex;gap:8px;font-size:12px;color:var(--text-dim);flex-wrap:wrap}
+.tb select{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:8px;padding:4px 8px;background:#fff}
+.tb .sbox{flex:1;min-width:140px;border:1px solid var(--line);border-radius:8px;padding:5px 10px;color:var(--text-faint);background:#fff}
+.mh{padding:6px 12px;font-size:11px;color:var(--text-faint);background:var(--surface-hi);letter-spacing:.04em}
+.e{display:grid;grid-template-columns:40px 1fr auto;gap:10px;align-items:center;padding:10px 12px;border-top:1px solid var(--line-soft);cursor:pointer}
+.e.on{background:var(--brand-soft)}
+.eimg{width:40px;height:52px;border-radius:6px;background:#fff;border:1px solid var(--line);display:grid;place-items:center;color:var(--text-faint);font-size:10px}
+.e .n{font-weight:600;font-size:13px}.e .d{font-size:11px;color:var(--text-dim)}
+.e .amt{text-align:right;font-weight:700;font-variant-numeric:tabular-nums}.e .amt small{display:block;font-weight:500;font-size:11px;color:var(--text-faint)}
+.chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;background:var(--surface-hi);color:var(--text-dim);vertical-align:middle;margin-right:4px}
+.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.ok{background:var(--profit-bg);color:var(--profit)}.chip.info{background:var(--info-bg);color:var(--info)}
+.detail{display:grid;grid-template-columns:360px 1fr;gap:16px;background:#fff;border-radius:var(--radius);box-shadow:var(--shadow-1);padding:16px 18px}
+.receipt{background:var(--surface-hi);border-radius:var(--radius-md);padding:10px;text-align:center}
+.receipt .paper{background:#fff;border:1px solid var(--line);margin:0 auto;width:250px;height:420px;border-radius:4px;padding:14px 12px;text-align:left;font-size:11px;line-height:1.7;color:#333;font-family:"MS Gothic",monospace}
+.receipt .paper .c{text-align:center}.receipt .paper .r{display:flex;justify-content:space-between}
+.receipt .ops{display:flex;gap:6px;justify-content:center;margin-top:8px;flex-wrap:wrap}
+.form h2{font-size:15px;margin:0 0 8px}
+.f{display:grid;grid-template-columns:110px 1fr;gap:8px 10px;align-items:center;font-size:13px}
+.f label{color:var(--text-dim)}
+.f input,.f select{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:#fff;width:100%}
+.f .row{display:flex;gap:8px;align-items:center}
+.f .hint{font-size:11px;color:var(--text-faint)}
+.lines{margin-top:12px}
+.ln{display:grid;grid-template-columns:1fr 90px 60px 90px 110px 24px;gap:8px;align-items:center;padding:4px 0;font-size:13px}
+.ln input,.ln select{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:8px;padding:5px 8px;background:#fff;width:100%}
+.ln.hd{font-size:11px;color:var(--text-faint)}
+.ln .num{text-align:right;font-variant-numeric:tabular-nums}
+.ln .ai{border-color:var(--brand)}
+.tot{display:flex;justify-content:flex-end;gap:16px;margin-top:8px;font-size:13px;color:var(--text-dim)}.tot b{font-size:16px;color:var(--text)}
+.ok{background:var(--profit-bg);color:var(--profit);border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
+.warn{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:6px 10px;font-size:12px;margin-top:8px}
+.foot{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+.note{position:fixed;right:16px;bottom:16px;background:#26262a;color:#fff;font-size:12px;padding:8px 12px;border-radius:8px;opacity:.85}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="nav">
+    <div class="mark">そ</div>そろばん
+    <div class="item">ホーム</div><div class="item">売上</div><div class="item">仕入</div><div class="item">在庫</div><div class="item">商品</div><div class="item active">経費</div><div class="item">月次</div><hr><div class="item">設定</div><div class="item">ヘルプ</div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div class="search">すべてから探す（Ctrl+K）</div>
+      <div class="mini">今月の粗利 ¥5,249 ／ 純利益 ¥5,049</div>
+      <div class="grow"></div>
+      <div class="last">最終取り込み 09/21 19:08</div>
+      <button class="btn primary">取り込む</button>
+    </div>
+    <div class="head"><h1>経費</h1><span style="flex:1"></span><button class="btn brand">📷 レシートを読み取って登録</button><button class="btn">手で登録</button></div>
+
+    <div class="sum">
+      <div class="s"><div class="l">今月の経費</div><div class="v">¥5,030</div><div class="x">4 件 ・ 純利益から引かれる</div></div>
+      <div class="s"><div class="l">梱包費</div><div class="v">¥2,000</div><div class="x">先月 ¥1,500</div></div>
+      <div class="s"><div class="l">送料</div><div class="v">¥1,400</div><div class="x">先月 ¥1,200</div></div>
+      <div class="s"><div class="l">消耗品・その他</div><div class="v">¥1,630</div><div class="x">翌月に回した ¥980 は含まない</div></div>
+    </div>
+
+    <div class="layout">
+      <!-- 左：一覧（月で区切り） -->
+      <div class="list">
+        <div class="tb"><select><option>今月</option><option>先月</option><option>直近 3 か月</option><option>期間を指定…</option></select><select><option>すべての項目</option><option>梱包費</option><option>送料</option></select><span class="sbox">購入店・品名・メモ</span></div>
+        <div class="mh">2026-09</div>
+        <div class="e on"><div class="eimg">レシート</div><div><div class="n">セリア 小倉貫店 <span class="chip">梱包費</span><span class="chip">送料</span></div><div class="d">09/21 ・ レジ袋小・発送用シール ほか1点 ・ <span class="chip ok" style="margin:0">読み取り</span></div></div><div class="amt">¥443</div></div>
+        <div class="e"><div class="eimg">レシート</div><div><div class="n">セブンイレブン 小倉貫店 <span class="chip">送料</span></div><div class="d">09/21 ・ メルカリ 宅急便コンパクト ×4</div></div><div class="amt">¥281</div></div>
+        <div class="e"><div class="eimg">レシート</div><div><div class="n">ダイソー <span class="chip">梱包費</span></div><div class="d">09/15 ・ ビニール袋 100枚 ほか1点</div></div><div class="amt">¥2,000</div></div>
+        <div class="e"><div class="eimg" style="border-style:dashed">なし</div><div><div class="n">Amazon <span class="chip">消耗品</span></div><div class="d">09/20 ・ 来月分の梱包資材 ・ <span class="chip warn" style="margin:0">計上 2026-10</span></div></div><div class="amt">¥980<small>翌月</small></div></div>
+        <div class="mh">2026-08</div>
+        <div class="e"><div class="eimg">レシート</div><div><div class="n">ダイソー <span class="chip">梱包費</span></div><div class="d">08/08 ・ 段ボール 10枚</div></div><div class="amt">¥1,500</div></div>
+        <div class="e"><div class="eimg" style="border-style:dashed">なし</div><div><div class="n">ヤマト運輸 <span class="chip">送料</span></div><div class="d">08/15</div></div><div class="amt">¥1,200</div></div>
+      </div>
+
+      <!-- 右：レシート画像 × フォーム -->
+      <div class="detail">
+        <div class="receipt">
+          <div class="paper">
+            <div class="c" style="font-size:16px;font-weight:700">Seria</div>
+            <div class="r"><span>登録番号</span><span>T4200001013662</span></div>
+            <div class="c">領収書</div>
+            <div class="r"><span>小倉貫店</span><span>2867</span></div>
+            <div>TEL093-967-6721</div>
+            <div>2026年 9月21日(月)16:01 #000005</div>
+            <div class="r"><span>&nbsp;レジ袋小</span><span>3</span></div>
+            <div class="r"><span>&nbsp;ゆうパケットポスト発送用シール20</span><span>200</span></div>
+            <div class="r"><span>&nbsp;宅配用ビニール袋A4サイ</span><span>200</span></div>
+            <div class="r"><span>小計 5点</span><span>403</span></div>
+            <div class="r"><span>10%対象 443(内 税額</span><span>40)</span></div>
+            <div class="r" style="font-size:14px;font-weight:700"><span>合計</span><span>¥443</span></div>
+            <div class="r"><span>クレジット</span><span>¥443</span></div>
+          </div>
+          <div class="ops"><button class="btn sm">拡大</button><button class="btn sm">もう一度読み取る</button><button class="btn sm">画像を差し替え</button></div>
+        </div>
+
+        <div class="form">
+          <h2>セリア 小倉貫店 <span class="chip ok">AI 読み取り ・ 登録番号で店名を確認</span></h2>
+          <div class="f">
+            <label>購入店</label><div class="row"><input value="セリア 小倉貫店"><span class="hint">履歴から候補</span></div>
+            <label>購入日</label><div class="row"><input value="2026-09-21" style="width:150px"><span class="hint">レシートの日付</span></div>
+            <label>計上月</label><div class="row"><input value="2026-09" style="width:120px"><span class="hint">基本は購入月。翌月に回すときだけ変える</span></div>
+          </div>
+          <div class="lines">
+            <div class="ln hd"><span>品名</span><span class="num">単価</span><span class="num">数量</span><span class="num">金額</span><span>項目</span><span></span></div>
+            <div class="ln"><input class="ai" value="レジ袋小"><input class="ai num" value="3"><input class="ai num" value="1"><span class="num">¥3</span><select class="ai"><option>梱包費</option></select><span>🗑</span></div>
+            <div class="ln"><input class="ai" value="ゆうパケットポスト発送用シール20"><input class="ai num" value="200"><input class="ai num" value="1"><span class="num">¥200</span><select class="ai"><option>送料</option><option>梱包費</option></select><span>🗑</span></div>
+            <div class="ln"><input class="ai" value="宅配用ビニール袋A4サイズ"><input class="ai num" value="200"><input class="ai num" value="1"><span class="num">¥200</span><select class="ai"><option>梱包費</option></select><span>🗑</span></div>
+            <div class="hint" style="margin-top:4px">＋ 明細を追加</div>
+          </div>
+          <div class="tot"><span>明細合計 <b>¥403</b></span><span>レシートの合計 <b>¥443</b></span></div>
+          <div class="warn">合計が ¥40 合いません（消費税の分かも）。明細を直すか、「差額を税として追加」を押してください　<button class="btn sm">差額 ¥40 を税として追加</button></div>
+          <div class="f" style="margin-top:10px"><label>メモ</label><input placeholder="任意"></div>
+          <div class="foot"><button class="btn">削除</button><span style="flex:1"></span><button class="btn">閉じる</button><button class="btn primary">保存する</button></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<div class="note">モック：静的な画面（数字はダミー）。黄色い枠＝AI が入れた値（人が確認して直す）</div>
+</body>
+</html>

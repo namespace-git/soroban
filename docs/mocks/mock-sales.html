@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>売上（作業リスト）モック</title>
+<style>
+:root{--canvas:#f6f6f3;--surface:#fff;--surface-hi:#f3f2ee;--line:#e6e4dd;--line-soft:#efede8;--text:#26262a;--text-dim:#63636a;--text-faint:#97979e;--brand:#f5c842;--brand-soft:#fff6dd;--brand-ink:#7a5a00;--primary:#2b2b30;--profit:#2f9e5a;--profit-bg:#e6f6ec;--loss:#d9463f;--loss-bg:#fdeceb;--warn:#b45f06;--warn-bg:#fff0e0;--warn-line:#f2b26b;--info:#2f6fcf;--info-bg:#e8f0fc;--radius:14px;--radius-md:10px;--shadow-1:0 2px 10px rgba(40,35,20,.06);--font:"M PLUS 2","Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--text);font:14px/1.5 var(--font)}
+.app{display:grid;grid-template-columns:88px 1fr;min-height:100vh}
+.nav{background:#fff;border-right:1px solid var(--line);padding:16px 0;text-align:center;font-size:11px;color:var(--text-faint)}
+.nav .mark{width:36px;height:36px;border-radius:50%;background:var(--brand);margin:0 auto 4px;display:grid;place-items:center;font-weight:800}
+.nav .item{padding:12px 0}.nav .item.active{color:var(--text);font-weight:700}
+.main{padding:20px 28px 40px;max-width:1240px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.topbar .search{flex:0 0 260px;border:1px solid var(--line);border-radius:999px;padding:8px 14px;color:var(--text-faint);background:#fff}
+.topbar .mini{font-size:13px;background:var(--brand-soft);color:var(--brand-ink);border-radius:999px;padding:6px 12px;font-weight:700}
+.topbar .grow{flex:1}.topbar .last{font-size:13px;color:var(--text-dim)}
+.btn{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;font:inherit;font-size:13px;cursor:pointer}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.btn.sm{padding:4px 10px;font-size:12px}.btn.warn{border-color:var(--warn-line);background:var(--warn-bg);color:var(--warn)}
+.head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+h1{font-size:20px;margin:0}
+.progress{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:8px}
+.stage{background:#fff;border-radius:var(--radius-md);box-shadow:var(--shadow-1);padding:10px 14px;cursor:pointer;border:2px solid transparent;position:relative}
+.stage.active{border-color:var(--primary)}
+.stage .l{font-size:12px;color:var(--text-dim)}.stage .v{font-size:22px;font-weight:800;line-height:1.2}.stage .s{font-size:12px;color:var(--text-faint)}
+.stage .v .money{font-size:14px;color:var(--text-dim);font-weight:600;margin-left:6px}
+.stage:after{content:"›";position:absolute;right:-9px;top:50%;transform:translateY(-50%);color:var(--text-faint);font-size:18px}
+.stage:last-child:after{content:""}
+.inputs{display:flex;gap:10px;align-items:center;font-size:13px;color:var(--text-dim);margin:0 0 14px}
+.inputs .pill{background:var(--warn-bg);color:var(--warn);border-radius:999px;padding:2px 10px;font-weight:700;cursor:pointer}
+.inputs .pill.ok{background:var(--profit-bg);color:var(--profit)}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px;font-size:13px;color:var(--text-dim);flex-wrap:wrap}
+.toolbar select,.toolbar .sbox{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:#fff}
+.toolbar .sbox{color:var(--text-faint);min-width:260px}
+.card{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow-1);padding:6px 8px}
+.row{display:grid;grid-template-columns:52px 1fr 110px 170px 200px 120px 90px;gap:12px;align-items:center;padding:10px 10px;border-top:1px solid var(--line-soft)}
+.row:first-child{border-top:0}
+.row.hdr{font-size:12px;color:var(--text-faint);padding:6px 10px}
+.thumb{width:52px;height:52px;border-radius:8px;background:var(--brand-soft);display:grid;place-items:center;color:var(--brand-ink);font-weight:800}
+.title{font-weight:600}.sub{font-size:12px;color:var(--text-dim);margin-top:2px}
+.chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;background:var(--surface-hi);color:var(--text-dim);margin-right:4px;vertical-align:middle}
+.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.info{background:var(--info-bg);color:var(--info)}.chip.ok{background:var(--profit-bg);color:var(--profit)}.chip.code{background:var(--brand-soft);color:var(--brand-ink);font-weight:700}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.num .d{font-size:12px;color:var(--text-faint)}
+select.ship{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:8px;padding:5px 8px;width:100%;background:#fff}
+select.ship.need{border-color:var(--warn-line);background:var(--warn-bg)}
+.cost{display:flex;flex-direction:column;gap:3px;font-size:13px}
+.cost .picked{display:flex;gap:6px;align-items:center}
+.profit{font-weight:800;font-size:16px;text-align:right}
+.profit.plus{color:var(--profit)}.profit.minus{color:var(--loss)}.profit.na{color:var(--text-faint);font-weight:600;font-size:13px}
+.profit .why{display:block;font-size:11px;color:var(--text-faint);font-weight:500}
+.ops{text-align:right;font-size:12px;color:var(--text-faint)}
+.ops span{margin-left:6px;cursor:pointer}
+.foot{margin-top:12px;font-size:12px;color:var(--text-faint)}
+.note{position:fixed;right:16px;bottom:16px;background:#26262a;color:#fff;font-size:12px;padding:8px 12px;border-radius:8px;opacity:.85}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="nav">
+    <div class="mark">そ</div>そろばん
+    <div class="item">ホーム</div><div class="item active">売上</div><div class="item">仕入</div><div class="item">在庫</div><div class="item">商品</div><div class="item">月次</div><div class="item">経費</div><div class="item">設定</div><div class="item">ヘルプ</div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div class="search">すべてから探す（Ctrl+K）</div>
+      <div class="mini">今月の粗利 ¥5,249 ／ 純利益 ¥5,049</div>
+      <div class="grow"></div>
+      <div class="last">最終取り込み 09/21 19:08</div>
+      <button class="btn primary">取り込む</button>
+    </div>
+
+    <div class="head"><h1>売上</h1><span class="grow" style="flex:1"></span><button class="btn">グラフを見せる</button><button class="btn primary">＋ 販売を登録</button></div>
+
+    <!-- 取引の進捗（メルカリ側の状態）。押すと絞る -->
+    <div class="progress">
+      <div class="stage"><div class="l">出品中</div><div class="v">8<span class="money">見込み ¥3,849</span></div><div class="s">未引き当て 3</div></div>
+      <div class="stage active"><div class="l">売れた・発送する</div><div class="v">2<span class="money">¥5,100</span></div><div class="s">メルカリで発送する</div></div>
+      <div class="stage"><div class="l">配送中・受取待ち</div><div class="v">3<span class="money">¥9,300</span></div><div class="s">売上金の反映待ち</div></div>
+      <div class="stage"><div class="l">取引完了</div><div class="v">11<span class="money">¥27,040</span></div><div class="s">今月・反映済み</div></div>
+      <div class="stage"><div class="l">すべて</div><div class="v">36</div><div class="s">出品も含む</div></div>
+    </div>
+    <!-- 入力の完了（アプリ側の状態）。進捗とは別の軸 -->
+    <p class="inputs">利益の入力：<span class="pill">送料未入力 3</span><span class="pill">未紐付け 5</span><span class="pill ok">入力済み 9</span><span style="margin-left:auto">粗利が出ていない行は上に来ます</span></p>
+
+    <div class="toolbar">
+      <select><option>すべての状態</option><option>発送してください</option><option>受取評価待ち</option></select>
+      <select><option>すべてのタグ</option><option>セール</option><option>マージン（瑞利）</option></select>
+      <span class="sbox">商品名・型番・メモ・タグ・買い手を検索</span>
+      <select><option>すべて</option><option>今月</option><option>先月</option></select>
+      <span style="margin-left:auto"><button class="btn sm">型番で自動紐付け</button> 5 件</span>
+    </div>
+
+    <div class="card">
+      <div class="row hdr"><div></div><div>商品</div><div class="num">価格</div><div>発送方法（送料）</div><div>原価（紐付け）</div><div class="num">粗利</div><div class="ops"></div></div>
+
+      <div class="row">
+        <div class="thumb">A</div>
+        <div><div class="title">【A035】ミニランド <span class="chip info">発送してください</span></div><div class="sub">09/21 に売れた ・ 買い手 hana ・ <span class="chip">転売</span><span class="chip">自動取得</span><span class="chip code">A035</span></div></div>
+        <div class="num">¥4,300<div class="d">手数料 −¥430</div></div>
+        <div><select class="ship need"><option>選択…</option><option>ネコポス ¥210</option><option>ゆうパケットポスト ¥215</option><option>宅急便コンパクト ¥450</option></select></div>
+        <div class="cost"><div class="picked"><span class="chip code">S-0009</span> ¥2,576 <span class="chip ok">自動紐付け</span></div><span style="font-size:11px;color:var(--text-faint)">変える</span></div>
+        <div class="profit na">送料を選ぶと確定<span class="why">¥1,084〜1,294</span></div>
+        <div class="ops"><span>↗</span><span>タグ</span><span>メモ</span><span>⋯</span></div>
+      </div>
+
+      <div class="row">
+        <div class="thumb">Z</div>
+        <div><div class="title">【Z080-1】ねっとりヨーグルト クリームわん <span class="chip info">発送してください</span></div><div class="sub">09/20 に売れた ・ 買い手 まる ・ <span class="chip">転売</span><span class="chip">自動取得</span></div></div>
+        <div class="num">¥800<div class="d">手数料 −¥80</div></div>
+        <div><select class="ship"><option>ゆうパケットポスト ¥215</option></select><div class="sub">出品時に決めた</div></div>
+        <div class="cost"><button class="btn sm warn">紐付ける</button><span style="font-size:11px;color:var(--text-faint)">候補 S-0031 ¥1,076（型番一致）</span></div>
+        <div class="profit na">紐付けると確定<span class="why">候補で ¥−571</span></div>
+        <div class="ops"><span>↗</span><span>タグ</span><span>メモ</span><span>⋯</span></div>
+      </div>
+
+      <div class="row" style="background:var(--surface-hi)">
+        <div class="thumb">Z</div>
+        <div><div class="title">【Z088-2】ねっとりヨーグルト プレミアム抹茶アイス <span class="chip ok">取引完了</span></div><div class="sub">09/19 ・ 買い手 taka ・ <span class="chip">転売</span><span class="chip">実額</span><span class="chip">セール</span></div></div>
+        <div class="num">¥3,300<div class="d">手数料 −¥330</div></div>
+        <div><div>ゆうパケット <b>¥210</b> <span class="chip ok">実額</span></div></div>
+        <div class="cost"><div class="picked"><span class="chip code">S-0020</span> ¥1,722</div></div>
+        <div class="profit plus">¥1,038</div>
+        <div class="ops"><span>↗</span><span>タグ</span><span>メモ</span><span>⋯</span></div>
+      </div>
+
+      <div class="row" style="background:var(--surface-hi)">
+        <div class="thumb">Z</div>
+        <div><div class="title">【Z001-4】【Z012-1】まとめ売り クリーミークリーム シーソルト ＆ いちごみるく <span class="chip">受取評価待ち</span></div><div class="sub">09/19 ・ 買い手 nao ・ <span class="chip">転売</span><span class="chip">実額</span> ・ メモ まとめて発送</div></div>
+        <div class="num">¥3,500<div class="d">手数料 −¥350</div></div>
+        <div><div>宅急便コンパクト <b>¥450</b> <span class="chip ok">実額</span></div></div>
+        <div class="cost"><div class="picked"><span class="chip code">S-0006</span><span class="chip code">S-0024</span> ¥2,043 <span style="color:var(--text-faint)">×2</span></div></div>
+        <div class="profit plus">¥237<span class="why">1 点あたり ¥118／¥119</span></div>
+        <div class="ops"><span>↗</span><span>タグ</span><span>メモ</span><span>⋯</span></div>
+      </div>
+
+      <div class="row" style="background:var(--surface-hi)">
+        <div class="thumb">—</div>
+        <div><div class="title">ハンドバッグ レザー 中古 <span class="chip ok">取引完了</span></div><div class="sub">09/15 ・ <span class="chip">私物</span> ・ 利益の計算に入れない</div></div>
+        <div class="num">¥5,200</div>
+        <div class="sub">—</div>
+        <div class="sub">—</div>
+        <div class="profit na">私物</div>
+        <div class="ops"><span>↗</span><span>転売にする</span></div>
+      </div>
+    </div>
+    <p class="foot">行の中で発送方法と紐付けを変えると、粗利と上の数字がその場で変わります。1 件 10 秒。</p>
+  </main>
+</div>
+<div class="note">モック：静的な画面（数字はダミー）</div>
+</body>
+</html>

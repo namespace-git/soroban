@@ -66,6 +66,25 @@ function shortDate(d: string | null): string {
   return d ? d.slice(5) : ''
 }
 
+type ShipStageState = 'done' | 'now' | 'pending'
+interface ShipStage { label: string; state: ShipStageState }
+
+/**
+ * 配送の進行：注文 › 発送 › 配送中 › 到着。fulfillment が 'delivered' または
+ * null（手入力で分からない）は全段「到着」まで点灯（Purchases.vue の一覧行と同じ扱い）
+ */
+function shippingStages(p: Pick<PurchaseDetail, 'fulfillment' | 'shipped_at' | 'delivered_at'>): ShipStage[] {
+  const f = p.fulfillment
+  const shipped = f === 'shipped' || f === 'delivered' || f === null
+  const delivered = f === 'delivered' || f === null
+  return [
+    { label: '注文', state: 'done' },
+    { label: p.shipped_at ? `発送 ${shortDate(p.shipped_at)}` : '発送', state: shipped ? 'done' : 'now' },
+    { label: '配送中', state: delivered ? 'done' : (f === 'shipped' ? 'now' : 'pending') },
+    { label: p.delivered_at ? `到着 ${shortDate(p.delivered_at)}` : '到着', state: delivered ? 'done' : 'pending' },
+  ]
+}
+
 function itemChip(it: PurchaseLineItem): ChipInfo {
   if (it.status === 'sold') return { tone: 'ok', label: `販売済 ${yen(it.sale_price ?? 0)} ${shortDate(it.sold_at)}` }
   if (it.status === 'disposed') return { tone: 'neutral', label: '廃棄' }
@@ -130,6 +149,15 @@ function fulfillmentAutoTitle(): string | undefined {
             <StatusChip v-for="t in detail.tags" :key="t.id" tone="info" :label="t.name" />
           </div>
         </div>
+      </div>
+
+      <div class="ship-progress">
+        <template v-for="(s, i) in shippingStages(detail)" :key="i">
+          <span class="ship-stage" :class="s.state">
+            <span class="ship-dot"></span>{{ s.label }}
+          </span>
+          <span v-if="i < 3" class="ship-bar" :class="{ done: s.state === 'done' }"></span>
+        </template>
       </div>
 
       <table class="compact lines-table">
@@ -214,6 +242,33 @@ function fulfillmentAutoTitle(): string | undefined {
   padding-bottom: 14px;
   border-bottom: 1px solid var(--line-soft);
 }
+/* --- 配送の進行：注文 › 発送 › 配送中 › 到着 --- */
+.ship-progress {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: -4px 0 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: var(--fs-12);
+  color: var(--text-faint);
+}
+.ship-stage { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.ship-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--line);
+  flex-shrink: 0;
+}
+.ship-stage.done { color: var(--text-dim); }
+.ship-stage.done .ship-dot { background: var(--profit); }
+.ship-stage.now { color: var(--info); font-weight: 600; }
+.ship-stage.now .ship-dot { background: var(--info); }
+.ship-bar { width: 18px; height: 2px; background: var(--line); flex-shrink: 0; }
+.ship-bar.done { background: var(--profit); }
+
 .item-head .thumb-placeholder {
   display: flex;
   align-items: center;

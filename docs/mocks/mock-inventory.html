@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>在庫（画像優先・型番ごと）モック</title>
+<style>
+:root{--canvas:#f6f6f3;--surface:#fff;--surface-hi:#f3f2ee;--line:#e6e4dd;--line-soft:#efede8;--text:#26262a;--text-dim:#63636a;--text-faint:#97979e;--brand:#f5c842;--brand-soft:#fff6dd;--brand-ink:#7a5a00;--primary:#2b2b30;--profit:#2f9e5a;--profit-bg:#e6f6ec;--loss:#d9463f;--warn:#b45f06;--warn-bg:#fff0e0;--warn-line:#f2b26b;--info:#2f6fcf;--info-bg:#e8f0fc;--radius:14px;--radius-md:10px;--shadow-1:0 2px 10px rgba(40,35,20,.06);--font:"M PLUS 2","Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--text);font:14px/1.5 var(--font)}
+.app{display:grid;grid-template-columns:88px 1fr;min-height:100vh}
+.nav{background:#fff;border-right:1px solid var(--line);padding:16px 0;text-align:center;font-size:11px;color:var(--text-faint)}
+.nav .mark{width:36px;height:36px;border-radius:50%;background:var(--brand);margin:0 auto 4px;display:grid;place-items:center;font-weight:800}
+.nav .item{padding:12px 0}.nav .item.active{color:var(--text);font-weight:700}
+.main{padding:20px 28px 40px;max-width:1240px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.topbar .search{flex:0 0 260px;border:1px solid var(--line);border-radius:999px;padding:8px 14px;color:var(--text-faint);background:#fff}
+.topbar .mini{font-size:13px;background:var(--brand-soft);color:var(--brand-ink);border-radius:999px;padding:6px 12px;font-weight:700}
+.topbar .grow{flex:1}.topbar .last{font-size:13px;color:var(--text-dim)}
+.btn{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;font:inherit;font-size:13px;cursor:pointer}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}.btn.sm{padding:4px 10px;font-size:12px}
+.head{display:flex;align-items:center;gap:12px;margin-bottom:12px}h1{font-size:20px;margin:0}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+.st{background:#fff;border-radius:var(--radius-md);box-shadow:var(--shadow-1);padding:10px 14px;border:2px solid transparent;cursor:pointer}
+.st.active{border-color:var(--primary)}.st .l{font-size:12px;color:var(--text-dim)}.st .v{font-size:22px;font-weight:800;line-height:1.2}.st .v .money{font-size:13px;color:var(--text-dim);font-weight:600;margin-left:6px}.st .s{font-size:12px;color:var(--text-faint)}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px;font-size:13px;color:var(--text-dim);flex-wrap:wrap}
+.toolbar select,.toolbar .sbox{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:#fff}
+.toolbar .sbox{color:var(--text-faint);min-width:260px}
+.toolbar .seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden}
+.toolbar .seg span{padding:5px 12px;cursor:pointer}.toolbar .seg span.on{background:var(--primary);color:#fff}
+.group{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow-1);margin-bottom:12px;overflow:hidden}
+.ghead{display:grid;grid-template-columns:64px 1fr auto;gap:14px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line-soft)}
+.gimg{width:64px;height:64px;border-radius:10px;background:var(--brand-soft);display:grid;place-items:center;font-weight:800;color:var(--brand-ink);font-size:20px}
+.gt{font-weight:700;font-size:15px}.gs{font-size:12px;color:var(--text-dim);margin-top:2px}
+.gnum{display:flex;gap:18px;font-size:12px;color:var(--text-dim);text-align:right}
+.gnum b{display:block;font-size:15px;color:var(--text)}
+.gnum .link{color:var(--info);cursor:pointer;align-self:center}
+.chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;background:var(--surface-hi);color:var(--text-dim);margin-right:4px;vertical-align:middle}
+.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.info{background:var(--info-bg);color:var(--info)}.chip.ok{background:var(--profit-bg);color:var(--profit)}.chip.code{background:var(--brand-soft);color:var(--brand-ink);font-weight:700;cursor:pointer}
+.chip.tag{background:var(--info-bg);color:var(--info)}
+.items{padding:4px 16px 8px}
+.it{display:grid;grid-template-columns:96px 1fr 120px 110px 90px auto;gap:12px;align-items:center;padding:7px 0;border-top:1px solid var(--line-soft);font-size:13px}
+.it:first-child{border-top:0}
+.it .code{font-weight:700}
+.it .dim{color:var(--text-faint);font-size:12px}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.ops{text-align:right;font-size:12px;color:var(--text-faint)}.ops span{margin-left:8px;cursor:pointer}
+.aging{display:inline-block;min-width:44px;text-align:center;border-radius:999px;padding:1px 8px;font-size:12px;background:var(--surface-hi)}
+.aging.long{background:var(--warn-bg);color:var(--warn);font-weight:700}
+.foot{margin-top:12px;font-size:12px;color:var(--text-faint)}
+.note{position:fixed;right:16px;bottom:16px;background:#26262a;color:#fff;font-size:12px;padding:8px 12px;border-radius:8px;opacity:.85}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="nav">
+    <div class="mark">そ</div>そろばん
+    <div class="item">ホーム</div><div class="item">売上</div><div class="item">仕入</div><div class="item active">在庫</div><div class="item">商品</div><div class="item">月次</div><div class="item">経費</div><div class="item">設定</div><div class="item">ヘルプ</div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div class="search">すべてから探す（Ctrl+K）</div>
+      <div class="mini">今月の粗利 ¥5,249 ／ 純利益 ¥5,049</div>
+      <div class="grow"></div>
+      <div class="last">最終取り込み 09/21 19:08</div>
+      <button class="btn primary">取り込む</button>
+    </div>
+    <div class="head"><h1>在庫</h1><span style="flex:1"></span></div>
+
+    <!-- 在庫の状態（押すと絞る）。「届いていて未出品」を最初に -->
+    <div class="stats">
+      <div class="st active"><div class="l">届いていて未出品</div><div class="v">21<span class="money">原価 ¥28,400</span></div><div class="s">いま出せるもの</div></div>
+      <div class="st"><div class="l">未着</div><div class="v">6<span class="money">¥8,900</span></div><div class="s">注文済み・届いていない</div></div>
+      <div class="st"><div class="l">出品中</div><div class="v">8<span class="money">見込み粗利 ¥3,849</span></div><div class="s">引き当て済みの在庫</div></div>
+      <div class="st"><div class="l">長期滞留（60 日以上）</div><div class="v" style="color:var(--warn)">20<span class="money">¥31,200</span></div><div class="s">値下げや自家消費を検討</div></div>
+    </div>
+
+    <div class="toolbar">
+      <span class="seg"><span class="on">型番ごと</span><span>1 点ずつ</span></span>
+      <select><option>すべてのタグ</option><option>セール</option><option>福袋</option></select>
+      <span class="sbox">名前・型番・素材・メモ・タグ・在庫コード</span>
+      <select><option>仕入日：すべて</option><option>今月</option><option>先月</option><option>直近 3 か月</option><option>直近 6 か月</option><option>今年</option><option>昨年</option><option>期間を指定…</option></select>
+      <span style="margin-left:auto">滞留が長い順 ▼ ・ 21 点 ／ 原価計 ¥28,400</span>
+    </div>
+
+    <!-- 型番グループ 1 -->
+    <div class="group">
+      <div class="ghead">
+        <div class="gimg">Z</div>
+        <div><div class="gt">ムースクリーム クリームミルフィーユ <span class="chip code">Z056-1</span><span class="chip tag">福袋</span></div><div class="gs">未出品 4 点（届いている 4）・出品中 2 ・ 販売済 2（平均売価 ¥3,150・平均粗利 ¥1,273）</div></div>
+        <div class="gnum"><span>原価/点<b>¥1,371</b></span><span>最古の仕入<b>07/08（75 日）</b></span><span class="link">商品カルテ →</span></div>
+      </div>
+      <div class="items">
+        <div class="it"><span class="code"><span class="chip code">S-0038</span></span><span>メロジョイA ・ 07/08 仕入 ・ <span class="dim">メモ なし</span></span><span class="num">¥1,371</span><span><span class="aging long">75 日</span></span><span><span class="chip">未出品</span></span><span class="ops"><span>タグ</span><span>分割</span><span>メモ</span><span>⋯</span></span></div>
+        <div class="it"><span class="code"><span class="chip code">S-0039</span></span><span>メロジョイA ・ 07/08 仕入</span><span class="num">¥1,371</span><span><span class="aging long">75 日</span></span><span><span class="chip">未出品</span></span><span class="ops"><span>タグ</span><span>分割</span><span>メモ</span><span>⋯</span></span></div>
+        <div class="it"><span class="code"><span class="chip code">S-0040</span></span><span>メロジョイA ・ 07/08 仕入</span><span class="num">¥1,372</span><span><span class="aging long">75 日</span></span><span><span class="chip">未出品</span></span><span class="ops"><span>タグ</span><span>分割</span><span>メモ</span><span>⋯</span></span></div>
+        <div class="it"><span class="code"><span class="chip code">S-0052</span></span><span>メロジョイB ・ 09/01 仕入</span><span class="num">¥1,397</span><span><span class="aging">20 日</span></span><span><span class="chip">未出品</span></span><span class="ops"><span>タグ</span><span>分割</span><span>メモ</span><span>⋯</span></span></div>
+      </div>
+    </div>
+
+    <!-- 型番グループ 2：分割あり -->
+    <div class="group">
+      <div class="ghead">
+        <div class="gimg">A</div>
+        <div><div class="gt">ミニランド <span class="chip code">A035</span></div><div class="gs">未出品 3 点（届いている 2・<span style="color:var(--warn)">未着 1</span>）・出品中 1 ・ 販売済 1（平均売価 ¥5,700／箱）</div></div>
+        <div class="gnum"><span>原価/点<b>¥3,798</b></span><span>最古の仕入<b>09/04（17 日）</b></span><span class="link">商品カルテ →</span></div>
+      </div>
+      <div class="items">
+        <div class="it"><span class="code"><span class="chip code">S-0041</span></span><span>TikTok Shop ・ 09/04 仕入</span><span class="num">¥3,997</span><span><span class="aging">17 日</span></span><span><span class="chip">未出品</span></span><span class="ops"><span>タグ</span><span>分割</span><span>メモ</span><span>⋯</span></span></div>
+        <div class="it"><span class="code"><span class="chip code">S-0045</span> <span class="dim">分割 1/4</span></span><span>TikTok Shop ・ 09/06 仕入 ・ S-0042 を 4 分割</span><span class="num">¥1,000</span><span><span class="aging">15 日</span></span><span><span class="chip">未出品</span></span><span class="ops"><span>分割を戻す</span><span>タグ</span><span>メモ</span><span>⋯</span></span></div>
+        <div class="it" style="opacity:.7"><span class="code"><span class="chip code">S-0060</span></span><span>TikTok Shop ・ 09/19 仕入</span><span class="num">¥3,997</span><span><span class="aging">2 日</span></span><span><span class="chip warn">未着</span></span><span class="ops"><span>到着済にする</span><span>⋯</span></span></div>
+      </div>
+    </div>
+
+    <!-- 型番なし -->
+    <div class="group">
+      <div class="ghead">
+        <div class="gimg" style="background:var(--surface-hi);color:var(--text-dim)">—</div>
+        <div><div class="gt">型番なし</div><div class="gs">未出品 2 点。型番を付けると自動引き当ての対象になります</div></div>
+        <div class="gnum"><span class="link">型番を付ける</span></div>
+      </div>
+      <div class="items">
+        <div class="it"><span class="code"><span class="chip code">S-0007</span></span><span>ハンドバッグ レザー 中古 ・ 手入力 ・ 05/19 仕入</span><span class="num">¥2,000</span><span><span class="aging long">125 日</span></span><span><span class="chip">未出品</span></span><span class="ops"><span>型番</span><span>タグ</span><span>⋯</span></span></div>
+      </div>
+    </div>
+
+    <p class="foot">在庫コード（S-0038）をタップするとコピー。メルカリのタイトルに貼るとその 1 点が自動で引き当たります。</p>
+  </main>
+</div>
+<div class="note">モック：静的な画面（数字はダミー）</div>
+</body>
+</html>

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>商品（カルテ）モック</title>
+<style>
+:root{--canvas:#f6f6f3;--surface:#fff;--surface-hi:#f3f2ee;--line:#e6e4dd;--line-soft:#efede8;--text:#26262a;--text-dim:#63636a;--text-faint:#97979e;--brand:#f5c842;--brand-soft:#fff6dd;--brand-ink:#7a5a00;--primary:#2b2b30;--profit:#2f9e5a;--profit-bg:#e6f6ec;--loss:#d9463f;--loss-bg:#fdeceb;--warn:#b45f06;--warn-bg:#fff0e0;--warn-line:#f2b26b;--info:#2f6fcf;--info-bg:#e8f0fc;--radius:14px;--radius-md:10px;--shadow-1:0 2px 10px rgba(40,35,20,.06);--font:"M PLUS 2","Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--text);font:14px/1.5 var(--font)}
+.app{display:grid;grid-template-columns:88px 1fr;min-height:100vh}
+.nav{background:#fff;border-right:1px solid var(--line);padding:16px 0;text-align:center;font-size:11px;color:var(--text-faint)}
+.nav .mark{width:36px;height:36px;border-radius:50%;background:var(--brand);margin:0 auto 4px;display:grid;place-items:center;font-weight:800}
+.nav .item{padding:12px 0}.nav .item.active{color:var(--text);font-weight:700}
+.main{padding:20px 28px 40px;max-width:1280px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.topbar .search{flex:0 0 260px;border:1px solid var(--line);border-radius:999px;padding:8px 14px;color:var(--text-faint);background:#fff}
+.topbar .mini{font-size:13px;background:var(--brand-soft);color:var(--brand-ink);border-radius:999px;padding:6px 12px;font-weight:700}
+.topbar .grow{flex:1}.topbar .last{font-size:13px;color:var(--text-dim)}
+.btn{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;font:inherit;font-size:13px;cursor:pointer}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}.btn.sm{padding:4px 10px;font-size:12px}
+.head{display:flex;align-items:center;gap:12px;margin-bottom:12px}h1{font-size:20px;margin:0}
+.layout{display:grid;grid-template-columns:380px 1fr;gap:16px;align-items:start}
+.list{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow-1);overflow:hidden}
+.list .tb{padding:10px 12px;border-bottom:1px solid var(--line-soft);display:flex;gap:8px;font-size:12px;color:var(--text-dim)}
+.list .tb .sbox{flex:1;border:1px solid var(--line);border-radius:8px;padding:5px 10px;color:var(--text-faint);background:#fff}
+.list .tb select{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:8px;padding:4px 8px;background:#fff}
+.p{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center;padding:10px 12px;border-top:1px solid var(--line-soft);cursor:pointer}
+.p:first-of-type{border-top:0}.p.on{background:var(--brand-soft)}
+.pimg{width:44px;height:44px;border-radius:8px;background:var(--brand-soft);display:grid;place-items:center;font-weight:800;color:var(--brand-ink)}
+.p .n{font-weight:600;font-size:13px}.p .s{font-size:11px;color:var(--text-dim)}
+.p .r{text-align:right;font-size:12px;color:var(--text-dim)}.p .r b{display:block;font-size:14px;color:var(--profit)}
+.spark{display:inline-block;width:60px;height:14px;vertical-align:middle;margin-left:6px}
+.chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;background:var(--surface-hi);color:var(--text-dim);vertical-align:middle;margin-right:4px}
+.chip.code{background:var(--brand-soft);color:var(--brand-ink);font-weight:700}.chip.tag{background:var(--info-bg);color:var(--info)}.chip.ok{background:var(--profit-bg);color:var(--profit)}.chip.warn{background:var(--warn-bg);color:var(--warn)}
+.karte{display:flex;flex-direction:column;gap:12px}
+.card{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow-1);padding:16px 18px}
+.kh{display:grid;grid-template-columns:80px 1fr auto;gap:14px;align-items:center}
+.kimg{width:80px;height:80px;border-radius:12px;background:var(--brand-soft);display:grid;place-items:center;font-weight:800;color:var(--brand-ink);font-size:26px}
+.kh h2{margin:0;font-size:18px}.kh .s{font-size:12px;color:var(--text-dim);margin-top:4px}
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.st{background:var(--surface-hi);border-radius:var(--radius-md);padding:10px 12px}
+.st .l{font-size:11px;color:var(--text-dim)}.st .v{font-size:18px;font-weight:800}.st .v.plus{color:var(--profit)}.st .s{font-size:11px;color:var(--text-faint)}
+h3{font-size:13px;color:var(--text-dim);margin:0 0 8px}
+.calc{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.calc .in{display:flex;gap:8px;align-items:center;font-size:13px;flex-wrap:wrap}
+.calc input{width:110px;font:inherit;font-size:16px;font-weight:700;border:1px solid var(--line);border-radius:8px;padding:6px 10px;text-align:right}
+.calc select{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:#fff}
+.calc .out{background:var(--profit-bg);border-radius:var(--radius-md);padding:10px 14px}
+.calc .out .v{font-size:24px;font-weight:800;color:var(--profit)}.calc .out .s{font-size:12px;color:var(--text-dim)}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{font-weight:600;color:var(--text-faint);text-align:left;padding:4px 6px;border-bottom:1px solid var(--line-soft);font-size:12px}
+.tbl td{padding:6px 6px;border-bottom:1px solid var(--line-soft)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.plus{color:var(--profit);font-weight:700}.minus{color:var(--loss);font-weight:700}
+.note{position:fixed;right:16px;bottom:16px;background:#26262a;color:#fff;font-size:12px;padding:8px 12px;border-radius:8px;opacity:.85}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="nav">
+    <div class="mark">そ</div>そろばん
+    <div class="item">ホーム</div><div class="item">売上</div><div class="item">仕入</div><div class="item">在庫</div><div class="item active">商品</div><div class="item">月次</div><div class="item">経費</div><div class="item">設定</div><div class="item">ヘルプ</div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div class="search">すべてから探す（Ctrl+K）</div>
+      <div class="mini">今月の粗利 ¥5,249 ／ 純利益 ¥5,049</div>
+      <div class="grow"></div>
+      <div class="last">最終取り込み 09/21 19:08</div>
+      <button class="btn primary">取り込む</button>
+    </div>
+    <div class="head"><h1>商品</h1><span style="flex:1"></span></div>
+
+    <div class="layout">
+      <!-- 左：型番の一覧 -->
+      <div class="list">
+        <div class="tb"><span class="sbox">型番・商品名・タグ</span><select><option>粗利合計</option><option>売れた数</option><option>在庫が多い</option><option>滞留が長い</option></select></div>
+        <div class="p"><div class="pimg">Z</div><div><div class="n">ムースクリーム クリームミルフィーユ</div><div class="s"><span class="chip code">Z056-1</span>在庫 4 ・ 売れた 2<svg class="spark" viewBox="0 0 60 14"><polyline points="0,12 12,9 24,10 36,5 48,6 60,2" fill="none" stroke="#2f9e5a" stroke-width="1.5"/></svg></div></div><div class="r">粗利計<b>¥2,546</b></div></div>
+        <div class="p on"><div class="pimg">A</div><div><div class="n">ミニランド</div><div class="s"><span class="chip code">A035</span>在庫 3 ・ 売れた 1<svg class="spark" viewBox="0 0 60 14"><polyline points="0,12 12,12 24,12 36,12 48,4 60,3" fill="none" stroke="#2f9e5a" stroke-width="1.5"/></svg></div></div><div class="r">粗利計<b>¥2,225</b></div></div>
+        <div class="p"><div class="pimg">Z</div><div><div class="n">ねっとりヨーグルト プレミアム抹茶アイス</div><div class="s"><span class="chip code">Z088-2</span>在庫 5 ・ 売れた 2</div></div><div class="r">粗利計<b>¥1,416</b></div></div>
+        <div class="p"><div class="pimg">Z</div><div><div class="n">もちもちもち クリームミルフィーユ</div><div class="s"><span class="chip code">Z056-2</span>在庫 5 ・ 売れた 1</div></div><div class="r">粗利計<b>¥1,028</b></div></div>
+        <div class="p"><div class="pimg">Z</div><div><div class="n">ねっとりヨーグルト マスカットオレ</div><div class="s"><span class="chip code">Z045-2</span>在庫 5 ・ 売れた 2 <span class="chip warn">滞留 90 日</span></div></div><div class="r">粗利計<b>¥834</b></div></div>
+        <div class="p"><div class="pimg">Z</div><div><div class="n">ねっとりヨーグルト クリームわん</div><div class="s"><span class="chip code">Z080-1</span>在庫 7 ・ 売れた 2</div></div><div class="r">粗利計<b>¥515</b></div></div>
+      </div>
+
+      <!-- 右：選んだ型番のカルテ -->
+      <div class="karte">
+        <div class="card">
+          <div class="kh">
+            <div class="kimg">A</div>
+            <div><h2>ミニランド <span class="chip code">A035</span><span class="chip">表示名</span></h2><div class="s">メロージョイ ミニランド【A035】（仕入明細の名前）・ シリーズ A ・ タグ <span class="chip tag">TikTok</span> ・ 最終仕入 09/19 ・ 最終販売 09/15</div></div>
+            <div><button class="btn sm">名前</button> <button class="btn sm">タグ</button> <button class="btn sm">メモ</button></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="stats">
+            <div class="st"><div class="l">手元の在庫</div><div class="v">3 <span style="font-size:12px;font-weight:500">点</span></div><div class="s">届いている 2 ・ 未着 1 ・ 原価計 ¥8,994</div></div>
+            <div class="st"><div class="l">出品中</div><div class="v">1</div><div class="s">¥4,300 ・ 見込み粗利 ¥1,084</div></div>
+            <div class="st"><div class="l">売れた</div><div class="v">1</div><div class="s">直近 3 か月</div></div>
+            <div class="st"><div class="l">平均売価（まるごと換算）</div><div class="v">¥5,700</div><div class="s">最低 ¥5,700 〜 最高 ¥5,700</div></div>
+            <div class="st"><div class="l">平均粗利（まるごと換算）</div><div class="v plus">¥2,225</div><div class="s">粗利率 39%</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>この金額で売ったら？</h3>
+          <div class="calc">
+            <div class="in">売価 <input value="4,300"> 発送 <select><option>ネコポス ¥210</option><option>ゆうパケットポスト ¥215</option><option>宅急便コンパクト ¥450</option></select> 在庫 <select><option>S-0041（原価 ¥3,997・09/04）</option><option>S-0045（分割 1/4・¥1,000）</option></select></div>
+            <div class="out"><div class="v">粗利 ¥−337</div><div class="s">4,300 − 手数料 430 − 送料 210 − 原価 3,997 ・ 粗利率 −8% ・ 過去の平均 ¥2,225 より低い</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>手元の在庫（3 点）</h3>
+          <table class="tbl">
+            <tr><th>コード</th><th>仕入</th><th class="num">原価</th><th class="num">滞留</th><th>状態</th><th></th></tr>
+            <tr><td><span class="chip code">S-0041</span></td><td>TikTok Shop ・ 09/04</td><td class="num">¥3,997</td><td class="num">17 日</td><td><span class="chip">未出品</span></td><td class="num"><span style="color:var(--info);font-size:12px">追跡</span></td></tr>
+            <tr><td><span class="chip code">S-0045</span> <span style="font-size:11px;color:var(--text-faint)">分割 1/4</span></td><td>TikTok Shop ・ 09/06</td><td class="num">¥1,000</td><td class="num">15 日</td><td><span class="chip">未出品</span></td><td class="num"><span style="color:var(--info);font-size:12px">追跡</span></td></tr>
+            <tr><td><span class="chip code">S-0060</span></td><td>TikTok Shop ・ 09/19</td><td class="num">¥3,997</td><td class="num">2 日</td><td><span class="chip warn">未着</span></td><td class="num"><span style="color:var(--info);font-size:12px">追跡</span></td></tr>
+          </table>
+        </div>
+
+        <div class="card">
+          <h3>販売の履歴</h3>
+          <table class="tbl">
+            <tr><th>販売日</th><th>タイトル</th><th class="num">売価</th><th class="num">送料</th><th class="num">原価</th><th class="num">粗利</th><th>買い手</th></tr>
+            <tr><td>09/15</td><td>【A035】ミニランド 新品未開封</td><td class="num">¥5,700</td><td class="num">¥230</td><td class="num">¥2,575</td><td class="num plus">¥2,225</td><td>hana</td></tr>
+            <tr><td>07/02</td><td>【A035】ミニランド（分割 1/4 ×2）</td><td class="num">¥2,400</td><td class="num">¥210</td><td class="num">¥2,000</td><td class="num minus">−¥50</td><td>momo</td></tr>
+          </table>
+          <div style="font-size:12px;color:var(--text-faint);margin-top:6px">出品中：09/14 ¥4,300（未引き当て）・ いいね 3</div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<div class="note">モック：静的な画面（数字はダミー）</div>
+</body>
+</html>

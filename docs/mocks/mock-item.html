@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>在庫 1 点の追跡（ドロワー）モック</title>
+<style>
+:root{--canvas:#f6f6f3;--surface:#fff;--surface-hi:#f3f2ee;--line:#e6e4dd;--line-soft:#efede8;--text:#26262a;--text-dim:#63636a;--text-faint:#97979e;--brand:#f5c842;--brand-soft:#fff6dd;--brand-ink:#7a5a00;--primary:#2b2b30;--profit:#2f9e5a;--profit-bg:#e6f6ec;--loss:#d9463f;--warn:#b45f06;--warn-bg:#fff0e0;--warn-line:#f2b26b;--info:#2f6fcf;--info-bg:#e8f0fc;--radius:14px;--radius-md:10px;--shadow-2:0 12px 32px rgba(40,35,20,.14);--font:"M PLUS 2","Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:#cfcdc6;color:var(--text);font:14px/1.5 var(--font);min-height:100vh}
+.drawer{position:absolute;right:0;top:0;bottom:0;width:640px;background:#fff;box-shadow:var(--shadow-2);display:flex;flex-direction:column}
+.dh{padding:16px 22px 12px;border-bottom:1px solid var(--line-soft)}
+.dh .t{display:flex;align-items:center;gap:10px}
+.dh h2{font-size:17px;margin:0}
+.chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;background:var(--surface-hi);color:var(--text-dim);vertical-align:middle}
+.chip.code{background:var(--brand-soft);color:var(--brand-ink);font-weight:700}.chip.ok{background:var(--profit-bg);color:var(--profit)}.chip.info{background:var(--info-bg);color:var(--info)}.chip.tag{background:var(--info-bg);color:var(--info)}
+.dh .sub{font-size:12px;color:var(--text-dim);margin-top:4px}
+.body{padding:16px 22px;overflow:auto;flex:1}
+.money{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px}
+.m{background:var(--surface-hi);border-radius:var(--radius-md);padding:10px 12px}
+.m .l{font-size:11px;color:var(--text-dim)}.m .v{font-size:18px;font-weight:800}.m .v.plus{color:var(--profit)}
+.m .s{font-size:11px;color:var(--text-faint)}
+h3{font-size:13px;color:var(--text-dim);margin:14px 0 8px}
+.tl{position:relative;padding-left:26px}
+.tl:before{content:"";position:absolute;left:8px;top:6px;bottom:6px;width:2px;background:var(--line)}
+.ev{position:relative;padding:6px 0 10px}
+.ev:before{content:"";position:absolute;left:-23px;top:10px;width:12px;height:12px;border-radius:50%;background:#fff;border:3px solid var(--line)}
+.ev.done:before{border-color:var(--profit);background:var(--profit)}
+.ev.now:before{border-color:var(--info);background:#fff}
+.ev.future{opacity:.55}
+.ev .d{font-size:12px;color:var(--text-faint)}
+.ev .t{font-weight:700}.ev .t .who{font-weight:500;color:var(--text-dim);font-size:12px;margin-left:6px}
+.ev .x{font-size:12px;color:var(--text-dim);margin-top:2px}
+.ev .x a{color:var(--info)}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;font-size:13px}
+.kv .k{color:var(--text-faint)}
+.foot{padding:12px 22px;border-top:1px solid var(--line-soft);display:flex;gap:8px;font-size:12px}
+.btn{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}
+.note{position:fixed;left:16px;bottom:16px;background:#26262a;color:#fff;font-size:12px;padding:8px 12px;border-radius:8px;opacity:.85}
+</style>
+</head>
+<body>
+<div class="drawer">
+  <div class="dh">
+    <div class="t"><span class="chip code">S-0020</span><h2>ねっとりヨーグルト プレミアム抹茶アイス</h2><span class="chip code">Z088-2</span><span class="chip tag">セール</span></div>
+    <div class="sub">仕入 メロジョイA #MJ-202609-07（09/01）・ 原価 ¥3,198（単価 ¥3,000 ＋ 送料按分 ¥198）・ 今：<span class="chip ok">販売済・取引完了</span></div>
+  </div>
+  <div class="body">
+    <div class="money">
+      <div class="m"><div class="l">原価</div><div class="v">¥3,198</div><div class="s">仕入時に確定</div></div>
+      <div class="m"><div class="l">売価</div><div class="v">¥3,300</div><div class="s">09/19 メルカリ</div></div>
+      <div class="m"><div class="l">手数料・送料</div><div class="v">−¥540</div><div class="s">10% ＋ ゆうパケット ¥210</div></div>
+      <div class="m"><div class="l">粗利</div><div class="v plus">−¥438</div><div class="s">この 1 点の分</div></div>
+    </div>
+
+    <h3>この 1 点の足あと</h3>
+    <div class="tl">
+      <div class="ev done"><div class="d">2026-09-01</div><div class="t">注文<span class="who">メロジョイA #MJ-202609-07 ・ 自動取得</span></div><div class="x">3 明細 4 点のうちの 1 点。送料 ¥800 を金額で按分 → この点に ¥198</div></div>
+      <div class="ev done"><div class="d">2026-09-03</div><div class="t">発送<span class="who">メロジョイ</span></div><div class="x">注文一覧の状態が「配送中」に</div></div>
+      <div class="ev done"><div class="d">2026-09-05</div><div class="t">到着</div><div class="x">状態が「配達済み」に（滞留日数はここから数えない。仕入日から）</div></div>
+      <div class="ev done"><div class="d">2026-09-10</div><div class="t">出品<span class="who">メルカリ m1234567890</span></div><div class="x">【Z088-2】ねっとりヨーグルト プレミアム抹茶アイス ¥3,300 ・ 型番一致で自動引き当て ・ 発送方法 ゆうパケット（出品時に決定） ・ <a href="#">出品ページ ↗</a></div></div>
+      <div class="ev done"><div class="d">2026-09-19 14:02</div><div class="t">売れた<span class="who">買い手 taka</span></div><div class="x">¥3,300 ・ 手数料 ¥330 ・ 引き当てをそのまま紐付け（link_source=listing）</div></div>
+      <div class="ev done"><div class="d">2026-09-19</div><div class="t">発送した<span class="who">ゆうパケット ¥210（実額）</span></div><div class="x">取引中タブ「受取評価待ち」で確認</div></div>
+      <div class="ev done"><div class="d">2026-09-21</div><div class="t">受取・評価</div><div class="x">取引中タブ「評価をしてください」</div></div>
+      <div class="ev done"><div class="d">2026-09-21</div><div class="t">取引完了 ・ 売上金に反映</div><div class="x">販売履歴に出た。粗利 −¥438 で確定 ・ <a href="#">取引画面 ↗</a></div></div>
+      <div class="ev future"><div class="d">2026-10-上旬</div><div class="t">月の締め</div><div class="x">9 月の明細で経費を按分（金額按分ならこの販売に約 ¥118）→ 純利益に</div></div>
+    </div>
+
+    <h3>いっしょに買ったもの（同じ注文）</h3>
+    <div class="kv">
+      <span class="k">S-0021</span><span>同じ型番 ・ 出品中 ¥3,300（引き当て済み）</span>
+      <span class="k">S-0022</span><span>【Z001-4】クリーミークリーム シーソルト ・ 未出品</span>
+      <span class="k">S-0023</span><span>【Z012-1】もちもちもち いちごみるく ・ 未出品</span>
+    </div>
+
+    <h3>メモ</h3>
+    <div class="kv"><span class="k">在庫</span><span>—</span><span class="k">販売</span><span>まとめて発送</span></div>
+  </div>
+  <div class="foot">
+    <button class="btn">仕入の伝票を開く</button><button class="btn">売上の行へ</button><button class="btn">商品カルテ</button><span style="flex:1"></span><button class="btn">閉じる</button>
+  </div>
+</div>
+<div class="note">モック：在庫の行を押すと右から出る「1 点の追跡」。数字はダミー</div>
+</body>
+</html>

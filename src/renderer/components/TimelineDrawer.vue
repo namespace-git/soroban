@@ -1,11 +1,13 @@
 <script setup lang="ts">
-// 在庫 1 点の履歴（仕入→到着→販売→発送→受取→取引完了）を読むだけのドロワー。
-// 編集はしない。開くたびに getItemTimeline を呼び直す。
-import { ref, watch } from 'vue'
-import type { ItemTimeline, SaleStatus } from '../../shared/types'
+// 在庫 1 点の追跡（仕入→到着→出品→売れた→発送→受取→取引完了）を読むだけのドロワー。
+// 編集はしない。開くたびに getItemTimeline を呼び直す（購入元の詳細は「いっしょに買ったもの」用に別途取る）。
+import { ref, computed, inject, watch } from 'vue'
+import type { ItemTimeline, SaleStatus, PurchaseDetail, PurchaseLine, PurchaseLineItem } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
+import StatusPill from './StatusPill.vue'
 import CodeChip from './CodeChip.vue'
+import Icon from './Icon.vue'
 
 const props = defineProps<{
   open: boolean
@@ -13,7 +15,10 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ close: [] }>()
 
+const goto = inject<(tab: string, payload?: { modelCode?: string; search?: string; focusId?: string }) => void>('goto')!
+
 const timeline = ref<ItemTimeline | null>(null)
+const purchaseDetail = ref<PurchaseDetail | null>(null)
 const loading = ref(false)
 
 // --- 取引の進み具合のチップ。Sales.vue と同じ表記に揃える ---
@@ -30,10 +35,14 @@ const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleStr
 async function load() {
   if (!props.inventoryItemId) {
     timeline.value = null
+    purchaseDetail.value = null
     return
   }
   loading.value = true
   timeline.value = await window.soroban.getItemTimeline(props.inventoryItemId)
+  purchaseDetail.value = timeline.value?.purchase
+    ? await window.soroban.getPurchase(timeline.value.purchase.id)
+    : null
   loading.value = false
 }
 
@@ -58,20 +67,134 @@ const thumbFailed = ref(false)
 function onThumbError() {
   thumbFailed.value = true
 }
+
+// --- 「今」の状態ピル・チップ。売れていれば取引の進み具合、未販売なら在庫の状態 ---
+type PillTone = 'solid-ok' | 'solid-loss' | 'solid-warn' | 'solid-info' | 'neutral' | 'ok' | 'warn' | 'info' | 'brand'
+type ChipTone = 'warn' | 'ok' | 'neutral' | 'info' | 'brand' | 'loss'
+const nowPill = computed<{ tone: PillTone; label: string } | null>(() => {
+  const item = timeline.value?.item
+  if (!item || timeline.value?.sale) return null
+  if (item.status === 'in_stock') {
+    if (item.fulfillment === 'pending' || item.fulfillment === 'shipped') return { tone: 'solid-warn', label: '未着' }
+    if (item.listing) {
+      return {
+        tone: item.listing.status === 'suspended' ? 'neutral' : 'brand',
+        label: `${item.listing.status === 'suspended' ? '公開停止中' : '出品中'} ${yen(item.listing.price)}`,
+      }
+    }
+    return { tone: 'neutral', label: '未出品' }
+  }
+  return null
+})
+const nowChip = computed<{ tone: ChipTone; label: string } | null>(() => {
+  const item = timeline.value?.item
+  const sale = timeline.value?.sale
+  if (!item) return null
+  if (sale?.status && SALE_STATUS_CHIP[sale.status]) return SALE_STATUS_CHIP[sale.status]
+  if (sale) return { tone: 'ok', label: '販売済' }
+  if (item.status === 'disposed') return { tone: 'neutral', label: '廃棄' }
+  if (item.status === 'personal_use') return { tone: 'neutral', label: '自家消費' }
+  if (item.status === 'split') return { tone: 'neutral', label: '分割済' }
+  return null
+})
+
+// --- お金の4枚 ---
+const saleCard = computed(() => {
+  const item = timeline.value?.item
+  const sale = timeline.value?.sale
+  if (!item) return null
+  if (sale) {
+    return {
+      price: yen(sale.price),
+      priceSub: `${formatDate(sale.sold_at)} メルカリ`,
+      fee: `−${yen(sale.fee + sale.shipping_fee)}`,
+      feeSub: `手数料 ${yen(sale.fee)}・送料 ${yen(sale.shipping_fee)}`,
+      profit: sale.gross_profit,
+      profitSub: sale.item_count > 1 ? `まとめ売り ${sale.item_count}点の粗利` : 'この販売の粗利',
+    }
+  }
+  if (item.listing) {
+    return {
+      price: yen(item.listing.price),
+      priceSub: '出品中（メルカリ）',
+      fee: '—',
+      feeSub: '未確定',
+      profit: null,
+      profitSub: '売れるまで未確定',
+    }
+  }
+  return { price: '—', priceSub: '未出品', fee: '—', feeSub: '未確定', profit: null, profitSub: '未販売' }
+})
+
+// --- メルカリのページを開く。出品ページは在庫が引き当て中ならその id、
+//     売れたあとは販売の id が同じ出品を指す ---
+const listingMercariId = computed(() => timeline.value?.item.listing?.mercari_item_id ?? timeline.value?.sale?.mercari_item_id ?? null)
+const saleMercariId = computed(() => timeline.value?.sale?.mercari_item_id ?? null)
+
+async function openMercariLink(kind: 'item' | 'transaction', id: string | null) {
+  if (!id) return
+  await window.soroban.openMercari(kind, id)
+}
+
+// --- いっしょに買ったもの（同じ注文の他の在庫） ---
+function siblingState(it: PurchaseLineItem): string {
+  if (it.status === 'sold') return `販売済 ${yen(it.sale_price ?? 0)}`
+  if (it.status === 'in_stock') return it.listing_price != null ? `出品中 ${yen(it.listing_price)}（引き当て済み）` : '未出品'
+  if (it.status === 'disposed') return '廃棄'
+  if (it.status === 'personal_use') return '自家消費'
+  return '分割済'
+}
+function siblingName(line: PurchaseLine): string {
+  const currentModelCode = timeline.value?.item.model_code
+  if (line.model_code && currentModelCode && line.model_code === currentModelCode) return '同じ型番'
+  return line.model_code ? `【${line.model_code}】${line.name}` : line.name
+}
+const siblings = computed(() => {
+  const currentId = timeline.value?.item.id
+  if (!purchaseDetail.value || !currentId) return []
+  const list: Array<{ item_code: string; label: string }> = []
+  for (const line of purchaseDetail.value.lines) {
+    for (const it of line.items) {
+      if (it.id === currentId) continue
+      list.push({ item_code: it.item_code, label: `${siblingName(line)} ・ ${siblingState(it)}` })
+    }
+  }
+  return list
+})
+
+// --- フッターの導線 ---
+function openPurchase() {
+  if (!timeline.value?.purchase) return
+  emit('close')
+  goto('purchases', { focusId: timeline.value.purchase.id })
+}
+function openSaleRow() {
+  if (!timeline.value?.sale) return
+  emit('close')
+  goto('sales', { focusId: timeline.value.sale.id })
+}
+function openProduct() {
+  if (!timeline.value?.item.model_code) return
+  emit('close')
+  goto('products', { modelCode: timeline.value.item.model_code })
+}
 </script>
 
 <template>
-  <Drawer :open="open" :title="timeline?.item.name ?? '在庫の履歴'" :width="480" @close="emit('close')">
+  <Drawer :open="open" :title="timeline?.item.name ?? '在庫の履歴'" :width="560" @close="emit('close')">
     <template v-if="timeline" #header-sub>
       <div class="head-sub">
         <CodeChip kind="item" :code="timeline.item.item_code" />
         <StatusChip v-if="timeline.item.model_code" tone="neutral" :label="timeline.item.model_code" />
-        <StatusChip
-          v-if="timeline.sale?.status && SALE_STATUS_CHIP[timeline.sale.status]"
-          :tone="SALE_STATUS_CHIP[timeline.sale.status].tone"
-          :label="SALE_STATUS_CHIP[timeline.sale.status].label"
-        />
-        <span class="faint">原価 {{ yen(timeline.item.landed_cost) }}</span>
+        <StatusChip v-for="t in timeline.item.tags" :key="t.id" tone="info" :label="t.name" />
+        <span class="faint sub-text">
+          <template v-if="timeline.purchase">
+            仕入 {{ timeline.purchase.shop_account_name }}<template v-if="timeline.purchase.order_no"> #{{ timeline.purchase.order_no }}</template>（{{ timeline.purchase.ordered_at }}）・
+          </template>
+          原価 {{ yen(timeline.item.landed_cost) }} ・ 今：
+        </span>
+        <StatusPill v-if="nowPill" :tone="nowPill.tone" :label="nowPill.label" />
+        <StatusChip v-else-if="nowChip" :tone="nowChip.tone" :label="nowChip.label" />
       </div>
     </template>
 
@@ -93,6 +216,33 @@ function onThumbError() {
         </div>
       </div>
 
+      <div class="money-grid">
+        <div class="money-card">
+          <div class="money-label">原価</div>
+          <div class="money-value">{{ yen(timeline.item.landed_cost) }}</div>
+          <div class="money-sub">仕入時に確定</div>
+        </div>
+        <div class="money-card">
+          <div class="money-label">売価</div>
+          <div class="money-value">{{ saleCard?.price ?? '—' }}</div>
+          <div class="money-sub">{{ saleCard?.priceSub }}</div>
+        </div>
+        <div class="money-card">
+          <div class="money-label">手数料・送料</div>
+          <div class="money-value">{{ saleCard?.fee ?? '—' }}</div>
+          <div class="money-sub">{{ saleCard?.feeSub }}</div>
+        </div>
+        <div class="money-card">
+          <div class="money-label">粗利</div>
+          <div
+            class="money-value"
+            :class="saleCard?.profit != null ? (saleCard.profit >= 0 ? 'profit' : 'loss') : 'faint'"
+          >{{ saleCard?.profit != null ? yen(saleCard.profit) : '未販売' }}</div>
+          <div class="money-sub">{{ saleCard?.profitSub }}</div>
+        </div>
+      </div>
+
+      <h3>この1点の足あと</h3>
       <ol class="timeline">
         <li
           v-for="(e, i) in timeline.events" :key="i"
@@ -106,13 +256,42 @@ function onThumbError() {
           <div class="tl-body">
             <div class="tl-title">{{ e.title }}</div>
             <div v-if="e.detail" class="tl-detail">{{ e.detail }}</div>
+            <button
+              v-if="e.kind === 'listed' && listingMercariId"
+              type="button" class="tl-link" @click="openMercariLink('item', listingMercariId)"
+            >出品ページ <Icon name="external" :size="12" /></button>
+            <button
+              v-if="e.kind === 'sale_completed' && saleMercariId"
+              type="button" class="tl-link" @click="openMercariLink('transaction', saleMercariId)"
+            >取引画面 <Icon name="external" :size="12" /></button>
           </div>
           <div v-if="e.amount != null" class="tl-amount num">{{ yen(e.amount) }}</div>
         </li>
       </ol>
 
-      <div v-if="timeline.sale" class="total-row profit-row" :class="{ loss: timeline.sale.gross_profit < 0 }">
-        粗利 {{ yen(timeline.sale.gross_profit) }}
+      <template v-if="siblings.length">
+        <h3>いっしょに買ったもの（同じ注文）</h3>
+        <div class="kv">
+          <template v-for="s in siblings" :key="s.item_code">
+            <span class="k">{{ s.item_code }}</span><span>{{ s.label }}</span>
+          </template>
+        </div>
+      </template>
+
+      <h3>メモ</h3>
+      <div class="kv">
+        <span class="k">在庫</span><span>{{ timeline.item.note || '—' }}</span>
+        <span class="k">販売</span><span>{{ timeline.sale?.note || '—' }}</span>
+      </div>
+    </template>
+
+    <template #footer>
+      <div class="drawer-actions">
+        <button type="button" class="ghost sm" :disabled="!timeline?.purchase" @click="openPurchase">仕入の伝票を開く</button>
+        <button v-if="timeline?.sale" type="button" class="ghost sm" @click="openSaleRow">売上の行へ</button>
+        <button type="button" class="ghost sm" :disabled="!timeline?.item.model_code" @click="openProduct">商品カルテ</button>
+        <span class="grow" />
+        <button type="button" class="ghost sm" @click="emit('close')">閉じる</button>
       </div>
     </template>
   </Drawer>
@@ -122,8 +301,10 @@ function onThumbError() {
 .head-sub {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
+.sub-text { white-space: normal; }
 
 .item-head {
   display: flex;
@@ -152,6 +333,36 @@ function onThumbError() {
 }
 .item-head-text { min-width: 0; }
 .item-name { font-size: var(--fs-14); font-weight: 600; }
+
+/* --- お金の4枚 --- */
+.money-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.money-card {
+  background: var(--surface-hi);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+}
+.money-label { font-size: var(--fs-11); color: var(--text-dim); }
+.money-value {
+  margin-top: 2px;
+  font-size: var(--fs-20);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.money-value.profit { color: var(--profit); }
+.money-value.loss { color: var(--loss); }
+.money-value.faint { color: var(--text-faint); font-size: var(--fs-16); }
+.money-sub { margin-top: 2px; font-size: var(--fs-11); color: var(--text-faint); }
+
+h3 {
+  margin: 14px 0 8px;
+  font-size: var(--fs-13);
+  color: var(--text-dim);
+}
 
 .timeline {
   list-style: none;
@@ -212,12 +423,35 @@ function onThumbError() {
   padding-top: 1px;
   font-size: var(--fs-13);
 }
-
-.profit-row {
+.tl-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   margin-top: 4px;
-  padding: 10px 14px;
-  border-radius: var(--radius-sm);
-  text-align: right;
-  font-size: var(--fs-14);
+  margin-right: 10px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  height: auto;
+  font-size: var(--fs-12);
+  color: var(--text-dim);
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+.tl-link:hover:not(:disabled) { background: transparent; color: var(--text); }
+
+.kv {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 4px 10px;
+  font-size: var(--fs-13);
+}
+.kv .k { color: var(--text-faint); }
+
+.drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
 }
 </style>

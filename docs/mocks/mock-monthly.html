@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>月次（計算書）モック</title>
+<style>
+:root{--canvas:#f6f6f3;--surface:#fff;--surface-hi:#f3f2ee;--line:#e6e4dd;--line-soft:#efede8;--text:#26262a;--text-dim:#63636a;--text-faint:#97979e;--brand:#f5c842;--brand-soft:#fff6dd;--brand-ink:#7a5a00;--primary:#2b2b30;--profit:#2f9e5a;--profit-bg:#e6f6ec;--loss:#d9463f;--loss-bg:#fdeceb;--warn:#b45f06;--warn-bg:#fff0e0;--warn-line:#f2b26b;--info:#2f6fcf;--info-bg:#e8f0fc;--radius:14px;--radius-md:10px;--shadow-1:0 2px 10px rgba(40,35,20,.06);--font:"M PLUS 2","Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--text);font:14px/1.5 var(--font)}
+.app{display:grid;grid-template-columns:88px 1fr;min-height:100vh}
+.nav{background:#fff;border-right:1px solid var(--line);padding:16px 0;text-align:center;font-size:11px;color:var(--text-faint)}
+.nav .mark{width:36px;height:36px;border-radius:50%;background:var(--brand);margin:0 auto 4px;display:grid;place-items:center;font-weight:800}
+.nav .item{padding:12px 0}.nav .item.active{color:var(--text);font-weight:700}.nav hr{border:0;border-top:1px solid var(--line);margin:8px 16px}
+.main{padding:20px 28px 40px;max-width:1240px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.topbar .search{flex:0 0 260px;border:1px solid var(--line);border-radius:999px;padding:8px 14px;color:var(--text-faint);background:#fff}
+.topbar .mini{font-size:13px;background:var(--brand-soft);color:var(--brand-ink);border-radius:999px;padding:6px 12px;font-weight:700}
+.topbar .grow{flex:1}.topbar .last{font-size:13px;color:var(--text-dim)}
+.btn{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;font:inherit;font-size:13px;cursor:pointer}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}.btn.sm{padding:4px 10px;font-size:12px}
+.head{display:flex;align-items:center;gap:12px;margin-bottom:12px}h1{font-size:20px;margin:0}
+.months{display:flex;gap:6px;margin-bottom:14px;overflow:auto}
+.mo{background:#fff;border-radius:var(--radius-md);box-shadow:var(--shadow-1);padding:8px 12px;min-width:120px;border:2px solid transparent;cursor:pointer}
+.mo.on{border-color:var(--primary)}.mo .l{font-size:12px;color:var(--text-dim)}.mo .v{font-weight:800;font-size:16px}.mo .v.plus{color:var(--profit)}.mo .s{font-size:11px;color:var(--text-faint)}
+.chip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;background:var(--surface-hi);color:var(--text-dim);vertical-align:middle;margin-left:4px}
+.chip.ok{background:var(--profit-bg);color:var(--profit)}.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.tag{background:var(--info-bg);color:var(--info)}
+.layout{display:grid;grid-template-columns:1fr 360px;gap:16px;align-items:start}
+.card{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow-1);padding:16px 18px;margin-bottom:12px}
+h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;color:var(--text-dim);margin:14px 0 6px}
+.pl{width:100%;border-collapse:collapse;font-size:14px}
+.pl td{padding:7px 6px;border-bottom:1px solid var(--line-soft)}
+.pl td.num{text-align:right;font-variant-numeric:tabular-nums;width:130px}
+.pl td.k{color:var(--text-dim)}.pl td.k .why{display:block;font-size:11px;color:var(--text-faint)}
+.pl tr.sum td{font-weight:800;border-top:2px solid var(--line);border-bottom:2px solid var(--line)}
+.pl tr.sum td.num.plus{color:var(--profit)}.pl tr.sum td.num.minus{color:var(--loss)}
+.pl tr.sub td{padding-left:22px;font-size:13px}
+.pl td .ln{color:var(--info);font-size:12px;cursor:pointer;margin-left:6px}
+.pending{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--radius-md);padding:10px 14px;font-size:13px;color:var(--warn);display:flex;gap:12px;align-items:center;margin-bottom:12px}
+.pending .grow{flex:1}
+.close{background:var(--brand-soft);border-radius:var(--radius-md);padding:12px 14px}
+.close .t{font-weight:700}.close .s{font-size:12px;color:var(--brand-ink);margin-top:2px}
+.tagrow{display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--line-soft);font-size:13px}
+.tagrow:first-of-type{border-top:0}.tagrow b{font-variant-numeric:tabular-nums}
+.small{font-size:12px;color:var(--text-faint)}
+.acc{display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--line-soft);font-size:13px}.acc:first-of-type{border-top:0}
+.note{position:fixed;right:16px;bottom:16px;background:#26262a;color:#fff;font-size:12px;padding:8px 12px;border-radius:8px;opacity:.85}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="nav">
+    <div class="mark">そ</div>そろばん
+    <div class="item">ホーム</div><div class="item">売上</div><div class="item">仕入</div><div class="item">在庫</div><div class="item">商品</div><div class="item">経費</div><div class="item active">月次</div><hr><div class="item">設定</div><div class="item">ヘルプ</div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div class="search">すべてから探す（Ctrl+K）</div>
+      <div class="mini">今月の粗利 ¥5,249 ／ 純利益 ¥5,049</div>
+      <div class="grow"></div>
+      <div class="last">最終取り込み 09/21 19:08</div>
+      <button class="btn primary">取り込む</button>
+    </div>
+    <div class="head"><h1>月次</h1><span style="flex:1"></span><button class="btn">グラフ</button></div>
+
+    <!-- 月の帯（横スクロール）。押すと下の計算書が切り替わる -->
+    <div class="months">
+      <div class="mo"><div class="l">2026-06</div><div class="v plus">¥8,120</div><div class="s">締め済み</div></div>
+      <div class="mo"><div class="l">2026-07</div><div class="v plus">¥12,600</div><div class="s">締め済み</div></div>
+      <div class="mo on"><div class="l">2026-08</div><div class="v plus">¥11,137</div><div class="s"><span class="chip warn">未締め</span></div></div>
+      <div class="mo"><div class="l">2026-09（今月）</div><div class="v plus">¥5,049</div><div class="s">進行中</div></div>
+    </div>
+
+    <div class="layout">
+      <div>
+        <div class="pending">⚠ 締める前に：送料未入力 1 件 ・ 未紐付け 3 件<span class="grow"></span><button class="btn sm">売上タブで片付ける</button></div>
+
+        <!-- 計算書 -->
+        <div class="card">
+          <h2>2026-08 の計算書 <span class="chip">販売用 11 件</span><span class="chip">私物 1 件は含まない</span></h2>
+          <table class="pl">
+            <tr><td class="k">売上（販売価格の合計）</td><td class="num">¥34,978</td><td></td></tr>
+            <tr class="sub"><td class="k">− 販売手数料（10%）</td><td class="num">−¥3,498</td><td></td></tr>
+            <tr class="sub"><td class="k">− 発送送料</td><td class="num">−¥3,730</td><td><span class="ln">実額 9 ・ 選択 2</span></td></tr>
+            <tr class="sub"><td class="k">− 梱包材費</td><td class="num">−¥750</td><td></td></tr>
+            <tr class="sub"><td class="k">− 原価（紐付けた在庫の按分後原価）</td><td class="num">−¥12,663</td><td><span class="ln">11 点</span></td></tr>
+            <tr class="sum"><td>粗利</td><td class="num plus">¥14,337</td><td class="small">粗利率 41%</td></tr>
+            <tr class="sub"><td class="k">− 経費（この月に計上）<span class="why">梱包費 ¥1,500 ・ 送料 ¥1,200 ・ 消耗品 ¥500</span></td><td class="num">−¥3,200</td><td><span class="ln">経費タブ →</span></td></tr>
+            <tr class="sum"><td>純利益</td><td class="num plus">¥11,137</td><td class="small">純利益率 32%</td></tr>
+          </table>
+          <h3>参考</h3>
+          <table class="pl" style="font-size:13px">
+            <tr><td class="k">売上金の反映待ち（この月に売れて未完了）</td><td class="num">¥0</td><td></td></tr>
+            <tr><td class="k">私物の販売</td><td class="num">¥5,200</td><td class="small">利益の計算に入れない</td></tr>
+            <tr><td class="k">この月に注文した仕入（支払）</td><td class="num">¥23,400</td><td class="small">原価とは別。在庫として残る</td></tr>
+          </table>
+        </div>
+
+        <!-- 経費の按分と販売の表（折りたたみ）。既存の表をそのまま -->
+        <div class="card">
+          <h2>経費の按分と販売ごとの利益 <span class="chip">按分：金額（販売価格の比）</span> <span class="small">数量に切替</span></h2>
+          <p class="small">経費 ¥3,200 を販売用 11 件に配賦。端数は最後の行。合計は必ず一致します。<span class="ln" style="color:var(--info);cursor:pointer">▶ 11 件の表を開く</span></p>
+        </div>
+      </div>
+
+      <aside>
+        <div class="card close">
+          <div class="t">この月を締める</div>
+          <div class="s">終わった月の数字を記録します。編集はロックしません（後で変われば差分が出ます）</div>
+          <div style="margin-top:10px"><button class="btn primary">2026-08 を締める</button></div>
+        </div>
+
+        <div class="card">
+          <h2>誰にいくら払う（タグ別）</h2>
+          <div class="tagrow"><span><span class="chip tag" style="margin:0">マージン（瑞利）</span> 4 件</span><b>¥3,980</b></div>
+          <div class="small" style="padding:0 0 6px">粗利 ¥5,120 − 按分経費 ¥1,140</div>
+          <div class="tagrow"><span><span class="chip tag" style="margin:0">セール</span> 6 件</span><b>¥6,210</b></div>
+          <div class="small" style="margin-top:8px">払う相手のタグは 1 販売に 1 つ。2 つ付いた販売があれば注意が出ます</div>
+        </div>
+
+        <div class="card">
+          <h2>仕入先への支払い（この月の注文）</h2>
+          <div class="acc"><span>メロジョイA</span><b>¥13,700</b></div>
+          <div class="acc"><span>メロジョイB</span><b>¥9,700</b></div>
+          <div class="acc"><span>TikTok Shop</span><b>¥0</b></div>
+          <div class="small" style="margin-top:6px">確定した仕入の総原価（商品計＋送料＋その他−割引）</div>
+        </div>
+      </aside>
+    </div>
+  </main>
+</div>
+<div class="note">モック：静的な画面（数字はダミー）</div>
+</body>
+</html>
