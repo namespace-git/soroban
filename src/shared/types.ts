@@ -531,12 +531,10 @@ export interface MonthlySummary {
   gross_profit: number
   /** 送料が未入力（is_shipping_confirmed=0）の販売数。その分は送料 0 で集計されているので画面で注記する */
   unconfirmed_shipping: number
-  /**
-   * 期間費用（expense テーブル、その月の合計）。kind='resale' の行にだけ載せ、私物の行は 0。
-   * 振込手数料は「月 1 回の振込」前提で、転売の販売がある月に 1 件だけ自動で expense に作られる
-   * （作った時点の設定値で固定。後から設定を変えても過去月は動かない）
-   */
+  /** 経費（expense.month がその月の合計）。kind='resale' の行にだけ載せ、私物の行は 0 */
   expense_total: number
+  /** 締め済みなら true */
+  closed: boolean
   /** 純利益 = 粗利 − 期間費用 */
   net_profit: number
 }
@@ -545,24 +543,122 @@ export interface MonthlySummary {
 // 期間費用（振込手数料・梱包材の買い足しなど、販売 1 件に紐付かない費用）
 // ------------------------------------------------------------
 
-export type ExpenseCategory = 'transfer_fee' | 'supplies' | 'other'
+/**
+ * 経費の項目。packaging=梱包費（既定。ビニール・箱など）／supplies=消耗品／shipping=送料／
+ * fee=手数料／transfer_fee=振込手数料（自動計上は廃止。過去の行のために残す）／other=その他。
+ * 減価償却は扱わない
+ */
+export type ExpenseCategory = 'packaging' | 'supplies' | 'shipping' | 'fee' | 'transfer_fee' | 'other'
 
+/** 経費（レシート）の明細 1 行 */
+export interface ExpenseLine {
+  id: string
+  name: string
+  /** 税込の金額（明細の合計。単価×数量ではなく行の金額） */
+  amount: number
+  quantity: number
+  category: ExpenseCategory
+}
+
+/**
+ * 経費 1 件＝レシート 1 枚。amount は明細があれば明細の合計、無ければ入力した合計。
+ * 計上月 month は購入日の月が既定（変えられる）。月次の純利益・按分はこの month で集計する
+ */
 export interface Expense {
   id: string
-  /** YYYY-MM-DD */
+  /** 購入日 YYYY-MM-DD */
   occurred_at: string
+  /** 計上月 YYYY-MM */
+  month: string
+  /** 購入店 */
+  shop: string | null
+  /** 代表の項目（明細が無いときの項目。明細があれば最初の明細の項目） */
   category: ExpenseCategory
   amount: number
   note: string | null
-  /** 1 なら振込手数料の自動計上（月 1 件）。消すと、その月にはもう自動で作らない */
+  /** 旧・振込手数料の自動計上の印（1）。新規には付かない */
   auto: number
+  /** レシート画像。soroban-thumb://receipt-<id>.<ext>。無ければ null */
+  receipt_url: string | null
+  lines: ExpenseLine[]
+}
+
+export interface ExpenseLineInput {
+  name: string
+  amount: number
+  quantity?: number
+  category?: ExpenseCategory
 }
 
 export interface ExpenseInput {
   occurred_at: string
+  /** 省略時は occurred_at の月 */
+  month?: string | null
+  shop?: string | null
   category: ExpenseCategory
-  amount: number
+  /** 明細が無いときの合計。明細があれば無視して明細の合計を使う */
+  amount?: number
   note?: string | null
+  lines?: ExpenseLineInput[]
+}
+
+/** 月の締めの記録。数字は締めた時点のもの（後で変わっても動かない） */
+export interface MonthClose {
+  month: string
+  closed_at: string
+  alloc_method: AllocMethod
+  sales_count: number
+  revenue: number
+  gross_profit: number
+  expense_total: number
+  net_profit: number
+}
+
+/** 月次の明細の販売 1 行（sale_profit ＋ 按分した経費） */
+export interface MonthSaleRow extends SaleProfit {
+  /** この販売に配賦した経費（整数。合計はその月の経費合計と一致） */
+  allocated_expense: number
+  /** 粗利 − 配賦した経費 */
+  net_profit: number
+}
+
+export interface MonthTotals {
+  sales_count: number
+  revenue: number
+  total_fee: number
+  total_shipping: number
+  total_packaging: number
+  total_cost: number
+  gross_profit: number
+  expense_total: number
+  net_profit: number
+}
+
+/**
+ * 月次の明細（月次タブの月をクリック）。
+ * 経費はその月の販売用の販売（kind='resale'）に按分する。私物には配賦しない。
+ * 金額按分＝販売価格の比、数量按分＝紐付けた在庫の点数の比（0 点なら 1）。
+ * floor で配って余りは最後の行に寄せ、Σallocated_expense = expense_total にする。販売が 0 件なら誰にも配賦しない
+ */
+export interface MonthDetail {
+  month: string
+  alloc_method: AllocMethod
+  close: MonthClose | null
+  /** 締め後に数字が変わっていれば true（close と totals の比較） */
+  changed_since_close: boolean
+  /** 販売用の販売（私物は含めない）。sold_at がその月 */
+  sales: MonthSaleRow[]
+  /** 私物の販売（参考。按分しない） */
+  personal_sales: SaleProfit[]
+  expenses: Expense[]
+  expense_by_category: Array<{ category: ExpenseCategory; amount: number }>
+  totals: MonthTotals
+  /** tagId を渡したときだけ。そのタグ（直接・派生）を持つ販売だけの合計 */
+  filtered: (MonthTotals & { tag: Tag }) | null
+  /** その月に注文した仕入の仕入先ごとの支払合計（総原価＝商品計＋送料＋その他−割引） */
+  purchases_by_account: Array<{ shop_account_id: string; shop_account_name: string; count: number; total_cost: number }>
+  /** 締める前に片付けるもの */
+  pending: { unconfirmed_shipping: number; unmatched: number }
 }
 
 export interface DashboardStats {
@@ -676,9 +772,22 @@ export interface SorobanApi {
 
   // 期間費用
   /** month は YYYY-MM。省略で全部。新しい順 */
+  /** month（YYYY-MM）は計上月で絞る。省略で全部（新しい順） */
   listExpenses(month?: string): Promise<Expense[]>
   createExpense(input: ExpenseInput): Promise<string>
+  updateExpense(id: string, input: ExpenseInput): Promise<void>
   deleteExpense(id: string): Promise<void>
+  /** レシート画像をファイル選択で添付（userData/thumbs/receipt-<id>.<ext> にコピー）。キャンセルなら null */
+  attachReceipt(id: string): Promise<string | null>
+  removeReceipt(id: string): Promise<void>
+
+  /** 月次の明細。tagId で絞った合計も同時に返す */
+  getMonthDetail(month: string, opts?: { tagId?: string | null }): Promise<MonthDetail>
+  /** その月の経費の按分方法（既定 by_amount）。締め前でも変えられる */
+  setMonthAllocMethod(month: string, method: AllocMethod): Promise<void>
+  /** 終わった月だけ締められる（今月・未来は Error）。締めた時点の数字を記録する */
+  closeMonth(month: string): Promise<MonthClose>
+  reopenMonth(month: string): Promise<void>
 
   // タグ
   listTags(): Promise<Tag[]>

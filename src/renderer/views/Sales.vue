@@ -439,7 +439,13 @@ watch(gotoPayload, async (p) => {
   if (p.stage) stage.value = p.stage
   else if (p.onlyPending) stage.value = 'pending'
   else if (p.focusId) stage.value = 'all' // どの段階にいても検索結果を必ず見つけられるようにする
-  if (p.month) { stage.value = 'all'; monthFilter.value = p.month } // グラフの月クリック：段階は必ず「すべて」
+  if (p.month) {
+    // グラフの月クリックは「すべて」、月次の「片付けるもの」は stage 指定のまま。
+    // 段階の変更で monthFilter を消す watch が先に走るので、1 tick 待ってから月を入れる
+    if (!p.stage) stage.value = 'all'
+    await nextTick()
+    monthFilter.value = p.month
+  }
   if (p.onlyUnallocated) listedFilter.value = 'unallocated'
   if (p.status) statusFilter.value = p.status
   if (p.search) searchText.value = p.search

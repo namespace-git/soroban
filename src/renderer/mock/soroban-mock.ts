@@ -18,7 +18,8 @@ import type {
   Material, VariantSummary, Tag, Fulfillment,
   ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
   Listing, ListingStatus,
-  Expense, ExpenseInput,
+  Expense, ExpenseInput, ExpenseLineInput, ExpenseLine, ExpenseCategory,
+  AllocMethod, MonthClose, MonthDetail, MonthSaleRow, MonthTotals,
   SearchHit,
   UpdateStatus,
 } from '../../shared/types'
@@ -258,7 +259,6 @@ const shippingMethods: ShippingMethod[] = [
 
 let settings: Record<string, string> = {
   fee_rate_bp: '1000',
-  transfer_fee: '200',
   collect_interval_h: '1',
   aging_warn_days: '90',
   mercari_keyword: '【',
@@ -964,7 +964,7 @@ function buildInitialListings(): void {
 // ------------------------------------------------------------
 
 /** expense_total / net_profit は expenses（期間費用）から後付けで合成するため、ここでは持たない */
-type MonthlyBase = Omit<MonthlySummary, 'expense_total' | 'net_profit'>
+type MonthlyBase = Omit<MonthlySummary, 'expense_total' | 'net_profit' | 'closed'>
 
 function monthlyFromSales(rows: SaleProfit[]): MonthlyBase[] {
   const map = new Map<string, MonthlyBase>()
@@ -1014,34 +1014,145 @@ function extraOlderMonths(): MonthlyBase[] {
 
 let expenses: Expense[] = []
 
-/** その月の末日（YYYY-MM-DD）。未来日にはしない */
-function monthEndOrToday(month: string): string {
-  const [y, m] = month.split('-').map(Number)
-  const lastDay = new Date(y, m, 0).getDate()
-  const end = `${month}-${pad(lastDay)}`
-  const today = todayLocal()
-  return end > today ? today : end
+/**
+ * 月の按分方法・締めの記録。月次タブ／経費の計上月ごとに1つ。持っていない月は
+ * 既定（金額按分・未締め）として扱う（monthBookEntry で都度作る）
+ */
+const monthBook = new Map<string, { alloc_method: AllocMethod; close: MonthClose | null }>()
+function monthBookEntry(month: string): { alloc_method: AllocMethod; close: MonthClose | null } {
+  let entry = monthBook.get(month)
+  if (!entry) {
+    entry = { alloc_method: 'by_amount', close: null }
+    monthBook.set(month, entry)
+  }
+  return entry
 }
 
-/** 振込手数料は月1回。転売の販売がある月にまだ無ければ、その月の1件だけ自動計上する */
-function addAutoTransferFee(month: string): void {
-  if (expenses.some(e => e.auto === 1 && e.occurred_at.slice(0, 7) === month)) return
+function buildExpenseLines(inputs: ExpenseLineInput[] | undefined): ExpenseLine[] {
+  if (!inputs || inputs.length === 0) return []
+  return inputs.map(l => ({
+    id: uid(),
+    name: l.name,
+    amount: Math.round(l.amount),
+    quantity: l.quantity ?? 1,
+    category: l.category ?? 'packaging',
+  }))
+}
+
+/** 今月・先月に梱包費／消耗品／送料のサンプル、過去月に旧・振込手数料の自動計上を1件残す */
+function buildInitialExpenses(): void {
+  const thisMonth = thisMonthLocal()
+  const lastMonth = monthAgoStr(1)
+  const nextMonth = monthAgoStr(-1)
+  const oldMonth = monthAgoStr(3) // extraOlderMonths の m3 と同じ月にして月次にも出るようにする
+
+  // 梱包費：レシート1枚に明細2行（ビニール袋＋緩衝材）
   expenses.push({
     id: uid(),
-    occurred_at: monthEndOrToday(month),
+    occurred_at: todayLocal(daysAgo(6)),
+    month: thisMonth,
+    shop: 'ダイソー',
+    category: 'packaging',
+    amount: 2000,
+    note: null,
+    auto: 0,
+    receipt_url: '/mock/receipt.svg',
+    lines: [
+      { id: uid(), name: 'ビニール袋 100枚', amount: 1200, quantity: 1, category: 'packaging' },
+      { id: uid(), name: '緩衝材', amount: 800, quantity: 1, category: 'packaging' },
+    ],
+  })
+  // 消耗品
+  expenses.push({
+    id: uid(),
+    occurred_at: todayLocal(daysAgo(4)),
+    month: thisMonth,
+    shop: '無印良品',
+    category: 'supplies',
+    amount: 650,
+    note: null,
+    auto: 0,
+    receipt_url: null,
+    lines: [],
+  })
+  // 送料
+  expenses.push({
+    id: uid(),
+    occurred_at: todayLocal(daysAgo(3)),
+    month: thisMonth,
+    shop: '郵便局',
+    category: 'shipping',
+    amount: 1400,
+    note: '梱包資材の発送',
+    auto: 0,
+    receipt_url: null,
+    lines: [],
+  })
+  // 計上月を翌月に回した1件（購入は今月、計上は来月）
+  expenses.push({
+    id: uid(),
+    occurred_at: todayLocal(daysAgo(1)),
+    month: nextMonth,
+    shop: 'Amazon',
+    category: 'supplies',
+    amount: 980,
+    note: '来月分の梱包資材をまとめ買い',
+    auto: 0,
+    receipt_url: null,
+    lines: [],
+  })
+
+  // 先月ぶん
+  expenses.push({
+    id: uid(),
+    occurred_at: `${lastMonth}-08`,
+    month: lastMonth,
+    shop: 'ダイソー',
+    category: 'packaging',
+    amount: 1500,
+    note: null,
+    auto: 0,
+    receipt_url: null,
+    lines: [{ id: uid(), name: '段ボール 10枚', amount: 1500, quantity: 10, category: 'packaging' }],
+  })
+  expenses.push({
+    id: uid(),
+    occurred_at: `${lastMonth}-15`,
+    month: lastMonth,
+    shop: 'ヤマト運輸',
+    category: 'shipping',
+    amount: 1200,
+    note: null,
+    auto: 0,
+    receipt_url: null,
+    lines: [],
+  })
+  expenses.push({
+    id: uid(),
+    occurred_at: `${lastMonth}-22`,
+    month: lastMonth,
+    shop: null,
+    category: 'supplies',
+    amount: 500,
+    note: 'ラベルシール',
+    auto: 0,
+    receipt_url: null,
+    lines: [],
+  })
+
+  // 旧・振込手数料の自動計上（過去月の1件だけ残す。新規にはもう作らない）
+  expenses.push({
+    id: uid(),
+    occurred_at: `${oldMonth}-28`,
+    month: oldMonth,
+    shop: null,
     category: 'transfer_fee',
-    amount: Number(settings.transfer_fee ?? '200'),
+    amount: 200,
     note: null,
     auto: 1,
+    receipt_url: null,
+    lines: [],
   })
-}
-
-/** 転売の販売がある月（実データ＋直近2か月の合成データ）に自動計上を1件ずつ入れておく */
-function buildInitialExpenses(): void {
-  const months = new Set<string>()
-  for (const s of sales) if (s.kind === 'resale') months.add(s.sold_at.slice(0, 7))
-  for (const m of extraOlderMonths()) if (m.kind === 'resale') months.add(m.month)
-  for (const month of months) addAutoTransferFee(month)
 }
 
 /** MonthlyBase[] に期間費用（転売の行のみ）を足して MonthlySummary[] にする */
@@ -1049,11 +1160,135 @@ function withExpenses(rows: MonthlyBase[]): MonthlySummary[] {
   return rows.map(m => {
     const expenseTotal = m.kind === 'resale'
       ? expenses
-        .filter(e => e.occurred_at.slice(0, 7) === m.month)
+        .filter(e => e.month === m.month)
         .reduce((s, e) => s + e.amount, 0)
       : 0
-    return { ...m, expense_total: expenseTotal, net_profit: m.gross_profit - expenseTotal }
+    const closed = m.kind === 'resale' && monthBook.get(m.month)?.close != null
+    return { ...m, expense_total: expenseTotal, net_profit: m.gross_profit - expenseTotal, closed }
   })
+}
+
+/**
+ * pool を weights の比率で配賦する。floor で配って余りは最後の要素へ（合計は必ず pool と一致）。
+ * weights の合計が 0 なら全部 0（誰にも配らない）
+ */
+function allocateExpenseFloor(weights: number[], pool: number): number[] {
+  const total = weights.reduce((s, w) => s + w, 0)
+  if (weights.length === 0) return []
+  if (total === 0) return weights.map(() => 0)
+
+  let assigned = 0
+  return weights.map((w, i) => {
+    if (i === weights.length - 1) return pool - assigned
+    const share = Math.floor((pool * w) / total)
+    assigned += share
+    return share
+  })
+}
+
+/** 月次の明細（月次タブの月をクリック）。getMonthDetail・closeMonth の両方で使う */
+function buildMonthDetail(month: string, tagId: string | null): MonthDetail {
+  const entry = monthBookEntry(month)
+  const resaleSales = sales
+    .filter(s => s.kind === 'resale' && s.sold_at.slice(0, 7) === month)
+    .slice()
+    .sort((a, b) => (a.sold_at < b.sold_at ? 1 : a.sold_at > b.sold_at ? -1 : 0))
+  const personalSales = sales
+    .filter(s => s.kind === 'personal' && s.sold_at.slice(0, 7) === month)
+    .slice()
+    .sort((a, b) => (a.sold_at < b.sold_at ? 1 : a.sold_at > b.sold_at ? -1 : 0))
+  const expensesForMonth = expenses
+    .filter(e => e.month === month)
+    .slice()
+    .sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : a.occurred_at > b.occurred_at ? -1 : 0))
+  const expenseTotal = expensesForMonth.reduce((s, e) => s + e.amount, 0)
+
+  const weights = resaleSales.map(s => (entry.alloc_method === 'by_amount' ? s.price : (s.item_count || 1)))
+  const shares = allocateExpenseFloor(weights, expenseTotal)
+  const saleRows: MonthSaleRow[] = resaleSales.map((s, i) => ({
+    ...s,
+    allocated_expense: shares[i] ?? 0,
+    net_profit: s.gross_profit - (shares[i] ?? 0),
+  }))
+
+  const sum = (f: (s: SaleProfit) => number) => resaleSales.reduce((acc, s) => acc + f(s), 0)
+  const grossProfit = sum(s => s.gross_profit)
+  const totals: MonthTotals = {
+    sales_count: resaleSales.length,
+    revenue: sum(s => s.price),
+    total_fee: sum(s => s.fee),
+    total_shipping: sum(s => s.shipping_fee),
+    total_packaging: sum(s => s.packaging_cost),
+    total_cost: sum(s => s.cost),
+    gross_profit: grossProfit,
+    expense_total: expenseTotal,
+    net_profit: grossProfit - expenseTotal,
+  }
+
+  const catMap = new Map<ExpenseCategory, number>()
+  for (const e of expensesForMonth) catMap.set(e.category, (catMap.get(e.category) ?? 0) + e.amount)
+  const expense_by_category = [...catMap.entries()].map(([category, amount]) => ({ category, amount }))
+
+  const purchasesThisMonth = purchases.filter(p => p.status === 'confirmed' && p.ordered_at.slice(0, 7) === month)
+  const acctMap = new Map<string, { shop_account_id: string; shop_account_name: string; count: number; total_cost: number }>()
+  for (const p of purchasesThisMonth) {
+    const cur = acctMap.get(p.shop_account_id) ?? {
+      shop_account_id: p.shop_account_id, shop_account_name: p.shop_account_name, count: 0, total_cost: 0,
+    }
+    cur.count += 1
+    cur.total_cost += p.total_cost
+    acctMap.set(p.shop_account_id, cur)
+  }
+
+  const pending = {
+    unconfirmed_shipping: [...resaleSales, ...personalSales].filter(s => !s.is_shipping_confirmed).length,
+    unmatched: resaleSales.filter(s => s.unmatched === 1).length,
+  }
+
+  let filtered: (MonthTotals & { tag: Tag }) | null = null
+  if (tagId) {
+    const tag = tags.find(t => t.id === tagId)
+    if (tag) {
+      const taggedRows = saleRows.filter(s => s.tags.some(t => t.id === tag.id) || s.inherited_tags.some(t => t.id === tag.id))
+      const tsum = (f: (s: MonthSaleRow) => number) => taggedRows.reduce((acc, s) => acc + f(s), 0)
+      filtered = {
+        sales_count: taggedRows.length,
+        revenue: tsum(s => s.price),
+        total_fee: tsum(s => s.fee),
+        total_shipping: tsum(s => s.shipping_fee),
+        total_packaging: tsum(s => s.packaging_cost),
+        total_cost: tsum(s => s.cost),
+        gross_profit: tsum(s => s.gross_profit),
+        expense_total: tsum(s => s.allocated_expense),
+        net_profit: tsum(s => s.net_profit),
+        tag,
+      }
+    }
+  }
+
+  const close = entry.close
+  const changed_since_close = !!close && (
+    close.sales_count !== totals.sales_count
+    || close.revenue !== totals.revenue
+    || close.gross_profit !== totals.gross_profit
+    || close.expense_total !== totals.expense_total
+    || close.net_profit !== totals.net_profit
+  )
+
+  return {
+    month,
+    alloc_method: entry.alloc_method,
+    close,
+    changed_since_close,
+    sales: saleRows,
+    personal_sales: personalSales,
+    expenses: expensesForMonth,
+    expense_by_category,
+    totals,
+    filtered,
+    purchases_by_account: [...acctMap.values()],
+    pending,
+  }
 }
 
 // ------------------------------------------------------------
@@ -2029,27 +2264,95 @@ const api: SorobanApi = {
 
   async listExpenses(month?: string) {
     let rows = expenses.slice()
-    if (month) rows = rows.filter(e => e.occurred_at.slice(0, 7) === month)
+    if (month) rows = rows.filter(e => e.month === month)
     rows.sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : a.occurred_at > b.occurred_at ? -1 : 0))
     return wait(rows)
   },
 
   async createExpense(input: ExpenseInput) {
     const id = uid()
+    const lines = buildExpenseLines(input.lines)
+    const amount = lines.length ? lines.reduce((s, l) => s + l.amount, 0) : Math.round(input.amount ?? 0)
+    const category = lines.length ? lines[0].category : input.category
     expenses.push({
       id,
       occurred_at: input.occurred_at,
-      category: input.category,
-      amount: Math.round(input.amount),
+      month: input.month ?? input.occurred_at.slice(0, 7),
+      shop: input.shop?.trim() || null,
+      category,
+      amount,
       note: input.note?.trim() || null,
       auto: 0,
+      receipt_url: null,
+      lines,
     })
     return wait(id)
   },
 
+  async updateExpense(id: string, input: ExpenseInput) {
+    const e = expenses.find(x => x.id === id)
+    if (!e) throw new Error('経費が見つかりません')
+    const lines = buildExpenseLines(input.lines)
+    const amount = lines.length ? lines.reduce((s, l) => s + l.amount, 0) : Math.round(input.amount ?? e.amount)
+    const category = lines.length ? lines[0].category : input.category
+    e.occurred_at = input.occurred_at
+    e.month = input.month ?? input.occurred_at.slice(0, 7)
+    e.shop = input.shop?.trim() || null
+    e.category = category
+    e.amount = amount
+    e.note = input.note?.trim() || null
+    e.lines = lines
+    return wait(undefined)
+  },
+
   async deleteExpense(id: string) {
-    // auto=1 でも消してよい。消えた月にはもう自動計上しない（buildInitialExpenses は起動時にしか走らない）
+    // auto=1 でも消してよい
     expenses = expenses.filter(e => e.id !== id)
+    return wait(undefined)
+  },
+
+  async attachReceipt(id: string) {
+    const e = expenses.find(x => x.id === id)
+    if (!e) throw new Error('経費が見つかりません')
+    // 本物はファイル選択でコピーする。モックは固定のサンプル画像を返す
+    e.receipt_url = '/mock/receipt.svg'
+    return wait(e.receipt_url)
+  },
+
+  async removeReceipt(id: string) {
+    const e = expenses.find(x => x.id === id)
+    if (e) e.receipt_url = null
+    return wait(undefined)
+  },
+
+  async getMonthDetail(month: string, opts?: { tagId?: string | null }) {
+    return wait(buildMonthDetail(month, opts?.tagId ?? null))
+  },
+
+  async setMonthAllocMethod(month: string, method: AllocMethod) {
+    monthBookEntry(month).alloc_method = method
+    return wait(undefined)
+  },
+
+  async closeMonth(month: string) {
+    if (month >= thisMonthLocal()) throw new Error('終わった月だけ締められます')
+    const detail = buildMonthDetail(month, null)
+    const close: MonthClose = {
+      month,
+      closed_at: todayLocal(),
+      alloc_method: detail.alloc_method,
+      sales_count: detail.totals.sales_count,
+      revenue: detail.totals.revenue,
+      gross_profit: detail.totals.gross_profit,
+      expense_total: detail.totals.expense_total,
+      net_profit: detail.totals.net_profit,
+    }
+    monthBookEntry(month).close = close
+    return wait(close)
+  },
+
+  async reopenMonth(month: string) {
+    monthBookEntry(month).close = null
     return wait(undefined)
   },
 
@@ -2497,6 +2800,7 @@ const api: SorobanApi = {
     listingItems.clear()
     lineItemIds.clear()
     productTags.clear()
+    monthBook.clear()
     return wait(undefined)
   },
 

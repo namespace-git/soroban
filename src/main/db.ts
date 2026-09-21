@@ -8,9 +8,10 @@ import { allocate, calcFee, splitEvenly } from './money'
 import { extractCode, extractCodeQuantities, extractCodes, extractItemCodes, extractMaterial } from './code'
 import { thisMonthLocal, todayLocal } from '../shared/date'
 import type {
-  AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, Fulfillment, InventoryItem,
-  InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus, Material,
-  MonthlySummary, ProductDetail, ProductMonthPoint, ProductSummary, PurchaseDetail,
+  AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, Fulfillment,
+  InventoryItem, InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus,
+  Material, MonthClose, MonthDetail, MonthlySummary, MonthSaleRow, MonthTotals, ProductDetail,
+  ProductMonthPoint, ProductSummary, PurchaseDetail,
   PurchaseDraftInput, PurchaseImportResult, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
   PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleStatus, SaleTotals,
   SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, Tag, TimelineEvent, VariantSummary,
@@ -893,6 +894,48 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '17')
          ON CONFLICT(key) DO UPDATE SET value = '17'`,
+    ).run()
+  }
+
+  if (version < 18) {
+    // 経費の明細（expense_line）・計上月（month）・購入店（shop）・レシート（receipt_file）。
+    // 振込手数料の自動計上は撤去（expense_auto_month は DROP。過去の auto=1 行は残す）
+    addColumnIfMissing('expense', 'month', `TEXT NOT NULL DEFAULT ''`)
+    db.exec(`UPDATE expense SET month = substr(occurred_at, 1, 7) WHERE month = ''`)
+    addColumnIfMissing('expense', 'shop', 'TEXT')
+    addColumnIfMissing('expense', 'receipt_file', 'TEXT')
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_expense_month ON expense(month)`)
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS expense_line (
+        id         TEXT PRIMARY KEY,
+        expense_id TEXT NOT NULL REFERENCES expense(id) ON DELETE CASCADE,
+        name       TEXT NOT NULL,
+        amount     INTEGER NOT NULL,
+        quantity   INTEGER NOT NULL DEFAULT 1,
+        category   TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_expense_line_expense ON expense_line(expense_id);
+
+      CREATE TABLE IF NOT EXISTS month_book (
+        month         TEXT PRIMARY KEY,
+        alloc_method  TEXT NOT NULL DEFAULT 'by_amount'
+                      CHECK (alloc_method IN ('by_amount','by_quantity')),
+        closed_at     TEXT,
+        sales_count   INTEGER,
+        revenue       INTEGER,
+        gross_profit  INTEGER,
+        expense_total INTEGER,
+        net_profit    INTEGER
+      );
+
+      DROP TABLE IF EXISTS expense_auto_month;
+    `)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '18')
+         ON CONFLICT(key) DO UPDATE SET value = '18'`,
     ).run()
   }
 
@@ -2776,70 +2819,11 @@ export function disposeInventory(
 // 集計
 // ============================================================
 
-/**
- * 転売の販売がある月それぞれについて、振込手数料を expense に自動計上する（月1件）。
- * 既に expense_auto_month にその月の記録があれば何もしない（人が自動行を消しても、
- * その月にはもう作らない。設定 transfer_fee を後から変えても、既に作った月は動かさない）。
- * 設定が 0 以下のときは expense は作らないが、expense_auto_month には記録する
- * （後から設定を上げても過去月には遡って作らないため）。
- *
- * 自動の振込手数料は「転売の販売がある月にだけ存在する」。区分変更（転売→私物）などで
- * その月の転売の販売が0件になったら、自動行（auto=1）と expense_auto_month の記録を消す
- * （人が入れた手動の費用は残す）。転売の販売が再び入れば、その時点でまた作り直す。
- */
-function ensureTransferFees(): void {
-  const resaleMonths = new Set(
-    (db.prepare(
-      `SELECT DISTINCT substr(sold_at, 1, 7) AS month FROM sale WHERE kind = 'resale'`,
-    ).all() as Array<{ month: string }>).map(r => r.month),
-  )
-  const trackedMonths = (db.prepare('SELECT month FROM expense_auto_month').all() as
-    Array<{ month: string }>).map(r => r.month)
-
-  const transferFee = setting('transfer_fee', 200)
-  const untrack = db.prepare('DELETE FROM expense_auto_month WHERE month = ?')
-  const deleteAutoExpense = db.prepare(
-    `DELETE FROM expense WHERE auto = 1 AND substr(occurred_at, 1, 7) = ?`,
-  )
-  const markDone = db.prepare(`INSERT INTO expense_auto_month (month) VALUES (?)`)
-  const insExpense = db.prepare(`
-    INSERT INTO expense (id, occurred_at, category, amount, note, auto)
-    VALUES (?, ?, 'transfer_fee', ?, '振込手数料（自動）', 1)
-  `)
-  const lastSaleDate = db.prepare(
-    `SELECT MAX(sold_at) AS d FROM sale WHERE kind = 'resale' AND substr(sold_at, 1, 7) = ?`,
-  )
-
-  const tx = db.transaction(() => {
-    // 転売の販売が0件になった月：自動行を消し、記録も消す（手動の費用は残す）
-    for (const month of trackedMonths) {
-      if (resaleMonths.has(month)) continue
-      deleteAutoExpense.run(month)
-      untrack.run(month)
-    }
-
-    // まだ記録していない、転売の販売がある月：自動計上する
-    for (const month of resaleMonths) {
-      if (trackedMonths.includes(month)) continue
-
-      if (transferFee > 0) {
-        const row = lastSaleDate.get(month) as { d: string | null }
-        // その月に転売の販売がある月だけをここに集めているので d は必ず取れる
-        const occurredAt = row.d ?? `${month}-28`
-        insExpense.run(randomUUID(), occurredAt, transferFee)
-      }
-      markDone.run(month)
-    }
-  })
-  tx()
-}
-
+/** 月次集計。expense_total は expense.month（計上月）で集計する */
 export function listMonthly(): MonthlySummary[] {
-  ensureTransferFees()
-
   const rows = db.prepare(
     `SELECT * FROM monthly_summary ORDER BY month DESC, kind`,
-  ).all() as Array<Omit<MonthlySummary, 'unconfirmed_shipping' | 'expense_total' | 'net_profit'>>
+  ).all() as Array<Omit<MonthlySummary, 'unconfirmed_shipping' | 'expense_total' | 'net_profit' | 'closed'>>
 
   // 送料未入力の件数（月×kind）
   const unconfirmedRows = db.prepare(`
@@ -2849,12 +2833,17 @@ export function listMonthly(): MonthlySummary[] {
   `).all() as Array<{ month: string; kind: SaleKind; c: number }>
   const unconfirmedMap = new Map(unconfirmedRows.map(r => [`${r.month}:${r.kind}`, r.c]))
 
-  // 期間費用の月合計。kind='resale' の行にだけ乗せる（私物は税務上別扱い）
+  // 期間費用の月合計（計上月＝expense.month）。kind='resale' の行にだけ乗せる（私物は税務上別扱い）
   const expenseRows = db.prepare(`
-    SELECT substr(occurred_at, 1, 7) AS month, COALESCE(SUM(amount), 0) AS total
-    FROM expense GROUP BY substr(occurred_at, 1, 7)
+    SELECT month, COALESCE(SUM(amount), 0) AS total
+    FROM expense GROUP BY month
   `).all() as Array<{ month: string; total: number }>
   const expenseMap = new Map(expenseRows.map(r => [r.month, r.total]))
+
+  const closedMonths = new Set(
+    (db.prepare(`SELECT month FROM month_book WHERE closed_at IS NOT NULL`).all() as
+      Array<{ month: string }>).map(r => r.month),
+  )
 
   const result: MonthlySummary[] = rows.map(r => {
     const expense_total = r.kind === 'resale' ? (expenseMap.get(r.month) ?? 0) : 0
@@ -2863,6 +2852,7 @@ export function listMonthly(): MonthlySummary[] {
       unconfirmed_shipping: unconfirmedMap.get(`${r.month}:${r.kind}`) ?? 0,
       expense_total,
       net_profit: r.gross_profit - expense_total,
+      closed: r.kind === 'resale' && closedMonths.has(r.month),
     }
   })
 
@@ -2876,6 +2866,7 @@ export function listMonthly(): MonthlySummary[] {
       sales_count: 0, revenue: 0, total_fee: 0, total_shipping: 0, total_packaging: 0,
       total_cost: 0, gross_profit: 0,
       unconfirmed_shipping: 0, expense_total: total, net_profit: -total,
+      closed: closedMonths.has(month),
     })
   }
 
@@ -2887,40 +2878,393 @@ export function listMonthly(): MonthlySummary[] {
 }
 
 // ------------------------------------------------------------
-// 期間費用（振込手数料・梱包材の買い足しなど、販売1件に紐付かない費用）
+// 期間費用（レシート単位。梱包材・消耗品・送料実費・手数料など、販売1件に紐付かない費用）
+//
+// amount は明細（expense_line）があればその合計、無ければ入力した合計。
+// 計上月（month）は購入日（occurred_at）の月が既定だが、変えられる。
+// 月次の純利益・按分は occurred_at ではなく month で集計する。
 // ------------------------------------------------------------
 
-const EXPENSE_CATEGORIES: ExpenseCategory[] = ['transfer_fee', 'supplies', 'other']
+const EXPENSE_CATEGORIES: ExpenseCategory[] = [
+  'packaging', 'supplies', 'shipping', 'fee', 'transfer_fee', 'other',
+]
 
-/** month は YYYY-MM。省略で全部。新しい順 */
-export function listExpenses(month?: string): Expense[] {
-  if (month) {
-    return db.prepare(`
-      SELECT id, occurred_at, category, amount, note, auto FROM expense
-      WHERE substr(occurred_at, 1, 7) = ?
-      ORDER BY occurred_at DESC, created_at DESC
-    `).all(month) as Expense[]
-  }
-  return db.prepare(`
-    SELECT id, occurred_at, category, amount, note, auto FROM expense
-    ORDER BY occurred_at DESC, created_at DESC
-  `).all() as Expense[]
+type ExpenseRow = {
+  id: string
+  occurred_at: string
+  month: string
+  shop: string | null
+  category: ExpenseCategory
+  amount: number
+  note: string | null
+  auto: number
+  receipt_file: string | null
 }
 
-export function createExpense(input: ExpenseInput): string {
+const EXPENSE_SELECT = `
+  SELECT id, occurred_at, month, shop, category, amount, note, auto, receipt_file FROM expense
+`
+
+function loadExpenseLinesFor(expenseIds: string[]): Map<string, ExpenseLine[]> {
+  const map = new Map<string, ExpenseLine[]>()
+  if (expenseIds.length === 0) return map
+
+  const ph = expenseIds.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT id, expense_id, name, amount, quantity, category
+    FROM expense_line
+    WHERE expense_id IN (${ph})
+    ORDER BY sort_order, rowid
+  `).all(...expenseIds) as Array<
+    { id: string; expense_id: string; name: string; amount: number; quantity: number; category: ExpenseCategory }
+  >
+
+  for (const r of rows) {
+    const { expense_id, ...line } = r
+    const arr = map.get(expense_id) ?? []
+    arr.push(line)
+    map.set(expense_id, arr)
+  }
+  return map
+}
+
+function hydrateExpenseRows(rows: ExpenseRow[]): Expense[] {
+  const lineMap = loadExpenseLinesFor(rows.map(r => r.id))
+  return rows.map(r => {
+    const { receipt_file, ...rest } = r
+    return { ...rest, receipt_url: toThumbUrl(receipt_file), lines: lineMap.get(r.id) ?? [] }
+  })
+}
+
+/** month は YYYY-MM（計上月）で絞る。省略で全部。新しい順 */
+export function listExpenses(month?: string): Expense[] {
+  const rows = month
+    ? db.prepare(`${EXPENSE_SELECT} WHERE month = ? ORDER BY occurred_at DESC, created_at DESC`)
+        .all(month) as ExpenseRow[]
+    : db.prepare(`${EXPENSE_SELECT} ORDER BY occurred_at DESC, created_at DESC`).all() as ExpenseRow[]
+  return hydrateExpenseRows(rows)
+}
+
+type ValidatedExpense = {
+  month: string
+  category: ExpenseCategory
+  amount: number
+  lines: Array<{ name: string; amount: number; quantity: number; category: ExpenseCategory }>
+}
+
+/**
+ * createExpense / updateExpense 共通の入力チェック。SqliteError が画面にそのまま
+ * 出ないよう、分かる範囲で先に日本語で弾く。明細があれば amount・category を明細から導く。
+ */
+function validateExpenseInput(input: ExpenseInput): ValidatedExpense {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.occurred_at)) {
+    throw new Error('購入日はYYYY-MM-DDの形式で入力してください')
+  }
+  const month = input.month ?? input.occurred_at.slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    throw new Error('計上月はYYYY-MMの形式で入力してください')
+  }
   if (!EXPENSE_CATEGORIES.includes(input.category)) {
     throw new Error(`不正な費用区分です: ${input.category}`)
   }
+
+  const lines = (input.lines ?? []).map((l, i) => {
+    if (!l.name.trim()) throw new Error(`${i + 1}行目：品名を入力してください`)
+    if (!Number.isInteger(l.amount) || l.amount < 0) {
+      throw new Error(`${i + 1}行目：金額は0以上の整数で入力してください`)
+    }
+    const quantity = l.quantity ?? 1
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new Error(`${i + 1}行目：数量は1以上の整数で入力してください`)
+    }
+    const category = l.category ?? input.category
+    if (!EXPENSE_CATEGORIES.includes(category)) {
+      throw new Error(`不正な費用区分です: ${category}`)
+    }
+    return { name: l.name.trim(), amount: l.amount, quantity, category }
+  })
+
+  const amount = lines.length > 0 ? lines.reduce((s, l) => s + l.amount, 0) : input.amount
+  if (amount === undefined || amount === null) throw new Error('金額を入れてください')
+  if (!Number.isInteger(amount) || amount < 0) {
+    throw new Error('金額は0以上の整数で入力してください')
+  }
+  const category = lines.length > 0 ? lines[0].category : input.category
+
+  return { month, category, amount, lines }
+}
+
+function insertExpenseLines(
+  expenseId: string,
+  lines: ValidatedExpense['lines'],
+): void {
+  const ins = db.prepare(`
+    INSERT INTO expense_line (id, expense_id, name, amount, quantity, category, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `)
+  lines.forEach((l, i) => {
+    ins.run(randomUUID(), expenseId, l.name, l.amount, l.quantity, l.category, i)
+  })
+}
+
+export function createExpense(input: ExpenseInput): string {
+  const { month, category, amount, lines } = validateExpenseInput(input)
   const id = randomUUID()
-  db.prepare(`
-    INSERT INTO expense (id, occurred_at, category, amount, note, auto)
-    VALUES (?, ?, ?, ?, ?, 0)
-  `).run(id, input.occurred_at, input.category, input.amount, input.note ?? null)
+  const tx = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO expense (id, occurred_at, month, shop, category, amount, note, auto)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+    `).run(id, input.occurred_at, month, input.shop ?? null, category, amount, input.note ?? null)
+    insertExpenseLines(id, lines)
+  })
+  tx()
   return id
 }
 
+/** 明細は全部入れ替える */
+export function updateExpense(id: string, input: ExpenseInput): void {
+  const exists = db.prepare('SELECT id FROM expense WHERE id = ?').get(id)
+  if (!exists) throw new Error('経費が見つかりません')
+
+  const { month, category, amount, lines } = validateExpenseInput(input)
+  const tx = db.transaction(() => {
+    db.prepare(`
+      UPDATE expense
+         SET occurred_at = ?, month = ?, shop = ?, category = ?, amount = ?, note = ?
+       WHERE id = ?
+    `).run(input.occurred_at, month, input.shop ?? null, category, amount, input.note ?? null, id)
+    db.prepare('DELETE FROM expense_line WHERE expense_id = ?').run(id)
+    insertExpenseLines(id, lines)
+  })
+  tx()
+}
+
+/** 明細は expense_line の ON DELETE CASCADE で消える。レシートファイル自体の削除は receipts.ts が担う */
 export function deleteExpense(id: string): void {
   db.prepare('DELETE FROM expense WHERE id = ?').run(id)
+}
+
+/** receipts.ts が使う：経費に添付したレシート画像のファイル名を読む・書く */
+export function getExpenseReceiptFile(id: string): string | null {
+  const row = db.prepare('SELECT receipt_file FROM expense WHERE id = ?').get(id) as
+    | { receipt_file: string | null } | undefined
+  return row?.receipt_file ?? null
+}
+
+export function setExpenseReceiptFile(id: string, file: string | null): void {
+  db.prepare('UPDATE expense SET receipt_file = ? WHERE id = ?').run(file, id)
+}
+
+// ------------------------------------------------------------
+// 月次の明細・締め
+//
+// 経費はその月の販売用の販売（kind='resale'）にだけ按分する。私物には配賦しない。
+// 金額按分＝販売価格の比、数量按分＝紐付けた在庫の点数の比（0点なら1）。
+// floor で配って余りは最後の行（sales の末尾）に寄せ、Σallocated_expense = 経費合計にする。
+// 販売が0件（または重みの合計が0）なら誰にも配賦しない（CLAUDE.mdの按分と同じ流儀）。
+// ------------------------------------------------------------
+
+function sumSaleTotals(sales: SaleProfit[]): Omit<MonthTotals, 'expense_total' | 'net_profit'> {
+  return sales.reduce((acc, s) => ({
+    sales_count: acc.sales_count + 1,
+    revenue: acc.revenue + s.price,
+    total_fee: acc.total_fee + s.fee,
+    total_shipping: acc.total_shipping + s.shipping_fee,
+    total_packaging: acc.total_packaging + s.packaging_cost,
+    total_cost: acc.total_cost + s.cost,
+    gross_profit: acc.gross_profit + s.gross_profit,
+  }), {
+    sales_count: 0, revenue: 0, total_fee: 0, total_shipping: 0,
+    total_packaging: 0, total_cost: 0, gross_profit: 0,
+  })
+}
+
+function allocateExpenseToSales(
+  sales: Array<{ id: string; price: number; item_count: number }>,
+  expenseTotal: number,
+  method: AllocMethod,
+): Map<string, number> {
+  const map = new Map<string, number>()
+  const weight = (s: { price: number; item_count: number }) =>
+    method === 'by_quantity' ? Math.max(s.item_count, 1) : s.price
+  const total = sales.reduce((sum, s) => sum + weight(s), 0)
+
+  if (sales.length === 0 || total === 0) {
+    for (const s of sales) map.set(s.id, 0)
+    return map
+  }
+
+  let assigned = 0
+  sales.forEach((s, idx) => {
+    const isLast = idx === sales.length - 1
+    // 端数は最終行へ。合計を expenseTotal と一致させるため
+    const share = isLast ? expenseTotal - assigned : Math.floor((expenseTotal * weight(s)) / total)
+    if (!isLast) assigned += share
+    map.set(s.id, share)
+  })
+  return map
+}
+
+/** 月次の明細（月次タブの月をクリック）。tagId を渡すとそのタグの分だけの合計も返す */
+export function getMonthDetail(month: string, opts?: { tagId?: string | null }): MonthDetail {
+  const sales = listSales({ month, kind: 'resale' })
+  const personal_sales = listSales({ month, kind: 'personal' })
+  const expenses = listExpenses(month)
+  const expenseTotal = expenses.reduce((s, e) => s + e.amount, 0)
+
+  const expense_by_category = db.prepare(`
+    SELECT category, COALESCE(SUM(amount), 0) AS amount
+    FROM expense WHERE month = ?
+    GROUP BY category
+    ORDER BY category
+  `).all(month) as Array<{ category: ExpenseCategory; amount: number }>
+
+  const bookRow = db.prepare(`
+    SELECT alloc_method, closed_at, sales_count, revenue, gross_profit, expense_total, net_profit
+    FROM month_book WHERE month = ?
+  `).get(month) as {
+    alloc_method: AllocMethod
+    closed_at: string | null
+    sales_count: number | null
+    revenue: number | null
+    gross_profit: number | null
+    expense_total: number | null
+    net_profit: number | null
+  } | undefined
+
+  const alloc_method: AllocMethod = bookRow?.alloc_method ?? 'by_amount'
+
+  const allocMap = allocateExpenseToSales(sales, expenseTotal, alloc_method)
+  const monthSales: MonthSaleRow[] = sales.map(s => {
+    const allocated_expense = allocMap.get(s.id) ?? 0
+    return { ...s, allocated_expense, net_profit: s.gross_profit - allocated_expense }
+  })
+
+  const base = sumSaleTotals(sales)
+  const totals: MonthTotals = {
+    ...base,
+    expense_total: expenseTotal,
+    net_profit: base.gross_profit - expenseTotal,
+  }
+
+  let filtered: (MonthTotals & { tag: Tag }) | null = null
+  if (opts?.tagId) {
+    const tagRow = db.prepare('SELECT id, name, sort_order FROM tag WHERE id = ?')
+      .get(opts.tagId) as Tag | undefined
+    if (!tagRow) throw new Error('タグが見つかりません')
+
+    const matched = monthSales.filter(s =>
+      s.tags.some(t => t.id === opts.tagId) || s.inherited_tags.some(t => t.id === opts.tagId))
+    const matchedBase = sumSaleTotals(matched)
+    filtered = {
+      ...matchedBase,
+      expense_total: matched.reduce((sum, s) => sum + s.allocated_expense, 0),
+      net_profit: matched.reduce((sum, s) => sum + s.net_profit, 0),
+      tag: tagRow,
+    }
+  }
+
+  const purchases_by_account = db.prepare(`
+    SELECT p.shop_account_id AS shop_account_id, sa.name AS shop_account_name,
+           COUNT(DISTINCT p.id) AS count,
+           COALESCE(SUM(pl.unit_price * pl.quantity + pl.allocated_cost), 0) AS total_cost
+    FROM purchase p
+    JOIN shop_account sa ON sa.id = p.shop_account_id
+    LEFT JOIN purchase_line pl ON pl.purchase_id = p.id
+    WHERE substr(p.ordered_at, 1, 7) = ? AND p.status = 'confirmed'
+    GROUP BY p.shop_account_id, sa.name
+    ORDER BY sa.name
+  `).all(month) as Array<
+    { shop_account_id: string; shop_account_name: string; count: number; total_cost: number }
+  >
+
+  const pending = {
+    unconfirmed_shipping: sales.filter(s => s.is_shipping_confirmed === 0).length,
+    unmatched: sales.filter(s => s.unmatched === 1).length,
+  }
+
+  const close: MonthClose | null = bookRow?.closed_at
+    ? {
+        month,
+        closed_at: bookRow.closed_at,
+        alloc_method: bookRow.alloc_method,
+        sales_count: bookRow.sales_count ?? 0,
+        revenue: bookRow.revenue ?? 0,
+        gross_profit: bookRow.gross_profit ?? 0,
+        expense_total: bookRow.expense_total ?? 0,
+        net_profit: bookRow.net_profit ?? 0,
+      }
+    : null
+
+  const changed_since_close = close !== null && (
+    close.sales_count !== totals.sales_count
+    || close.revenue !== totals.revenue
+    || close.gross_profit !== totals.gross_profit
+    || close.expense_total !== totals.expense_total
+    || close.net_profit !== totals.net_profit
+  )
+
+  return {
+    month, alloc_method, close, changed_since_close,
+    sales: monthSales, personal_sales, expenses, expense_by_category,
+    totals, filtered, purchases_by_account, pending,
+  }
+}
+
+/** その月の経費の按分方法（既定 by_amount）。締め済みでも変えられる */
+export function setMonthAllocMethod(month: string, method: AllocMethod): void {
+  db.prepare(`
+    INSERT INTO month_book (month, alloc_method) VALUES (?, ?)
+    ON CONFLICT(month) DO UPDATE SET alloc_method = excluded.alloc_method
+  `).run(month, method)
+}
+
+/** 終わった月（今月・未来ではない月）だけ締められる。締めた時点の数字を month_book に記録する */
+export function closeMonth(month: string): MonthClose {
+  if (month >= thisMonthLocal()) {
+    throw new Error('終わった月だけ締められます')
+  }
+
+  const detail = getMonthDetail(month)
+  const closedAt = new Date().toISOString()
+
+  db.prepare(`
+    INSERT INTO month_book
+      (month, alloc_method, closed_at, sales_count, revenue, gross_profit, expense_total, net_profit)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(month) DO UPDATE SET
+      closed_at = excluded.closed_at,
+      sales_count = excluded.sales_count,
+      revenue = excluded.revenue,
+      gross_profit = excluded.gross_profit,
+      expense_total = excluded.expense_total,
+      net_profit = excluded.net_profit
+  `).run(
+    month, detail.alloc_method, closedAt,
+    detail.totals.sales_count, detail.totals.revenue, detail.totals.gross_profit,
+    detail.totals.expense_total, detail.totals.net_profit,
+  )
+
+  return {
+    month,
+    closed_at: closedAt,
+    alloc_method: detail.alloc_method,
+    sales_count: detail.totals.sales_count,
+    revenue: detail.totals.revenue,
+    gross_profit: detail.totals.gross_profit,
+    expense_total: detail.totals.expense_total,
+    net_profit: detail.totals.net_profit,
+  }
+}
+
+/** 締めを解除する（数字は消える。alloc_method は残す） */
+export function reopenMonth(month: string): void {
+  db.prepare(`
+    UPDATE month_book
+       SET closed_at = NULL, sales_count = NULL, revenue = NULL, gross_profit = NULL,
+           expense_total = NULL, net_profit = NULL
+     WHERE month = ?
+  `).run(month)
 }
 
 export function listVariantSummary(
@@ -4040,7 +4384,7 @@ export function resetData(): void {
       DELETE FROM purchase;
       DELETE FROM collector_run;
       DELETE FROM expense;
-      DELETE FROM expense_auto_month;
+      DELETE FROM month_book;
     `)
   })
   tx()

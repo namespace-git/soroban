@@ -13,12 +13,13 @@ import Purchases from './views/Purchases.vue'
 import Inventory from './views/Inventory.vue'
 import Products from './views/Products.vue'
 import Monthly from './views/Monthly.vue'
+import Expenses from './views/Expenses.vue'
 import Settings from './views/Settings.vue'
 import Help from './views/Help.vue'
 import type { CollectorRun, DashboardStats, SaleStatus, SearchHit, UpdateStatus } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 
-type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'settings' | 'help'
+type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'expenses' | 'settings' | 'help'
 /**
  * goto にタブと一緒に渡す情報。型番指定（商品タブ）・売上タブの段階指定（出品中／未処理／完了／すべて）・
  * 出品指定・未引き当てだけ絞る指定・横断検索からの遷移（検索語を引き継ぐ・該当行をハイライトする）
@@ -44,6 +45,7 @@ const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [
   { key: 'inventory', label: '在庫', icon: 'inventory' },
   { key: 'products', label: '商品', icon: 'product' },
   { key: 'monthly', label: '月次', icon: 'monthly' },
+  { key: 'expenses', label: '経費', icon: 'receipt' },
   { key: 'settings', label: '設定', icon: 'settings' },
   { key: 'help', label: 'ヘルプ', icon: 'help' },
 ]
@@ -388,6 +390,7 @@ watch(revision, loadStats)
         <Inventory v-else-if="tab === 'inventory'" />
         <Products v-else-if="tab === 'products'" />
         <Monthly v-else-if="tab === 'monthly'" />
+        <Expenses v-else-if="tab === 'expenses'" />
         <Settings v-else-if="tab === 'settings'" />
         <Help v-else />
       </main>

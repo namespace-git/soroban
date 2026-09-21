@@ -6,6 +6,7 @@ import * as db from './db'
 import * as collector from './collector'
 import * as collectorMellojoy from './collector-mellojoy'
 import * as updater from './updater'
+import * as receipts from './receipts'
 import type { CollectorRun, SorobanApi } from '../shared/types'
 
 // ============================================================
@@ -128,6 +129,13 @@ function registerIpc(): void {
   handle('listExpenses', (month) => db.listExpenses(month))
   handle('createExpense', (input) => db.createExpense(input))
   handle('deleteExpense', (id) => db.deleteExpense(id))
+  handle('updateExpense', (id, input) => db.updateExpense(id, input))
+  handle('attachReceipt', (id) => receipts.attachReceipt(id, mainWindow))
+  handle('removeReceipt', (id) => receipts.removeReceipt(id))
+  handle('getMonthDetail', (month, opts) => db.getMonthDetail(month, opts))
+  handle('setMonthAllocMethod', (month, method) => db.setMonthAllocMethod(month, method))
+  handle('closeMonth', (month) => db.closeMonth(month))
+  handle('reopenMonth', (month) => db.reopenMonth(month))
 
   handle('listTags', () => db.listTags())
   handle('createTag', (name) => db.createTag(name))

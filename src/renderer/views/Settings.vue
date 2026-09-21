@@ -328,20 +328,12 @@ const runLabel: Record<string, string> = {
                 String(Math.round(Number(($event.target as HTMLInputElement).value) * 100)))"
             />
           </label>
-          <label class="field">
-            <span>振込手数料（円）</span>
-            <input
-              type="number" style="width:120px"
-              :value="settings.transfer_fee ?? 200"
-              @change="saveSetting('transfer_fee', ($event.target as HTMLInputElement).value)"
-            />
-          </label>
         </div>
         <p class="faint hint">
           メルカリの販売手数料は税込価格に対する率（既定 10%）です。
         </p>
         <p class="faint hint">
-          月1回の振込として、月次の費用に計上します。
+          振込手数料などの経費は経費タブで登録します。
         </p>
         <p class="faint hint">
           手数料率を変えても、登録済みの販売は再計算されません。

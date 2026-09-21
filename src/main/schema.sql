@@ -340,23 +340,50 @@ END;
 
 CREATE TABLE IF NOT EXISTS expense (
   id          TEXT PRIMARY KEY,
-  occurred_at TEXT NOT NULL,
-  category    TEXT NOT NULL,   -- transfer_fee | supplies | other
+  occurred_at TEXT NOT NULL,             -- 購入日 YYYY-MM-DD
+  -- 計上月（省略時は occurred_at の月）。月次の純利益・按分はこちらで集計する
+  month       TEXT NOT NULL,             -- YYYY-MM
+  shop        TEXT,                      -- 購入店
+  -- 代表の項目。明細（expense_line）があれば最初の明細の項目
+  category    TEXT NOT NULL,             -- packaging | supplies | shipping | fee | transfer_fee | other
   amount      INTEGER NOT NULL,
   note        TEXT,
-  -- 1 = 振込手数料の自動計上（月1件）。人が消しても、その月にはもう自動で作らない
-  -- （expense_auto_month に記録が残るため）
+  -- 旧・振込手数料の自動計上（廃止）の印。過去の行のために残す。新規行には付かない
   auto        INTEGER NOT NULL DEFAULT 0,
+  -- レシート画像のファイル名（userData/thumbs）。無ければ NULL
+  receipt_file TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_expense_date ON expense(occurred_at);
+-- idx_expense_month（month列を使う）は __VIEWS__ マーカーの後ろで作る（idx_inv_modelと同じ理由。
+-- 既存DBは migrate() で month 列を足すまでこの列が無いため、テーブル作成と同じタイミングで
+-- 作ると未migrateのDBでコケる）。
 
--- 振込手数料を自動計上した月の記録。auto=1の行を人が消しても、この記録が残る限り
--- その月にはもう自動で作り直さない（手数料設定を後から変えても過去月は動かさない、と同じ思想）
-CREATE TABLE IF NOT EXISTS expense_auto_month (
-  month      TEXT PRIMARY KEY, -- YYYY-MM
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+-- 経費（レシート）の明細1行
+CREATE TABLE IF NOT EXISTS expense_line (
+  id         TEXT PRIMARY KEY,
+  expense_id TEXT NOT NULL REFERENCES expense(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  amount     INTEGER NOT NULL,           -- 行の金額（単価×数量ではなく行の合計）
+  quantity   INTEGER NOT NULL DEFAULT 1,
+  category   TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_expense_line_expense ON expense_line(expense_id);
+
+-- 月の締め。closed_at が入っていれば締め済み（数字はその時点のもの。後で変わっても動かさない）
+CREATE TABLE IF NOT EXISTS month_book (
+  month         TEXT PRIMARY KEY,        -- YYYY-MM
+  alloc_method  TEXT NOT NULL DEFAULT 'by_amount'
+                CHECK (alloc_method IN ('by_amount','by_quantity')),
+  closed_at     TEXT,
+  sales_count   INTEGER,
+  revenue       INTEGER,
+  gross_profit  INTEGER,
+  expense_total INTEGER,
+  net_profit    INTEGER
 );
 
 -- ============================================================
@@ -437,6 +464,9 @@ CREATE INDEX IF NOT EXISTS idx_inv_model ON inventory_item(model_code, status, a
 
 -- source は migrate() で足される列なので、ここ（migrate() の後）で作る。
 CREATE INDEX IF NOT EXISTS idx_run_source_started ON collector_run(source, started_at DESC);
+
+-- month は migrate() で足される列なので、ここ（migrate() の後）で作る。
+CREATE INDEX IF NOT EXISTS idx_expense_month ON expense(month);
 
 -- ============================================================
 -- ビュー

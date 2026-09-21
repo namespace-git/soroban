@@ -63,7 +63,8 @@ src/renderer/  画面（Vue 3）
 | `sale_line` | 販売と在庫の紐付け。**1販売に複数可**（まとめ売り） |
 | `listing` / `listing_line` | メルカリの出品と、人が引き当てた在庫。売れると `sale_line` に移る |
 | `purchase_tag` / `inventory_tag` / `sale_tag` | タグ。下流へは派生で見える（コピーしない） |
-| `expense` | 振込手数料など期間費用 |
+| `expense` / `expense_line` | 経費（レシート 1 枚＝1 件、計上月 `month`）。月の明細で販売用の販売に按分する（金額＝販売価格の比／数量＝点数の比、余りは最後の行、私物には配賦しない） |
+| `month_book` | 月の按分方法と締めの記録（締めた時点の数字。編集はロックしない） |
 | `collector_run` | 収集の実行記録 |
 
 ビュー `sale_profit` / `monthly_summary` / `inventory_view` に計算が入っている。
