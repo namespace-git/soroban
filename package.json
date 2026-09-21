@@ -93,7 +93,8 @@
       "sign": false
     },
     "artifactName": "soroban-${version}-${arch}.${ext}",
-    "afterPack": "scripts/after-pack.cjs"
+    "afterPack": "scripts/after-pack.cjs",
+    "executableName": "Soroban"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
