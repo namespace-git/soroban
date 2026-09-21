@@ -17,9 +17,13 @@ import TimelineDrawer from '../components/TimelineDrawer.vue'
 import AllocateDrawer from '../components/AllocateDrawer.vue'
 import SalesSummary from '../components/SalesSummary.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
+import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
+import SortTh from '../components/SortTh.vue'
+import { useSort } from '../composables/useSort'
 import type { PromptOptions } from '../components/InputDialog.vue'
 
 type Stage = 'listed' | 'pending' | 'done' | 'all'
+type SortKey = 'date' | 'title' | 'price' | 'fee' | 'packaging' | 'cost' | 'profit'
 
 /**
  * goto('sales', payload) で渡ってくる情報。ホームの要対応・横断検索から開かれる。
@@ -79,6 +83,9 @@ const tagFilter = ref('')
 /** 「発送してください」だけに絞る（タブは増やさない。ホームの要対応から来る） */
 const statusFilter = ref<SaleStatus | ''>('')
 const searchText = ref('')
+/** 期間の絞り込み。販売行は sold_at、出品行は listed_at。既定は「すべて」
+    （毎日の「売れた・要入力」を絞って見落とさないため） */
+const period = ref<Period>('all')
 /** グラフの月をクリックしたときの絞り込み（YYYY-MM）。段階を切り替えても保持し、× で解除する */
 const monthFilter = ref<string | null>(null)
 // 段階を切り替えたら月の絞り込みは外す（グラフから来た「その月の販売」は「すべて」で見るもの）
@@ -156,14 +163,31 @@ function saleRow(s: SaleProfit): Row {
 
 const rows = computed<Row[]>(() => {
   if (stage.value === 'listed') return listings.value.map(listingRow)
-  if (stage.value === 'all') {
-    return [...listings.value.map(listingRow), ...sales.value.map(saleRow)]
-      .sort((a, b) => b.date.localeCompare(a.date))
-  }
+  if (stage.value === 'all') return [...listings.value.map(listingRow), ...sales.value.map(saleRow)]
   return sales.value.map(saleRow)
 })
 
-const filteredRows = computed(() => rows.value.filter(r => {
+// --- 並び替え（列見出しクリック）。既定は日付 desc（現状の並び）。出品行と販売行が
+//     混じる「すべて」でも同じキーで並べる（無い値は null → 末尾） ---
+const { sortKey, sortDir, toggle, sortRows } = useSort<SortKey>('date', 'desc')
+function onSort(key: string) {
+  toggle(key as SortKey)
+}
+function sortValue(r: Row, key: SortKey): string | number | null {
+  switch (key) {
+    case 'date': return rowDateDisplay(r)
+    case 'title': return rowTitle(r)
+    case 'price': return r.kind === 'sale' ? (r.sale?.price ?? null) : (r.listing?.price ?? null)
+    case 'fee': return r.kind === 'sale' ? (r.sale?.fee ?? null) : null
+    case 'packaging': return r.kind === 'sale' ? (r.sale?.packaging_cost ?? null) : null
+    case 'cost': return r.kind === 'sale' ? (r.sale?.cost ?? null) : (r.listing?.reserved_cost ?? null)
+    case 'profit': return r.kind === 'sale' ? (r.sale?.gross_profit ?? null) : (r.listing?.expected_profit ?? null)
+  }
+}
+const sortedRows = computed(() => sortRows(rows.value, sortValue))
+
+const filteredRows = computed(() => sortedRows.value.filter(r => {
+  if (!inPeriod(rowDateDisplay(r), period.value)) return false
   if (monthFilter.value && !rowDateDisplay(r).startsWith(monthFilter.value)) return false
   if (r.kind === 'sale' && r.sale) {
     const s = r.sale
@@ -709,6 +733,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
         </optgroup>
       </select>
       <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
+      <PeriodSelect v-model="period" />
       <span v-if="hasSearch && stage === 'listed'" class="faint search-hint">検索中は状態・未引き当ての絞り込みも解除して表示</span>
       <button
         v-if="monthFilter"
@@ -776,17 +801,17 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
           </colgroup>
           <thead>
             <tr>
-              <th>{{ dateColLabel }}</th>
+              <SortTh :label="dateColLabel" sort-key="date" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
               <th></th>
-              <th>商品</th>
-              <th class="num">価格</th>
-              <th v-if="showFeePack" class="num">手数料</th>
+              <SortTh label="商品" sort-key="title" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="価格" sort-key="price" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh v-if="showFeePack" label="手数料" sort-key="fee" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
               <th v-if="showStatusCol">状態</th>
               <th v-if="showListedShipping" title="出品時に決めておくと、売れたときそのまま販売に入ります">発送方法</th>
               <th v-if="showFeePack">発送方法</th>
-              <th v-if="showFeePack" class="num" title="梱包材の実費（税込）">梱包</th>
-              <th class="num">{{ costColLabel }}</th>
-              <th class="num">{{ profitColLabel }}</th>
+              <SortTh v-if="showFeePack" label="梱包" sort-key="packaging" align="right" title="梱包材の実費（税込）" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh :label="costColLabel" sort-key="cost" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh :label="profitColLabel" sort-key="profit" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
               <th></th>
             </tr>
           </thead>
@@ -1048,7 +1073,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
       </div>
 
       <EmptyState
-        v-else-if="searchText || monthFilter || statusFilter"
+        v-else-if="searchText || monthFilter || statusFilter || period !== 'all'"
         title="検索条件に一致する行がありません"
       />
       <EmptyState

@@ -490,6 +490,7 @@ const runLabel: Record<string, string> = {
           <span class="section-head-icon"><Icon name="purchase" :size="16" /></span>
           <h2 class="section-head-title">仕入先</h2>
         </div>
+        <div class="accounts-table-wrap">
         <table class="compact accounts-table">
           <thead>
             <tr><th>名前</th><th>種別</th><th>取り込みキーワード</th><th>自動タグ</th><th class="num">送料の既定値</th><th></th></tr>
@@ -535,18 +536,21 @@ const runLabel: Record<string, string> = {
                 </span>
               </td>
               <td class="actions">
-                <button class="sm ghost" @click="renameAccount(a)">改名</button>
-                <button v-if="a.kind === 'mellojoy' && a.is_active" class="sm" @click="openShopLogin(a.id)">
-                  <Icon name="login" :size="14" /> ログイン
-                </button>
-                <button class="sm ghost" @click="toggleAccountActive(a)">{{ a.is_active ? '無効にする' : '有効にする' }}</button>
-                <button class="icon ghost" @click="removeAccount(a)" aria-label="削除">
-                  <Icon name="trash" :size="16" />
-                </button>
+                <div class="actions-row">
+                  <button class="sm ghost" @click="renameAccount(a)">改名</button>
+                  <button v-if="a.kind === 'mellojoy' && a.is_active" class="sm" @click="openShopLogin(a.id)">
+                    <Icon name="login" :size="14" /> ログイン
+                  </button>
+                  <button class="sm ghost" @click="toggleAccountActive(a)">{{ a.is_active ? '無効にする' : '有効にする' }}</button>
+                  <button class="icon ghost" @click="removeAccount(a)" aria-label="削除">
+                    <Icon name="trash" :size="16" />
+                  </button>
+                </div>
               </td>
             </tr>
           </tbody>
         </table>
+        </div>
         <p v-if="!accounts.length" class="faint hint">「仕入先を追加」から登録してください</p>
         <p class="add-row">
           <button class="ghost sm" @click="addShopAccount"><Icon name="plus" :size="14" /> 仕入先を追加</button>
@@ -717,12 +721,27 @@ const runLabel: Record<string, string> = {
   background: var(--surface);
 }
 
+/* 1024px 幅だと名前や操作ボタンが折り返って崩れるため、テーブルごと横スクロールにする
+   （td を display:flex にすると上の .name-cell と同じ理由でセル計算がずれるので、
+   操作ボタンは中の .actions-row で横並びにする） */
+.accounts-table-wrap { overflow-x: auto; }
+.accounts-table { min-width: 900px; }
+.accounts-table .name-cell { white-space: nowrap; }
+.accounts-table td.actions { white-space: nowrap; }
+.actions-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 .auto-tags-cell { min-width: 180px; }
 .auto-tags-cell .chip-row { margin-top: 0; }
 
-.keywords-cell { min-width: 220px; }
+.keywords-cell { min-width: 160px; }
 .keywords-cell textarea {
   width: 100%;
+  min-width: 160px;
   min-height: 36px;
   resize: vertical;
   border-color: transparent;

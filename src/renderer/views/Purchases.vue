@@ -156,6 +156,33 @@ function removeLine(i: number) {
   if (!form.value.lines.length) addLine()
 }
 
+// --- 送料の既定値：仕入先ごとに設定タブで決めたもの。人が送料を触ったら以後は上書きしない ---
+
+/** 送料の入力欄を人が触ったら true。フォームを開き直す／送信後のリセットで false に戻る */
+const shippingTouched = ref(false)
+
+function accountDefaultFee(accountId: string): number {
+  return accounts.value.find(a => a.id === accountId)?.default_shipping_fee ?? 0
+}
+
+/** 選んだ仕入先の送料の既定値。無ければ null（ヒント表示の有無に使う） */
+const selectedAccountDefaultFee = computed(
+  () => accounts.value.find(a => a.id === form.value.shop_account_id)?.default_shipping_fee ?? null,
+)
+
+/** 送料をまだ人が触っていなければ既定値を入れる。下書きの確定中は取り込んだ値が正なので触らない */
+function applyDefaultShippingFee() {
+  if (editingId.value || shippingTouched.value) return
+  form.value.shipping_fee = accountDefaultFee(form.value.shop_account_id)
+}
+
+watch(() => form.value.shop_account_id, applyDefaultShippingFee)
+watch(showForm, (open) => {
+  if (!open) return
+  shippingTouched.value = false
+  applyDefaultShippingFee()
+})
+
 async function submit() {
   const lines = form.value.lines.filter(l => l.name.trim() && l.quantity > 0)
   if (!lines.length) { toast('明細を入力してください', 'warn'); return }
@@ -192,6 +219,7 @@ async function submit() {
   form.value.note = ''
   form.value.fulfillment = null
   form.value.lines = [{ name: '', unit_price: 0, quantity: 1 }]
+  shippingTouched.value = false
   showForm.value = false
   await load()
   changed()
@@ -426,7 +454,8 @@ async function remove(p: PurchaseSummary) {
       <div class="fields">
         <label class="field">
           <span>送料（税込）</span>
-          <input type="number" v-model.number="form.shipping_fee" />
+          <input type="number" v-model.number="form.shipping_fee" @input="shippingTouched = true" />
+          <span v-if="selectedAccountDefaultFee !== null" class="faint">仕入先の既定値：{{ yen(selectedAccountDefaultFee) }}</span>
         </label>
         <label class="field">
           <span>その他費用（税込）</span>

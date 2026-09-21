@@ -10,8 +10,11 @@ import MiniChart from '../components/MiniChart.vue'
 import TimelineDrawer from '../components/TimelineDrawer.vue'
 import TagPicker from '../components/TagPicker.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
+import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
+import SortTh from '../components/SortTh.vue'
+import { useSort } from '../composables/useSort'
 
-type SortKey = 'total_profit' | 'avg_profit' | 'sold' | 'in_stock' | 'last_purchased_at'
+type SortKey = 'name' | 'in_stock' | 'purchase_total' | 'avg_cost' | 'avg_price' | 'avg_profit' | 'total_profit' | 'last_purchased_at' | 'last_sold_at'
 type ChipInfo = { tone: 'neutral' | 'ok' | 'warn' | 'info'; label: string }
 
 const revision = inject<Ref<number>>('revision')!
@@ -23,17 +26,37 @@ const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleStr
 // --- 一覧 ---
 
 const products = ref<ProductSummary[]>([])
-const sortKey = ref<SortKey>('total_profit')
 const loaded = ref(false)
 const searchText = ref('')
+/** 最終販売日（last_sold_at）に対する絞り込み。既定は「すべて」 */
+const period = ref<Period>('all')
 
 async function load() {
   loaded.value = false
-  products.value = await window.soroban.listProducts(sortKey.value)
+  products.value = await window.soroban.listProducts()
   loaded.value = true
 }
 onMounted(load)
-watch([revision, sortKey], load)
+watch(revision, load)
+
+// --- 並び替え（列見出しクリック）。既定は現状のまま粗利合計 desc ---
+const { sortKey, sortDir, toggle, sortRows } = useSort<SortKey>('total_profit', 'desc')
+function onSort(key: string) {
+  toggle(key as SortKey)
+}
+function sortValue(p: ProductSummary, key: SortKey): string | number | null {
+  switch (key) {
+    case 'name': return p.name
+    case 'in_stock': return p.in_stock
+    case 'purchase_total': return p.purchase_total
+    case 'avg_cost': return p.avg_cost
+    case 'avg_price': return p.avg_price
+    case 'avg_profit': return p.avg_profit
+    case 'total_profit': return p.total_profit
+    case 'last_purchased_at': return p.last_purchased_at
+    case 'last_sold_at': return p.last_sold_at
+  }
+}
 
 // --- 商品（型番）タグ：この型番の在庫・販売に派生で見える ---
 
@@ -80,7 +103,9 @@ async function onProductTagCreate(name: string) {
 }
 
 const filteredProducts = computed(() =>
-  products.value.filter(p => matchesSearch([p.model_code, p.name], searchText.value)),
+  sortRows(products.value, sortValue).filter(p =>
+    matchesSearch([p.model_code, p.name], searchText.value) && inPeriod(p.last_sold_at, period.value),
+  ),
 )
 
 // --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
@@ -169,14 +194,8 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
       </div>
 
       <div class="toolbar">
-        <select v-model="sortKey">
-          <option value="total_profit">粗利合計</option>
-          <option value="avg_profit">平均粗利</option>
-          <option value="sold">販売数</option>
-          <option value="in_stock">在庫数</option>
-          <option value="last_purchased_at">最近仕入れた</option>
-        </select>
         <SearchBox v-model="searchText" placeholder="型番・商品名を検索" />
+        <PeriodSelect v-model="period" />
         <span class="grow" />
         <span class="faint">{{ filteredProducts.length }}件</span>
       </div>
@@ -187,14 +206,15 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
           <thead>
             <tr>
               <th class="col-thumb"></th>
-              <th>商品</th>
-              <th class="num col-n">在庫</th>
-              <th class="num col-amt">仕入合計</th>
-              <th class="num col-amt">平均原価</th>
-              <th class="num col-amt">平均売価</th>
-              <th class="num col-amt">平均粗利</th>
-              <th class="num col-amt">粗利合計</th>
-              <th class="col-dates">最終仕入／販売</th>
+              <SortTh label="商品" sort-key="name" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="在庫" sort-key="in_stock" align="right" class="col-n" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="仕入合計" sort-key="purchase_total" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="平均原価" sort-key="avg_cost" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="平均売価" sort-key="avg_price" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="平均粗利" sort-key="avg_profit" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="粗利合計" sort-key="total_profit" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="最終仕入" sort-key="last_purchased_at" class="col-date-sm" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="販売" sort-key="last_sold_at" class="col-date-sm" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
             </tr>
           </thead>
           <tbody>
@@ -229,16 +249,14 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
               <td class="num">
                 <strong :class="p.total_profit >= 0 ? 'profit' : 'loss'">{{ yen(p.total_profit) }}</strong>
               </td>
-              <td class="dim last-dates">
-                <div>仕入 {{ p.last_purchased_at ?? '—' }}</div>
-                <div>販売 {{ p.last_sold_at ?? '—' }}</div>
-              </td>
+              <td class="dim last-dates">{{ p.last_purchased_at ?? '—' }}</td>
+              <td class="dim last-dates">{{ p.last_sold_at ?? '—' }}</td>
             </tr>
           </tbody>
         </table>
       </div>
       <EmptyState
-        v-else-if="searchText"
+        v-else-if="searchText || period !== 'all'"
         title="検索条件に一致する商品がありません"
       />
       <EmptyState
@@ -398,7 +416,7 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
 /* 数字列は固定幅、商品列が残りを取る（商品名を 3 行に折らない） */
 .table-panel th.col-n     { width: 64px; }
 .table-panel th.col-amt   { width: 104px; }
-.table-panel th.col-dates { width: 150px; }
+.table-panel th.col-date-sm { width: 84px; }
 
 .product-row { cursor: pointer; }
 .item-row { cursor: pointer; }
