@@ -2,7 +2,7 @@
 // 経費タブ：レシート1枚＝経費1件。購入店・購入日・明細・金額・レシート画像・計上月を管理する。
 // 月次の按分・純利益はこの経費を月（計上月）で拾う（Monthly.vue 側。ここでは再計算しない）。
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { Expense, ExpenseCategory, ExpenseInput, ExpenseLineInput } from '../../shared/types'
+import type { Expense, ExpenseCategory, ExpenseInput, ExpenseLineInput, ReceiptDraft, ReceiptRead } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
@@ -46,7 +46,7 @@ const editingId = ref<string | null>(null)
 type LineForm = ExpenseLineInput & { category: ExpenseCategory }
 
 function blankLine(): LineForm {
-  return { name: '', amount: 0, quantity: 1, category: 'packaging' }
+  return { name: '', unit_price: 0, quantity: 1, category: 'packaging' }
 }
 
 const form = ref({
@@ -57,6 +57,8 @@ const form = ref({
   amount: 0,
   note: '',
   lines: [blankLine()] as LineForm[],
+  /** readReceiptImage で読んだ一時ファイル名。登録・保存時にそのまま渡す */
+  receipt_temp_file: null as string | null,
 })
 
 const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
@@ -102,6 +104,25 @@ const sortedExpenses = computed(() => sortRows(filteredExpenses.value, sortValue
 
 const periodTotal = computed(() => filteredExpenses.value.reduce((s, e) => s + e.amount, 0))
 
+// --- 購入店の候補（datalist）。読み込み済みの経費から集計する。使用回数の多い順、同数なら最近使った順 ---
+const shopOptions = computed(() => {
+  const stats = new Map<string, { count: number; recent: string }>()
+  for (const e of expenses.value) {
+    const shop = e.shop?.trim()
+    if (!shop) continue
+    const cur = stats.get(shop)
+    if (cur) {
+      cur.count++
+      if (e.occurred_at > cur.recent) cur.recent = e.occurred_at
+    } else {
+      stats.set(shop, { count: 1, recent: e.occurred_at })
+    }
+  }
+  return [...stats.entries()]
+    .sort((a, b) => b[1].count - a[1].count || b[1].recent.localeCompare(a[1].recent))
+    .map(([shop]) => shop)
+})
+
 function contentLabel(e: Expense): string {
   if (!e.lines.length) return e.note?.trim() || '—'
   if (e.lines.length === 1) return e.lines[0].name
@@ -140,8 +161,10 @@ function resetForm() {
     amount: 0,
     note: '',
     lines: [blankLine()],
+    receipt_temp_file: null,
   }
   monthTouched.value = false
+  clearReceiptDraft()
 }
 
 function toggleForm() {
@@ -161,7 +184,59 @@ function removeLine(i: number) {
   form.value.lines.splice(i, 1)
 }
 
-const lineSubtotal = computed(() => form.value.lines.reduce((s, l) => s + (l.amount || 0), 0))
+function lineAmount(l: LineForm): number {
+  return (l.unit_price || 0) * (l.quantity || 1)
+}
+const lineSubtotal = computed(() => form.value.lines.reduce((s, l) => s + lineAmount(l), 0))
+
+// --- レシートを読み取る（OCR の下書きをフォームに入れる） ---
+
+const receiptBusy = ref(false)
+/** 画像を選んで読んだときだけ入る（サムネ表示用）。添付済みレシートの再読み取りでは入らない */
+const receiptPreviewUrl = ref<string | null>(null)
+const receiptRawText = ref<string | null>(null)
+/** レシートの「合計」行の値。明細合計と食い違っていたら警告する */
+const receiptDraftTotal = ref<number | null>(null)
+
+const receiptTotalMismatch = computed(() => {
+  if (receiptDraftTotal.value == null) return null
+  if (receiptDraftTotal.value === lineSubtotal.value) return null
+  return receiptDraftTotal.value
+})
+
+function clearReceiptDraft() {
+  form.value.receipt_temp_file = null
+  receiptPreviewUrl.value = null
+  receiptRawText.value = null
+  receiptDraftTotal.value = null
+}
+
+/** 画像を選んで読んだ下書きをフォームへ反映する。draft の値がある項目だけ上書きする */
+function applyReceiptDraft(result: ReceiptRead) {
+  form.value.receipt_temp_file = result.temp_file
+  receiptPreviewUrl.value = result.receipt_url
+  receiptRawText.value = result.draft.raw_text
+  receiptDraftTotal.value = result.draft.total
+  if (result.draft.shop) form.value.shop = result.draft.shop
+  if (result.draft.occurred_at) form.value.occurred_at = result.draft.occurred_at
+  if (result.draft.lines.length) {
+    form.value.lines = result.draft.lines.map(l => ({
+      name: l.name, unit_price: l.unit_price, quantity: l.quantity, category: 'packaging' as ExpenseCategory,
+    }))
+  }
+}
+
+async function readReceiptForForm() {
+  receiptBusy.value = true
+  try {
+    const result = await window.soroban.readReceiptImage()
+    if (result) applyReceiptDraft(result)
+  } catch (e: any) {
+    toast(e.message, 'warn')
+  } finally {
+    receiptBusy.value = false
+  }
+}
 
 function openEdit(e: Expense) {
   editingId.value = e.id
@@ -173,17 +248,35 @@ function openEdit(e: Expense) {
     category: e.category,
     amount: e.lines.length ? 0 : e.amount,
     note: e.note ?? '',
-    lines: e.lines.map(l => ({ name: l.name, amount: l.amount, quantity: l.quantity, category: l.category })),
+    lines: e.lines.map(l => ({ name: l.name, unit_price: l.unit_price, quantity: l.quantity, category: l.category })),
+    receipt_temp_file: null,
   }
   monthTouched.value = monthDiffers(e)
+  clearReceiptDraft()
   drawerExpense.value = null
   showForm.value = true
 }
 
+/** ドロワーの「レシートを読み取って編集」。既存の値は上書きせず、空の項目だけ埋める */
+async function onDrawerReadEdit(e: Expense, draft: ReceiptDraft) {
+  openEdit(e)
+  if (draft.shop && !form.value.shop.trim()) form.value.shop = draft.shop
+  if (draft.occurred_at && !form.value.occurred_at) form.value.occurred_at = draft.occurred_at
+  receiptRawText.value = draft.raw_text
+  receiptDraftTotal.value = draft.total
+  if (draft.lines.length) {
+    if (await confirmDialog('読み取った明細で置き換えますか？', { message: '今の明細は消えます' })) {
+      form.value.lines = draft.lines.map(l => ({
+        name: l.name, unit_price: l.unit_price, quantity: l.quantity, category: 'packaging' as ExpenseCategory,
+      }))
+    }
+  }
+}
+
 async function submit() {
   const lines = form.value.lines
-    .filter(l => l.name.trim() && l.amount > 0)
-    .map(l => ({ name: l.name.trim(), amount: Math.round(l.amount), quantity: l.quantity || 1, category: l.category }))
+    .filter(l => l.name.trim() && l.unit_price > 0)
+    .map(l => ({ name: l.name.trim(), unit_price: Math.round(l.unit_price), quantity: l.quantity || 1, category: l.category }))
 
   if (!lines.length && (!form.value.amount || form.value.amount <= 0)) {
     toast('金額を入力してください', 'warn')
@@ -192,6 +285,7 @@ async function submit() {
 
   const input: ExpenseInput = {
     occurred_at: form.value.occurred_at,
+    receipt_temp_file: form.value.receipt_temp_file,
     month: form.value.month || null,
     shop: form.value.shop.trim() || null,
     category: lines.length ? lines[0].category! : form.value.category,
@@ -258,10 +352,40 @@ async function onDrawerDelete(e: Expense) {
     <!-- 登録・編集フォーム -->
     <div v-if="showForm" class="panel form">
       <p v-if="editingId" class="panel-title">経費を編集</p>
+
+      <div class="receipt-scan">
+        <div class="receipt-scan-main">
+          <button class="ghost sm" :disabled="receiptBusy" @click="readReceiptForForm">
+            <Icon name="receipt" :size="14" />
+            {{ receiptBusy ? '読み取り中…（数秒）' : 'レシートを読み取る' }}
+          </button>
+          <span class="faint">画像を選ぶと、店名・日付・明細を推定して下に入れます（アプリ内で処理。必ず確認してから登録）</span>
+        </div>
+        <div v-if="receiptPreviewUrl" class="receipt-scan-preview">
+          <img class="receipt-scan-thumb" :src="receiptPreviewUrl" alt="" />
+          <div class="receipt-scan-actions">
+            <button class="ghost sm" :disabled="receiptBusy" @click="readReceiptForForm">別の画像を選ぶ</button>
+            <button class="ghost sm" @click="clearReceiptDraft">画像を外す</button>
+          </div>
+        </div>
+      </div>
+
+      <p v-if="receiptTotalMismatch !== null" class="faint">
+        レシートの合計 {{ yen(receiptTotalMismatch) }} と明細合計 {{ yen(lineSubtotal) }} が違います。明細を直してください
+      </p>
+
+      <details v-if="receiptRawText" class="receipt-raw">
+        <summary>読み取ったテキストを見る</summary>
+        <pre>{{ receiptRawText }}</pre>
+      </details>
+
       <div class="fields">
         <label class="field">
           <span>購入店</span>
-          <input v-model="form.shop" placeholder="任意" />
+          <input v-model="form.shop" placeholder="任意" list="expense-shops" />
+          <datalist id="expense-shops">
+            <option v-for="shop in shopOptions" :key="shop" :value="shop" />
+          </datalist>
         </label>
         <label class="field">
           <span>購入日</span>
@@ -278,8 +402,9 @@ async function onDrawerDelete(e: Expense) {
         <thead>
           <tr>
             <th>品名</th>
-            <th class="num col-amount">金額（税込）</th>
+            <th class="num col-price">単価（税込）</th>
             <th class="num col-qty">数量</th>
+            <th class="num col-amount">金額</th>
             <th class="col-category">項目</th>
             <th class="col-actions"></th>
           </tr>
@@ -287,8 +412,9 @@ async function onDrawerDelete(e: Expense) {
         <tbody>
           <tr v-for="(l, i) in form.lines" :key="i">
             <td><input v-model="l.name" class="full" placeholder="品名" /></td>
-            <td><input type="number" v-model.number="l.amount" class="full" /></td>
+            <td><input type="number" v-model.number="l.unit_price" class="full" /></td>
             <td><input type="number" v-model.number="l.quantity" class="full" min="1" /></td>
+            <td class="num">{{ yen(lineAmount(l)) }}</td>
             <td>
               <select v-model="l.category" class="full">
                 <option v-for="o in CATEGORY_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
@@ -423,6 +549,7 @@ async function onDrawerDelete(e: Expense) {
       @edit="onDrawerEdit"
       @delete="onDrawerDelete"
       @changed="onDrawerChanged"
+      @read-edit="onDrawerReadEdit"
     />
   </div>
 </template>
@@ -440,8 +567,55 @@ async function onDrawerDelete(e: Expense) {
   font-size: var(--fs-13);
 }
 
-.lines-table .col-amount { width: 130px; }
+.receipt-scan {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.receipt-scan-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.receipt-scan-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.receipt-scan-thumb {
+  width: 96px;
+  height: 96px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+.receipt-scan-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.receipt-raw {
+  font-size: var(--fs-13);
+}
+.receipt-raw summary {
+  cursor: pointer;
+  color: var(--text-faint);
+}
+.receipt-raw pre {
+  margin: 8px 0 0;
+  padding: 10px;
+  background: var(--surface-hi);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.lines-table .col-price { width: 130px; }
 .lines-table .col-qty { width: 80px; }
+.lines-table .col-amount { width: 110px; }
 .lines-table .col-category { width: 130px; }
 .lines-table .col-actions { width: 36px; }
 .full { width: 100%; }

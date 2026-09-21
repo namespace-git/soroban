@@ -554,9 +554,11 @@ export type ExpenseCategory = 'packaging' | 'supplies' | 'shipping' | 'fee' | 't
 export interface ExpenseLine {
   id: string
   name: string
-  /** 税込の金額（明細の合計。単価×数量ではなく行の金額） */
-  amount: number
+  /** 税込の単価 */
+  unit_price: number
   quantity: number
+  /** 行の金額 ＝ unit_price × quantity（main が計算して保存。画面で再計算しない） */
+  amount: number
   category: ExpenseCategory
 }
 
@@ -585,13 +587,41 @@ export interface Expense {
 
 export interface ExpenseLineInput {
   name: string
-  amount: number
+  /** 税込の単価 */
+  unit_price: number
+  /** 省略は 1 */
   quantity?: number
   category?: ExpenseCategory
 }
 
+/**
+ * レシート画像を OCR（アプリ内・オフライン。Tesseract＋日本語モデルを同梱）で読んだ下書き。
+ * 推定なので必ず人が直す前提。読めなかった項目は null／空
+ */
+export interface ReceiptDraft {
+  shop: string | null
+  /** YYYY-MM-DD */
+  occurred_at: string | null
+  /** 「合計」などの行から取った税込の合計。無ければ null */
+  total: number | null
+  lines: Array<{ name: string; unit_price: number; quantity: number }>
+  /** OCR の生テキスト（確認用） */
+  raw_text: string
+  /** 0〜100 */
+  confidence: number
+}
+
+/** 画像を選んで読み取った結果。temp_file は createExpense の receipt_temp_file に渡すと本添付になる */
+export interface ReceiptRead {
+  temp_file: string
+  receipt_url: string
+  draft: ReceiptDraft
+}
+
 export interface ExpenseInput {
   occurred_at: string
+  /** readReceiptImage で読んだ一時ファイル名。指定すると登録時にレシートとして添付する */
+  receipt_temp_file?: string | null
   /** 省略時は occurred_at の月 */
   month?: string | null
   shop?: string | null
@@ -780,6 +810,10 @@ export interface SorobanApi {
   /** レシート画像をファイル選択で添付（userData/thumbs/receipt-<id>.<ext> にコピー）。キャンセルなら null */
   attachReceipt(id: string): Promise<string | null>
   removeReceipt(id: string): Promise<void>
+  /** 画像を選んで OCR。キャンセルなら null。数秒かかる（初回はモデルの展開でさらに数秒） */
+  readReceiptImage(): Promise<ReceiptRead | null>
+  /** 添付済みのレシートを OCR。レシートが無ければ Error */
+  readReceipt(id: string): Promise<ReceiptDraft>
 
   /** 月次の明細。tagId で絞った合計も同時に返す */
   getMonthDetail(month: string, opts?: { tagId?: string | null }): Promise<MonthDetail>

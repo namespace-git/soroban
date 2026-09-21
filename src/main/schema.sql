@@ -365,7 +365,8 @@ CREATE TABLE IF NOT EXISTS expense_line (
   id         TEXT PRIMARY KEY,
   expense_id TEXT NOT NULL REFERENCES expense(id) ON DELETE CASCADE,
   name       TEXT NOT NULL,
-  amount     INTEGER NOT NULL,           -- 行の金額（単価×数量ではなく行の合計）
+  unit_price INTEGER NOT NULL DEFAULT 0, -- 単価
+  amount     INTEGER NOT NULL,           -- 行の金額 ＝ unit_price × quantity（main が計算して保存）
   quantity   INTEGER NOT NULL DEFAULT 1,
   category   TEXT NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0

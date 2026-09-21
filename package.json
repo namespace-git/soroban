@@ -24,7 +24,8 @@
   "dependencies": {
     "@fontsource-variable/m-plus-2": "^5.3.0",
     "better-sqlite3": "^12.11.1",
-    "electron-updater": "^6.8.9"
+    "electron-updater": "^6.8.9",
+    "tesseract.js": "^6.0.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
@@ -58,7 +59,12 @@
       "out/**/*",
       "package.json"
     ],
-    "extraResources": [],
+    "extraResources": [
+      {
+        "from": "resources/tessdata",
+        "to": "tessdata"
+      }
+    ],
     "win": {
       "target": [
         "nsis"
@@ -82,6 +88,12 @@
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "darkModeSupport": true,
+      "extraResources": [
+        {
+          "from": "build/mac/soroban-ocr",
+          "to": "soroban-ocr"
+        }
+      ],
       "extendInfo": {
         "CFBundleDisplayName": "そろばん",
         "NSHumanReadableCopyright": "Copyright © 2026 Soroban"
@@ -99,7 +111,11 @@
       "sign": false
     },
     "artifactName": "soroban-${version}-${arch}.${ext}",
-    "afterPack": "scripts/after-pack.cjs"
+    "afterPack": "scripts/after-pack.cjs",
+    "asarUnpack": [
+      "node_modules/tesseract.js/**",
+      "node_modules/tesseract.js-core/**"
+    ]
   },
   "pnpm": {
     "onlyBuiltDependencies": [

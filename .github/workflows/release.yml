@@ -27,6 +27,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: stop Spotlight indexing (hdiutil detach が Resource busy になるのを防ぐ)
         run: sudo mdutil -a -i off || true
+      - name: build ocr helper (Apple Vision)
+        run: |
+          set -e
+          mkdir -p build/mac
+          swiftc -O -target arm64-apple-macos12 -o build/mac/soroban-ocr-arm64 resources/mac/soroban-ocr.swift
+          swiftc -O -target x86_64-apple-macos12 -o build/mac/soroban-ocr-x64 resources/mac/soroban-ocr.swift
+          lipo -create -output build/mac/soroban-ocr build/mac/soroban-ocr-arm64 build/mac/soroban-ocr-x64
+          chmod +x build/mac/soroban-ocr
+          file build/mac/soroban-ocr
       - name: build (mac, unsigned)
         run: pnpm dist:mac:ci
         env:

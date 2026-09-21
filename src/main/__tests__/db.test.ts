@@ -1205,7 +1205,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('18')
+      expect(db.getSettings().schema_version).toBe('19')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1326,7 +1326,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('18')
+      expect(db.getSettings().schema_version).toBe('19')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1335,6 +1335,40 @@ describe('db（:memory:）', () => {
     } finally {
       // アサーション失敗時もハンドルを解放してから片付ける（EBUSYで本当のエラーが
       // 隠れないように）
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('migrate：version18相当の経費明細（unit_priceが無い）→19でamount/quantityからunit_priceを逆算', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-expense-migrate-'))
+    const path = join(dir, 'v18.db')
+    try {
+      db.closeDb()
+      db.initDb(path) // 一旦フルスキーマで作り、明細をv18相当（amount/quantityのみ）の値で直挿しする
+      const expenseId = db.createExpense({ occurred_at: '2026-01-01', category: 'packaging', amount: 2200 })
+      db.getDb().prepare(`
+        INSERT INTO expense_line (id, expense_id, name, amount, quantity, category, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run('line-divisible', expenseId, '割り切れる行', 1200, 4, 'packaging', 0)
+      db.getDb().prepare(`
+        INSERT INTO expense_line (id, expense_id, name, amount, quantity, category, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run('line-remainder', expenseId, '割り切れない行', 1000, 3, 'packaging', 1)
+      db.getDb().prepare(`UPDATE setting SET value = '18' WHERE key = 'schema_version'`).run()
+      db.closeDb()
+
+      expect(() => db.initDb(path)).not.toThrow()
+
+      expect(db.getSettings().schema_version).toBe('19')
+      const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
+      const divisible = expense.lines.find(l => l.id === 'line-divisible')!
+      expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
+      const remainder = expense.lines.find(l => l.id === 'line-remainder')!
+      expect(remainder).toMatchObject({ unit_price: 1000, quantity: 1, amount: 1000 })
+      // amount自体は動かさない（合計をずらさない）
+      expect(expense.amount).toBe(2200)
+    } finally {
       try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
       rmSync(dir, { recursive: true, force: true })
     }
@@ -2930,16 +2964,20 @@ describe('db（:memory:）', () => {
         occurred_at: '2026-01-10',
         category: 'packaging',
         lines: [
-          { name: '緩衝材', amount: 300, quantity: 1 },
-          { name: 'OPP袋', amount: 200, quantity: 2, category: 'supplies' },
+          { name: '緩衝材', unit_price: 300, quantity: 1 },
+          { name: 'OPP袋', unit_price: 100, quantity: 2, category: 'supplies' },
         ],
       })
       const expense = db.listExpenses('2026-01').find(e => e.id === id)!
       expect(expense.amount).toBe(500) // 300+200の合計
       expect(expense.category).toBe('packaging') // 最初の明細の項目
       expect(expense.lines).toHaveLength(2)
-      expect(expense.lines[0]).toMatchObject({ name: '緩衝材', amount: 300, quantity: 1, category: 'packaging' })
-      expect(expense.lines[1]).toMatchObject({ name: 'OPP袋', amount: 200, quantity: 2, category: 'supplies' })
+      expect(expense.lines[0]).toMatchObject(
+        { name: '緩衝材', unit_price: 300, quantity: 1, amount: 300, category: 'packaging' },
+      )
+      expect(expense.lines[1]).toMatchObject(
+        { name: 'OPP袋', unit_price: 100, quantity: 2, amount: 200, category: 'supplies' },
+      )
 
       // 明細が無い経費はinput.amount/categoryのまま
       const id2 = db.createExpense({ occurred_at: '2026-01-15', category: 'other', amount: 700 })
@@ -2947,6 +2985,34 @@ describe('db（:memory:）', () => {
       expect(expense2.amount).toBe(700)
       expect(expense2.category).toBe('other')
       expect(expense2.lines).toHaveLength(0)
+    })
+
+    it('createExpense：明細の金額は単価×数量で計算される（数量省略は1）', () => {
+      const id = db.createExpense({
+        occurred_at: '2026-01-20',
+        category: 'packaging',
+        lines: [
+          { name: '袋', unit_price: 300, quantity: 4 },
+          { name: '箱', unit_price: 150 },
+        ],
+      })
+      const expense = db.listExpenses('2026-01').find(e => e.id === id)!
+      expect(expense.lines[0]).toMatchObject({ name: '袋', unit_price: 300, quantity: 4, amount: 1200 })
+      expect(expense.lines[1]).toMatchObject({ name: '箱', unit_price: 150, quantity: 1, amount: 150 })
+      expect(expense.amount).toBe(1350) // 1200 + 150
+
+      // updateで数量を変えると再計算される
+      db.updateExpense(id, {
+        occurred_at: '2026-01-20',
+        category: 'packaging',
+        lines: [
+          { name: '袋', unit_price: 300, quantity: 2 },
+          { name: '箱', unit_price: 150 },
+        ],
+      })
+      const updated = db.listExpenses('2026-01').find(e => e.id === id)!
+      expect(updated.lines[0]).toMatchObject({ name: '袋', unit_price: 300, quantity: 2, amount: 600 })
+      expect(updated.amount).toBe(750) // 600 + 150
     })
 
     it('計上月：省略時はoccurred_atの月。指定すればそちらで集計される（listExpenses(month)）', () => {
@@ -2971,11 +3037,11 @@ describe('db（:memory:）', () => {
     it('updateExpense：明細を丸ごと入れ替える', () => {
       const id = db.createExpense({
         occurred_at: '2026-03-01', category: 'packaging',
-        lines: [{ name: '箱', amount: 500 }],
+        lines: [{ name: '箱', unit_price: 500 }],
       })
       db.updateExpense(id, {
         occurred_at: '2026-03-01', category: 'shipping',
-        lines: [{ name: '切手', amount: 100 }, { name: '梱包テープ', amount: 200 }],
+        lines: [{ name: '切手', unit_price: 100 }, { name: '梱包テープ', unit_price: 200 }],
       })
       const updated = db.listExpenses('2026-03').find(e => e.id === id)!
       expect(updated.amount).toBe(300)
@@ -2990,6 +3056,17 @@ describe('db（:memory:）', () => {
       )).toThrow()
       // 明細も無くamountも無い
       expect(() => db.createExpense({ occurred_at: '2026-01-01', category: 'other' })).toThrow()
+    })
+
+    it('createExpense：明細の単価が負・数量が0以下はthrow', () => {
+      expect(() => db.createExpense({
+        occurred_at: '2026-01-01', category: 'packaging',
+        lines: [{ name: '袋', unit_price: -1 }],
+      })).toThrow()
+      expect(() => db.createExpense({
+        occurred_at: '2026-01-01', category: 'packaging',
+        lines: [{ name: '袋', unit_price: 100, quantity: 0 }],
+      })).toThrow()
     })
 
     it('振込手数料の自動計上は撤去：販売を作ってもexpenseは増えず、expense_auto_monthテーブルも存在しない', () => {

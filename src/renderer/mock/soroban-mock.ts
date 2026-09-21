@@ -19,6 +19,7 @@ import type {
   ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
   Listing, ListingStatus,
   Expense, ExpenseInput, ExpenseLineInput, ExpenseLine, ExpenseCategory,
+  ReceiptDraft, ReceiptRead,
   AllocMethod, MonthClose, MonthDetail, MonthSaleRow, MonthTotals,
   SearchHit,
   UpdateStatus,
@@ -1015,6 +1016,39 @@ function extraOlderMonths(): MonthlyBase[] {
 let expenses: Expense[] = []
 
 /**
+ * レシート OCR の固定の下書き（readReceiptImage／readReceipt 共通）。
+ * 実データは main が Tesseract で読む。モックはこの1件だけを返す
+ */
+const MOCK_RECEIPT_DRAFT: ReceiptDraft = {
+  shop: 'ダイソー',
+  occurred_at: '2026-09-15',
+  total: 880,
+  lines: [
+    { name: 'ビニール袋 100枚', unit_price: 110, quantity: 1 },
+    { name: 'OPP袋 A4', unit_price: 110, quantity: 2 },
+    { name: '緩衝材 プチプチ', unit_price: 330, quantity: 1 },
+    { name: 'ダンボール 小', unit_price: 220, quantity: 1 },
+  ],
+  raw_text: [
+    'ダイソー ○○店',
+    '2026/09/15 (火) 12:34',
+    '',
+    'ビニール袋100枚          ¥110',
+    'OPP袋A4       2         ¥220',
+    '緩衝材プチプチ           ¥330',
+    'ダンボール小             ¥220',
+    '',
+    '合計                     ¥880',
+  ].join('\n'),
+  confidence: 76,
+}
+
+/** 実際の OCR は数秒かかる。モックも同じ体感になるよう 1.2 秒待つ */
+function waitReceipt<T>(value: T): Promise<T> {
+  return new Promise(resolve => setTimeout(() => resolve(value), 1200))
+}
+
+/**
  * 月の按分方法・締めの記録。月次タブ／経費の計上月ごとに1つ。持っていない月は
  * 既定（金額按分・未締め）として扱う（monthBookEntry で都度作る）
  */
@@ -1030,13 +1064,18 @@ function monthBookEntry(month: string): { alloc_method: AllocMethod; close: Mont
 
 function buildExpenseLines(inputs: ExpenseLineInput[] | undefined): ExpenseLine[] {
   if (!inputs || inputs.length === 0) return []
-  return inputs.map(l => ({
-    id: uid(),
-    name: l.name,
-    amount: Math.round(l.amount),
-    quantity: l.quantity ?? 1,
-    category: l.category ?? 'packaging',
-  }))
+  return inputs.map(l => {
+    const unit_price = Math.round(l.unit_price)
+    const quantity = l.quantity ?? 1
+    return {
+      id: uid(),
+      name: l.name,
+      unit_price,
+      quantity,
+      amount: unit_price * quantity,
+      category: l.category ?? 'packaging',
+    }
+  })
 }
 
 /** 今月・先月に梱包費／消耗品／送料のサンプル、過去月に旧・振込手数料の自動計上を1件残す */
@@ -1058,8 +1097,8 @@ function buildInitialExpenses(): void {
     auto: 0,
     receipt_url: '/mock/receipt.svg',
     lines: [
-      { id: uid(), name: 'ビニール袋 100枚', amount: 1200, quantity: 1, category: 'packaging' },
-      { id: uid(), name: '緩衝材', amount: 800, quantity: 1, category: 'packaging' },
+      { id: uid(), name: 'ビニール袋 100枚', unit_price: 1200, amount: 1200, quantity: 1, category: 'packaging' },
+      { id: uid(), name: '緩衝材', unit_price: 800, amount: 800, quantity: 1, category: 'packaging' },
     ],
   })
   // 消耗品
@@ -1113,7 +1152,7 @@ function buildInitialExpenses(): void {
     note: null,
     auto: 0,
     receipt_url: null,
-    lines: [{ id: uid(), name: '段ボール 10枚', amount: 1500, quantity: 10, category: 'packaging' }],
+    lines: [{ id: uid(), name: '段ボール 10枚', unit_price: 150, amount: 1500, quantity: 10, category: 'packaging' }],
   })
   expenses.push({
     id: uid(),
@@ -2283,7 +2322,7 @@ const api: SorobanApi = {
       amount,
       note: input.note?.trim() || null,
       auto: 0,
-      receipt_url: null,
+      receipt_url: input.receipt_temp_file ? '/mock/receipt.svg' : null,
       lines,
     })
     return wait(id)
@@ -2302,6 +2341,7 @@ const api: SorobanApi = {
     e.amount = amount
     e.note = input.note?.trim() || null
     e.lines = lines
+    if (input.receipt_temp_file) e.receipt_url = '/mock/receipt.svg'
     return wait(undefined)
   },
 
@@ -2323,6 +2363,21 @@ const api: SorobanApi = {
     const e = expenses.find(x => x.id === id)
     if (e) e.receipt_url = null
     return wait(undefined)
+  },
+
+  async readReceiptImage() {
+    const result: ReceiptRead = {
+      temp_file: `receipt-draft-${uid()}.jpg`,
+      receipt_url: '/mock/receipt.svg',
+      draft: MOCK_RECEIPT_DRAFT,
+    }
+    return waitReceipt(result)
+  },
+
+  async readReceipt(id: string) {
+    const e = expenses.find(x => x.id === id)
+    if (!e || !e.receipt_url) throw new Error('レシートが添付されていません')
+    return waitReceipt(MOCK_RECEIPT_DRAFT)
   },
 
   async getMonthDetail(month: string, opts?: { tagId?: string | null }) {

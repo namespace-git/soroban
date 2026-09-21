@@ -132,6 +132,8 @@ function registerIpc(): void {
   handle('updateExpense', (id, input) => db.updateExpense(id, input))
   handle('attachReceipt', (id) => receipts.attachReceipt(id, mainWindow))
   handle('removeReceipt', (id) => receipts.removeReceipt(id))
+  handle('readReceiptImage', () => receipts.readReceiptImage(mainWindow))
+  handle('readReceipt', (id) => receipts.readReceipt(id))
   handle('getMonthDetail', (month, opts) => db.getMonthDetail(month, opts))
   handle('setMonthAllocMethod', (month, method) => db.setMonthAllocMethod(month, method))
   handle('closeMonth', (month) => db.closeMonth(month))

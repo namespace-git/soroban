@@ -2,6 +2,7 @@ node_modules/
 out/
 release/
 dist/
+build/mac/
 
 # ローカルDB・セッション（絶対にコミットしない）
 *.db

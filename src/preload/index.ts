@@ -47,6 +47,8 @@ const api: SorobanApi = {
   updateExpense: invoke('updateExpense'),
   attachReceipt: invoke('attachReceipt'),
   removeReceipt: invoke('removeReceipt'),
+  readReceiptImage: invoke('readReceiptImage'),
+  readReceipt: invoke('readReceipt'),
   getMonthDetail: invoke('getMonthDetail'),
   setMonthAllocMethod: invoke('setMonthAllocMethod'),
   closeMonth: invoke('closeMonth'),

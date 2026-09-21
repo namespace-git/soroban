@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { join, extname } from 'node:path'
+import { existsSync, renameSync, unlinkSync } from 'node:fs'
 import { app } from 'electron'
 // ビルド後もスキーマを確実に読めるよう、ファイル読み込みではなく埋め込む
 import schemaSql from './schema.sql?raw'
@@ -936,6 +937,28 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '18')
          ON CONFLICT(key) DO UPDATE SET value = '18'`,
+    ).run()
+  }
+
+  if (version < 19) {
+    // 経費の明細を「単価 × 数量 ＝ 金額」にする。既存行は amount が行の合計だったため、
+    // 割り切れれば unit_price = amount / quantity、割り切れなければ unit_price = amount, quantity = 1
+    // に寄せる（amount 自体は変えない＝合計は動かさない）
+    addColumnIfMissing('expense_line', 'unit_price', 'INTEGER NOT NULL DEFAULT 0')
+    const lineRows = db.prepare('SELECT id, amount, quantity FROM expense_line').all() as
+      Array<{ id: string; amount: number; quantity: number }>
+    const updLine = db.prepare('UPDATE expense_line SET unit_price = ?, quantity = ? WHERE id = ?')
+    for (const r of lineRows) {
+      if (r.quantity > 0 && r.amount % r.quantity === 0) {
+        updLine.run(r.amount / r.quantity, r.quantity, r.id)
+      } else {
+        updLine.run(r.amount, 1, r.id)
+      }
+    }
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '19')
+         ON CONFLICT(key) DO UPDATE SET value = '19'`,
     ).run()
   }
 
@@ -2911,12 +2934,15 @@ function loadExpenseLinesFor(expenseIds: string[]): Map<string, ExpenseLine[]> {
 
   const ph = expenseIds.map(() => '?').join(',')
   const rows = db.prepare(`
-    SELECT id, expense_id, name, amount, quantity, category
+    SELECT id, expense_id, name, unit_price, amount, quantity, category
     FROM expense_line
     WHERE expense_id IN (${ph})
     ORDER BY sort_order, rowid
   `).all(...expenseIds) as Array<
-    { id: string; expense_id: string; name: string; amount: number; quantity: number; category: ExpenseCategory }
+    {
+      id: string; expense_id: string; name: string; unit_price: number; amount: number
+      quantity: number; category: ExpenseCategory
+    }
   >
 
   for (const r of rows) {
@@ -2949,7 +2975,9 @@ type ValidatedExpense = {
   month: string
   category: ExpenseCategory
   amount: number
-  lines: Array<{ name: string; amount: number; quantity: number; category: ExpenseCategory }>
+  lines: Array<
+    { name: string; unit_price: number; quantity: number; amount: number; category: ExpenseCategory }
+  >
 }
 
 /**
@@ -2970,8 +2998,8 @@ function validateExpenseInput(input: ExpenseInput): ValidatedExpense {
 
   const lines = (input.lines ?? []).map((l, i) => {
     if (!l.name.trim()) throw new Error(`${i + 1}行目：品名を入力してください`)
-    if (!Number.isInteger(l.amount) || l.amount < 0) {
-      throw new Error(`${i + 1}行目：金額は0以上の整数で入力してください`)
+    if (!Number.isInteger(l.unit_price) || l.unit_price < 0) {
+      throw new Error(`${i + 1}行目：単価は0以上の整数で入力してください`)
     }
     const quantity = l.quantity ?? 1
     if (!Number.isInteger(quantity) || quantity <= 0) {
@@ -2981,7 +3009,7 @@ function validateExpenseInput(input: ExpenseInput): ValidatedExpense {
     if (!EXPENSE_CATEGORIES.includes(category)) {
       throw new Error(`不正な費用区分です: ${category}`)
     }
-    return { name: l.name.trim(), amount: l.amount, quantity, category }
+    return { name: l.name.trim(), unit_price: l.unit_price, quantity, amount: l.unit_price * quantity, category }
   })
 
   const amount = lines.length > 0 ? lines.reduce((s, l) => s + l.amount, 0) : input.amount
@@ -2999,12 +3027,41 @@ function insertExpenseLines(
   lines: ValidatedExpense['lines'],
 ): void {
   const ins = db.prepare(`
-    INSERT INTO expense_line (id, expense_id, name, amount, quantity, category, sort_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO expense_line (id, expense_id, name, unit_price, amount, quantity, category, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `)
   lines.forEach((l, i) => {
-    ins.run(randomUUID(), expenseId, l.name, l.amount, l.quantity, l.category, i)
+    ins.run(randomUUID(), expenseId, l.name, l.unit_price, l.amount, l.quantity, l.category, i)
   })
+}
+
+/**
+ * readReceiptImage が作った一時ファイル（receipt-tmp-<uuid>.<拡張子>、userData/thumbs）を
+ * receipt-<経費id>.<拡張子> にリネームして本添付にする。想定外の名前・実在しないファイルは
+ * 無視する（Error にしない）。既存のレシートがあれば消す
+ */
+function applyReceiptTempFile(id: string, tempFile: string | null | undefined): void {
+  if (!tempFile || !tempFile.startsWith('receipt-tmp-')) return
+  if (tempFile.includes('/') || tempFile.includes('\\') || tempFile.includes('..')) return
+
+  const dir = join(app.getPath('userData'), 'thumbs')
+  const srcPath = join(dir, tempFile)
+  if (!existsSync(srcPath)) return
+
+  const file = `receipt-${id}${extname(tempFile)}`
+  const destPath = join(dir, file)
+
+  const prevFile = getExpenseReceiptFile(id)
+  if (prevFile && prevFile !== file) {
+    try {
+      unlinkSync(join(dir, prevFile))
+    } catch {
+      // 元々無い・消せない場合は無視
+    }
+  }
+
+  renameSync(srcPath, destPath)
+  setExpenseReceiptFile(id, file)
 }
 
 export function createExpense(input: ExpenseInput): string {
@@ -3018,6 +3075,7 @@ export function createExpense(input: ExpenseInput): string {
     insertExpenseLines(id, lines)
   })
   tx()
+  applyReceiptTempFile(id, input.receipt_temp_file)
   return id
 }
 
@@ -3037,6 +3095,7 @@ export function updateExpense(id: string, input: ExpenseInput): void {
     insertExpenseLines(id, lines)
   })
   tx()
+  applyReceiptTempFile(id, input.receipt_temp_file)
 }
 
 /** 明細は expense_line の ON DELETE CASCADE で消える。レシートファイル自体の削除は receipts.ts が担う */

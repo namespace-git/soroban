@@ -2,8 +2,8 @@
 // 経費（レシート1枚）の詳細。明細・合計・メモ・レシート画像を見せる。
 // 編集・削除は Expenses.vue の処理を呼んでもらう（ここでは持たない）。
 // レシートの添付・取り外しだけはここで完結し、終わったら changed を投げて親に再読込させる。
-import { ref, watch } from 'vue'
-import type { Expense, ExpenseCategory } from '../../shared/types'
+import { ref, watch, inject } from 'vue'
+import type { Expense, ExpenseCategory, ReceiptDraft } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import Icon from './Icon.vue'
@@ -17,7 +17,11 @@ const emit = defineEmits<{
   edit: [expense: Expense]
   delete: [expense: Expense]
   changed: []
+  /** 「レシートを読み取って編集」。親（Expenses.vue）が編集フォームを開いて下書きを反映する */
+  'read-edit': [expense: Expense, draft: ReceiptDraft]
 }>()
+
+const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 
 const CATEGORY_LABEL: Record<ExpenseCategory, string> = {
   packaging: '梱包費',
@@ -32,6 +36,7 @@ const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleStr
 
 const busy = ref(false)
 const expanded = ref(false)
+const readingReceipt = ref(false)
 
 watch(() => props.open, (isOpen) => {
   if (!isOpen) expanded.value = false
@@ -70,6 +75,20 @@ function onEdit() {
 function onDelete() {
   if (props.expense) emit('delete', props.expense)
 }
+
+/** 添付済みのレシートを OCR で読み直し、親に編集フォームを開かせる */
+async function readForEdit() {
+  if (!props.expense) return
+  readingReceipt.value = true
+  try {
+    const draft = await window.soroban.readReceipt(props.expense.id)
+    emit('read-edit', props.expense, draft)
+  } catch (e: any) {
+    toast(e.message, 'warn')
+  } finally {
+    readingReceipt.value = false
+  }
+}
 </script>
 
 <template>
@@ -90,17 +109,19 @@ function onDelete() {
         <thead>
           <tr>
             <th>品名</th>
+            <th class="num">単価</th>
             <th class="num">数量</th>
-            <th>項目</th>
             <th class="num">金額</th>
+            <th>項目</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="l in expense.lines" :key="l.id">
             <td class="line-name">{{ l.name }}</td>
+            <td class="num">{{ yen(l.unit_price) }}</td>
             <td class="num">{{ l.quantity }}</td>
-            <td>{{ CATEGORY_LABEL[l.category] }}</td>
             <td class="num">{{ yen(l.amount) }}</td>
+            <td>{{ CATEGORY_LABEL[l.category] }}</td>
           </tr>
         </tbody>
       </table>
@@ -126,6 +147,14 @@ function onDelete() {
           />
         </div>
         <p v-else class="faint">レシート画像はありません</p>
+        <button
+          v-if="expense.receipt_url"
+          class="ghost sm receipt-read-btn" :disabled="readingReceipt"
+          @click="readForEdit"
+        >
+          <Icon name="receipt" :size="14" />
+          {{ readingReceipt ? '読み取り中…（数秒）' : 'レシートを読み取って編集' }}
+        </button>
       </div>
     </template>
 
@@ -178,6 +207,7 @@ function onDelete() {
 .note-row { margin-top: 14px; }
 
 .receipt-block { margin-top: 16px; }
+.receipt-read-btn { margin-top: 10px; }
 .receipt-wrap { display: flex; }
 .receipt-img {
   max-width: 220px;
