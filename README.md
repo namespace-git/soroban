@@ -112,6 +112,18 @@ pnpm dist:win          # release/そろばん Setup 0.1.0.exe（NSIS インス�
 
 ---
 
+## 更新
+
+`pnpm release:patch`（または `release:minor`）を叩くと `package.json` のバージョンを上げてタグを push する。
+GitHub Actions（`.github/workflows/release.yml`）が mac・Windows の両方をビルドして GitHub Releases に載せる。
+
+アプリは起動10秒後と6時間ごとに Releases を確認し、新しい版があれば知らせる（設定タブからも手動で確認できる）。
+
+- **Windows**：見つかったら裏でダウンロードし、次に終了するときに自動で入れ替わる
+- **macOS**：署名（Apple Developer Program）を付けていないため自動では入れ替えられない。「新しいバージョンがあります」から Releases のページを開き、dmg を落として Applications に上書きする（データはそのまま）
+
+---
+
 ## アイコン
 
 `build/icon.svg` が原本。PNG は Electron で描画して作る（外部ツール不要）。

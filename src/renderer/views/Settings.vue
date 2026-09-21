@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, inject, watch, type Ref } from 'vue'
-import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag } from '../../shared/types'
+import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
+import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
@@ -22,23 +22,63 @@ const accounts = ref<ShopAccount[]>([])
 const tags = ref<Tag[]>([])
 const saved = ref('')
 const loaded = ref(false)
+const updateStatus = ref<UpdateStatus | null>(null)
+const checkingUpdate = ref(false)
+const installingUpdate = ref(false)
 
 async function load() {
-  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes] = await Promise.all([
+  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes] = await Promise.all([
     window.soroban.listShippingMethods(),
     window.soroban.getSettings(),
     window.soroban.listRuns(10),
     window.soroban.listShopAccounts(),
     window.soroban.listTags(),
+    window.soroban.checkForUpdate(),
   ])
   methods.value = methodsRes
   settings.value = settingsRes
   runs.value = runsRes
   accounts.value = accountsRes
   tags.value = tagsRes
+  updateStatus.value = updateRes
   loaded.value = true
 }
 onMounted(load)
+
+// --- アプリの更新（GitHub Releases） ---
+
+async function checkUpdate() {
+  checkingUpdate.value = true
+  try {
+    updateStatus.value = await window.soroban.checkForUpdate()
+  } finally {
+    checkingUpdate.value = false
+  }
+}
+
+async function installUpdateNow() {
+  installingUpdate.value = true
+  try {
+    await window.soroban.installUpdate()
+    toast(
+      updateStatus.value?.canAutoInstall
+        ? 'ダウンロードを始めました。終了時に自動で入れ替わります'
+        : 'ダウンロードページを開きました',
+      'ok',
+    )
+  } finally {
+    installingUpdate.value = false
+  }
+}
+
+const updateResultText = computed(() => {
+  const s = updateStatus.value
+  if (!s) return ''
+  if (s.state === 'none') return s.message ?? '最新です'
+  if (s.state === 'error') return `確認できません${s.message ? `（${s.message}）` : ''}`
+  const firstLine = s.notes?.split('\n').map(l => l.trim()).find(l => l) ?? ''
+  return `v${s.latest} があります${firstLine ? `（${firstLine}）` : ''}`
+})
 
 // 仕入タブでアカウントを増やしたら、こちらの一覧も追従させる
 watch(revision, async () => {
@@ -535,6 +575,30 @@ const runLabel: Record<string, string> = {
           </p>
           <button class="danger" @click="resetData">取引データを初期化</button>
         </div>
+      </div>
+
+      <!-- アプリの更新 -->
+      <div class="panel">
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="refresh" :size="16" /></span>
+          <h2 class="section-head-title">アプリの更新</h2>
+        </div>
+        <p class="faint">現在のバージョン：v{{ updateStatus?.current ?? '—' }}</p>
+        <div class="row">
+          <button class="ghost" :disabled="checkingUpdate" @click="checkUpdate">
+            <Icon name="refresh" :size="16" /> {{ checkingUpdate ? '確認中…' : '更新を確認' }}
+          </button>
+          <span v-if="updateStatus" class="faint">{{ updateResultText }}</span>
+        </div>
+        <div v-if="updateStatus && (updateStatus.state === 'available' || updateStatus.state === 'downloaded')" class="row">
+          <button :disabled="installingUpdate" @click="installUpdateNow">
+            <Icon name="download" :size="16" />
+            {{ updateStatus.canAutoInstall ? '更新する' : 'ダウンロードページを開く' }}
+          </button>
+        </div>
+        <p class="faint hint">
+          Windows は終了時に自動で入れ替わります。macOS は dmg を開いて Applications に上書きしてください（データはそのまま）。
+        </p>
       </div>
     </template>
 

@@ -14,7 +14,7 @@ import Inventory from './views/Inventory.vue'
 import Products from './views/Products.vue'
 import Monthly from './views/Monthly.vue'
 import Settings from './views/Settings.vue'
-import type { CollectorRun, DashboardStats, SearchHit } from '../shared/types'
+import type { CollectorRun, DashboardStats, SearchHit, UpdateStatus } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 
 type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'settings'
@@ -266,12 +266,41 @@ async function collect() {
   }
 }
 
+// --- アプリの更新（GitHub Releases）。裏の自動確認から知らされたら薄いバナーで出す ---
+
+const updateStatus = ref<UpdateStatus | null>(null)
+// 「あとで」で閉じたらセッション中は出さない
+const updateDismissed = ref(false)
+const updateInstalling = ref(false)
+
+const showUpdateBanner = computed(() =>
+  !updateDismissed.value && !!updateStatus.value &&
+  (updateStatus.value.state === 'available' || updateStatus.value.state === 'downloaded'),
+)
+
+function dismissUpdateBanner() {
+  updateDismissed.value = true
+}
+
+async function installUpdateFromBanner() {
+  updateInstalling.value = true
+  try {
+    await window.soroban.installUpdate()
+  } finally {
+    updateInstalling.value = false
+  }
+}
+
 onMounted(() => {
   loadStats()
   // 起動時の自動取り込みが終わったら知らせる
   ;(window as any).sorobanEvents?.onCollectDone((runs: CollectorRun[]) => {
     reportRun(runs)
     loadStats()
+  })
+  // 裏の自動確認（起動10秒後・6時間ごと）で新しい版が見つかったら知らせる
+  ;(window as any).sorobanEvents?.onUpdateStatus((status: UpdateStatus) => {
+    updateStatus.value = status
   })
   window.addEventListener('keydown', onGlobalKeydown)
 })
@@ -324,6 +353,15 @@ watch(revision, loadStats)
           {{ collecting ? '取り込み中…' : '取り込む' }}
         </button>
       </header>
+
+      <div v-if="showUpdateBanner" class="update-banner">
+        <Icon name="refresh" :size="14" />
+        <span>新しいバージョン v{{ updateStatus?.latest }} があります</span>
+        <button class="sm" :disabled="updateInstalling" @click="installUpdateFromBanner">
+          {{ updateStatus?.canAutoInstall ? '再起動して更新' : 'ダウンロード' }}
+        </button>
+        <button class="ghost sm" @click="dismissUpdateBanner">あとで</button>
+      </div>
 
       <div v-if="notice" class="toast" :class="notice.kind">
         <Icon v-if="notice.kind === 'warn'" class="toast-warn-icon" name="alert" :size="14" />
@@ -505,4 +543,19 @@ main {
   overflow-y: auto;
   background: var(--canvas);
 }
+
+/* --- 更新バナー --- */
+
+.update-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 24px;
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-size: var(--fs-13);
+}
+.update-banner button { margin-left: 0; }
+.update-banner button:last-child { margin-left: auto; }
 </style>

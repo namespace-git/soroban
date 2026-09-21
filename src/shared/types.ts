@@ -716,6 +716,31 @@ export interface SorobanApi {
   revealDbFolder(): Promise<void>
   /** 取引データ（販売・仕入・在庫・紐付け・取り込み履歴・期間費用）を全部消す。設定・仕入先・発送方法は残す */
   resetData(): Promise<void>
+
+  // 更新（GitHub Releases）
+  /** いまのアプリのバージョンと、更新の確認結果。起動時と 6 時間ごとに自動で確認し、手動でも呼べる */
+  checkForUpdate(): Promise<UpdateStatus>
+  /**
+   * 更新を入れる。Windows：ダウンロード済みなら再起動して入れ替える（未ダウンロードならダウンロードを始める）。
+   * macOS：署名が無いので自動入れ替えはできない。Releases のページ（dmg）をブラウザで開く
+   */
+  installUpdate(): Promise<void>
+}
+
+export interface UpdateStatus {
+  /** いまのバージョン（package.json） */
+  current: string
+  /** 'none' = 最新 / 'available' = 新しい版がある / 'downloaded' = 入れ替え準備済み（Windows）/ 'error' = 確認できない（オフライン等） */
+  state: 'none' | 'available' | 'downloaded' | 'error'
+  /** 新しいバージョン（あれば） */
+  latest: string | null
+  /** リリースノート（Markdown。あれば） */
+  notes: string | null
+  /** Releases のページ URL（macOS はここを開く） */
+  url: string | null
+  /** この OS で自動入れ替えできるか（Windows = true、macOS = false） */
+  canAutoInstall: boolean
+  message: string | null
 }
 
 declare global {

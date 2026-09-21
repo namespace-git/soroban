@@ -5,6 +5,7 @@ import { writeFileSync, copyFileSync } from 'node:fs'
 import * as db from './db'
 import * as collector from './collector'
 import * as collectorMellojoy from './collector-mellojoy'
+import * as updater from './updater'
 import type { CollectorRun, SorobanApi } from '../shared/types'
 
 // ============================================================
@@ -203,6 +204,9 @@ function registerIpc(): void {
   })
 
   handle('resetData', () => db.resetData())
+
+  handle('checkForUpdate', () => updater.checkForUpdate())
+  handle('installUpdate', () => updater.installUpdate())
 }
 
 /**
@@ -255,6 +259,9 @@ app.whenReady().then(async () => {
   // 起動時に、前回から間隔が空いていれば裏で収集する。
   // OSのスケジューラは使わない（アプリを開いたときに追いつけばよい）
   collectInBackground()
+
+  // 起動10秒後・以後6時間ごとにアプリの更新を裏で確認する（dev では走らない）
+  updater.scheduleAutoCheck(() => mainWindow)
 })
 
 async function collectInBackground(): Promise<void> {

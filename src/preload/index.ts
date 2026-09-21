@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { SorobanApi, CollectorRun } from '../shared/types'
+import type { SorobanApi, CollectorRun, UpdateStatus } from '../shared/types'
 
 // ============================================================
 // レンダラーへ公開するAPI
@@ -86,6 +86,9 @@ const api: SorobanApi = {
   backupDb: invoke('backupDb'),
   revealDbFolder: invoke('revealDbFolder'),
   resetData: invoke('resetData'),
+
+  checkForUpdate: invoke('checkForUpdate'),
+  installUpdate: invoke('installUpdate'),
 } as SorobanApi
 
 contextBridge.exposeInMainWorld('soroban', api)
@@ -94,5 +97,9 @@ contextBridge.exposeInMainWorld('soroban', api)
 contextBridge.exposeInMainWorld('sorobanEvents', {
   onCollectDone(cb: (runs: CollectorRun[]) => void) {
     ipcRenderer.on('collect:done', (_e, runs: CollectorRun[]) => cb(runs))
+  },
+  // 裏の自動確認（起動10秒後・6時間ごと）で新しい版が見つかったら知らせる
+  onUpdateStatus(cb: (status: UpdateStatus) => void) {
+    ipcRenderer.on('update:status', (_e, status: UpdateStatus) => cb(status))
   },
 })

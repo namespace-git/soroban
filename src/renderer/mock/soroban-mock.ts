@@ -20,6 +20,7 @@ import type {
   Listing, ListingStatus,
   Expense, ExpenseInput,
   SearchHit,
+  UpdateStatus,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 import { matchesSearch } from '../components/SearchBox.vue'
@@ -2401,6 +2402,23 @@ const api: SorobanApi = {
     productTags.clear()
     return wait(undefined)
   },
+
+  // アプリの更新（GitHub Releases）。見た目の確認用に「新しい版がある」を返す
+  async checkForUpdate(): Promise<UpdateStatus> {
+    return wait({
+      current: '0.1.0',
+      state: 'available',
+      latest: '0.2.0',
+      notes: '- 出品の一括引き当てを追加\n- 月次のグラフを見やすく調整',
+      url: 'https://github.com/namespace-git/soroban/releases/latest',
+      canAutoInstall: true,
+      message: null,
+    })
+  },
+
+  async installUpdate() {
+    return wait(undefined)
+  },
 }
 
 /** メモ付きの在庫を1件（見え方の確認用。商品名の続きに見えないことを確かめる） */
@@ -2458,9 +2476,17 @@ export function installMock(): void {
   recalcAllInheritance()
 
   window.soroban = api
-  ;(window as unknown as { sorobanEvents: { onCollectDone(cb: (runs: CollectorRun[]) => void): void } }).sorobanEvents = {
+  ;(window as unknown as {
+    sorobanEvents: {
+      onCollectDone(cb: (runs: CollectorRun[]) => void): void
+      onUpdateStatus(cb: (status: UpdateStatus) => void): void
+    }
+  }).sorobanEvents = {
     onCollectDone() {
       // モックでは自動収集イベントを発火しない（collect() は手動呼び出しのみ）
+    },
+    onUpdateStatus() {
+      // モックでは裏の自動確認イベントを発火しない（checkForUpdate() は手動呼び出しのみ）
     },
   }
 }

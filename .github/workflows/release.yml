@@ -1,0 +1,57 @@
+name: release
+
+# タグ v* を push すると、mac / Windows をビルドして GitHub Releases に publish する。
+# アプリは electron-updater でこの Releases を見て更新を知らせる（src/main/updater.ts）。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: build & publish (mac)
+        run: pnpm dist:mac -- --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 配布用の署名（Apple Developer Program）は付けていないため、
+          # ビルド時の自動署名探索を無効にする（README の「初回起動」参照）
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: build & publish (windows)
+        run: pnpm dist:win -- --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
