@@ -21,6 +21,14 @@ const TIMEOUT_MS = 60_000
 const MAX_BYTES = 10 * 1024 * 1024
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 
+/**
+ * Gemini の無料枠は 503（過負荷）が頻発する。数秒〜十数秒で通ることが多いので
+ * 短く自動再試行する。待ち時間はこの配列だけで決まる（1回目3秒・2回目8秒）。
+ * 呼び出し回数は初回 + この配列の長さ = 最大3回で打ち切る
+ */
+const RETRY_DELAYS_MS = [3_000, 8_000]
+const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1
+
 const MIME_BY_EXT: Record<string, string> = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -198,7 +206,20 @@ function requireApiKey(): string {
 // Gemini 呼び出し
 // ------------------------------------------------------------
 
-async function callGemini(model: string, apiKey: string, body: unknown): Promise<unknown> {
+/** 再試行してよいエラーか（503/502/504、または fetch 自体の一時的な失敗） */
+function isRetryable(e: unknown): boolean {
+  if (e instanceof GeminiHttpError) {
+    return e.status === 502 || e.status === 503 || e.status === 504
+  }
+  return e instanceof Error && /fetch failed|ECONNRESET/i.test(e.message)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/** 1回だけ呼ぶ。TIMEOUT_MS の AbortController は呼び出しごとに作り直す */
+async function callGeminiOnce(model: string, apiKey: string, body: unknown): Promise<unknown> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
@@ -219,6 +240,25 @@ async function callGemini(model: string, apiKey: string, body: unknown): Promise
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * 503/502/504 と fetch の一時的失敗だけ、短く自動再試行する（RETRY_DELAYS_MS）。
+ * 429・400・401・403・404 は再試行しない（429は無料枠の上限なので連打しない）
+ */
+async function callGemini(model: string, apiKey: string, body: unknown): Promise<unknown> {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await callGeminiOnce(model, apiKey, body)
+    } catch (e) {
+      if (attempt === MAX_ATTEMPTS || !isRetryable(e)) throw e
+      const label = e instanceof GeminiHttpError ? String(e.status) : 'network'
+      console.warn(`[ai] Gemini ${label} を再試行 (${attempt}/${RETRY_DELAYS_MS.length})`)
+      await sleep(RETRY_DELAYS_MS[attempt - 1])
+    }
+  }
+  // ここには到達しない（ループ内で必ず return か throw する）
+  throw new Error('unreachable')
 }
 
 /** 並び順の優先度：-latest を先頭、次に2.5系、それ以外は名前順（同順位内は呼び出し側で名前順にする） */
@@ -331,7 +371,7 @@ function toAiErrorMessage(e: unknown, model: string): string {
       return '無料枠の上限に達しました。設定 → AI 読み取り でモデルを gemini-flash-latest に変えるか、明日また'
     }
     if (status >= 500) {
-      return `Gemini 側の障害です（${status}）。しばらくして再試行`
+      return `Gemini が混み合っています（${status}）。${RETRY_DELAYS_MS.length}回試しましたが通りませんでした。少し待ってから、もう一度「読み取る」を押してください`
     }
     return `AI の応答を読めませんでした（${apiMessage.slice(0, 120)}）`
   }

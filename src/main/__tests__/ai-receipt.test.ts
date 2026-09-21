@@ -121,7 +121,7 @@ describe('APIキー・モデルの設定', () => {
     expect(ai.getAiStatus().model).toBe('gemini-flash-latest')
   })
 
-  it('db.getSettings()の戻りには暗号化済みキーがそのまま含まれる（index.tsのgetSettingsハンドラはdb.getSettings()を直接返すため、ai-receipt.tsの外で漏れる。ここでは修正できない範囲として記録）', () => {
+  it('db.getSettings()の戻りには暗号化済みキーが含まれる（index.tsのgetSettingsハンドラ側でgemini_api_key_encを外してからrendererへ返す）', () => {
     ai.setGeminiApiKey('secret-key')
     expect(db.getSettings()).toHaveProperty('gemini_api_key_enc')
   })
@@ -243,10 +243,15 @@ describe('readReceiptWithGemini（fetchをモック）', () => {
     await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('モデル「gemini-nope」がこのキーでは使えません')
   })
 
-  it('5xxはGemini側の障害というエラーにする', async () => {
+  it('5xxは自動再試行（2回）を使い切ったあと、混み合っている旨のエラーにする', async () => {
+    vi.useFakeTimers()
     ai.setGeminiApiKey('secret-key')
     mockFetch.mockResolvedValue(geminiApiError(503, 'The service is currently unavailable.'))
-    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('Gemini 側の障害です（503）')
+    const promise = ai.readReceiptWithGemini(imagePath)
+    const expectation = expect(promise).rejects.toThrow('Gemini が混み合っています（503）。2回試しましたが通りませんでした')
+    await vi.advanceTimersByTimeAsync(3_000 + 8_000)
+    await expectation
+    expect(mockFetch).toHaveBeenCalledTimes(3)
   })
 
   it('思考partが混じっていても本文のtextを取り出せる', async () => {
@@ -273,10 +278,15 @@ describe('readReceiptWithGemini（fetchをモック）', () => {
     await expectation
   })
 
-  it('ネットワークエラー（fetch failed）もネットに接続できませんというエラーにする', async () => {
+  it('ネットワークエラー（fetch failed）もネットに接続できませんというエラーにする（これも再試行の対象なので3回呼ばれる）', async () => {
+    vi.useFakeTimers()
     ai.setGeminiApiKey('secret-key')
     mockFetch.mockRejectedValue(new TypeError('fetch failed'))
-    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('ネットに接続できません')
+    const promise = ai.readReceiptWithGemini(imagePath)
+    const expectation = expect(promise).rejects.toThrow('ネットに接続できません')
+    await vi.advanceTimersByTimeAsync(3_000 + 8_000)
+    await expectation
+    expect(mockFetch).toHaveBeenCalledTimes(3)
   })
 
   it('本文が空のまま finishReason だけ MAX_TOKENS で返れば、考えすぎで本文が空という専用のエラーにする', async () => {
@@ -302,6 +312,43 @@ describe('readReceiptWithGemini（fetchをモック）', () => {
     writeFileSync(heicPath, Buffer.from([0x00]))
     await expect(ai.readReceiptWithGemini(heicPath)).rejects.toThrow('HEIC は読めません')
     expect(mockFetch).not.toHaveBeenCalled()
+  })
+})
+
+describe('503の自動再試行（RETRY_DELAYS_MS = [3秒, 8秒]、最大3回）', () => {
+  it('503 → 503 → 200 なら3回目で成功する', async () => {
+    vi.useFakeTimers()
+    ai.setGeminiApiKey('secret-key')
+    mockFetch
+      .mockResolvedValueOnce(geminiApiError(503, 'The service is currently unavailable.'))
+      .mockResolvedValueOnce(geminiApiError(503, 'The service is currently unavailable.'))
+      .mockResolvedValueOnce(geminiResponse({ lines: [], warnings: [] }))
+
+    const promise = ai.readReceiptWithGemini(imagePath)
+    await vi.advanceTimersByTimeAsync(3_000 + 8_000)
+    const draft = await promise
+
+    expect(draft.lines).toEqual([])
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('503が3回続くとGeminiHttpError(503)相当のエラーで失敗し、fetchは3回だけ呼ばれる（それ以上は再試行しない）', async () => {
+    vi.useFakeTimers()
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiApiError(503, 'The service is currently unavailable.'))
+
+    const promise = ai.readReceiptWithGemini(imagePath)
+    const expectation = expect(promise).rejects.toThrow('Gemini が混み合っています（503）')
+    await vi.advanceTimersByTimeAsync(3_000 + 8_000)
+    await expectation
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('429は無料枠の上限なので再試行せず1回で失敗する', async () => {
+    ai.setGeminiApiKey('secret-key')
+    mockFetch.mockResolvedValue(geminiHttpError(429))
+    await expect(ai.readReceiptWithGemini(imagePath)).rejects.toThrow('無料枠の上限に達しました')
+    expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 })
 
