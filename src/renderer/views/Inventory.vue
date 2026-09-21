@@ -634,10 +634,13 @@ async function editNote(item: InventoryItem) {
                   <span class="note-text">{{ i.note }}</span>
                 </div>
               </div>
-              <div class="git-cost num">{{ yen(i.landed_cost) }}</div>
+              <div class="git-cost num" :class="{ faint: i.status !== 'in_stock' }">{{ yen(i.landed_cost) }}</div>
               <div class="git-aging">
-                <StatusChip v-if="i.aging_days >= warnDays" tone="warn" :label="`${i.aging_days}日`" />
-                <span v-else class="faint">{{ i.aging_days }}日</span>
+                <template v-if="i.status === 'in_stock'">
+                  <StatusChip v-if="i.aging_days >= warnDays" tone="warn" :label="`${i.aging_days}日`" />
+                  <span v-else class="faint">{{ i.aging_days }}日</span>
+                </template>
+                <span v-else class="faint">—</span>
               </div>
               <div class="git-state">
                 <StatusPill v-if="itemPillState(i)" :tone="itemPillState(i)!.tone" :label="itemPillState(i)!.label" />
@@ -917,9 +920,12 @@ async function editNote(item: InventoryItem) {
 .gnum-item b.warn { color: var(--warn); }
 
 .gitems { padding: 4px 20px 8px; }
+/* 各行はグリッドで縦の列を揃える。操作列（ops）は幅固定にして、ボタンの本数で
+   数値・状態の列がずれないようにする */
 .git {
   display: grid;
-  grid-template-columns: 116px 1fr 92px 68px 150px auto;
+  grid-template-columns: 110px minmax(0, 1fr) 90px 64px 110px 440px;
+  grid-template-areas: "code meta cost aging state ops";
   gap: 12px;
   align-items: center;
   padding: 8px 0;
@@ -928,14 +934,14 @@ async function editNote(item: InventoryItem) {
 }
 .git:first-child { border-top: 0; }
 .git.focused { background: var(--brand-soft); }
-.git-code { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.git-code { grid-area: code; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .split-label { font-size: var(--fs-11); }
-.git-meta { min-width: 0; }
+.git-meta { grid-area: meta; min-width: 0; }
 .git-meta .chip-row { margin-top: 4px; }
-.git-cost { text-align: right; font-variant-numeric: tabular-nums; }
-.git-aging { text-align: center; }
-.git-state { text-align: left; }
-.git-ops { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.git-cost { grid-area: cost; text-align: right; font-variant-numeric: tabular-nums; }
+.git-aging { grid-area: aging; text-align: center; }
+.git-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; grid-area: state; text-align: left; }
+.git-ops { grid-area: ops; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .clickable { cursor: pointer; }
 
 .table-panel { padding: 0; overflow: hidden; }
@@ -981,6 +987,18 @@ tr.focused { background: var(--brand-soft); }
 
 @media (max-width: 1099px) {
   .table-panel { overflow-x: auto; }
-  .git { grid-template-columns: 100px 1fr 80px 56px 120px auto; }
+}
+
+/* 幅が狭い画面では操作列がボタンの折り返しで縦に伸びやすいので、2段目に落として
+   コード・数値・状態の列は常に横一列で揃える */
+@media (max-width: 1365px) {
+  .git {
+    grid-template-columns: 110px minmax(0, 1fr) 90px 64px 110px;
+    grid-template-areas:
+      "code meta cost aging state"
+      "ops  ops  ops  ops  ops";
+    row-gap: 6px;
+  }
+  .git-ops { justify-content: flex-end; }
 }
 </style>
