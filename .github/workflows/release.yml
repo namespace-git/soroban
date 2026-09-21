@@ -2,6 +2,7 @@ name: release
 
 # タグ v* を push すると、mac / Windows をビルドして GitHub Releases に publish する。
 # アプリは electron-updater でこの Releases を見て更新を知らせる（src/main/updater.ts）。
+# Release は公開状態で作る（releaseType: release）。Draft のままだと updater に見えない。
 on:
   push:
     tags:
@@ -37,6 +38,8 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
+    # mac が先に Release を作り、Windows はそこへ成果物を足す（同時に走ると Release が 2 つできる）
+    needs: build-macos
     steps:
       - uses: actions/checkout@v4
 

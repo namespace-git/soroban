@@ -48,7 +48,8 @@
       {
         "provider": "github",
         "owner": "namespace-git",
-        "repo": "soroban"
+        "repo": "soroban",
+        "releaseType": "release"
       }
     ],
     "files": [
