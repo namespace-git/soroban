@@ -197,6 +197,10 @@ const receiptPreviewUrl = ref<string | null>(null)
 const receiptRawText = ref<string | null>(null)
 /** レシートの「合計」行の値。明細合計と食い違っていたら警告する */
 const receiptDraftTotal = ref<number | null>(null)
+/** レシートの登録番号（T＋13桁）。登録・保存時に渡すと「この番号＝この店名」を覚える（shop_alias） */
+const receiptRegistrationNo = ref<string | null>(null)
+/** 店名が前回の学習から決まったら true（購入店の横に出す） */
+const receiptShopLearned = ref(false)
 
 const receiptTotalMismatch = computed(() => {
   if (receiptDraftTotal.value == null) return null
@@ -209,6 +213,8 @@ function clearReceiptDraft() {
   receiptPreviewUrl.value = null
   receiptRawText.value = null
   receiptDraftTotal.value = null
+  receiptRegistrationNo.value = null
+  receiptShopLearned.value = false
 }
 
 /** 画像を選んで読んだ下書きをフォームへ反映する。draft の値がある項目だけ上書きする */
@@ -217,6 +223,8 @@ function applyReceiptDraft(result: ReceiptRead) {
   receiptPreviewUrl.value = result.receipt_url
   receiptRawText.value = result.draft.raw_text
   receiptDraftTotal.value = result.draft.total
+  receiptRegistrationNo.value = result.draft.registration_no
+  receiptShopLearned.value = result.draft.shop_learned
   if (result.draft.shop) form.value.shop = result.draft.shop
   if (result.draft.occurred_at) form.value.occurred_at = result.draft.occurred_at
   if (result.draft.lines.length) {
@@ -264,6 +272,8 @@ async function onDrawerReadEdit(e: Expense, draft: ReceiptDraft) {
   if (draft.occurred_at && !form.value.occurred_at) form.value.occurred_at = draft.occurred_at
   receiptRawText.value = draft.raw_text
   receiptDraftTotal.value = draft.total
+  receiptRegistrationNo.value = draft.registration_no
+  receiptShopLearned.value = draft.shop_learned
   if (draft.lines.length) {
     if (await confirmDialog('読み取った明細で置き換えますか？', { message: '今の明細は消えます' })) {
       form.value.lines = draft.lines.map(l => ({
@@ -286,6 +296,7 @@ async function submit() {
   const input: ExpenseInput = {
     occurred_at: form.value.occurred_at,
     receipt_temp_file: form.value.receipt_temp_file,
+    receipt_registration_no: receiptRegistrationNo.value,
     month: form.value.month || null,
     shop: form.value.shop.trim() || null,
     category: lines.length ? lines[0].category! : form.value.category,
@@ -386,6 +397,7 @@ async function onDrawerDelete(e: Expense) {
           <datalist id="expense-shops">
             <option v-for="shop in shopOptions" :key="shop" :value="shop" />
           </datalist>
+          <span v-if="receiptShopLearned" class="faint">前回の登録から</span>
         </label>
         <label class="field">
           <span>購入日</span>

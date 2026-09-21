@@ -603,6 +603,9 @@ const runLabel: Record<string, string> = {
           データはこのPCの中だけにあります。壊れたら戻せないので、
           月に1回はバックアップを取ってください。
         </p>
+        <p class="faint hint">
+          不具合の報告は、このバックアップファイルを送ってください（操作ログも14日分入っています）。
+        </p>
         <div class="row">
           <button @click="exportCsv"><Icon name="download" :size="16" /> 売上をCSVで書き出す</button>
           <button @click="backup"><Icon name="download" :size="16" /> データベースをバックアップ</button>

@@ -1205,7 +1205,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('19')
+      expect(db.getSettings().schema_version).toBe('20')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1241,6 +1241,57 @@ describe('db（:memory:）', () => {
     expect(summary.avg_price).toBe(2000)
     expect(summary.avg_profit).toBe(Math.round((700 + 650) / 2))
     expect(summary.total_profit).toBe(700 + 650)
+  })
+
+  it('variant_summary：分割した在庫はまるごと換算（1/分割数の重み）で平均する', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      shipping_fee: 0,
+      lines: [{ name: 'ぬいぐるみ【X001】', unit_price: 3000, quantity: 2 }],
+    })
+    const [whole, toSplit] = db.listInventory('in_stock')
+
+    // 1点目はまるごと¥3,600で販売。手数料10%: fee=360 → 粗利 = 3600-360-3000 = 240
+    const saleWhole = db.createSale({ title: 'まるごと販売', sold_at: '2026-09-10', price: 3600 })
+    db.linkInventory(saleWhole, [whole.id])
+
+    // 2点目は4分割（750ずつ）。1個¥1,000で4個販売。手数料10%: fee=100 → 粗利 = 1000-100-750 = 150
+    const childIds = db.splitInventory(toSplit.id, 4)
+    childIds.forEach((childId, i) => {
+      const saleId = db.createSale({ title: `ばら売り${i + 1}`, sold_at: '2026-09-11', price: 1000 })
+      db.linkInventory(saleId, [childId])
+    })
+
+    const summary = db.listVariantSummary().find(v => v.model_code === 'X001')!
+    expect(summary.sold).toBe(5) // 件数（「点」）は従来どおり5点
+    // avg_price = Σprice_share ÷ Σweight = (3600 + 4*1000) / (1 + 4*0.25) = 7600 / 2 = 3800
+    expect(summary.avg_price).toBe(3800)
+    // avg_profit = Σprofit_share ÷ Σweight = (240 + 4*150) / 2 = 840 / 2 = 420
+    expect(summary.avg_profit).toBe(420)
+    expect(summary.total_profit).toBe(240 + 4 * 150)
+  })
+
+  it('variant_summary：分割の分割（孫）も再帰的に重みを算出する（1/8）', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      shipping_fee: 0,
+      lines: [{ name: 'ぬいぐるみ【Y001】', unit_price: 800, quantity: 1 }],
+    })
+    const parent = db.listInventory('in_stock')[0]
+    const children = db.splitInventory(parent.id, 4) // 各200（重み1/4）
+    const grandchildren = db.splitInventory(children[0], 2) // 各100（重み1/8）
+
+    // 孫2点をまとめて¥600で販売。手数料10%: fee=60 → 粗利 = 600-60-(100+100) = 340
+    const saleId = db.createSale({ title: 'まとめ売り', sold_at: '2026-09-12', price: 600 })
+    db.linkInventory(saleId, grandchildren)
+
+    const summary = db.listVariantSummary().find(v => v.model_code === 'Y001')!
+    // Σweight = 1/8 + 1/8 = 0.25 → avg_price = 600/0.25 = 2400、avg_profit = 340/0.25 = 1360
+    expect(summary.avg_price).toBe(2400)
+    expect(summary.avg_profit).toBe(1360)
+    expect(summary.total_profit).toBe(340)
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1326,7 +1377,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('19')
+      expect(db.getSettings().schema_version).toBe('20')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1360,7 +1411,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('19')
+      expect(db.getSettings().schema_version).toBe('20')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -3067,6 +3118,36 @@ describe('db（:memory:）', () => {
         occurred_at: '2026-01-01', category: 'packaging',
         lines: [{ name: '袋', unit_price: 100, quantity: 0 }],
       })).toThrow()
+    })
+
+    it('shop_alias：登録番号→店名を学習し、次回の読み取りで使える（learnShopAlias / lookupShopAlias）', () => {
+      expect(db.lookupShopAlias('T2290801007056')).toBeNull()
+
+      db.learnShopAlias('T2290801007056', 'セブンイレブン 小倉貫店')
+      expect(db.lookupShopAlias('T2290801007056')).toBe('セブンイレブン 小倉貫店')
+
+      // 同じ番号で別の店名を学習すると上書きされ、hits が増える
+      db.learnShopAlias('T2290801007056', 'セブンイレブン 小倉貫店２号店')
+      expect(db.lookupShopAlias('T2290801007056')).toBe('セブンイレブン 小倉貫店２号店')
+      const row = db.getDb().prepare(
+        `SELECT hits FROM shop_alias WHERE key = 'reg:T2290801007056'`,
+      ).get() as { hits: number }
+      expect(row.hits).toBe(2)
+
+      // 空文字は何もしない
+      db.learnShopAlias('T9999999999999', '   ')
+      expect(db.lookupShopAlias('T9999999999999')).toBeNull()
+    })
+
+    it('createExpense：receipt_registration_no と shop を渡すと店名を学習し、lookupShopAlias で返る', () => {
+      db.createExpense({
+        occurred_at: '2026-04-01',
+        category: 'supplies',
+        amount: 300,
+        shop: 'セリア 小倉貫店',
+        receipt_registration_no: 'T4200001013662',
+      })
+      expect(db.lookupShopAlias('T4200001013662')).toBe('セリア 小倉貫店')
     })
 
     it('振込手数料の自動計上は撤去：販売を作ってもexpenseは増えず、expense_auto_monthテーブルも存在しない', () => {

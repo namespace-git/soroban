@@ -23,6 +23,24 @@ const MAX_BYTES = 10 * 1024 * 1024
 const TEMP_PREFIX = 'receipt-tmp-'
 const TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
+/** parseReceiptText が registration_no を抜けなかったときの保険。生テキストから T＋13桁を拾う */
+function extractRegistrationNoFallback(text: string): string | null {
+  const m = text.normalize('NFKC').match(/T\s*(\d{13})/)
+  return m ? `T${m[1]}` : null
+}
+
+/**
+ * 登録番号が学習済み（shop_alias）なら店名を上書きする。当たらなければそのまま
+ * （shop_learned はそのまま false／parseReceiptText の判定を尊重）
+ */
+function applyShopAlias(draft: ReceiptDraft): ReceiptDraft {
+  const registrationNo = draft.registration_no ?? extractRegistrationNoFallback(draft.raw_text)
+  if (!registrationNo) return draft
+  const learned = db.lookupShopAlias(registrationNo)
+  if (!learned) return { ...draft, registration_no: registrationNo }
+  return { ...draft, registration_no: registrationNo, shop: learned, shop_learned: true }
+}
+
 /** サムネイル保存先ディレクトリ（無ければ作る） */
 function ensureThumbDir(): string {
   const dir = join(app.getPath('userData'), 'thumbs')
@@ -116,7 +134,8 @@ export async function removeReceipt(id: string): Promise<void> {
 /** 画像ファイルを OCR して下書きを作る（アプリ内・オフライン） */
 async function ocrDraft(filePath: string): Promise<ReceiptDraft> {
   const { text, confidence } = await recognizeImage(filePath)
-  return { ...parseReceiptText(text), raw_text: text, confidence }
+  const draft: ReceiptDraft = { ...parseReceiptText(text), raw_text: text, confidence }
+  return applyShopAlias(draft)
 }
 
 /**

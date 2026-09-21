@@ -100,6 +100,7 @@ const api: SorobanApi = {
 
   openMercari: invoke('openMercari'),
 
+  logClient: invoke('logClient'),
   checkForUpdate: invoke('checkForUpdate'),
   installUpdate: invoke('installUpdate'),
 } as SorobanApi

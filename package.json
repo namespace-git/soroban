@@ -88,12 +88,6 @@
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "darkModeSupport": true,
-      "extraResources": [
-        {
-          "from": "build/mac/soroban-ocr",
-          "to": "soroban-ocr"
-        }
-      ],
       "extendInfo": {
         "CFBundleDisplayName": "そろばん",
         "NSHumanReadableCopyright": "Copyright © 2026 Soroban"

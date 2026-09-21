@@ -25,10 +25,13 @@ async function boot() {
     installMock()
   }
   const app = createApp(App)
-  // 画面の処理で例外が出たら握りつぶさず、コンソールと画面（App.vue の通知）に出す
+  // 画面の処理で例外が出たら握りつぶさず、コンソールと画面（App.vue の通知）・操作ログに出す
   app.config.errorHandler = (err) => {
     console.error(err)
-    window.dispatchEvent(new CustomEvent('soroban:error', { detail: err instanceof Error ? err.message : String(err) }))
+    const message = err instanceof Error ? err.message : String(err)
+    window.dispatchEvent(new CustomEvent('soroban:error', { detail: message }))
+    // モック（Electron外）では soroban.logClient が無いことがあるので無視する
+    window.soroban?.logClient?.('error', message, { stack: err instanceof Error ? err.stack : undefined })
   }
   app.mount('#app')
 }

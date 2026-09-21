@@ -60,6 +60,17 @@ CREATE TABLE IF NOT EXISTS setting (
   value TEXT NOT NULL
 );
 
+-- レシートの登録番号（T＋13桁）→ 店名の学習。OCRで読んだ登録番号は会社ごとに固定なので、
+-- 一度人が店名を確定させれば次回の読み取りで店名を出せる。key は接頭辞付き
+-- （'reg:T2290801007056' の形。将来 'name:...' 等も入れられるように）。
+-- resetData() では消さない（設定に近い知識のため）
+CREATE TABLE IF NOT EXISTS shop_alias (
+  key        TEXT PRIMARY KEY,
+  shop       TEXT NOT NULL,
+  hits       INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+
 -- fee_rate_bp: ベーシスポイント。1000 = 10.00%
 -- 小数を避けるため整数で持つ
 -- collect_interval_h: 2026-09-19 に 6 時間から 1 時間へ変更（既存DBは migrate() で更新）
@@ -614,24 +625,45 @@ FROM ordered;
 -- 型番（バリアント）ごとの実績。ホームの型番ランキングで使う
 DROP VIEW IF EXISTS variant_summary;
 CREATE VIEW variant_summary AS
-WITH linked AS (
-  -- sale_line_share の整数按分をそのまま使う（1点あたりの売上・粗利。まとめ売り対応）
+WITH RECURSIVE item_weight(id, weight) AS (
+  -- 分割していない在庫（parent_idなし）の重みは1。分割した子は「親の重み ÷ 親の子の数」
+  -- （分割の分割も再帰）。avg_price/avg_profitを「箱まるごと」単位にそろえるための重み
+  SELECT id, 1.0 AS weight
+  FROM inventory_item
+  WHERE parent_id IS NULL
+  UNION ALL
+  SELECT i.id, iw.weight / cnt.n
+  FROM inventory_item i
+  JOIN item_weight iw ON iw.id = i.parent_id
+  JOIN (
+    SELECT parent_id, COUNT(*) AS n FROM inventory_item
+    WHERE parent_id IS NOT NULL GROUP BY parent_id
+  ) cnt ON cnt.parent_id = i.parent_id
+),
+linked AS (
+  -- sale_line_share の整数按分をそのまま使う（1点あたりの売上・粗利。まとめ売り対応）。
+  -- weight は分割した子を「まるごと換算」するための重み
   SELECT
     i.model_code,
     sls.price_share  AS price_share,
-    sls.profit_share AS profit_share
+    sls.profit_share AS profit_share,
+    iw.weight         AS weight
   FROM inventory_item i
   JOIN sale_line_share sls ON sls.inventory_item_id = i.id
+  JOIN item_weight iw ON iw.id = i.id
   WHERE i.model_code IS NOT NULL
 ),
 agg AS (
+  -- avg_price/avg_profit は Σ(売上・粗利の按分) ÷ Σ(重み)。件数（purchased/sold等）は
+  -- 従来どおり「点」で数える（このビューの下のSELECTを参照）
   SELECT
     model_code,
-    AVG(price_share)  AS avg_price,
-    AVG(profit_share) AS avg_profit,
-    SUM(profit_share) AS total_profit
+    SUM(price_share)  / SUM(weight) AS avg_price,
+    SUM(profit_share) / SUM(weight) AS avg_profit,
+    SUM(profit_share)               AS total_profit
   FROM linked
   GROUP BY model_code
+  HAVING SUM(weight) > 0
 ),
 base AS (
   SELECT DISTINCT model_code FROM inventory_item WHERE model_code IS NOT NULL

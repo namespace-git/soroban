@@ -1021,6 +1021,8 @@ let expenses: Expense[] = []
  */
 const MOCK_RECEIPT_DRAFT: ReceiptDraft = {
   shop: 'ダイソー',
+  registration_no: 'T2290801007056',
+  shop_learned: false,
   occurred_at: '2026-09-15',
   total: 880,
   lines: [
@@ -2864,6 +2866,13 @@ const api: SorobanApi = {
   async openMercari(kind: 'item' | 'transaction', mercariItemId: string) {
     const url = `https://jp.mercari.com/${kind}/${mercariItemId}`
     window.alert(`ブラウザで開きます: ${url}`)
+    return wait(undefined)
+  },
+
+  // 操作ログ（デバッグ用）。実データは main が app_log テーブルへ保存する。
+  // モックには保存先が無いので console にだけ出す
+  async logClient(kind: string, message: string, payload?: unknown) {
+    console.debug('[soroban:logClient]', kind, message, payload)
     return wait(undefined)
   },
 

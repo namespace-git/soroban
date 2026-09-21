@@ -221,10 +221,15 @@ export function parseReceiptText(text: string): ReceiptDraftCore {
   const normalized = text.normalize('NFKC')
   const lines = normalized.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0)
 
+  // 事業者登録番号（T＋13 桁）。会社ごとに固定なので店名の学習キーになる
+  const reg = normalized.match(/T\s*(\d{13})/)
+
   return {
     shop: extractShop(lines),
     occurred_at: extractDate(lines),
     total: extractTotal(lines),
     lines: extractItems(lines),
+    registration_no: reg ? `T${reg[1]}` : null,
+    shop_learned: false,
   }
 }

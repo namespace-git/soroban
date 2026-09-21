@@ -56,8 +56,6 @@ const allTags = ref<Tag[]>([])
 const tagFilter = ref('')
 const searchText = ref('')
 const period = ref<Period>('all')
-// 検索中は状態の絞り込みを無視して全状態から探す（検索したのに見つからないと誤認させないため）
-const hasSearch = computed(() => !!searchText.value.trim())
 
 // --- 並び替え（列見出しクリック）。既定は滞留 desc（現状の並びと同じ） ---
 const { sortKey, sortDir, toggle, sortRows } = useSort<SortKey>('aging_days', 'desc')
@@ -77,8 +75,8 @@ function sortValue(i: InventoryItem, key: SortKey): string | number | null {
 async function load() {
   // 未出品／出品中は在庫としては同じ in_stock。listing の有無で client 側に分ける。
   // 「その他」は listInventory が単一の状態しか取れないため 3 回に分けて合わせる。
-  // 「すべて」は検索中と同じく全状態を並列で取って結合する。
-  if (hasSearch.value || statusFilter.value === 'all') {
+  // 「すべて」は全状態を並列で取って結合する。検索は取得後にクライアント側で絞る（AND）ので取得対象には関わらない。
+  if (statusFilter.value === 'all') {
     const [inStock, sold, disposed, personalUse, split] = await Promise.all([
       window.soroban.listInventory('in_stock'),
       window.soroban.listInventory('sold'),
@@ -104,7 +102,7 @@ async function load() {
   loaded.value = true
 }
 onMounted(load)
-watch([revision, statusFilter, hasSearch], load)
+watch([revision, statusFilter], load)
 
 async function loadTags() {
   allTags.value = await window.soroban.listTags()
@@ -125,6 +123,8 @@ async function focusRow(id: string) {
 
 watch(gotoPayload, (p) => {
   if (!p) return
+  // focusId 指定時は、対象行が今の状態の絞り込みで隠れていても見えるよう「すべて」にしてから探す
+  if (p.focusId) statusFilter.value = 'all'
   if (p.search) searchText.value = p.search
   if (p.focusId) focusRow(p.focusId)
   gotoPayload.value = null
@@ -139,10 +139,8 @@ function statusRank(i: InventoryItem): number {
 
 const filteredItems = computed(() => {
   let list = items.value
-  if (!hasSearch.value) {
-    if (statusFilter.value === 'unlisted') list = list.filter(i => i.listing === null)
-    if (statusFilter.value === 'listed') list = list.filter(i => i.listing !== null)
-  }
+  if (statusFilter.value === 'unlisted') list = list.filter(i => i.listing === null)
+  if (statusFilter.value === 'listed') list = list.filter(i => i.listing !== null)
   if (tagFilter.value) {
     list = list.filter(i =>
       i.tags.some(t => t.id === tagFilter.value) || i.inherited_tags.some(t => t.id === tagFilter.value),
@@ -158,14 +156,14 @@ const filteredItems = computed(() => {
   list = list.filter(i => inPeriod(i.acquired_at, period.value))
   list = sortRows(list, sortValue)
   // 「すべて」のときは状態順を優先し、その中を選んだ並びにする
-  if (!hasSearch.value && statusFilter.value === 'all') {
+  if (statusFilter.value === 'all') {
     list = [...list].sort((a, b) => statusRank(a) - statusRank(b))
   }
   return list
 })
 
-// 状態が絞られていない（すべて／検索中）ときだけ、行に状態チップを出す
-const showStatusChips = computed(() => hasSearch.value || statusFilter.value === 'all')
+// 「すべて」のときだけ、行に状態チップを出す（状態が絞られているときは自明なので出さない）
+const showStatusChips = computed(() => statusFilter.value === 'all')
 
 const total = computed(() => filteredItems.value.reduce((s, i) => s + i.landed_cost, 0))
 
@@ -303,7 +301,6 @@ async function editNote(item: InventoryItem) {
       </select>
       <SearchBox v-model="searchText" placeholder="名前・型番・素材・メモ・タグ・仕入先を検索" />
       <PeriodSelect v-model="period" />
-      <span v-if="hasSearch" class="faint search-hint">検索中は状態の絞り込みも解除して表示</span>
       <span class="grow" />
       <span class="faint nowrap">{{ filteredItems.length }}点 ／ 原価計 {{ yen(total) }}</span>
     </div>

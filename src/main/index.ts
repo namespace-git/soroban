@@ -7,6 +7,7 @@ import * as collector from './collector'
 import * as collectorMellojoy from './collector-mellojoy'
 import * as updater from './updater'
 import * as receipts from './receipts'
+import * as applog from './applog'
 import type { CollectorRun, SorobanApi } from '../shared/types'
 
 // ============================================================
@@ -60,11 +61,19 @@ function createMainWindow(): void {
 
 async function collectAll(silent: boolean): Promise<CollectorRun[]> {
   const runs: CollectorRun[] = []
+  applog.log('collector', 'collect_start', `収集を開始（silent=${silent}）`)
 
   try {
-    runs.push(await collector.collect(silent))
+    const run = await collector.collect(silent)
+    runs.push(run)
+    applog.log('collector', 'mercari', `メルカリ: ${run.status}`, {
+      fetched: run.fetched, inserted: run.inserted, message: run.message,
+    })
   } catch (e) {
     console.error('メルカリの収集に失敗しました', e)
+    applog.log('collector', 'mercari', 'メルカリの収集に失敗しました', undefined, {
+      error: e instanceof Error ? e.message : String(e),
+    })
   }
 
   const shopAccounts = db.listShopAccounts()
@@ -72,9 +81,16 @@ async function collectAll(silent: boolean): Promise<CollectorRun[]> {
 
   for (const account of shopAccounts) {
     try {
-      runs.push(await collectorMellojoy.collectShopOrders(account.id, silent))
+      const run = await collectorMellojoy.collectShopOrders(account.id, silent)
+      runs.push(run)
+      applog.log('collector', 'mellojoy', `仕入先「${account.name}」: ${run.status}`, {
+        fetched: run.fetched, inserted: run.inserted, message: run.message,
+      })
     } catch (e) {
       console.error(`仕入先「${account.name}」の収集に失敗しました`, e)
+      applog.log('collector', 'mellojoy', `仕入先「${account.name}」の収集に失敗しました`, undefined, {
+        error: e instanceof Error ? e.message : String(e),
+      })
     }
   }
 
@@ -88,12 +104,38 @@ async function collectAll(silent: boolean): Promise<CollectorRun[]> {
 // ここに増やしたら preload とインターフェースも直すこと。
 // ------------------------------------------------------------
 
+/**
+ * 読み取りだけのハンドラは記録しない（呼び出し頻度が高く、ログが読み取り操作で埋まってしまう）。
+ * logClient 自身も対象外（記録用の呼び出しを記録すると無限に増える）。
+ */
+const UNLOGGED_HANDLERS = new Set<keyof SorobanApi>([
+  'logClient', 'getDashboard', 'listSales', 'listListings', 'listInventory',
+  'listPurchases', 'listMonthly', 'listExpenses', 'searchAll', 'getSettings',
+  'getMonthDetail', 'listProducts', 'listTags', 'listShopAccounts', 'listShippingMethods',
+])
+
 function registerIpc(): void {
   const handle = <K extends keyof SorobanApi>(
     name: K,
     fn: (...args: Parameters<SorobanApi[K]>) => unknown,
   ) => {
-    ipcMain.handle(name, (_e, ...args) => fn(...(args as Parameters<SorobanApi[K]>)))
+    ipcMain.handle(name, async (_e, ...args) => {
+      const typedArgs = args as Parameters<SorobanApi[K]>
+      if (UNLOGGED_HANDLERS.has(name)) return fn(...typedArgs)
+
+      const startedAt = Date.now()
+      try {
+        const result = await fn(...typedArgs)
+        applog.log('ipc', name, name, typedArgs, { duration_ms: Date.now() - startedAt })
+        return result
+      } catch (e) {
+        applog.log('ipc', name, name, typedArgs, {
+          duration_ms: Date.now() - startedAt,
+          error: e instanceof Error ? e.message : String(e),
+        })
+        throw e
+      }
+    })
   }
 
   handle('getDashboard', () => db.getDashboard())
@@ -225,6 +267,8 @@ function registerIpc(): void {
     await shell.openExternal(`https://jp.mercari.com/${path}/${mercariItemId}`)
   })
 
+  handle('logClient', (kind, message, payload) => applog.log('renderer', kind, message, payload))
+
   handle('checkForUpdate', () => updater.checkForUpdate())
   handle('installUpdate', () => updater.installUpdate())
 }
@@ -271,6 +315,7 @@ app.whenReady().then(async () => {
     app.quit()
     return
   }
+  applog.initAppLog()
   collector.ensureSession()
   registerThumbProtocol()
   registerIpc()

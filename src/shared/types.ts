@@ -600,6 +600,10 @@ export interface ExpenseLineInput {
  */
 export interface ReceiptDraft {
   shop: string | null
+  /** レシートの事業者登録番号（T＋13 桁）。会社ごとに固定なので店名の学習キーに使う。無ければ null */
+  registration_no: string | null
+  /** shop が学習（shop_alias）や辞書で決まったなら true。OCR の生の推定なら false */
+  shop_learned: boolean
   /** YYYY-MM-DD */
   occurred_at: string | null
   /** 「合計」などの行から取った税込の合計。無ければ null */
@@ -622,6 +626,8 @@ export interface ExpenseInput {
   occurred_at: string
   /** readReceiptImage で読んだ一時ファイル名。指定すると登録時にレシートとして添付する */
   receipt_temp_file?: string | null
+  /** OCR の下書きから登録するとき、レシートの登録番号を渡すと「この番号＝この店名」を覚える（shop_alias） */
+  receipt_registration_no?: string | null
   /** 省略時は occurred_at の月 */
   month?: string | null
   shop?: string | null
@@ -908,6 +914,8 @@ export interface SorobanApi {
 
   // 更新（GitHub Releases）
   /** いまのアプリのバージョンと、更新の確認結果。起動時と 6 時間ごとに自動で確認し、手動でも呼べる */
+  /** 画面側の出来事をログに残す（例外・操作）。DB の app_log に入り、14 日で消える */
+  logClient(kind: string, message: string, payload?: unknown): Promise<void>
   checkForUpdate(): Promise<UpdateStatus>
   /**
    * 更新を入れる。Windows：ダウンロード済みなら再起動して入れ替える（未ダウンロードならダウンロードを始める）。

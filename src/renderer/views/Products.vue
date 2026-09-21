@@ -210,8 +210,16 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
               <SortTh label="在庫" sort-key="in_stock" align="right" class="col-n" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
               <SortTh label="仕入合計" sort-key="purchase_total" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
               <SortTh label="平均原価" sort-key="avg_cost" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
-              <SortTh label="平均売価" sort-key="avg_price" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
-              <SortTh label="平均粗利" sort-key="avg_profit" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh
+                label="平均売価（まるごと換算）" sort-key="avg_price" align="right" class="col-amt col-wrap"
+                title="分割した子は 1/分割数 の重みで平均します。箱を 4 つに分けて 1 個 ¥1,000 で売ると ¥4,000／箱"
+                :active-key="sortKey" :dir="sortDir" @sort="onSort"
+              />
+              <SortTh
+                label="平均粗利（まるごと換算）" sort-key="avg_profit" align="right" class="col-amt col-wrap"
+                title="分割した子は 1/分割数 の重みで平均します。箱を 4 つに分けて 1 個 ¥1,000 で売ると ¥4,000／箱"
+                :active-key="sortKey" :dir="sortDir" @sort="onSort"
+              />
               <SortTh label="粗利合計" sort-key="total_profit" align="right" class="col-amt" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
               <SortTh label="最終仕入" sort-key="last_purchased_at" class="col-date-sm" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
               <SortTh label="販売" sort-key="last_sold_at" class="col-date-sm" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
@@ -417,6 +425,8 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
 .table-panel th.col-n     { width: 64px; }
 .table-panel th.col-amt   { width: 104px; }
 .table-panel th.col-date-sm { width: 84px; }
+/* 「（まるごと換算）」が入る2列は折り返しを許して2行にする */
+.table-panel th.col-wrap  { width: 116px; white-space: normal; line-height: 1.3; }
 
 .product-row { cursor: pointer; }
 .item-row { cursor: pointer; }

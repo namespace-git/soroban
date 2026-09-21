@@ -142,8 +142,6 @@ function isPendingSale(s: SaleProfit): boolean {
   return !s.is_shipping_confirmed || (s.kind === 'resale' && s.unmatched === 1)
 }
 
-const hasSearch = computed(() => !!searchText.value.trim())
-
 // --- 行の統一表現。出品（listing）と販売（sale）を同じ行の形で並べる ---
 interface Row {
   kind: 'listing' | 'sale'
@@ -277,15 +275,12 @@ async function loadTotals() {
 async function load() {
   loaded.value = false
   if (stage.value === 'listed') {
-    const base = await window.soroban.listListings(
-      hasSearch.value
-        ? { status: ['active', 'suspended', 'sold', 'ended'] }
-        : { status: ['active', 'suspended'], onlyUnallocated: listedFilter.value === 'unallocated' || undefined },
-    )
-    // 「引き当て済み」はAPI側に絞り込みが無いためここで足す（検索中は他の絞り込みと同じく解除）
-    listings.value = (!hasSearch.value && listedFilter.value === 'allocated')
-      ? base.filter(l => l.items.length > 0)
-      : base
+    const base = await window.soroban.listListings({
+      status: ['active', 'suspended'],
+      onlyUnallocated: listedFilter.value === 'unallocated' || undefined,
+    })
+    // 「引き当て済み」はAPI側に絞り込みが無いためここで足す。検索はクライアント側の絞り込みなので取得対象には関わらない（AND）
+    listings.value = listedFilter.value === 'allocated' ? base.filter(l => l.items.length > 0) : base
     sales.value = []
   } else if (stage.value === 'all') {
     const [ls, ss] = await Promise.all([
@@ -341,7 +336,7 @@ onMounted(async () => {
 })
 watch(revision, loadTags)
 watch(revision, loadCounts)
-watch([revision, stage, listedFilter, tagFilter, hasSearch], load)
+watch([revision, stage, listedFilter, tagFilter], load)
 
 // --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
 const thumbFailed = ref<Set<string>>(new Set())
@@ -740,7 +735,6 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
       </select>
       <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
       <PeriodSelect v-model="period" />
-      <span v-if="hasSearch && stage === 'listed'" class="faint search-hint">検索中は状態・未引き当ての絞り込みも解除して表示</span>
       <button
         v-if="monthFilter"
         type="button"

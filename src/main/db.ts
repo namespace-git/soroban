@@ -962,6 +962,23 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 20) {
+    // レシートの登録番号（T＋13桁）→ 店名の学習。新規テーブルなので ALTER 不要
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS shop_alias (
+        key        TEXT PRIMARY KEY,
+        shop       TEXT NOT NULL,
+        hits       INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+      );
+    `)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '20')
+         ON CONFLICT(key) DO UPDATE SET value = '20'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -3022,6 +3039,30 @@ function validateExpenseInput(input: ExpenseInput): ValidatedExpense {
   return { month, category, amount, lines }
 }
 
+// ------------------------------------------------------------
+// レシートの登録番号（T＋13桁）→ 店名の学習（shop_alias）。
+// 会社ごとに固定な番号なので、一度店名を確定させれば次回の読み取りで使い回せる。
+// resetData() では消さない（設定に近い知識）
+// ------------------------------------------------------------
+
+/** 学習済みの店名を返す。無ければ null */
+export function lookupShopAlias(registrationNo: string): string | null {
+  const row = db.prepare('SELECT shop FROM shop_alias WHERE key = ?').get(`reg:${registrationNo}`) as
+    | { shop: string } | undefined
+  return row ? row.shop : null
+}
+
+/** 「この登録番号＝この店名」を覚える（UPSERT）。shop は trim、空なら何もしない */
+export function learnShopAlias(registrationNo: string, shop: string): void {
+  const trimmed = shop.trim()
+  if (!trimmed) return
+  db.prepare(`
+    INSERT INTO shop_alias (key, shop, hits, updated_at)
+    VALUES (?, ?, 1, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET shop = excluded.shop, hits = hits + 1, updated_at = datetime('now')
+  `).run(`reg:${registrationNo}`, trimmed)
+}
+
 function insertExpenseLines(
   expenseId: string,
   lines: ValidatedExpense['lines'],
@@ -3073,6 +3114,9 @@ export function createExpense(input: ExpenseInput): string {
       VALUES (?, ?, ?, ?, ?, ?, ?, 0)
     `).run(id, input.occurred_at, month, input.shop ?? null, category, amount, input.note ?? null)
     insertExpenseLines(id, lines)
+    if (input.receipt_registration_no && input.shop) {
+      learnShopAlias(input.receipt_registration_no, input.shop)
+    }
   })
   tx()
   applyReceiptTempFile(id, input.receipt_temp_file)
@@ -3093,6 +3137,9 @@ export function updateExpense(id: string, input: ExpenseInput): void {
     `).run(input.occurred_at, month, input.shop ?? null, category, amount, input.note ?? null, id)
     db.prepare('DELETE FROM expense_line WHERE expense_id = ?').run(id)
     insertExpenseLines(id, lines)
+    if (input.receipt_registration_no && input.shop) {
+      learnShopAlias(input.receipt_registration_no, input.shop)
+    }
   })
   tx()
   applyReceiptTempFile(id, input.receipt_temp_file)
