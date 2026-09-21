@@ -2,7 +2,7 @@ import { BrowserWindow, session } from 'electron'
 import { setTimeout as sleep } from 'node:timers/promises'
 import * as db from './db'
 import { extractCode, extractMaterial } from './code'
-import { buildUserAgent, isChallengeText, randomWait } from './collector'
+import { buildUserAgent, CHALLENGE_MESSAGE, isChallengeText, randomWait, revealForChallenge } from './collector'
 import { todayLocal } from '../shared/date'
 import type {
   CollectorRun, Fulfillment, Material, PurchaseDraftInput, PurchaseInput, PurchaseLineInput,
@@ -637,6 +637,9 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
   const runId = db.startRun('mellojoy', shopAccountId)
   const win = createShopWindow(shopAccountId, !silent)
   let pagesOpened = 0
+  // CAPTCHA・本人確認が出たときは、非表示で走っていてもウィンドウを見せて残す
+  // （finally での destroy をスキップする）
+  let keepWindowOpen = false
   const importKeywords = db.parseKeywords(db.getShopAccount(shopAccountId)?.import_keywords ?? '')
 
   try {
@@ -649,7 +652,9 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
       return db.finishRun(runId, 'auth_required', 0, 0, AUTH_MESSAGE)
     }
     if (await isChallenge(win)) {
-      return db.finishRun(runId, 'auth_required', 0, 0, AUTH_MESSAGE)
+      keepWindowOpen = true
+      revealForChallenge(win)
+      return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
     }
 
     const listUrl = win.webContents.getURL()
@@ -705,8 +710,10 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           )
         }
         if (await isChallenge(win)) {
+          keepWindowOpen = true
+          revealForChallenge(win)
           return db.finishRun(
-            runId, 'auth_required', list.length, confirmedCount + draftCount, AUTH_MESSAGE,
+            runId, 'auth_required', list.length, confirmedCount + draftCount, CHALLENGE_MESSAGE,
           )
         }
 
@@ -763,6 +770,6 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
       e instanceof Error ? e.message : String(e),
     )
   } finally {
-    if (!win.isDestroyed()) win.destroy()
+    if (!keepWindowOpen && !win.isDestroyed()) win.destroy()
   }
 }

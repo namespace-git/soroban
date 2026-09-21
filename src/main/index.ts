@@ -165,7 +165,7 @@ function registerIpc(): void {
   handle('getSettings', () => db.getSettings())
   handle('setSetting', (k, v) => db.setSetting(k, v))
 
-  handle('collect', () => collectAll(false))
+  handle('collect', () => collectAll(db.getSettings().collect_show_window !== '1'))
   handle('openLogin', () => collector.openLoginWindow())
   handle('openShopLogin', (id) => collectorMellojoy.openShopLoginWindow(id))
   handle('listRuns', (limit) => db.listRuns(limit))

@@ -39,8 +39,8 @@ const MAX_PAGES_PER_RUN = 6
  */
 const MAX_THUMBS_PER_RUN = 30
 
-const CHALLENGE_MESSAGE =
-  'メルカリが本人確認を求めています。「メルカリにログイン」から画面を開いて、手で進めてください'
+export const CHALLENGE_MESSAGE =
+  '本人確認（CAPTCHA）が出ました。開いたウィンドウで完了してから、もう一度「取り込む」を押してください'
 
 export interface ScrapedSale {
   mercariItemId: string
@@ -357,6 +357,17 @@ async function isLoggedIn(win: BrowserWindow): Promise<boolean> {
   return Boolean(hasMain)
 }
 
+/**
+ * silent 実行中に CAPTCHA・本人確認が出たら、そのウィンドウを表示して人に渡す。
+ * タイトルを差し替えて「これは何のウィンドウか」を分かるようにする。
+ * 呼び出し側は、これを呼んだら finally での `destroy()` をスキップしてウィンドウを
+ * 残すこと（人が完了して自分で閉じる。閉じたら何もしない）。
+ */
+export function revealForChallenge(win: BrowserWindow): void {
+  win.setTitle('そろばん — 本人確認を完了してください')
+  if (!win.isVisible()) win.show()
+}
+
 /** 現在のページが CAPTCHA・本人確認を求めていないかを見る */
 async function isChallenge(win: BrowserWindow): Promise<boolean> {
   const url = win.webContents.getURL()
@@ -597,6 +608,9 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
   const runId = db.startRun('mercari')
   const win = createWindow(!silent)
   let pagesOpened = 0
+  // CAPTCHA・本人確認が出たときは、非表示で走っていてもウィンドウを見せて残す
+  // （finally での destroy をスキップする）
+  let keepWindowOpen = false
 
   try {
     await win.loadURL(LISTINGS_URL)
@@ -604,6 +618,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     await randomWait()
 
     if (await isChallenge(win)) {
+      keepWindowOpen = true
+      revealForChallenge(win)
       return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
     }
 
@@ -667,6 +683,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       await randomWait()
 
       if (await isChallenge(win)) {
+        keepWindowOpen = true
+        revealForChallenge(win)
         return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
@@ -732,6 +750,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       await randomWait()
 
       if (await isChallenge(win)) {
+        keepWindowOpen = true
+        revealForChallenge(win)
         return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
@@ -775,7 +795,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       e instanceof Error ? e.message : String(e),
     )
   } finally {
-    if (!win.isDestroyed()) win.destroy()
+    if (!keepWindowOpen && !win.isDestroyed()) win.destroy()
   }
 }
 

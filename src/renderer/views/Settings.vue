@@ -95,6 +95,12 @@ async function saveSetting(key: string, value: string) {
   flash('保存しました')
 }
 
+async function toggleShowWindow(checked: boolean) {
+  const value = checked ? '1' : '0'
+  settings.value = { ...settings.value, collect_show_window: value }
+  await saveSetting('collect_show_window', value)
+}
+
 async function saveMethod(m: ShippingMethod) {
   await window.soroban.saveShippingMethod(m)
   flash('保存しました')
@@ -398,13 +404,22 @@ const runLabel: Record<string, string> = {
             />
           </label>
         </div>
+        <label class="row hint">
+          <input
+            type="checkbox"
+            :checked="settings.collect_show_window === '1'"
+            @change="toggleShowWindow(($event.target as HTMLInputElement).checked)"
+          />
+          取り込み中にブラウザのウィンドウを表示する（動きを確認したいときだけ）
+        </label>
         <p class="faint hint">
           アプリ起動時、前回から指定時間が空いていれば裏で取り込みます。
           頻度を上げすぎないでください。
         </p>
         <p class="faint hint">
-          収集は人間と同じ速度で数ページだけ読みます。本人確認が出たら止まるので、
-          「メルカリにログイン」から手で進めてください。
+          収集は人間と同じ速度で数ページだけ読みます。普段はオフで大丈夫です。
+          本人確認（CAPTCHA）が出たときはウィンドウが自動で表示されるので、
+          そこで手で進めてください。
         </p>
 
         <p class="panel-title runs-title">実行履歴</p>

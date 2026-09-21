@@ -18,6 +18,9 @@ const state = vi.hoisted(() => ({
       | ((url: string) => Promise<{ ok: boolean; arrayBuffer: () => Promise<ArrayBuffer> }>)
       | undefined,
   },
+  // collect() が内部で作るウィンドウは戻り値に出てこないので、生成されたインスタンスを
+  // ここに積んで、show/isVisible/destroy の呼ばれ方をテストから見えるようにする
+  createdWindows: [] as Array<{ isVisible: () => boolean; isDestroyed: () => boolean; title: string }>,
 }))
 
 // collector.ts は electron（BrowserWindow・session）に依存する。
@@ -27,12 +30,16 @@ vi.mock('electron', () => {
   class FakeBrowserWindow {
     private destroyedFlag = false
     private currentUrl = ''
+    private visible: boolean
+    title = ''
     webContents: {
       getURL: () => string
       executeJavaScript: (script: string) => Promise<unknown>
     }
 
-    constructor() {
+    constructor(opts?: { show?: boolean }) {
+      this.visible = opts?.show ?? false
+      state.createdWindows.push(this)
       this.webContents = {
         getURL: () => this.currentUrl,
         executeJavaScript: async (script: string) => {
@@ -62,6 +69,18 @@ vi.mock('electron', () => {
 
     destroy(): void {
       this.destroyedFlag = true
+    }
+
+    isVisible(): boolean {
+      return this.visible
+    }
+
+    show(): void {
+      this.visible = true
+    }
+
+    setTitle(title: string): void {
+      this.title = title
     }
 
     on(): void {}
@@ -358,6 +377,19 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
       detailDescription: null,
       fetchImpl: undefined,
     }
+    state.createdWindows = []
+  })
+
+  it('非表示（silent）実行中にCAPTCHAが出たら、ウィンドウを表示したまま残す（destroyしない）', async () => {
+    state.opts.hasCaptchaFrame = true
+
+    const run = await collect(true)
+
+    expect(run.status).toBe('auth_required')
+    expect(run.message).toContain('本人確認（CAPTCHA）')
+    expect(state.createdWindows).toHaveLength(1)
+    expect(state.createdWindows[0].isVisible()).toBe(true)
+    expect(state.createdWindows[0].isDestroyed()).toBe(false)
   })
 
   it('販売0件でも出品中タブを読み、出品が取れればokになる（Codexレビュー指摘）', async () => {
