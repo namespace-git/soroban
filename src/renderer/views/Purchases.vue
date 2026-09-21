@@ -9,6 +9,7 @@ import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
+import PurchaseDrawer from '../components/PurchaseDrawer.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
 
@@ -196,6 +197,21 @@ async function editNote(p: PurchaseSummary) {
   if (input === null) return
   await window.soroban.updatePurchaseNote(p.id, input.trim() || null)
   await load()
+  await purchaseDrawerRef.value?.reload()
+}
+
+// --- 取引詳細ドロワー：行のサムネ・商品名・注文番号をクリックで開く ---
+
+const drawerPurchaseId = ref<string | null>(null)
+const purchaseDrawerRef = ref<InstanceType<typeof PurchaseDrawer> | null>(null)
+
+function openPurchaseDrawer(id: string) {
+  drawerPurchaseId.value = id
+}
+
+async function onDrawerConfirmDraft(p: PurchaseSummary) {
+  drawerPurchaseId.value = null
+  await confirmDraft(p)
 }
 
 // --- 仕入タグ：この仕入に直接付ける。在庫・販売には派生（コピーしない）で見える ---
@@ -226,6 +242,7 @@ async function onPurchaseTagChange(tagIds: string[]) {
   await window.soroban.setPurchaseTags(id, tagIds)
   await load()
   tagPickerPurchase.value = purchases.value.find(p => p.id === id) ?? null
+  await purchaseDrawerRef.value?.reload()
 }
 
 async function onPurchaseTagCreate(name: string) {
@@ -237,6 +254,17 @@ async function onPurchaseTagCreate(name: string) {
   await window.soroban.setPurchaseTags(id, tagIds)
   await load()
   tagPickerPurchase.value = purchases.value.find(p => p.id === id) ?? null
+  await purchaseDrawerRef.value?.reload()
+}
+
+/** ドロワーの「タグ」ボタンから：既存の openPurchaseTagPicker をそのまま使う */
+function onDrawerEditTag(p: PurchaseSummary, e: MouseEvent) {
+  openPurchaseTagPicker(p, e)
+}
+
+/** ドロワーの「メモ」ボタンから：既存の editNote をそのまま使う（内部で drawer も再読込する） */
+async function onDrawerEditNote(p: PurchaseSummary) {
+  await editNote(p)
 }
 
 async function remove(p: PurchaseSummary) {
@@ -387,17 +415,17 @@ async function remove(p: PurchaseSummary) {
               :class="{ focused: focusedId === p.id }"
             >
               <td class="faint">{{ p.ordered_at }}</td>
-              <td class="thumb-cell">
+              <td class="thumb-cell clickable" title="取引詳細を見る" @click="openPurchaseDrawer(p.id)">
                 <span class="thumb-placeholder">{{ placeholderChar(p) }}</span>
               </td>
               <td>{{ p.shop_account_name }}</td>
               <td class="product-cell">
-                <div class="product-name">
+                <div class="product-name clickable" title="取引詳細を見る" @click="openPurchaseDrawer(p.id)">
                   {{ p.first_line_name ?? '—' }}
                   <span v-if="p.line_count > 1" class="faint">ほか{{ p.line_count - 1 }}点</span>
                 </div>
                 <div class="order-row">
-                  <span v-if="p.order_no" class="faint">{{ p.order_no }}</span>
+                  <span v-if="p.order_no" class="faint clickable" title="取引詳細を見る" @click="openPurchaseDrawer(p.id)">{{ p.order_no }}</span>
                   <div class="chip-row">
                     <StatusChip v-if="p.status === 'draft'" tone="warn" label="価格未入力" />
                     <StatusChip v-if="p.import_key" tone="neutral" label="自動取得" />
@@ -465,6 +493,16 @@ async function remove(p: PurchaseSummary) {
       @create="onPurchaseTagCreate"
       @close="closePurchaseTagPicker"
     />
+
+    <PurchaseDrawer
+      ref="purchaseDrawerRef"
+      :open="!!drawerPurchaseId"
+      :purchase-id="drawerPurchaseId"
+      @close="drawerPurchaseId = null"
+      @confirm-draft="onDrawerConfirmDraft"
+      @edit-tag="onDrawerEditTag"
+      @edit-note="onDrawerEditNote"
+    />
   </div>
 </template>
 
@@ -515,6 +553,7 @@ async function remove(p: PurchaseSummary) {
 .table-panel td.actions { white-space: nowrap; text-align: right; }
 .table-panel .actions > * { vertical-align: middle; margin-left: 4px; }
 .table-panel th.col-thumb { width: 64px; }
+.clickable { cursor: pointer; }
 
 /* 横断検索から来たときに該当行を一時的に示す */
 tr.focused { background: var(--brand-soft); }

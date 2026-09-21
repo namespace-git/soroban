@@ -398,6 +398,24 @@ CREATE TABLE IF NOT EXISTS purchase_tag (
   PRIMARY KEY (purchase_id, tag_id)
 );
 
+-- 商品（型番）に付いたタグ。model_code はメロジョイの商品コードそのもの（外部キーは張らない。
+-- 在庫・仕入行が無い型番にも先に付けられるようにするため）。その型番の在庫すべて・
+-- その在庫が紐付いた販売に「派生」で見える（コピーしない）
+CREATE TABLE IF NOT EXISTS product_tag (
+  model_code TEXT NOT NULL,
+  tag_id     TEXT NOT NULL REFERENCES tag(id) ON DELETE CASCADE,
+  PRIMARY KEY (model_code, tag_id)
+);
+
+-- 仕入先アカウントの自動タグ。この口座の仕入（取り込み・手入力とも）に作成時にだけ
+-- purchase_tag として自動で付く（createPurchase / createPurchaseDraft）。後から setPurchaseTags で
+-- 外せる。外しても再付与しない（作成時だけの挙動）
+CREATE TABLE IF NOT EXISTS shop_account_tag (
+  shop_account_id TEXT NOT NULL REFERENCES shop_account(id) ON DELETE CASCADE,
+  tag_id          TEXT NOT NULL REFERENCES tag(id)          ON DELETE CASCADE,
+  PRIMARY KEY (shop_account_id, tag_id)
+);
+
 -- __VIEWS__
 -- db.ts はこのマーカーでファイルを分割し、テーブルの CREATE → migrate() での
 -- 列追加 → ここから先のビュー作成、の順で実行する（ビューが新しい列を参照するため）。

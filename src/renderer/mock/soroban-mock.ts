@@ -199,9 +199,9 @@ function extractAllCodes(text: string): string[] {
 // ------------------------------------------------------------
 
 const shopAccounts: ShopAccount[] = [
-  { id: uid(), name: 'メロジョイA', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null },
-  { id: uid(), name: 'メロジョイB', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null },
-  { id: uid(), name: 'TikTok Shop', kind: 'tiktok', note: null, is_active: 1, import_keywords: null },
+  { id: uid(), name: 'メロジョイA', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null, auto_tags: [] },
+  { id: uid(), name: 'メロジョイB', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null, auto_tags: [] },
+  { id: uid(), name: 'TikTok Shop', kind: 'tiktok', note: null, is_active: 1, import_keywords: null, auto_tags: [] },
 ]
 
 /** タグ。deleteTag で配列ごと差し替えるので let */
@@ -210,6 +210,9 @@ let tags: Tag[] = [
   { id: uid(), name: 'まとめ売り', sort_order: 2 },
   { id: uid(), name: '福袋', sort_order: 3 },
 ]
+
+/** 商品（型番）に直接付けたタグ。型番 → タグ[]（setProductTags で置き換える） */
+const productTags = new Map<string, Tag[]>()
 
 const shippingMethods: ShippingMethod[] = [
   { id: uid(), name: 'ネコポス', carrier: 'らくらくメルカリ便', fee: 210, sort_order: 1, is_active: 1 },
@@ -277,6 +280,8 @@ let purchases: PurchaseDetail[] = []
 let inventory: InventoryItem[] = []
 /** 在庫アイテム → どの仕入から生まれたか（deletePurchase の判定用） */
 const itemPurchaseId = new Map<string, string>()
+/** 仕入明細 id → 生まれた在庫 id[]（PurchaseLine.items は都度組み立てて現在の状態を反映する） */
+const lineItemIds = new Map<string, string[]>()
 /** 在庫アイテム → 廃棄／自家消費にした日（履歴タイムライン用。実データは main が操作時刻を記録する） */
 const itemDisposedAt = new Map<string, string>()
 /** 在庫アイテム → 分割した日（履歴タイムライン用） */
@@ -309,9 +314,11 @@ function addConfirmedPurchase(opts: {
     subtotal += v.price * l.qty
     totalCost += v.price * l.qty + shares[li]
     const parts = splitEvenly(shares[li], l.qty)
+    const lineId = uid()
+    const itemIds: string[] = []
 
     lines.push({
-      id: uid(),
+      id: lineId,
       name: rawName(v),
       unit_price: v.price,
       quantity: l.qty,
@@ -320,6 +327,7 @@ function addConfirmedPurchase(opts: {
       material: v.material,
       allocated_cost: shares[li],
       landed_unit_cost: v.price + Math.floor(shares[li] / l.qty),
+      items: [],
     })
 
     for (let n = 0; n < l.qty; n++) {
@@ -345,8 +353,12 @@ function addConfirmedPurchase(opts: {
         listing: null,
       })
       itemPurchaseId.set(itemId, purchaseId)
+      itemIds.push(itemId)
     }
+    lineItemIds.set(lineId, itemIds)
   })
+
+  const shop = shopAccounts.find(s => s.id === opts.shopId)
 
   purchases.push({
     id: purchaseId,
@@ -370,7 +382,8 @@ function addConfirmedPurchase(opts: {
     other_cost: 0,
     alloc_method: 'by_amount',
     lines,
-    tags: [],
+    // 仕入先の自動タグ（作成時に確定。後から仕入先の設定を変えても遡って付け直さない）
+    tags: [...(shop?.auto_tags ?? [])],
   })
 }
 
@@ -395,9 +408,11 @@ function addTiktokPurchase(opts: {
     subtotal += l.price * l.qty
     totalCost += l.price * l.qty + shares[li]
     const parts = splitEvenly(shares[li], l.qty)
+    const lineId = uid()
+    const itemIds: string[] = []
 
     lines.push({
-      id: uid(),
+      id: lineId,
       name: l.name,
       unit_price: l.price,
       quantity: l.qty,
@@ -406,6 +421,7 @@ function addTiktokPurchase(opts: {
       material: null,
       allocated_cost: shares[li],
       landed_unit_cost: l.price + Math.floor(shares[li] / l.qty),
+      items: [],
     })
 
     for (let n = 0; n < l.qty; n++) {
@@ -431,8 +447,12 @@ function addTiktokPurchase(opts: {
         listing: null,
       })
       itemPurchaseId.set(itemId, purchaseId)
+      itemIds.push(itemId)
     }
+    lineItemIds.set(lineId, itemIds)
   })
+
+  const shop = shopAccounts.find(s => s.id === opts.shopId)
 
   purchases.push({
     id: purchaseId,
@@ -456,7 +476,7 @@ function addTiktokPurchase(opts: {
     other_cost: 0,
     alloc_method: 'by_amount',
     lines,
-    tags: [],
+    tags: [...(shop?.auto_tags ?? [])],
   })
 }
 
@@ -480,8 +500,10 @@ function addDraftPurchase(opts: {
       material: v.material,
       allocated_cost: 0,
       landed_unit_cost: 0,
+      items: [], // 下書きはまだ在庫が無い
     }
   })
+  const shop = shopAccounts.find(s => s.id === opts.shopId)
   purchases.push({
     id: uid(),
     status: 'draft',
@@ -504,7 +526,7 @@ function addDraftPurchase(opts: {
     other_cost: 0,
     alloc_method: 'by_amount',
     lines,
-    tags: [],
+    tags: [...(shop?.auto_tags ?? [])],
   })
 }
 
@@ -1073,23 +1095,38 @@ function recalcSale(sale: SaleProfit): void {
   recalcSaleInheritedTags(sale)
 }
 
-/** 在庫の inherited_tags = 紐付く仕入のタグ（在庫に直接付いたタグと重複するものは除く） */
+/**
+ * 在庫の inherited_tags = 紐付く仕入のタグ ∪ 同じ型番の商品タグ
+ * （在庫に直接付いたタグと重複するものは除く。出どころは tag.from に残す）
+ */
 function recalcItemInheritedTags(item: InventoryItem): void {
   const purchaseId = itemPurchaseId.get(item.id)
   const purchase = purchaseId ? purchases.find(p => p.id === purchaseId) : undefined
   const direct = new Set(item.tags.map(t => t.id))
-  item.inherited_tags = (purchase?.tags ?? []).filter(t => !direct.has(t.id))
+  const merged = new Map<string, Tag>()
+  for (const t of purchase?.tags ?? []) {
+    if (!direct.has(t.id)) merged.set(t.id, { ...t, from: 'purchase' })
+  }
+  if (item.model_code) {
+    for (const t of productTags.get(item.model_code) ?? []) {
+      if (!direct.has(t.id) && !merged.has(t.id)) merged.set(t.id, { ...t, from: 'product' })
+    }
+  }
+  item.inherited_tags = [...merged.values()]
 }
 
-/** 販売の inherited_tags = 紐付いた在庫のタグ ∪ その在庫の inherited_tags（販売に直接付いたタグと重複するものは除く） */
+/**
+ * 販売の inherited_tags = 紐付いた在庫に直接付いたタグ（from: 'inventory'） ∪ その在庫の
+ * inherited_tags（from はそのまま：'purchase' か 'product'）。販売に直接付いたタグと重複するものは除く
+ */
 function recalcSaleInheritedTags(sale: SaleProfit): void {
   const ids = saleLines.get(sale.id) ?? []
   const items = ids.map(id => inventory.find(it => it.id === id)).filter((it): it is InventoryItem => !!it)
   const direct = new Set(sale.tags.map(t => t.id))
   const merged = new Map<string, Tag>()
   for (const it of items) {
-    for (const t of it.tags) if (!direct.has(t.id)) merged.set(t.id, t)
-    for (const t of it.inherited_tags) if (!direct.has(t.id)) merged.set(t.id, t)
+    for (const t of it.tags) if (!direct.has(t.id) && !merged.has(t.id)) merged.set(t.id, { ...t, from: 'inventory' })
+    for (const t of it.inherited_tags) if (!direct.has(t.id) && !merged.has(t.id)) merged.set(t.id, t)
   }
   sale.inherited_tags = [...merged.values()]
 }
@@ -1126,6 +1163,34 @@ function findPurchase(id: string): PurchaseDetail {
   const p = purchases.find(x => x.id === id)
   if (!p) throw new Error('仕入が見つかりません')
   return p
+}
+
+/**
+ * 仕入明細から生まれた在庫 1 点ずつのいまの状態。呼ばれるたびに inventory / saleLines /
+ * listingItems の現在の値から組み立てる（landed_cost は生成時に確定したまま動かさない）
+ */
+function buildPurchaseLineItems(lineId: string) {
+  const ids = lineItemIds.get(lineId) ?? []
+  return ids
+    .map(id => inventory.find(i => i.id === id))
+    .filter((i): i is InventoryItem => !!i)
+    .map(i => {
+      const sale = saleForItem(i.id)
+      return {
+        id: i.id,
+        status: i.status,
+        landed_cost: i.landed_cost,
+        listing_price: i.listing?.price ?? null,
+        sale_id: sale?.id ?? null,
+        sale_price: sale?.price ?? null,
+        sold_at: sale?.sold_at ?? null,
+      }
+    })
+}
+
+/** getPurchase が返す PurchaseDetail：lines[].items を現在の状態で組み立て直す */
+function hydratePurchase(p: PurchaseDetail): PurchaseDetail {
+  return { ...p, lines: p.lines.map(l => ({ ...l, items: buildPurchaseLineItems(l.id) })) }
 }
 
 // ------------------------------------------------------------
@@ -1206,6 +1271,7 @@ function buildProductSummary(model: string): ProductSummary {
     last_purchased_at: lastPurchasedAt,
     last_sold_at: lastSoldAt,
     thumb_url: thumbUrl,
+    tags: productTags.get(model) ?? [],
   }
 }
 
@@ -1597,7 +1663,7 @@ const api: SorobanApi = {
   },
 
   async getPurchase(id: string) {
-    return wait(findPurchase(id))
+    return wait(hydratePurchase(findPurchase(id)))
   },
 
   async createPurchase(input: PurchaseInput) {
@@ -1625,15 +1691,18 @@ const api: SorobanApi = {
       subtotal += l.unit_price * l.quantity
       totalCost += l.unit_price * l.quantity + shares[li]
       const parts = splitEvenly(shares[li], l.quantity)
+      const lineId = uid()
+      const itemIds: string[] = []
 
       lines.push({
-        id: uid(),
+        id: lineId,
         name: l.name,
         unit_price: l.unit_price,
         quantity: l.quantity,
         model_code, series_code, material,
         allocated_cost: shares[li],
         landed_unit_cost: l.unit_price + Math.floor(shares[li] / l.quantity),
+        items: [],
       })
 
       for (let n = 0; n < l.quantity; n++) {
@@ -1651,13 +1720,15 @@ const api: SorobanApi = {
           parent_id: null,
           note: null,
           tags: [],
-          inherited_tags: [], // 新規の仕入はまだタグを持たない
+          inherited_tags: [...(shop?.auto_tags ?? [])], // 仕入先の自動タグをそのまま引き継ぐ
           fulfillment: null,
           thumb_url: null,
           listing: null,
         })
         itemPurchaseId.set(itemId, purchaseId)
+        itemIds.push(itemId)
       }
+      lineItemIds.set(lineId, itemIds)
     })
 
     purchases.push({
@@ -1681,7 +1752,8 @@ const api: SorobanApi = {
       other_cost: otherCost,
       alloc_method: method,
       lines,
-      tags: [],
+      // 仕入先の自動タグ（作成時に確定。後から仕入先の設定を変えても遡って付け直さない）
+      tags: [...(shop?.auto_tags ?? [])],
     })
 
     return wait(purchaseId)
@@ -1714,15 +1786,18 @@ const api: SorobanApi = {
       subtotal += l.unit_price * l.quantity
       totalCost += l.unit_price * l.quantity + shares[li]
       const parts = splitEvenly(shares[li], l.quantity)
+      const lineId = uid()
+      const itemIds: string[] = []
 
       lines.push({
-        id: uid(),
+        id: lineId,
         name: l.name,
         unit_price: l.unit_price,
         quantity: l.quantity,
         model_code, series_code, material,
         allocated_cost: shares[li],
         landed_unit_cost: l.unit_price + Math.floor(shares[li] / l.quantity),
+        items: [],
       })
 
       for (let n = 0; n < l.quantity; n++) {
@@ -1746,7 +1821,9 @@ const api: SorobanApi = {
           listing: null,
         })
         itemPurchaseId.set(itemId, p.id)
+        itemIds.push(itemId)
       }
+      lineItemIds.set(lineId, itemIds)
     })
 
     p.status = 'confirmed'
@@ -1918,6 +1995,8 @@ const api: SorobanApi = {
       it.inherited_tags = it.inherited_tags.filter(t => t.id !== id)
     }
     for (const p of purchases) p.tags = p.tags.filter(t => t.id !== id)
+    for (const [model, ts] of productTags) productTags.set(model, ts.filter(t => t.id !== id))
+    for (const a of shopAccounts) a.auto_tags = a.auto_tags.filter(t => t.id !== id)
     return wait(undefined)
   },
 
@@ -1945,6 +2024,19 @@ const api: SorobanApi = {
     p.tags = tagIds.map(id => tags.find(t => t.id === id)).filter((t): t is Tag => !!t)
     for (const it of inventory) {
       if (itemPurchaseId.get(it.id) !== purchaseId) continue
+      recalcItemInheritedTags(it)
+      const sale = saleForItem(it.id)
+      if (sale) recalcSaleInheritedTags(sale)
+    }
+    return wait(undefined)
+  },
+
+  /** 商品（型番）に直接付いたタグを置き換える。その型番の在庫の inherited_tags、
+   *  さらにその在庫が紐付いた販売の inherited_tags も連動して作り直す */
+  async setProductTags(modelCode: string, tagIds: string[]) {
+    productTags.set(modelCode, tagIds.map(id => tags.find(t => t.id === id)).filter((t): t is Tag => !!t))
+    for (const it of inventory) {
+      if (it.model_code !== modelCode) continue
       recalcItemInheritedTags(it)
       const sale = saleForItem(it.id)
       if (sale) recalcSaleInheritedTags(sale)
@@ -2162,11 +2254,11 @@ const api: SorobanApi = {
 
   async createShopAccount(name: string, kind: ShopAccountKind = 'other') {
     const id = uid()
-    shopAccounts.push({ id, name, kind, note: null, is_active: 1, import_keywords: null })
+    shopAccounts.push({ id, name, kind, note: null, is_active: 1, import_keywords: null, auto_tags: [] })
     return wait(id)
   },
 
-  async updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null }) {
+  async updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null; auto_tag_ids?: string[] }) {
     const account = shopAccounts.find(s => s.id === id)
     if (!account) throw new Error('仕入先が見つかりません')
     if (patch.name !== undefined) account.name = patch.name
@@ -2174,6 +2266,10 @@ const api: SorobanApi = {
     if (patch.is_active !== undefined) account.is_active = patch.is_active
     if (patch.import_keywords !== undefined) {
       account.import_keywords = patch.import_keywords?.trim() ? patch.import_keywords : null
+    }
+    if (patch.auto_tag_ids !== undefined) {
+      // 既存の仕入・在庫・販売には遡って付け直さない（次にこの仕入先で作る仕入から効く）
+      account.auto_tags = patch.auto_tag_ids.map(tid => tags.find(t => t.id === tid)).filter((t): t is Tag => !!t)
     }
     return wait(undefined)
   },
@@ -2301,6 +2397,8 @@ const api: SorobanApi = {
     itemDisposedAt.clear()
     itemSplitAt.clear()
     listingItems.clear()
+    lineItemIds.clear()
+    productTags.clear()
     return wait(undefined)
   },
 }
@@ -2331,7 +2429,23 @@ function assignInitialPurchaseTags(): void {
   })
 }
 
+/**
+ * 仕入先の1つに自動タグを付けておく（見え方の確認用）。ここで作った仕入から生まれる
+ * 仕入・在庫・販売にそのまま流れることを確かめられる（buildInitialPurchasesAndInventory より先に呼ぶ）
+ */
+function assignInitialAutoTags(): void {
+  shopAccounts[0].auto_tags = [tags[0]]
+}
+
+/** 商品（型番）の一部にタグを付ける（見え方の確認用） */
+function assignInitialProductTags(): void {
+  allModelCodes().forEach((model, i) => {
+    if (i % 4 === 2) productTags.set(model, [tags[(i + 2) % tags.length]])
+  })
+}
+
 export function installMock(): void {
+  assignInitialAutoTags()
   buildInitialPurchasesAndInventory()
   buildInitialSales()
   buildInitialListings()
@@ -2340,6 +2454,7 @@ export function installMock(): void {
   assignInitialNote()
   assignInitialTags()
   assignInitialPurchaseTags()
+  assignInitialProductTags()
   recalcAllInheritance()
 
   window.soroban = api

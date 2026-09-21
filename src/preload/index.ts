@@ -50,6 +50,7 @@ const api: SorobanApi = {
   setSaleTags: invoke('setSaleTags'),
   setInventoryTags: invoke('setInventoryTags'),
   setPurchaseTags: invoke('setPurchaseTags'),
+  setProductTags: invoke('setProductTags'),
   listVariantSummary: invoke('listVariantSummary'),
 
   listProducts: invoke('listProducts'),

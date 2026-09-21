@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
-import type { ProductSummary, ProductDetail, InventoryItem, SaleProfit } from '../../shared/types'
+import type { ProductSummary, ProductDetail, InventoryItem, SaleProfit, Tag } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import MiniChart from '../components/MiniChart.vue'
 import TimelineDrawer from '../components/TimelineDrawer.vue'
+import TagPicker from '../components/TagPicker.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 
 type SortKey = 'total_profit' | 'avg_profit' | 'sold' | 'in_stock' | 'last_purchased_at'
@@ -32,6 +33,50 @@ async function load() {
 }
 onMounted(load)
 watch([revision, sortKey], load)
+
+// --- 商品（型番）タグ：この型番の在庫・販売に派生で見える ---
+
+const allTags = ref<Tag[]>([])
+async function loadTags() {
+  allTags.value = await window.soroban.listTags()
+}
+onMounted(loadTags)
+watch(revision, loadTags)
+
+const tagPickerModelCode = ref<string | null>(null)
+const tagPickerAnchor = ref<HTMLElement | null>(null)
+const tagPickerSelected = computed(() => {
+  const target = tagPickerModelCode.value
+  if (!target) return []
+  const source = detail.value?.model_code === target ? detail.value : products.value.find(p => p.model_code === target)
+  return source?.tags.map(t => t.id) ?? []
+})
+
+function openProductTagPicker(modelCode: string, e: MouseEvent) {
+  tagPickerModelCode.value = modelCode
+  tagPickerAnchor.value = e.currentTarget as HTMLElement
+}
+
+function closeProductTagPicker() {
+  tagPickerModelCode.value = null
+  tagPickerAnchor.value = null
+}
+
+async function onProductTagChange(tagIds: string[]) {
+  if (!tagPickerModelCode.value) return
+  await window.soroban.setProductTags(tagPickerModelCode.value, tagIds)
+  await load()
+  if (detail.value?.model_code === tagPickerModelCode.value) await openDetail(tagPickerModelCode.value)
+}
+
+async function onProductTagCreate(name: string) {
+  if (!tagPickerModelCode.value) return
+  const newTagId = await window.soroban.createTag(name)
+  await loadTags()
+  await window.soroban.setProductTags(tagPickerModelCode.value, [...tagPickerSelected.value, newTagId])
+  await load()
+  if (detail.value?.model_code === tagPickerModelCode.value) await openDetail(tagPickerModelCode.value)
+}
 
 const filteredProducts = computed(() =>
   products.value.filter(p => matchesSearch([p.model_code, p.name], searchText.value)),
@@ -169,6 +214,8 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
                 <div class="item-name">{{ p.name }}</div>
                 <div class="chip-row">
                   <StatusChip tone="neutral" :label="p.model_code" />
+                  <StatusChip v-for="t in p.tags" :key="t.id" tone="info" :label="t.name" />
+                  <button class="sm ghost" @click.stop="openProductTagPicker(p.model_code, $event)" title="タグを編集する">タグ</button>
                 </div>
               </td>
               <td class="num">{{ p.in_stock }}</td>
@@ -220,8 +267,13 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
           />
           <span v-else class="thumb-placeholder thumb-lg">{{ placeholderChar(detail.model_code, detail.name) }}</span>
           <div class="detail-head-text">
-            <div class="chip-row"><StatusChip tone="neutral" :label="detail.model_code" /></div>
+            <div class="chip-row">
+              <StatusChip tone="neutral" :label="detail.model_code" />
+              <StatusChip v-for="t in detail.tags" :key="t.id" tone="info" :label="t.name" />
+              <button class="sm ghost" @click="openProductTagPicker(detail.model_code, $event)" title="タグを編集する">タグ</button>
+            </div>
             <h2 class="detail-name">{{ detail.name }}</h2>
+            <p class="faint tag-hint">この型番の在庫と販売に引き継がれます</p>
           </div>
         </div>
 
@@ -320,6 +372,16 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
       :inventory-item-id="timelineItemId"
       @close="timelineItemId = null"
     />
+
+    <TagPicker
+      :open="!!tagPickerModelCode"
+      :anchor="tagPickerAnchor"
+      :all-tags="allTags"
+      :selected="tagPickerSelected"
+      @change="onProductTagChange"
+      @create="onProductTagCreate"
+      @close="closeProductTagPicker"
+    />
   </div>
 </template>
 
@@ -376,6 +438,7 @@ function saleStatusChip(s: SaleProfit): ChipInfo {
 }
 .detail-head-text { min-width: 0; }
 .detail-name { margin: 4px 0 0; font-size: var(--fs-20); font-weight: 700; }
+.tag-hint { margin: 4px 0 0; font-size: var(--fs-12); }
 
 .stat-grid {
   display: grid;

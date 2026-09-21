@@ -133,6 +133,7 @@ function registerIpc(): void {
   handle('setSaleTags', (saleId, tagIds) => db.setSaleTags(saleId, tagIds))
   handle('setInventoryTags', (itemId, tagIds) => db.setInventoryTags(itemId, tagIds))
   handle('setPurchaseTags', (purchaseId, tagIds) => db.setPurchaseTags(purchaseId, tagIds))
+  handle('setProductTags', (modelCode, tagIds) => db.setProductTags(modelCode, tagIds))
   handle('listVariantSummary', (sort) => db.listVariantSummary(sort))
 
   handle('listProducts', (sort) => db.listProducts(sort))

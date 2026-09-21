@@ -144,6 +144,22 @@ function findRoleDivStarts(html: string, role: string): number[] {
   return starts
 }
 
+/**
+ * MoneyLine の金額セル（小計・配送・割引・合計）を解析する。
+ * `￥1,234` / `¥1,234`（全角・半角どちらも）ならその額。
+ * 実際の注文で「配送 無料」のように金額表記が無いことがあり、これを読めない扱いにすると
+ * 配送料0円の注文が下書きに落ちてしまう。「無料」「送料無料」「Free」「¥0」「￥0」の
+ * いずれかを含むセルは 0 円として扱う。どちらでもなければ null（読めない）
+ */
+function parseMoneyCell(cellBlock: string | null): number | null {
+  if (!cellBlock) return null
+  const amountMatch = /[¥￥]([\d,]+)/.exec(cellBlock)
+  if (amountMatch) return parseInt(amountMatch[1].replace(/,/g, ''), 10)
+  const text = stripTags(cellBlock)
+  if (/無料|Free/i.test(text)) return 0
+  return null
+}
+
 // ------------------------------------------------------------
 // 注文一覧
 // ------------------------------------------------------------
@@ -298,8 +314,7 @@ export function parseOrderDetailHtml(html: string): OrderDetail {
 
         const cellStarts = findRoleDivStarts(rowBlock, 'cell')
         const cellBlock = cellStarts.length > 0 ? extractDivBlock(rowBlock, cellStarts[0]) : null
-        const amountMatch = cellBlock ? /￥([\d,]+)/.exec(cellBlock) : null
-        const amount = amountMatch ? parseInt(amountMatch[1].replace(/,/g, ''), 10) : null
+        const amount = parseMoneyCell(cellBlock)
 
         if (label.startsWith('小計')) {
           subtotal = amount

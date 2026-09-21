@@ -462,6 +462,32 @@ async function autoReserveListings() {
   changed()
 }
 
+// --- タグの絞り込み候補：出どころで分ける（直接／仕入から／商品から／在庫から）。
+//     現在読み込んでいる販売一覧に実際に出ているタグだけ（選択中のタグは消えないよう常に残す） ---
+function tagOptionsOf(pick: (s: SaleProfit) => Tag[]): Array<{ id: string; name: string }> {
+  const map = new Map<string, string>()
+  for (const s of sales.value) for (const t of pick(s)) map.set(t.id, t.name)
+  if (tagFilter.value && !map.has(tagFilter.value)) {
+    const t = allTags.value.find(x => x.id === tagFilter.value)
+    if (t) map.set(t.id, t.name)
+  }
+  return [...map].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'ja'))
+}
+const directTagOptions = computed(() => tagOptionsOf(s => s.tags))
+const purchaseTagOptions = computed(() => tagOptionsOf(s => s.inherited_tags.filter(t => t.from === 'purchase')))
+const productTagOptions = computed(() => tagOptionsOf(s => s.inherited_tags.filter(t => t.from === 'product')))
+const inventoryTagOptions = computed(() => tagOptionsOf(s => s.inherited_tags.filter(t => t.from === 'inventory')))
+
+// --- 派生タグの出どころ表示（chip-inherited の前に小さく出す印） ---
+const TAG_ORIGIN_LABEL: Record<string, string> = { purchase: '仕入から', product: '商品から', inventory: '在庫から' }
+const TAG_ORIGIN_MARK: Record<string, string> = { purchase: '仕', product: '品', inventory: '在' }
+function tagOriginTitle(from?: Tag['from']): string {
+  return from ? TAG_ORIGIN_LABEL[from] : ''
+}
+function tagOriginMark(from?: Tag['from']): string {
+  return from ? TAG_ORIGIN_MARK[from] : ''
+}
+
 // --- タグ ---
 
 function openTagPicker(sale: SaleProfit, e: MouseEvent) {
@@ -601,7 +627,18 @@ async function remove(sale: SaleProfit) {
       </label>
       <select v-if="stage !== 'listed'" v-model="tagFilter">
         <option value="">すべてのタグ</option>
-        <option v-for="t in allTags" :key="t.id" :value="t.id">{{ t.name }}</option>
+        <optgroup v-if="directTagOptions.length" label="直接">
+          <option v-for="t in directTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </optgroup>
+        <optgroup v-if="purchaseTagOptions.length" label="仕入から">
+          <option v-for="t in purchaseTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </optgroup>
+        <optgroup v-if="productTagOptions.length" label="商品から">
+          <option v-for="t in productTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </optgroup>
+        <optgroup v-if="inventoryTagOptions.length" label="在庫から">
+          <option v-for="t in inventoryTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </optgroup>
       </select>
       <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
       <span v-if="hasSearch && stage === 'listed'" class="faint search-hint">検索中は状態・未引き当ての絞り込みも解除して表示</span>
@@ -734,11 +771,14 @@ async function remove(sale: SaleProfit) {
                     />
                     <StatusChip v-for="mc in r.sale.model_codes" :key="mc" tone="neutral" :label="mc" />
                     <StatusChip v-for="t in r.sale.tags" :key="t.id" tone="info" :label="t.name" />
-                    <StatusChip
+                    <span
                       v-for="t in r.sale.inherited_tags" :key="'inh-' + t.id"
-                      tone="neutral" :label="t.name" class="chip-inherited"
-                      title="仕入／在庫から引き継いだタグ"
-                    />
+                      class="chip-inherited-wrap"
+                      :title="tagOriginTitle(t.from)"
+                    >
+                      <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
+                      <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
+                    </span>
                   </div>
                   <div v-if="r.sale.note" class="note-row">
                     <Icon name="note" :size="14" class="icon-note" />
@@ -951,8 +991,18 @@ async function remove(sale: SaleProfit) {
 }
 .field-wide input { width: 320px; }
 
-/* 派生タグ（仕入・在庫から引き継いだもの）は直接付けたタグより少し薄く見せる */
+/* 派生タグ（仕入・商品・在庫から引き継いだもの）は直接付けたタグより少し薄く見せる。
+   先頭の小さな記号で出どころを示す */
 .chip-inherited { opacity: .7; }
+.chip-inherited-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.chip-origin-mark {
+  font-size: 10px;
+  color: var(--text-faint);
+}
 
 /* --- 段階の切替 --- */
 .stage-tabs {

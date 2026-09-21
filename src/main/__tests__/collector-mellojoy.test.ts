@@ -114,6 +114,29 @@ describe('collector-mellojoy（electronに依存しない部分）', () => {
     })
   })
 
+  describe('parseOrderDetailHtml（配送が「無料」表記。実際の注文#270882で下書きに落ちていたバグ）', () => {
+    // 配送のセル（￥499）を「無料」に、合計（￥5,397）を配送0円分の￥4,898に差し替える
+    const freeShippingHtml = orderDetailHtml
+      .replace('>￥499<', '>無料<')
+      .replace('>￥5,397<', '>￥4,898<')
+    const detail = parseOrderDetailHtml(freeShippingHtml)
+
+    it('shipping は 0（読めない扱いにならない）', () => {
+      expect(detail.shipping).toBe(0)
+      expect(detail.subtotal).toBe(4898)
+      expect(detail.total).toBe(4898)
+      expect(detail.unknownRows).toEqual([])
+    })
+
+    it('toPurchaseInput で confirmed になり、配送料が読めませんが出ない', () => {
+      const opts = { shopAccountId: 'shop-1', orderedAt: '2026-09-19', orderNo: '#268526' }
+      const result = toPurchaseInput(detail, opts)
+      expect(result.kind).toBe('confirmed')
+      if (result.kind !== 'confirmed') throw new Error('confirmed になるはず')
+      expect(result.input.shipping_fee).toBe(0)
+    })
+  })
+
   describe('inferOrderDate', () => {
     it('年が無ければ今年。今日以前なら今年のまま', () => {
       expect(inferOrderDate('確認日: 9月19日', new Date('2026-09-20'))).toBe('2026-09-19')

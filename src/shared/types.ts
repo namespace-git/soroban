@@ -76,6 +76,11 @@ export interface ShopAccount {
    * 転売の原価に混ぜない）。除外した明細数はメモに残す
    */
   import_keywords: string | null
+  /**
+   * 自動タグ。この仕入先の仕入（取り込み・手入力とも）に作成時に自動で付く（purchase_tag として。
+   * 後から外せる）。例：マージン対象の口座に「瑞利」を付けておくと、その在庫・販売まで派生して見える
+   */
+  auto_tags: Tag[]
 }
 
 /**
@@ -91,6 +96,12 @@ export interface Tag {
   id: string
   name: string
   sort_order: number
+  /**
+   * 派生タグ（`inherited_tags`）にだけ入る：どこに付いたタグか。
+   * purchase = 仕入（取引）／product = 商品（型番）／inventory = 在庫 1 点。
+   * 直接付いたタグ（`tags`）では undefined
+   */
+  from?: 'purchase' | 'product' | 'inventory'
 }
 
 export interface ShippingMethod {
@@ -236,6 +247,20 @@ export interface PurchaseLine {
   material: Material | null
   allocated_cost: number
   landed_unit_cost: number
+  /** この明細から生まれた在庫 1 点ずつのいまの状態（下書きは空） */
+  items: PurchaseLineItem[]
+}
+
+export interface PurchaseLineItem {
+  id: string
+  status: InventoryStatus
+  landed_cost: number
+  /** 出品に引き当て済みなら出品価格 */
+  listing_price: number | null
+  /** 売れていれば販売の id・価格・販売日 */
+  sale_id: string | null
+  sale_price: number | null
+  sold_at: string | null
 }
 
 /** 1注文の全部（下書きの確定フォーム用） */
@@ -407,6 +432,8 @@ export interface ProductSummary extends VariantSummary {
   last_sold_at: string | null
   /** 代表サムネイル（紐付いた販売のもの。無ければ null） */
   thumb_url: string | null
+  /** 商品（型番）に付いたタグ。付け外しは setProductTags。その型番の在庫・販売に派生する */
+  tags: Tag[]
 }
 
 /** 月ごとの在庫の増減 */
@@ -623,6 +650,8 @@ export interface SorobanApi {
   setSaleTags(saleId: string, tagIds: string[]): Promise<void>
   setInventoryTags(inventoryItemId: string, tagIds: string[]): Promise<void>
   setPurchaseTags(purchaseId: string, tagIds: string[]): Promise<void>
+  /** 商品（型番）のタグを丸ごと置き換える */
+  setProductTags(modelCode: string, tagIds: string[]): Promise<void>
   listVariantSummary(sort?: 'total_profit' | 'avg_profit' | 'sold'): Promise<VariantSummary[]>
 
   // 商品（型番）ページ・在庫の履歴
@@ -664,7 +693,7 @@ export interface SorobanApi {
   // マスタ
   listShopAccounts(): Promise<ShopAccount[]>
   createShopAccount(name: string, kind?: ShopAccountKind): Promise<string>
-  updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null }): Promise<void>
+  updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null; auto_tag_ids?: string[] }): Promise<void>
   /** 仕入で使われていれば例外（消せない）。使われていなければ削除。ログイン用プロファイルも消す */
   deleteShopAccount(id: string): Promise<void>
   listShippingMethods(): Promise<ShippingMethod[]>

@@ -4,6 +4,7 @@ import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag } 
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import Skeleton from '../components/Skeleton.vue'
+import TagPicker from '../components/TagPicker.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import type { ConfirmChoice } from '../components/ConfirmDialog.vue'
 
@@ -141,6 +142,40 @@ async function saveAccountKeywords(a: ShopAccount, value: string) {
   await window.soroban.updateShopAccount(a.id, { import_keywords: value })
   accounts.value = await window.soroban.listShopAccounts()
   toast('保存しました', 'ok')
+}
+
+// --- 仕入先の自動タグ：作成する仕入・その在庫・販売にそのまま引き継がれる（後から外せる） ---
+
+const tagPickerAccount = ref<ShopAccount | null>(null)
+const tagPickerAccountAnchor = ref<HTMLElement | null>(null)
+
+function openAccountTagPicker(a: ShopAccount, e: MouseEvent) {
+  tagPickerAccount.value = a
+  tagPickerAccountAnchor.value = e.currentTarget as HTMLElement
+}
+
+function closeAccountTagPicker() {
+  tagPickerAccount.value = null
+  tagPickerAccountAnchor.value = null
+}
+
+async function onAccountTagChange(tagIds: string[]) {
+  if (!tagPickerAccount.value) return
+  const id = tagPickerAccount.value.id
+  await window.soroban.updateShopAccount(id, { auto_tag_ids: tagIds })
+  accounts.value = await window.soroban.listShopAccounts()
+  tagPickerAccount.value = accounts.value.find(a => a.id === id) ?? null
+}
+
+async function onAccountTagCreate(name: string) {
+  if (!tagPickerAccount.value) return
+  const id = tagPickerAccount.value.id
+  const newTagId = await window.soroban.createTag(name)
+  tags.value = await window.soroban.listTags()
+  const tagIds = [...tagPickerAccount.value.auto_tags.map(t => t.id), newTagId]
+  await window.soroban.updateShopAccount(id, { auto_tag_ids: tagIds })
+  accounts.value = await window.soroban.listShopAccounts()
+  tagPickerAccount.value = accounts.value.find(a => a.id === id) ?? null
 }
 
 async function removeAccount(a: ShopAccount) {
@@ -387,7 +422,7 @@ const runLabel: Record<string, string> = {
         </div>
         <table class="compact accounts-table">
           <thead>
-            <tr><th>名前</th><th>種別</th><th>取り込みキーワード</th><th></th></tr>
+            <tr><th>名前</th><th>種別</th><th>取り込みキーワード</th><th>自動タグ</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="a in accounts" :key="a.id">
@@ -412,6 +447,12 @@ const runLabel: Record<string, string> = {
                 />
                 <span v-else class="faint">—</span>
               </td>
+              <td class="auto-tags-cell">
+                <div class="chip-row">
+                  <StatusChip v-for="t in a.auto_tags" :key="t.id" tone="info" :label="t.name" />
+                  <button class="sm ghost" @click="openAccountTagPicker(a, $event)" title="自動タグを編集する">タグ</button>
+                </div>
+              </td>
               <td class="actions">
                 <button class="sm ghost" @click="renameAccount(a)">改名</button>
                 <button v-if="a.kind === 'mellojoy' && a.is_active" class="sm" @click="openShopLogin(a.id)">
@@ -435,6 +476,9 @@ const runLabel: Record<string, string> = {
         </p>
         <p class="faint hint">
           商品名がどれかに一致する明細だけを取り込みます。一致しない明細の分の送料は原価に入りません。
+        </p>
+        <p class="faint hint">
+          自動タグは、この仕入先の仕入に、登録時に自動で付きます（後から外せます）。在庫・販売まで引き継がれます。
         </p>
       </div>
 
@@ -493,6 +537,16 @@ const runLabel: Record<string, string> = {
         </div>
       </div>
     </template>
+
+    <TagPicker
+      :open="!!tagPickerAccount"
+      :anchor="tagPickerAccountAnchor"
+      :all-tags="tags"
+      :selected="tagPickerAccount?.auto_tags.map(t => t.id) ?? []"
+      @change="onAccountTagChange"
+      @create="onAccountTagCreate"
+      @close="closeAccountTagPicker"
+    />
   </div>
 </template>
 
@@ -554,6 +608,9 @@ const runLabel: Record<string, string> = {
   border-color: var(--line);
   background: var(--surface);
 }
+
+.auto-tags-cell { min-width: 180px; }
+.auto-tags-cell .chip-row { margin-top: 0; }
 
 .keywords-cell { min-width: 220px; }
 .keywords-cell textarea {

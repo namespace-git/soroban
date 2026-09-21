@@ -130,6 +130,27 @@ const filteredItems = computed(() => {
 
 const total = computed(() => filteredItems.value.reduce((s, i) => s + i.landed_cost, 0))
 
+// --- タグの絞り込み候補：出どころで分ける（直接／仕入から／商品から）。
+//     現在読み込んでいる一覧（状態の絞り込み後、タグ・検索の絞り込み前）に実際に出ているタグだけ ---
+function tagOptionsOf(pick: (i: InventoryItem) => Tag[]): Array<{ id: string; name: string }> {
+  const map = new Map<string, string>()
+  for (const i of items.value) for (const t of pick(i)) map.set(t.id, t.name)
+  return [...map].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'ja'))
+}
+const directTagOptions = computed(() => tagOptionsOf(i => i.tags))
+const purchaseTagOptions = computed(() => tagOptionsOf(i => i.inherited_tags.filter(t => t.from === 'purchase')))
+const productTagOptions = computed(() => tagOptionsOf(i => i.inherited_tags.filter(t => t.from === 'product')))
+
+// --- 派生タグの出どころ表示（chip-inherited の前に小さく出す印） ---
+const TAG_ORIGIN_LABEL: Record<string, string> = { purchase: '仕入から', product: '商品から', inventory: '在庫から' }
+const TAG_ORIGIN_MARK: Record<string, string> = { purchase: '仕', product: '品', inventory: '在' }
+function tagOriginTitle(from?: Tag['from']): string {
+  return from ? TAG_ORIGIN_LABEL[from] : ''
+}
+function tagOriginMark(from?: Tag['from']): string {
+  return from ? TAG_ORIGIN_MARK[from] : ''
+}
+
 const tagPickerForId = ref<string | null>(null)
 const tagPickerAnchor = ref<HTMLElement | null>(null)
 const tagPickerItem = computed(() => items.value.find(i => i.id === tagPickerForId.value) ?? null)
@@ -225,7 +246,15 @@ async function editNote(item: InventoryItem) {
       </select>
       <select v-model="tagFilter">
         <option value="">すべてのタグ</option>
-        <option v-for="t in allTags" :key="t.id" :value="t.id">{{ t.name }}</option>
+        <optgroup v-if="directTagOptions.length" label="直接">
+          <option v-for="t in directTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </optgroup>
+        <optgroup v-if="purchaseTagOptions.length" label="仕入から">
+          <option v-for="t in purchaseTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </optgroup>
+        <optgroup v-if="productTagOptions.length" label="商品から">
+          <option v-for="t in productTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </optgroup>
       </select>
       <SearchBox v-model="searchText" placeholder="名前・型番・素材・メモ・タグ・仕入先を検索" />
       <span v-if="hasSearch" class="faint search-hint">検索中は状態の絞り込みも解除して表示</span>
@@ -287,11 +316,14 @@ async function editNote(item: InventoryItem) {
                 <StatusChip v-if="hasSearch && i.status === 'personal_use'" tone="neutral" label="自家消費" />
                 <StatusChip v-if="hasSearch && i.status === 'split'" tone="neutral" label="分割済" />
                 <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
-                <StatusChip
+                <span
                   v-for="t in i.inherited_tags" :key="'inh-' + t.id"
-                  tone="neutral" :label="t.name" class="chip-inherited"
-                  title="仕入から引き継いだタグ"
-                />
+                  class="chip-inherited-wrap"
+                  :title="tagOriginTitle(t.from)"
+                >
+                  <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
+                  <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
+                </span>
               </div>
               <div v-if="i.note" class="note-row">
                 <Icon name="note" :size="14" class="icon-note" />
@@ -343,8 +375,18 @@ async function editNote(item: InventoryItem) {
 </template>
 
 <style scoped>
-/* 派生タグ（仕入から引き継いだもの）は直接付けたタグより少し薄く見せる */
+/* 派生タグ（仕入・商品から引き継いだもの）は直接付けたタグより少し薄く見せる。
+   先頭の小さな記号で出どころ（仕入／商品）を示す */
 .chip-inherited { opacity: .7; }
+.chip-inherited-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.chip-origin-mark {
+  font-size: 10px;
+  color: var(--text-faint);
+}
 
 .table-panel { padding: 0; overflow: hidden; }
 .table-panel table { table-layout: fixed; }

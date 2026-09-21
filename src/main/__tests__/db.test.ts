@@ -1077,7 +1077,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('13')
+      expect(db.getSettings().schema_version).toBe('14')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1198,7 +1198,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('13')
+      expect(db.getSettings().schema_version).toBe('14')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -2208,6 +2208,200 @@ describe('db（:memory:）', () => {
       // 空配列で全部外す
       db.setPurchaseTags(purchaseId, [])
       expect(db.listPurchases().find(p => p.id === purchaseId)!.tags).toEqual([])
+    })
+  })
+
+  describe('setProductTags：商品（型番）のタグ。在庫・販売へ派生し、優先順位 purchase > product で1つにまとまる', () => {
+    it('型番タグが在庫のinherited_tags（from: product）・販売のinherited_tagsに出る。listProducts/getProductのtagsにも出る', () => {
+      const tagId = db.createTag('型番タグ')
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '型番タグ対象【Z900】', unit_price: 1000, quantity: 1 }],
+      })
+      db.setProductTags('Z900', [tagId])
+
+      const item = db.listInventory('in_stock')[0]
+      expect(item.tags).toEqual([])
+      expect(item.inherited_tags).toEqual([{ id: tagId, name: '型番タグ', sort_order: 0, from: 'product' }])
+
+      expect(db.listProducts().find(p => p.model_code === 'Z900')!.tags.map(t => t.id)).toEqual([tagId])
+      expect(db.getProduct('Z900')!.tags.map(t => t.id)).toEqual([tagId])
+
+      const saleId = db.createSale({ title: '型番タグ対象【Z900】', sold_at: '2026-01-05', price: 2000 })
+      const sale = db.listSales().find(s => s.id === saleId)!
+      expect(sale.tags).toEqual([])
+      expect(sale.inherited_tags).toEqual([{ id: tagId, name: '型番タグ', sort_order: 0, from: 'product' }])
+    })
+
+    it('優先順位：同じタグが仕入(purchase)・商品(product)の両方から来たら purchase を優先して1つにまとめる', () => {
+      const tagId = db.createTag('共通タグ')
+      const purchaseId = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '優先順位確認【Z901】', unit_price: 1000, quantity: 1 }],
+      })
+      db.setPurchaseTags(purchaseId, [tagId])
+      db.setProductTags('Z901', [tagId])
+
+      const item = db.listInventory('in_stock')[0]
+      expect(item.inherited_tags).toEqual([{ id: tagId, name: '共通タグ', sort_order: 0, from: 'purchase' }])
+    })
+
+    it('setProductTags：置き換え（丸ごと入れ替え）。deleteTagでCASCADEされ、product_tagからも消える', () => {
+      const tagA = db.createTag('A')
+      const tagB = db.createTag('B')
+      db.setProductTags('Z902', [tagA, tagB])
+      expect(db.listProducts().find(p => p.model_code === 'Z902')).toBeUndefined() // まだ在庫が無ければ商品一覧に出ない
+
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '置き換え確認【Z902】', unit_price: 1000, quantity: 1 }],
+      })
+      expect(db.listProducts().find(p => p.model_code === 'Z902')!.tags.map(t => t.id).sort())
+        .toEqual([tagA, tagB].sort())
+
+      db.setProductTags('Z902', [tagB])
+      expect(db.listProducts().find(p => p.model_code === 'Z902')!.tags.map(t => t.id)).toEqual([tagB])
+
+      db.deleteTag(tagB)
+      expect(db.listProducts().find(p => p.model_code === 'Z902')!.tags).toEqual([])
+    })
+  })
+
+  describe('仕入先の自動タグ（shop_account_tag）：作成時にだけ purchase_tag へ自動で付く', () => {
+    it('口座に自動タグA→createPurchaseの仕入にA、その在庫のinherited_tagsにA(from purchase)、売れた販売にもA。下書き→確定でも残る。setPurchaseTags([])で外せる', () => {
+      const tagId = db.createTag('自動タグA')
+      db.updateShopAccount(shopId, { auto_tag_ids: [tagId] })
+      expect(db.listShopAccounts().find(a => a.id === shopId)!.auto_tags.map(t => t.id)).toEqual([tagId])
+      expect(db.getShopAccount(shopId)!.auto_tags.map(t => t.id)).toEqual([tagId])
+
+      const purchaseId = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '自動タグ対象', unit_price: 1000, quantity: 1 }],
+      })
+      expect(db.getPurchase(purchaseId).tags.map(t => t.id)).toEqual([tagId])
+
+      const item = db.listInventory('in_stock').find(i => i.name === '自動タグ対象')!
+      expect(item.inherited_tags).toEqual([{ id: tagId, name: '自動タグA', sort_order: 0, from: 'purchase' }])
+
+      const saleId = db.createSale({ title: '自動タグ対象', sold_at: '2026-01-05', price: 2000 })
+      db.linkInventory(saleId, [item.id])
+      const sale = db.listSales().find(s => s.id === saleId)!
+      expect(sale.inherited_tags.map(t => t.id)).toEqual([tagId])
+
+      // 下書き→確定でも残る
+      const draftId = db.createPurchaseDraft({
+        import_key: 'mellojoy:#900001',
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        lines: [{ name: '下書き対象', quantity: 1 }],
+      })
+      expect(db.getPurchase(draftId).tags.map(t => t.id)).toEqual([tagId])
+      db.confirmPurchase(draftId, {
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '下書き対象', unit_price: 1000, quantity: 1 }],
+      })
+      expect(db.getPurchase(draftId).tags.map(t => t.id)).toEqual([tagId])
+
+      // 後から外せる（作成時だけの挙動。外しても再付与しない）
+      db.setPurchaseTags(purchaseId, [])
+      expect(db.getPurchase(purchaseId).tags).toEqual([])
+    })
+
+    it('updateShopAccount：auto_tag_idsは丸ごと置き換え。他のpatchフィールドと同時に渡しても独立して効く', () => {
+      const tagA = db.createTag('A')
+      const tagB = db.createTag('B')
+      db.updateShopAccount(shopId, { auto_tag_ids: [tagA, tagB], name: '改名後' })
+      let acc = db.getShopAccount(shopId)!
+      expect(acc.name).toBe('改名後')
+      expect(acc.auto_tags.map(t => t.id).sort()).toEqual([tagA, tagB].sort())
+
+      db.updateShopAccount(shopId, { auto_tag_ids: [tagB] })
+      acc = db.getShopAccount(shopId)!
+      expect(acc.auto_tags.map(t => t.id)).toEqual([tagB])
+
+      db.updateShopAccount(shopId, { auto_tag_ids: [] })
+      acc = db.getShopAccount(shopId)!
+      expect(acc.auto_tags).toEqual([])
+    })
+  })
+
+  describe('getPurchase：lines[].items（明細ごとの在庫の状態）', () => {
+    it('3点のうち1点出品中・1点販売済・1点未出品の内訳が返る', () => {
+      const purchaseId = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '内訳確認', unit_price: 1000, quantity: 3 }],
+      })
+      const [a, b, c] = db.listInventory('in_stock')
+
+      db.upsertListings([
+        { mercariItemId: 'LDETAIL', title: '内訳確認', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('LDETAIL', [a.id])
+
+      const saleId = db.createSale({ title: '内訳確認', sold_at: '2026-01-10', price: 2500 })
+      db.linkInventory(saleId, [b.id])
+      // c は未出品のまま
+
+      const detail = db.getPurchase(purchaseId)
+      expect(detail.lines).toHaveLength(1)
+      const items = detail.lines[0].items
+      expect(items).toHaveLength(3)
+      for (const it of items) expect(it.landed_cost).toBeGreaterThan(0)
+
+      const itemA = items.find(i => i.id === a.id)!
+      expect(itemA.status).toBe('in_stock')
+      expect(itemA.listing_price).toBe(3000)
+      expect(itemA.sale_id).toBeNull()
+
+      const itemB = items.find(i => i.id === b.id)!
+      expect(itemB.status).toBe('sold')
+      expect(itemB.listing_price).toBeNull()
+      expect(itemB.sale_id).toBe(saleId)
+      expect(itemB.sale_price).toBe(2500)
+      expect(itemB.sold_at).toBe('2026-01-10')
+
+      const itemC = items.find(i => i.id === c.id)!
+      expect(itemC.status).toBe('in_stock')
+      expect(itemC.listing_price).toBeNull()
+      expect(itemC.sale_id).toBeNull()
+    })
+
+    it('下書きは明細のitemsが空配列', () => {
+      const draftId = db.createPurchaseDraft({
+        import_key: 'mellojoy:#900002',
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        lines: [{ name: '下書き明細', quantity: 2 }],
+      })
+      const detail = db.getPurchase(draftId)
+      expect(detail.lines[0].items).toEqual([])
+    })
+
+    it('分割で生まれた子は親のpurchase_line_idを引き継ぎ、items には split 親は出ず子だけ出る', () => {
+      const purchaseId = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '分割確認', unit_price: 1000, quantity: 1 }],
+      })
+      const parent = db.listInventory('in_stock')[0]
+      const childIds = db.splitInventory(parent.id, 2)
+
+      const items = db.getPurchase(purchaseId).lines[0].items
+      expect(items.map(i => i.id).sort()).toEqual([...childIds].sort())
+      expect(items.every(i => i.status === 'in_stock')).toBe(true)
     })
   })
 

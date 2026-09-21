@@ -621,6 +621,28 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 14) {
+    // 商品（型番）タグ・仕入先の自動タグ。新規テーブルなので ALTER 不要。
+    // CASCADE でタグ削除・仕入先削除に追従する
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS product_tag (
+        model_code TEXT NOT NULL,
+        tag_id     TEXT NOT NULL REFERENCES tag(id) ON DELETE CASCADE,
+        PRIMARY KEY (model_code, tag_id)
+      );
+      CREATE TABLE IF NOT EXISTS shop_account_tag (
+        shop_account_id TEXT NOT NULL REFERENCES shop_account(id) ON DELETE CASCADE,
+        tag_id          TEXT NOT NULL REFERENCES tag(id)          ON DELETE CASCADE,
+        PRIMARY KEY (shop_account_id, tag_id)
+      );
+    `)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '14')
+         ON CONFLICT(key) DO UPDATE SET value = '14'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -727,6 +749,19 @@ function insertLinesAndItems(
   }
 }
 
+/**
+ * 仕入先アカウントの自動タグを、作成した仕入の purchase_tag に足す（作成時だけ）。
+ * 後から setPurchaseTags で外しても、ここでは再付与しない。
+ */
+function applyShopAccountAutoTags(purchaseId: string, shopAccountId: string): void {
+  const rows = db.prepare(
+    'SELECT tag_id FROM shop_account_tag WHERE shop_account_id = ?',
+  ).all(shopAccountId) as Array<{ tag_id: string }>
+  if (rows.length === 0) return
+  const ins = db.prepare('INSERT OR IGNORE INTO purchase_tag (purchase_id, tag_id) VALUES (?, ?)')
+  for (const r of rows) ins.run(purchaseId, r.tag_id)
+}
+
 export function createPurchase(input: PurchaseInput): string {
   if (input.import_key) {
     const exists = db.prepare('SELECT id FROM purchase WHERE import_key = ?').get(input.import_key) as
@@ -762,6 +797,7 @@ export function createPurchase(input: PurchaseInput): string {
     )
 
     insertLinesAndItems(purchaseId, input.lines, pool, method, input.ordered_at)
+    applyShopAccountAutoTags(purchaseId, input.shop_account_id)
   })
 
   tx()
@@ -812,10 +848,59 @@ export function createPurchaseDraft(input: PurchaseDraftInput): string {
         model_code, series_code, material, i,
       )
     })
+    applyShopAccountAutoTags(purchaseId, input.shop_account_id)
   })
 
   tx()
   return purchaseId
+}
+
+/**
+ * 仕入明細から生まれた在庫1点ずつのいまの状態（getPurchase が使う）。
+ * 分割で生まれた子は親の purchase_line_id を引き継ぐため、分割済みの親（status='split'）を
+ * 除けば子だけが自然に対象になる。明細ごとに問い合わせず1クエリでまとめて引く。
+ */
+function loadPurchaseLineItems(lineIds: string[]): Map<string, PurchaseLine['items']> {
+  const map = new Map<string, PurchaseLine['items']>()
+  if (lineIds.length === 0) return map
+
+  const ph = lineIds.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT
+      i.purchase_line_id AS line_id,
+      i.id, i.status, i.landed_cost,
+      lst.price    AS listing_price,
+      sl.sale_id   AS sale_id,
+      sale.price   AS sale_price,
+      sale.sold_at AS sold_at
+    FROM inventory_item i
+    LEFT JOIN listing_line ll  ON ll.inventory_item_id = i.id
+    LEFT JOIN listing      lst ON lst.mercari_item_id = ll.listing_id AND lst.status IN ('active','suspended')
+    LEFT JOIN sale_line    sl  ON sl.inventory_item_id = i.id
+    LEFT JOIN sale             ON sale.id = sl.sale_id
+    WHERE i.purchase_line_id IN (${ph}) AND i.status != 'split'
+    ORDER BY i.created_at
+  `).all(...lineIds) as Array<{
+    line_id: string
+    id: string; status: InventoryStatus; landed_cost: number
+    listing_price: number | null
+    sale_id: string | null; sale_price: number | null; sold_at: string | null
+  }>
+
+  for (const r of rows) {
+    const arr = map.get(r.line_id) ?? []
+    arr.push({
+      id: r.id,
+      status: r.status,
+      landed_cost: r.landed_cost,
+      listing_price: r.listing_price,
+      sale_id: r.sale_id,
+      sale_price: r.sale_price,
+      sold_at: r.sold_at,
+    })
+    map.set(r.line_id, arr)
+  }
+  return map
 }
 
 export function getPurchase(id: string): PurchaseDetail {
@@ -829,11 +914,13 @@ export function getPurchase(id: string): PurchaseDetail {
     | undefined
   if (!p) throw new Error('仕入が見つかりません')
 
-  const lines = db.prepare(
+  const lineRows = db.prepare(
     `SELECT id, name, unit_price, quantity, model_code, series_code, material,
             allocated_cost, landed_unit_cost
        FROM purchase_line WHERE purchase_id = ? ORDER BY sort_order`,
-  ).all(id) as PurchaseLine[]
+  ).all(id) as Array<Omit<PurchaseLine, 'items'>>
+  const itemsMap = loadPurchaseLineItems(lineRows.map(l => l.id))
+  const lines: PurchaseLine[] = lineRows.map(l => ({ ...l, items: itemsMap.get(l.id) ?? [] }))
 
   const subtotal = lines.reduce((s, l) => s + l.unit_price * l.quantity, 0)
   const total_cost = lines.reduce((s, l) => s + l.unit_price * l.quantity + l.allocated_cost, 0)
@@ -1166,12 +1253,12 @@ type SaleProfitRow = Omit<SaleProfit, 'model_codes' | 'tags' | 'inherited_tags' 
 }
 
 /**
- * タグを持つテーブル（sale_tag / inventory_tag / purchase_tag）から、対象idごとの
- * タグ配列をまとめて1クエリで引く（N+1にしない）。
+ * タグを持つテーブル（sale_tag / inventory_tag / purchase_tag / product_tag / shop_account_tag）
+ * から、対象idごとのタグ配列をまとめて1クエリで引く（N+1にしない）。
  */
 function loadTagsFor(
-  table: 'sale_tag' | 'inventory_tag' | 'purchase_tag',
-  column: 'sale_id' | 'inventory_item_id' | 'purchase_id',
+  table: 'sale_tag' | 'inventory_tag' | 'purchase_tag' | 'product_tag' | 'shop_account_tag',
+  column: 'sale_id' | 'inventory_item_id' | 'purchase_id' | 'model_code' | 'shop_account_id',
   ids: string[],
 ): Map<string, Tag[]> {
   const map = new Map<string, Tag[]>()
@@ -1195,10 +1282,10 @@ function loadTagsFor(
 }
 
 /**
- * 在庫が「派生」で持つタグ（purchase_line → purchase に付いた purchase_tag）を
- * まとめて1クエリで引く。tags（直接）との重複除去は呼び出し側（attachInventoryTags）で行う。
+ * 在庫が「派生」で持つタグのうち、仕入から来るもの
+ * （purchase_line → purchase に付いた purchase_tag）を1クエリで引く。
  */
-function loadInheritedTagsForInventory(itemIds: string[]): Map<string, Tag[]> {
+function loadPurchaseTagsForInventory(itemIds: string[]): Map<string, Tag[]> {
   const map = new Map<string, Tag[]>()
   if (itemIds.length === 0) return map
 
@@ -1222,33 +1309,71 @@ function loadInheritedTagsForInventory(itemIds: string[]): Map<string, Tag[]> {
 }
 
 /**
- * 販売が「派生」で持つタグ：紐付いた在庫（sale_line）の inventory_tag ∪
- * それらの在庫の仕入に付いた purchase_tag。tags（直接）との重複除去は
- * 呼び出し側（hydrateSaleProfitRows）で行う。
+ * 在庫が「派生」で持つタグのうち、商品（型番）から来るもの（product_tag。model_code一致）。
+ * model_code の無い在庫（私物の手入力等）は対象外。
  */
-function loadInheritedTagsForSales(saleIds: string[]): Map<string, Tag[]> {
+function loadProductTagsForInventory(items: Array<{ id: string; model_code: string | null }>): Map<string, Tag[]> {
+  const map = new Map<string, Tag[]>()
+  const withCode = items.filter((i): i is { id: string; model_code: string } => !!i.model_code)
+  if (withCode.length === 0) return map
+
+  const codes = [...new Set(withCode.map(i => i.model_code))]
+  const ph = codes.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT pt.model_code AS model_code, t.id, t.name, t.sort_order
+    FROM product_tag pt
+    JOIN tag t ON t.id = pt.tag_id
+    WHERE pt.model_code IN (${ph})
+  `).all(...codes) as Array<{ model_code: string; id: string; name: string; sort_order: number }>
+
+  const byCode = new Map<string, Tag[]>()
+  for (const r of rows) {
+    const arr = byCode.get(r.model_code) ?? []
+    arr.push({ id: r.id, name: r.name, sort_order: r.sort_order })
+    byCode.set(r.model_code, arr)
+  }
+  for (const i of withCode) {
+    map.set(i.id, byCode.get(i.model_code) ?? [])
+  }
+  return map
+}
+
+/**
+ * 派生タグを、優先順位 purchase > product > inventory で1つにまとめる
+ * （同じタグが複数の経路から来ても重複させない）。直接タグ（directIds）は除く。
+ * sources は既に優先順に並べて渡すこと（先勝ち）。
+ */
+function mergeInheritedTags(
+  directIds: Set<string>,
+  sources: Array<{ from: NonNullable<Tag['from']>; tags: Tag[] }>,
+): Tag[] {
+  const seen = new Map<string, Tag>()
+  for (const { from, tags } of sources) {
+    for (const t of tags) {
+      if (directIds.has(t.id) || seen.has(t.id)) continue
+      seen.set(t.id, { ...t, from })
+    }
+  }
+  return [...seen.values()].sort((a, b) =>
+    a.sort_order !== b.sort_order ? a.sort_order - b.sort_order : a.name.localeCompare(b.name))
+}
+
+/**
+ * 販売が「派生」で持つタグのうち、紐付いた在庫の直接タグ（inventory_tag）由来。
+ */
+function loadInventoryTagsForSales(saleIds: string[]): Map<string, Tag[]> {
   const map = new Map<string, Tag[]>()
   if (saleIds.length === 0) return map
 
   const ph = saleIds.map(() => '?').join(',')
   const rows = db.prepare(`
-    SELECT owner_id, id, name, sort_order FROM (
-      SELECT sl.sale_id AS owner_id, t.id AS id, t.name AS name, t.sort_order AS sort_order
-      FROM sale_line sl
-      JOIN inventory_tag it ON it.inventory_item_id = sl.inventory_item_id
-      JOIN tag t ON t.id = it.tag_id
-      WHERE sl.sale_id IN (${ph})
-      UNION
-      SELECT sl.sale_id AS owner_id, t.id AS id, t.name AS name, t.sort_order AS sort_order
-      FROM sale_line sl
-      JOIN inventory_item i  ON i.id = sl.inventory_item_id
-      JOIN purchase_line pl ON pl.id = i.purchase_line_id
-      JOIN purchase_tag  pt ON pt.purchase_id = pl.purchase_id
-      JOIN tag t ON t.id = pt.tag_id
-      WHERE sl.sale_id IN (${ph})
-    )
-    ORDER BY sort_order, name
-  `).all(...ids2(saleIds)) as Array<{ owner_id: string; id: string; name: string; sort_order: number }>
+    SELECT sl.sale_id AS owner_id, t.id, t.name, t.sort_order
+    FROM sale_line sl
+    JOIN inventory_tag it ON it.inventory_item_id = sl.inventory_item_id
+    JOIN tag t ON t.id = it.tag_id
+    WHERE sl.sale_id IN (${ph})
+    ORDER BY t.sort_order, t.name
+  `).all(...saleIds) as Array<{ owner_id: string; id: string; name: string; sort_order: number }>
 
   for (const r of rows) {
     const arr = map.get(r.owner_id) ?? []
@@ -1258,9 +1383,57 @@ function loadInheritedTagsForSales(saleIds: string[]): Map<string, Tag[]> {
   return map
 }
 
-/** 同じ配列を2回分並べる（UNION の両方の IN (?) に渡す）。可読性のためだけの小ヘルパー */
-function ids2(ids: string[]): string[] {
-  return [...ids, ...ids]
+/**
+ * 販売が「派生」で持つタグのうち、紐付いた在庫の仕入（purchase_tag）由来。
+ */
+function loadPurchaseTagsForSales(saleIds: string[]): Map<string, Tag[]> {
+  const map = new Map<string, Tag[]>()
+  if (saleIds.length === 0) return map
+
+  const ph = saleIds.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT sl.sale_id AS owner_id, t.id, t.name, t.sort_order
+    FROM sale_line sl
+    JOIN inventory_item i  ON i.id = sl.inventory_item_id
+    JOIN purchase_line pl ON pl.id = i.purchase_line_id
+    JOIN purchase_tag  pt ON pt.purchase_id = pl.purchase_id
+    JOIN tag t ON t.id = pt.tag_id
+    WHERE sl.sale_id IN (${ph})
+    ORDER BY t.sort_order, t.name
+  `).all(...saleIds) as Array<{ owner_id: string; id: string; name: string; sort_order: number }>
+
+  for (const r of rows) {
+    const arr = map.get(r.owner_id) ?? []
+    arr.push({ id: r.id, name: r.name, sort_order: r.sort_order })
+    map.set(r.owner_id, arr)
+  }
+  return map
+}
+
+/**
+ * 販売が「派生」で持つタグのうち、紐付いた在庫の商品（型番。product_tag）由来。
+ */
+function loadProductTagsForSales(saleIds: string[]): Map<string, Tag[]> {
+  const map = new Map<string, Tag[]>()
+  if (saleIds.length === 0) return map
+
+  const ph = saleIds.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT DISTINCT sl.sale_id AS owner_id, t.id, t.name, t.sort_order
+    FROM sale_line sl
+    JOIN inventory_item i ON i.id = sl.inventory_item_id
+    JOIN product_tag  pt ON pt.model_code = i.model_code
+    JOIN tag t ON t.id = pt.tag_id
+    WHERE sl.sale_id IN (${ph})
+    ORDER BY t.sort_order, t.name
+  `).all(...saleIds) as Array<{ owner_id: string; id: string; name: string; sort_order: number }>
+
+  for (const r of rows) {
+    const arr = map.get(r.owner_id) ?? []
+    arr.push({ id: r.id, name: r.name, sort_order: r.sort_order })
+    map.set(r.owner_id, arr)
+  }
+  return map
 }
 
 /** listSales / saleTotals 共通の絞り込み。sale_profit ビューに対する WHERE を組み立てる */
@@ -1275,7 +1448,7 @@ function buildSaleFilterWhere(filter?: SaleFilter): { where: string; vals: unkno
     clauses.push(`(is_shipping_confirmed = 0 OR (unmatched = 1 AND kind = 'resale'))`)
   }
   if (filter?.tagId) {
-    // 直接付いたタグ ∪ 派生タグ（紐付いた在庫のタグ・その仕入のタグ）で一致させる
+    // 直接付いたタグ ∪ 派生タグ（紐付いた在庫のタグ・その仕入のタグ・その商品＝型番のタグ）で一致させる
     clauses.push(`(
       EXISTS (SELECT 1 FROM sale_tag WHERE sale_tag.sale_id = sale_profit.id AND sale_tag.tag_id = ?)
       OR EXISTS (
@@ -1290,8 +1463,14 @@ function buildSaleFilterWhere(filter?: SaleFilter): { where: string; vals: unkno
         JOIN purchase_tag  pt ON pt.purchase_id = pl.purchase_id
         WHERE sl.sale_id = sale_profit.id AND pt.tag_id = ?
       )
+      OR EXISTS (
+        SELECT 1 FROM sale_line sl
+        JOIN inventory_item i ON i.id = sl.inventory_item_id
+        JOIN product_tag  pt ON pt.model_code = i.model_code
+        WHERE sl.sale_id = sale_profit.id AND pt.tag_id = ?
+      )
     )`)
-    vals.push(filter.tagId, filter.tagId, filter.tagId)
+    vals.push(filter.tagId, filter.tagId, filter.tagId, filter.tagId)
   }
 
   return { where: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', vals }
@@ -1304,12 +1483,19 @@ function buildSaleFilterWhere(filter?: SaleFilter): { where: string; vals: unkno
 function hydrateSaleProfitRows(rows: SaleProfitRow[]): SaleProfit[] {
   const ids = rows.map(r => r.id)
   const tagMap = loadTagsFor('sale_tag', 'sale_id', ids)
-  const inheritedMap = loadInheritedTagsForSales(ids)
+  const purchaseMap = loadPurchaseTagsForSales(ids)
+  const productMap = loadProductTagsForSales(ids)
+  const inventoryMap = loadInventoryTagsForSales(ids)
   return rows.map(r => {
     const { thumb_file, ...rest } = r
     const tags = tagMap.get(r.id) ?? []
     const directIds = new Set(tags.map(t => t.id))
-    const inherited_tags = (inheritedMap.get(r.id) ?? []).filter(t => !directIds.has(t.id))
+    // 優先順位 purchase > product > inventory で1つにまとめる
+    const inherited_tags = mergeInheritedTags(directIds, [
+      { from: 'purchase', tags: purchaseMap.get(r.id) ?? [] },
+      { from: 'product', tags: productMap.get(r.id) ?? [] },
+      { from: 'inventory', tags: inventoryMap.get(r.id) ?? [] },
+    ])
     return {
       ...rest,
       model_codes: JSON.parse(rest.model_codes || '[]') as string[],
@@ -1517,17 +1703,21 @@ type InventoryRow = Omit<InventoryItem, 'tags' | 'inherited_tags' | 'thumb_url' 
 
 /**
  * in_stock（等）を inventory_view から引いた結果に、まとめて引いた直接タグと
- * 派生タグ（仕入から。tags と重複するものは除く）を付ける。
+ * 派生タグ（仕入・商品＝型番から。優先順位 purchase > product。tags と重複するものは除く）を付ける。
  */
 function attachInventoryTags(items: InventoryRow[]): InventoryItem[] {
   const ids = items.map(i => i.id)
   const tagMap = loadTagsFor('inventory_tag', 'inventory_item_id', ids)
-  const inheritedMap = loadInheritedTagsForInventory(ids)
+  const purchaseMap = loadPurchaseTagsForInventory(ids)
+  const productMap = loadProductTagsForInventory(items)
   return items.map(i => {
     const { thumb_file, listing_id, listing_price, listing_status, ...rest } = i
     const tags = tagMap.get(i.id) ?? []
     const directIds = new Set(tags.map(t => t.id))
-    const inherited_tags = (inheritedMap.get(i.id) ?? []).filter(t => !directIds.has(t.id))
+    const inherited_tags = mergeInheritedTags(directIds, [
+      { from: 'purchase', tags: purchaseMap.get(i.id) ?? [] },
+      { from: 'product', tags: productMap.get(i.id) ?? [] },
+    ])
     return {
       ...rest,
       thumb_url: toThumbUrl(thumb_file),
@@ -2298,13 +2488,15 @@ function selectProducts(sort: ProductSummarySort): ProductSummaryRow[] {
   `).all() as ProductSummaryRow[]
 }
 
-function toProductSummary(r: ProductSummaryRow): ProductSummary {
+function toProductSummary(r: ProductSummaryRow, tags: Tag[]): ProductSummary {
   const { thumb_file, ...rest } = r
-  return { ...rest, thumb_url: toThumbUrl(thumb_file) }
+  return { ...rest, thumb_url: toThumbUrl(thumb_file), tags }
 }
 
 export function listProducts(sort: ProductSummarySort = 'total_profit'): ProductSummary[] {
-  return selectProducts(sort).map(toProductSummary)
+  const rows = selectProducts(sort)
+  const tagMap = loadTagsFor('product_tag', 'model_code', rows.map(r => r.model_code))
+  return rows.map(r => toProductSummary(r, tagMap.get(r.model_code) ?? []))
 }
 
 /** 'YYYY-MM' を1か月進める */
@@ -2403,7 +2595,7 @@ export function getProduct(modelCode: string): ProductDetail | null {
   `).all(modelCode) as SaleProfitRow[]
 
   return {
-    ...toProductSummary(base),
+    ...toProductSummary(base, loadTagsFor('product_tag', 'model_code', [modelCode]).get(modelCode) ?? []),
     months,
     items,
     sales: hydrateSaleProfitRows(saleRows),
@@ -2656,6 +2848,20 @@ export function setPurchaseTags(purchaseId: string, tagIds: string[]): void {
     db.prepare('DELETE FROM purchase_tag WHERE purchase_id = ?').run(purchaseId)
     const ins = db.prepare('INSERT INTO purchase_tag (purchase_id, tag_id) VALUES (?, ?)')
     for (const tagId of unique) ins.run(purchaseId, tagId)
+  })
+  tx()
+}
+
+/**
+ * 商品（型番）のタグを丸ごと置き換える（空配列で全部外す）。
+ * その型番の在庫すべて・その在庫が紐付いた販売に派生で見える（コピーしない）
+ */
+export function setProductTags(modelCode: string, tagIds: string[]): void {
+  const unique = [...new Set(tagIds)]
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM product_tag WHERE model_code = ?').run(modelCode)
+    const ins = db.prepare('INSERT INTO product_tag (model_code, tag_id) VALUES (?, ?)')
+    for (const tagId of unique) ins.run(modelCode, tagId)
   })
   tx()
 }
@@ -2933,7 +3139,10 @@ export function searchAll(query: string, limit = 60): SearchHit[] {
 // ============================================================
 
 export function listShopAccounts(): ShopAccount[] {
-  return db.prepare('SELECT * FROM shop_account ORDER BY name').all() as ShopAccount[]
+  const rows = db.prepare('SELECT * FROM shop_account ORDER BY name').all() as
+    Array<Omit<ShopAccount, 'auto_tags'>>
+  const tagMap = loadTagsFor('shop_account_tag', 'shop_account_id', rows.map(r => r.id))
+  return rows.map(r => ({ ...r, auto_tags: tagMap.get(r.id) ?? [] }))
 }
 
 export function createShopAccount(name: string, kind: ShopAccountKind = 'other'): string {
@@ -2943,12 +3152,20 @@ export function createShopAccount(name: string, kind: ShopAccountKind = 'other')
 }
 
 export function getShopAccount(id: string): ShopAccount | undefined {
-  return db.prepare('SELECT * FROM shop_account WHERE id = ?').get(id) as ShopAccount | undefined
+  const row = db.prepare('SELECT * FROM shop_account WHERE id = ?').get(id) as
+    Omit<ShopAccount, 'auto_tags'> | undefined
+  if (!row) return undefined
+  const tagMap = loadTagsFor('shop_account_tag', 'shop_account_id', [id])
+  return { ...row, auto_tags: tagMap.get(id) ?? [] }
 }
 
 export function updateShopAccount(
   id: string,
-  patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null },
+  patch: {
+    name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null
+    /** 置き換え（丸ごと入れ替え）。この口座の以後の仕入作成時にだけ効く（過去の仕入は変わらない） */
+    auto_tag_ids?: string[]
+  },
 ): void {
   const sets: string[] = []
   const vals: unknown[] = []
@@ -2961,10 +3178,20 @@ export function updateShopAccount(
     const trimmed = patch.import_keywords?.trim()
     put('import_keywords', trimmed ? patch.import_keywords : null)
   }
-  if (sets.length === 0) return
 
-  vals.push(id)
-  db.prepare(`UPDATE shop_account SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
+  const tx = db.transaction(() => {
+    if (sets.length > 0) {
+      vals.push(id)
+      db.prepare(`UPDATE shop_account SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
+    }
+    if (patch.auto_tag_ids !== undefined) {
+      const unique = [...new Set(patch.auto_tag_ids)]
+      db.prepare('DELETE FROM shop_account_tag WHERE shop_account_id = ?').run(id)
+      const ins = db.prepare('INSERT INTO shop_account_tag (shop_account_id, tag_id) VALUES (?, ?)')
+      for (const tagId of unique) ins.run(id, tagId)
+    }
+  })
+  tx()
 }
 
 /** 仕入で使われていたら消させない（無効化を促す）。無ければ物理削除 */
