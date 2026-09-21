@@ -1,6 +1,6 @@
 {
   "name": "soroban",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "description": "メルカリ販売の利益管理（単一Electronアプリ・ローカルSQLite）",
   "main": "./out/main/index.js",
