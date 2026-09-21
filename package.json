@@ -41,7 +41,7 @@
   },
   "build": {
     "appId": "jp.namespace.soroban",
-    "productName": "そろばん",
+    "productName": "Soroban",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -81,11 +81,17 @@
       "identity": null,
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
-      "darkModeSupport": true
+      "darkModeSupport": true,
+      "extendInfo": {
+        "CFBundleDisplayName": "そろばん",
+        "NSHumanReadableCopyright": "Copyright © 2026 Soroban"
+      }
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "そろばん",
+      "uninstallDisplayName": "そろばん"
     },
     "icon": "build/icon.png",
     "dmg": {
@@ -93,8 +99,7 @@
       "sign": false
     },
     "artifactName": "soroban-${version}-${arch}.${ext}",
-    "afterPack": "scripts/after-pack.cjs",
-    "executableName": "Soroban"
+    "afterPack": "scripts/after-pack.cjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

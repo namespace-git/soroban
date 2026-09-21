@@ -75,7 +75,7 @@ pnpm electron-builder install-app-deps
 
 | OS | ファイル | 入れ方 |
 |---|---|---|
-| macOS（Apple Silicon: M1〜） | `soroban-<版>-arm64.dmg` | dmg を開き「そろばん」を **Applications にドラッグ** |
+| macOS（Apple Silicon: M1〜） | `soroban-<版>-arm64.dmg` | dmg を開き「Soroban」を **Applications にドラッグ**（Dock やメニューでは「そろばん」と出る） |
 | macOS（Intel） | `soroban-<版>-x64.dmg` | 同上 |
 | Windows | `soroban-setup-<版>.exe` | ダブルクリック → インストール先を選んで進む |
 
@@ -89,20 +89,20 @@ pnpm electron-builder install-app-deps
 2. それでも「壊れているため開けません」と出る場合は、ターミナルで隔離属性を外す
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/そろばん.app
+xattr -dr com.apple.quarantine /Applications/Soroban.app
 ```
 
 2 回目以降は Launchpad や Dock から普通に起動できる。Dock に残しておけばデスクトップから 1 クリック。
 
 ### クリーンインストール（古い版を消してから入れ直す）
 
-初期のリリース（v0.1.0〜v0.1.5）を入れたことがある場合、古い Electron が残っていて起動直後にクラッシュすることがある。一度きれいに消してから最新版を入れる。**データ（DB）は別の場所にあるので消えない**が、念のため先にバックアップを取る。
+v0.1.8 以前の版は macOS で起動直後にクラッシュする（アプリ内部の名前が日本語だったため）。入れたことがある場合は、一度きれいに消してから最新版を入れる。**データ（DB）は別の場所にあるので消えない**が、念のため先にバックアップを取る。
 
 macOS：
 
 ```bash
 # 1. アプリを終了してから、本体を消す
-rm -rf /Applications/そろばん.app
+rm -rf /Applications/Soroban.app /Applications/そろばん.app
 # 2. 更新の一時ファイルとキャッシュを消す（DB は ~/Library/Application Support/soroban/soroban.db。消さない）
 rm -rf ~/Library/Caches/jp.namespace.soroban ~/Library/Caches/soroban-updater
 # 3. 最新の dmg を入れ直し、初回は右クリック → 開く
@@ -134,7 +134,7 @@ pnpm install
 pnpm dist:mac
 ```
 
-`release/` に `soroban-<版>-arm64.dmg` と `soroban-<版>-x64.dmg` ができる。動作確認だけなら `pnpm pack:mac` → `open release/mac-arm64/そろばん.app`。
+`release/` に `soroban-<版>-arm64.dmg` と `soroban-<版>-x64.dmg` ができる。動作確認だけなら `pnpm pack:mac` → `open release/mac-arm64/Soroban.app`。
 
 Windows は `pnpm dist:win` → `release/soroban-setup-<版>.exe`。
 
@@ -219,7 +219,7 @@ macOS の `.icns` と Windows の `.ico` は electron-builder が `build/icon.pn
 | 取り込みが 0 件のまま／「構造が変わった可能性」 | メルカリの画面構造が変わった。`src/main/collector.ts` のパーサを実 DOM で直す（`src/main/__tests__/fixtures/` に HTML の見本） |
 | 利益が合わない | 仕入の送料按分（仕入タブの総原価）→ まとめ売りの紐付け漏れ → 発送方法の送料マスタ → 私物と転売の混在、の順に確認 |
 | macOS で「壊れているため開けません」 | 上の `xattr` を実行 |
-| macOS で起動した瞬間に落ちる（ターミナルから起動すると `trace trap` だけ出る） | 署名が全く無いアプリは Apple Silicon で起動できない。v0.1.7 以降はビルド時に ad-hoc 署名を入れている。古い版は `codesign --force --deep --sign - /Applications/そろばん.app` で応急処置できる |
+| macOS で起動した瞬間に落ちる（ターミナルから起動すると `trace trap` だけ出る） | v0.1.8 以前はアプリ内部の名前（`CFBundleName`・ヘルパーアプリ名）が日本語で、Electron の起動直後のヘルパー探索で落ちていた。v0.1.9 以降は内部名を `Soroban`（表示名だけ「そろばん」）にして解消。古い版は消して入れ直す（クリーンインストール参照） |
 | Windows で `dist:win` が `Cannot create symbolic link`（winCodeSign）で止まる | exe にアイコンを埋め込む工程でシンボリックリンクを作る。**設定 → 開発者向け → 開発者モード** をオンにするか、管理者のターミナルで実行する |
 | `better-sqlite3` の NODE_MODULE_VERSION エラー | `pnpm electron-builder install-app-deps`。テストは必ず `pnpm test` 経由 |
 
