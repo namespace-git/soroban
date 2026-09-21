@@ -1,8 +1,8 @@
 name: release
 
-# タグ v* を push すると、mac / Windows をビルドして GitHub Releases に publish する。
-# アプリは electron-updater でこの Releases を見て更新を知らせる（src/main/updater.ts）。
-# Release は公開状態で作る（releaseType: release）。Draft のままだと updater に見えない。
+# タグ v* を push すると、mac / Windows をビルドし、最後に 1 つの GitHub Release にまとめて公開する。
+# electron-builder の publish は使わない（mac と Windows のジョブが別々に Release を作ってしまうため）。
+# アプリは electron-updater でこの Releases（latest.yml / latest-mac.yml）を見て更新を知らせる（src/main/updater.ts）。
 on:
   push:
     tags:
@@ -16,45 +16,65 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
         with:
           version: 10
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-
       - run: pnpm install --frozen-lockfile
-
-      - name: build & publish (mac)
-        run: pnpm dist:mac -- --publish always
+      - name: build (mac, unsigned)
+        run: pnpm dist:mac -- --publish never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 配布用の署名（Apple Developer Program）は付けていないため、
-          # ビルド時の自動署名探索を無効にする（README の「初回起動」参照）
+          # 配布用の署名（Apple Developer Program）は付けていない（README の「初回起動」参照）
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            release/*.dmg
+            release/*.dmg.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
 
   build-windows:
     runs-on: windows-latest
-    # mac が先に Release を作り、Windows はそこへ成果物を足す（同時に走ると Release が 2 つできる）
-    needs: build-macos
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
         with:
           version: 10
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-
       - run: pnpm install --frozen-lockfile
+      - name: build (windows)
+        run: pnpm dist:win -- --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
 
-      - name: build & publish (windows)
-        run: pnpm dist:win -- --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  publish:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - name: create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: dist/*
