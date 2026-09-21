@@ -69,22 +69,19 @@ pnpm electron-builder install-app-deps
 
 ---
 
-## macOS でビルドしてデスクトップから起動する
+## インストール（配布版を使う）
 
-ビルドは **Mac 上で**行う（Windows からは macOS 用の dmg は作れない）。
+ビルドしなくても、GitHub の **Releases** から入れられる：https://github.com/namespace-git/soroban/releases/latest
 
-```bash
-git clone https://github.com/namespace-git/soroban.git
-cd soroban
-corepack enable
-pnpm install
-pnpm dist:mac
-```
+| OS | ファイル | 入れ方 |
+|---|---|---|
+| macOS（Apple Silicon: M1〜） | `soroban-<版>-arm64.dmg` | dmg を開き「そろばん」を **Applications にドラッグ** |
+| macOS（Intel） | `soroban-<版>-x64.dmg` | 同上 |
+| Windows | `soroban-setup-<版>.exe` | ダブルクリック → インストール先を選んで進む |
 
-`release/` に `soroban-0.1.0-arm64.dmg`（Apple Silicon）と `soroban-0.1.0-x64.dmg`（Intel）ができる。
-自分の Mac に合う方を開き、**「そろばん」を Applications フォルダにドラッグ**する。
+どの Mac か分からないときは、 → 「このMacについて」で「チップ Apple M…」なら arm64。
 
-### 初回起動（署名なしアプリの開き方）
+### macOS の初回起動（署名なしアプリの開き方）
 
 配布用の署名（Apple Developer Program）は付けていないので、初回だけ Gatekeeper に止められる。
 
@@ -97,30 +94,71 @@ xattr -dr com.apple.quarantine /Applications/そろばん.app
 
 2 回目以降は Launchpad や Dock から普通に起動できる。Dock に残しておけばデスクトップから 1 クリック。
 
-### 動作確認だけしたい（dmg を作らない）
+### クリーンインストール（古い版を消してから入れ直す）
+
+初期のリリース（v0.1.0〜v0.1.5）を入れたことがある場合、古い Electron が残っていて起動直後にクラッシュすることがある。一度きれいに消してから最新版を入れる。**データ（DB）は別の場所にあるので消えない**が、念のため先にバックアップを取る。
+
+macOS：
 
 ```bash
-pnpm pack:mac          # release/mac-arm64/そろばん.app ができる
-open release/mac-arm64/そろばん.app
+# 1. アプリを終了してから、本体を消す
+rm -rf /Applications/そろばん.app
+# 2. 更新の一時ファイルとキャッシュを消す（DB は ~/Library/Application Support/soroban/soroban.db。消さない）
+rm -rf ~/Library/Caches/jp.namespace.soroban ~/Library/Caches/soroban-updater
+# 3. 最新の dmg を入れ直し、初回は右クリック → 開く
 ```
 
-### Windows
+データごと完全に消してやり直すとき（**取引データも消える**。バックアップを取ってから）：
 
 ```bash
-pnpm dist:win          # release/soroban-setup-0.1.0.exe（NSIS インストーラ）
+rm -rf ~/Library/Application Support/soroban
 ```
+
+Windows：
+
+1. 設定 → アプリ → 「そろばん」をアンインストール
+2. `%LOCALAPPDATA%soroban-updater` があれば削除（更新の一時ファイル）
+3. 最新の `soroban-setup-<版>.exe` を実行
+
+データごと消すときは `%APPDATA%soroban` も削除（バックアップを取ってから）。
+
+### 自分でビルドする（macOS）
+
+ビルドは **Mac 上で**行う（Windows からは macOS 用の dmg は作れない）。
+
+```bash
+git clone https://github.com/namespace-git/soroban.git
+cd soroban
+corepack enable
+pnpm install
+pnpm dist:mac
+```
+
+`release/` に `soroban-<版>-arm64.dmg` と `soroban-<版>-x64.dmg` ができる。動作確認だけなら `pnpm pack:mac` → `open release/mac-arm64/そろばん.app`。
+
+Windows は `pnpm dist:win` → `release/soroban-setup-<版>.exe`。
 
 ---
 
-## 更新
+## 自動アップデート
 
-`pnpm release:patch`（または `release:minor`）を叩くと `package.json` のバージョンを上げてタグを push する。
-GitHub Actions（`.github/workflows/release.yml`）が mac・Windows の両方をビルドして GitHub Releases に載せる。
+アプリは **起動 10 秒後と 6 時間ごと**に GitHub Releases を確認し、新しい版があればヘッダの下に「新しいバージョン vX.Y.Z があります」と出す。設定タブの「アプリの更新」からも手動で確認できる。
 
-アプリは起動10秒後と6時間ごとに Releases を確認し、新しい版があれば知らせる（設定タブからも手動で確認できる）。
+| OS | 動き |
+|---|---|
+| **Windows** | 裏でダウンロードし、**次に終了するとき**に自動で入れ替わる（バナーの「再起動して更新」で今すぐも可） |
+| **macOS** | Apple の署名が無いアプリは OS が自動入れ替えを拒否するため、「ダウンロード」で Releases のページを開く → dmg を開いて Applications に上書き（初回と同じく右クリック → 開く）。**DB はそのまま**で、起動時に自動で新しいスキーマへ移行する |
 
-- **Windows**：見つかったら裏でダウンロードし、次に終了するときに自動で入れ替わる
-- **macOS**：署名（Apple Developer Program）を付けていないため自動では入れ替えられない。「新しいバージョンがあります」から Releases のページを開き、dmg を落として Applications に上書きする（データはそのまま）
+更新が見つからないとき：オフラインか、GitHub の API 制限（1 時間に 60 回）に当たっている。しばらく待つか、Releases のページを直接見る。
+
+### リリースの出し方（開発者向け）
+
+```bash
+pnpm release:patch     # 0.1.6 → 0.1.7。バージョンを上げてタグを push
+pnpm release:minor     # 0.1.6 → 0.2.0
+```
+
+タグ `v*` を push すると GitHub Actions（`.github/workflows/release.yml`）が動く：mac（macos-14 ランナー、arm64/x64 の dmg）と Windows（NSIS）をビルド → 最後に 1 つの Release にまとめて公開（`latest.yml` / `latest-mac.yml` を含む。Draft ではなく公開状態。Draft だとアプリの更新確認に見えない）。
 
 ---
 
