@@ -23,9 +23,9 @@ const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleStr
         </span>
       </div>
       <div class="p">
-        <span class="p-label">入力すれば増える見込み</span>
-        <span class="p-value dim">+{{ yen(strip?.pending_profit_estimate ?? 0) }}</span>
-        <span class="p-sub">送料・紐付け待ち {{ strip?.pending_count ?? 0 }} 件（下の「今やること」）</span>
+        <span class="p-label">確定待ちの粗利（見込み）</span>
+        <span class="p-value dim">{{ yen(strip?.pending_profit_estimate ?? 0) }}</span>
+        <span class="p-sub">送料・紐付け待ち {{ strip?.pending_count ?? 0 }} 件。入れると確定します</span>
       </div>
       <div class="p">
         <span class="p-label">売上金の反映待ち</span>

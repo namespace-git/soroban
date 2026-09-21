@@ -78,7 +78,7 @@ function shippingStages(p: Pick<PurchaseSummary, 'fulfillment' | 'shipped_at' | 
   return [
     { label: '注文', state: 'done' },
     { label: p.shipped_at ? `発送 ${shortDate(p.shipped_at)}` : '発送', state: shipped ? 'done' : 'now' },
-    { label: '配送中', state: delivered ? 'done' : (f === 'shipped' ? 'now' : 'pending') },
+    { label: '配送', state: delivered ? 'done' : (f === 'shipped' ? 'now' : 'pending') },
     { label: p.delivered_at ? `到着 ${shortDate(p.delivered_at)}` : '到着', state: delivered ? 'done' : 'pending' },
   ]
 }
@@ -780,7 +780,7 @@ async function remove(p: PurchaseSummary) {
 .table-panel td.actions { white-space: nowrap; text-align: right; }
 .table-panel .actions > * { vertical-align: middle; margin-left: 4px; }
 .table-panel th.col-thumb { width: 64px; }
-.table-panel th.col-ship { width: 200px; }
+.table-panel th.col-ship { width: 240px; }
 .col-ship-icon { margin-right: 4px; vertical-align: -2px; color: var(--text-faint); }
 .clickable { cursor: pointer; }
 
@@ -822,14 +822,15 @@ tr.focused { background: var(--brand-soft); }
   font-size: var(--fs-13);
 }
 
-/* --- 配送の進行：注文 › 発送 › 配送中 › 到着 --- */
+/* --- 配送の進行：注文 › 発送 › 配送 › 到着。1行に収める（折り返すと点灯が読み違えられる） --- */
 .ship-progress {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 4px;
   font-size: var(--fs-12);
   color: var(--text-faint);
+  white-space: nowrap;
 }
 .ship-stage { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .ship-dot {
@@ -851,12 +852,13 @@ tr.focused { background: var(--brand-soft); }
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 .acc {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  height: auto;
   padding: 12px 14px;
   border-radius: var(--radius-md);
   background: var(--surface);

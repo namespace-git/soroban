@@ -288,33 +288,30 @@ async function doReopen() {
               <h2 class="section-head-title">タグ別の集計</h2>
             </div>
             <template v-if="statement && statement.by_tag.length">
-              <div class="side-table-scroll">
-                <table class="compact">
-                  <thead>
-                    <tr>
-                      <th>タグ</th>
-                      <th class="num">件数</th>
-                      <th class="num">粗利</th>
-                      <th class="num">按分経費</th>
-                      <th class="num">按分後利益</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="t in statement.by_tag" :key="t.tag.id">
-                      <td><StatusChip tone="info" :label="t.tag.name" /></td>
-                      <td class="num">{{ t.count }}</td>
-                      <td class="num">{{ yen(t.gross_profit) }}</td>
-                      <td class="num dim">{{ yen(t.allocated_expense) }}</td>
-                      <td class="num"><strong :class="t.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(t.net_profit) }}</strong></td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+              <table class="compact">
+                <thead>
+                  <tr>
+                    <th>タグ</th>
+                    <th class="num">件数</th>
+                    <th class="num">粗利</th>
+                    <th class="num" title="按分後利益＝粗利−按分経費">按分後利益</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="t in statement.by_tag" :key="t.tag.id">
+                    <td><StatusChip tone="info" :label="t.tag.name" /></td>
+                    <td class="num">{{ t.count }}</td>
+                    <td class="num">{{ yen(t.gross_profit) }}</td>
+                    <td class="num" :title="'按分経費 ' + yen(t.allocated_expense)">
+                      <strong :class="t.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(t.net_profit) }}</strong>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
               <p v-if="statement.multi_tag_count > 0" class="multi-tag-note">
                 <Icon name="alert" :size="14" />
                 {{ statement.multi_tag_count }} 件に複数のタグが付いています
               </p>
-              <p class="faint tag-summary-hint">払う相手のタグは1販売に1つにしておくと、この集計がそのまま使えます</p>
             </template>
             <EmptyState v-else-if="statement" title="タグの付いた販売はまだありません" />
           </div>
@@ -492,9 +489,6 @@ async function doReopen() {
 }
 
 /* --- 右：タグ別の集計 --- */
-.side-table-scroll { overflow-x: auto; }
-.side-table-scroll table { min-width: 420px; }
-.tag-summary-hint { margin: 8px 0 0; }
 .multi-tag-note {
   display: flex;
   align-items: center;

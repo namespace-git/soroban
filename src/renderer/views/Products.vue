@@ -141,11 +141,16 @@ watch(revision, async () => {
   }
 })
 
-const headerSubParts = computed(() => {
+/** 仕入明細の元の名前（表示名と違うときだけ）。長くなりがちなので、シリーズ等とは別の行にする */
+const headerSourceName = computed(() => {
+  const k = karte.value
+  return k?.source_name && k.source_name !== k.summary.name ? k.source_name : null
+})
+/** シリーズ・最終仕入・最終販売。1行に収め、収まらなければ末尾を省略する */
+const headerMetaParts = computed(() => {
   const k = karte.value
   if (!k) return []
   const parts: string[] = []
-  if (k.source_name && k.source_name !== k.summary.name) parts.push(k.source_name)
   if (k.summary.series_code) parts.push(`シリーズ ${k.summary.series_code}`)
   if (k.summary.last_purchased_at) parts.push(`最終仕入 ${k.summary.last_purchased_at}`)
   if (k.summary.last_sold_at) parts.push(`最終販売 ${k.summary.last_sold_at}`)
@@ -213,6 +218,8 @@ function itemStatePill(i: InventoryItem): { tone: 'info' | 'warn' | 'neutral'; l
   if (i.fulfillment === 'pending' || i.fulfillment === 'shipped') return { tone: 'warn', label: '未着' }
   return { tone: 'neutral', label: '未出品' }
 }
+/** 手元の在庫のうち、出品に引き当て済み（出品中）の点数。表の見出しで内訳として出す */
+const karteListedCount = computed(() => karte.value?.items.filter(i => !!i.listing).length ?? 0)
 function trackItem(i: InventoryItem) {
   goto('inventory', { focusId: i.id })
 }
@@ -363,7 +370,8 @@ const estimateCompare = computed(() => {
                 <StatusChip v-for="t in karte.summary.tags" :key="t.id" tone="info" :label="t.name" />
               </div>
               <h2 class="karte-name">{{ karte.summary.name }}</h2>
-              <p v-if="headerSubParts.length" class="faint karte-sub">{{ headerSubParts.join(' ・ ') }}</p>
+              <p v-if="headerSourceName" class="faint karte-sub karte-sub-line">{{ headerSourceName }}</p>
+              <p v-if="headerMetaParts.length" class="faint karte-sub karte-sub-line">{{ headerMetaParts.join(' ・ ') }}</p>
             </div>
             <div class="karte-head-actions">
               <button class="sm ghost" @click="openProductTagPicker(karte.summary.model_code, $event)">タグ</button>
@@ -441,7 +449,9 @@ const estimateCompare = computed(() => {
           </div>
 
           <div class="panel table-panel">
-            <p class="panel-title table-title">手元の在庫（{{ karte.items.length }} 点）</p>
+            <p class="panel-title table-title">
+              手元の在庫（{{ karte.in_stock.count }} 点<template v-if="karteListedCount">・うち出品中 {{ karteListedCount }}</template>）
+            </p>
             <table v-if="karte.items.length" class="compact">
               <thead>
                 <tr>
@@ -548,6 +558,8 @@ const estimateCompare = computed(() => {
   gap: 10px;
   align-items: center;
   padding: 10px 8px;
+  height: auto;
+  min-height: 60px;
   border: none;
   border-top: 1px solid var(--line-soft);
   background: none;
@@ -597,6 +609,7 @@ const estimateCompare = computed(() => {
 .karte-head-text { min-width: 0; flex: 1; }
 .karte-name { margin: 4px 0 0; font-size: var(--fs-20); font-weight: 700; }
 .karte-sub { margin: 4px 0 0; font-size: var(--fs-12); }
+.karte-sub-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .karte-head-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
 .stat-grid {
@@ -622,5 +635,6 @@ const estimateCompare = computed(() => {
   .layout { grid-template-columns: 1fr; }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .table-panel { overflow-x: auto; }
+  .prow-list { max-height: 320px; overflow-y: auto; }
 }
 </style>

@@ -598,7 +598,10 @@ async function editNote(item: InventoryItem) {
               <button
                 v-if="g.model_code" type="button" class="link-action"
                 @click="goto('products', { modelCode: g.model_code })"
-              >商品カルテ →</button>
+              >
+                商品カルテ
+                <Icon name="arrow-right" :size="16" />
+              </button>
               <button v-else type="button" class="link-action" @click="assignGroupModelCode(g)">型番を付ける</button>
             </div>
           </div>
@@ -843,6 +846,9 @@ async function editNote(item: InventoryItem) {
 .aging-chip-btn:hover:not(:disabled) { background: transparent; }
 
 .link-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   background: transparent;
   border: none;
   padding: 0;
@@ -852,6 +858,7 @@ async function editNote(item: InventoryItem) {
   text-decoration: underline dotted;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .link-action:hover:not(:disabled) { background: transparent; color: var(--text); }
 

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// 売上タブの上部：今月の粗利カードと、直近12か月のグラフ。
+// 売上タブの上部：直近12か月のグラフ（開閉カード）。
+// 「今月の粗利」はトップバーのピル（App.vue）と重複するため、ここには置かない。
 // 「出品中」「売れた・要入力」は Sales.vue の進捗ストリップ（StageStrip、getSalesProgress）が
 // 同じ数字をより詳しく出すため、ここでは重複させない（同じことをする表示を2つ作らない）。
 // 合計は既存データを足すだけ（利益の再計算はしない）。
@@ -32,11 +33,6 @@ async function load() {
 }
 onMounted(load)
 watch([revision, dataRevision], load)
-
-// --- 今月の粗利（転売のみ。ホームの主要指標と同じ考え方） ---
-const thisMonthSummary = computed(() =>
-  monthly.value.find(m => m.month === thisMonthLocal() && m.kind === 'resale') ?? null,
-)
 
 // --- グラフ：直近12か月。売上（棒）＋粗利（線）＋純利益（線） ---
 const chartKind = ref<SaleKind>('resale')
@@ -191,16 +187,6 @@ const gridLines = computed(() => domainMin.value < 0
 
 <template>
   <div class="sales-summary">
-    <Skeleton v-if="!loaded" kind="stats" />
-    <div v-else class="stat-card brand">
-      <span class="stat-card-label">今月の粗利</span>
-      <span class="stat-card-value">{{ yen(thisMonthSummary?.gross_profit ?? 0) }}</span>
-      <span class="stat-card-sub">
-        売上 {{ yen(thisMonthSummary?.revenue ?? 0) }} ・ 件数 {{ thisMonthSummary?.sales_count ?? 0 }} 件
-        ・ 純利益 {{ yen(thisMonthSummary?.net_profit ?? 0) }}
-      </span>
-    </div>
-
     <div class="panel chart-panel">
       <div class="section-head">
         <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
@@ -218,7 +204,9 @@ const gridLines = computed(() => domainMin.value < 0
         <button class="sm ghost" @click="toggleChart">{{ showChart ? 'グラフを隠す' : 'グラフを見せる' }}</button>
       </div>
 
-      <div v-if="showChart" class="chart-wrap">
+      <Skeleton v-if="!loaded" kind="table" :rows="3" />
+
+      <div v-else-if="showChart" class="chart-wrap">
         <svg :viewBox="`0 0 ${W} ${H}`" class="chart" preserveAspectRatio="xMidYMid meet" @mouseleave="onLeaveChart">
           <line v-for="gl in gridLines" :key="gl.y" :x1="PAD_L" :y1="gl.y" :x2="W - PAD_R" :y2="gl.y" class="grid" />
           <text v-for="gl in gridLines" :key="'gl' + gl.y" :x="PAD_L - 6" :y="gl.y + 3" class="grid-label">{{ gl.label }}</text>
@@ -276,7 +264,7 @@ const gridLines = computed(() => domainMin.value < 0
           <div class="chart-tooltip-row" :class="tooltip.p.netProfit < 0 ? 'loss' : 'profit'">純利益 {{ yen(tooltip.p.netProfit) }}</div>
         </div>
       </div>
-      <p v-if="showChart" class="chart-hint">月をクリックすると、その月の販売を売上タブで表示します</p>
+      <p v-if="loaded && showChart" class="chart-hint">月をクリックすると、その月の販売を売上タブで表示します</p>
     </div>
   </div>
 </template>
@@ -288,18 +276,6 @@ const gridLines = computed(() => domainMin.value < 0
   gap: 16px;
   margin-bottom: 20px;
 }
-
-.stat-card { padding-top: 12px; padding-bottom: 12px; }
-.stat-card-label { font-size: var(--fs-12); font-weight: 600; }
-.stat-card-value {
-  font-size: var(--fs-36);
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.1;
-}
-.stat-card.brand .stat-card-value { font-size: var(--fs-44); }
-.stat-card-sub { font-size: var(--fs-12); color: var(--text-dim); }
-.stat-card.brand .stat-card-sub { color: var(--text); opacity: .75; }
 
 .chart-panel .section-head select { margin-right: 4px; }
 

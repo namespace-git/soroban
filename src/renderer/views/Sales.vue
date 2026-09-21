@@ -1168,7 +1168,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 .work-panel { padding: 6px 8px; overflow: hidden; }
 .work-row {
   display: grid;
-  grid-template-columns: 56px minmax(180px, 1fr) 96px 200px 200px 120px 148px;
+  grid-template-columns: 56px minmax(180px, 1fr) 96px 200px 200px 110px auto;
   grid-template-areas: "thumb product price ship cost profit ops";
   align-items: center;
   gap: 12px;
@@ -1206,17 +1206,18 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   white-space: nowrap;
 }
 .cell-ops button { white-space: nowrap; }
 
 @media (max-width: 1099px) {
   .work-row {
-    grid-template-columns: 48px minmax(0, 1fr) auto;
+    grid-template-columns: 48px minmax(0, 1fr);
     grid-template-areas:
-      "thumb product ops"
-      "meta  meta    meta";
+      "thumb product"
+      "meta  meta"
+      "ops   ops";
     row-gap: 8px;
   }
   .cell-meta {
@@ -1224,6 +1225,10 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
     display: flex;
     flex-wrap: wrap;
     gap: 10px 20px;
+  }
+  .cell-ops {
+    grid-area: ops;
+    justify-content: flex-end;
   }
   .cell-price, .cell-ship, .cell-cost { min-width: 140px; }
 }

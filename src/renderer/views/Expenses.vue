@@ -742,6 +742,14 @@ async function deleteCurrent() {
           </div>
 
           <table v-if="form.lines.length" class="compact lines-table">
+            <colgroup>
+              <col />
+              <col class="col-price" />
+              <col class="col-qty" />
+              <col class="col-amount" />
+              <col class="col-category" />
+              <col class="col-actions" />
+            </colgroup>
             <thead>
               <tr>
                 <th>品名</th>
@@ -883,7 +891,7 @@ async function deleteCurrent() {
 
 .layout {
   display: grid;
-  grid-template-columns: 400px 1fr;
+  grid-template-columns: 340px 1fr;
   gap: 16px;
   align-items: start;
 }
@@ -977,11 +985,21 @@ async function deleteCurrent() {
 
 .detail-panel {
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: minmax(200px, 260px) 1fr;
   gap: 20px;
   align-items: start;
+  container-type: inline-size;
 }
 .detail-empty { display: flex; }
+
+/* 右ペインの幅が 700px を切ったら、画像を上・フォームを下に縦積みにする */
+@container (max-width: 700px) {
+  .detail-panel {
+    grid-template-columns: 1fr;
+  }
+  .receipt-frame:not(.empty) { height: 260px; }
+  .receipt-img { height: 100%; max-height: none; object-fit: contain; }
+}
 
 .receipt-pane {
   display: flex;
@@ -1076,6 +1094,7 @@ async function deleteCurrent() {
 .tax-add-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1097,11 +1116,18 @@ async function deleteCurrent() {
   overflow: auto;
 }
 
-.lines-table .col-price { width: 130px; }
-.lines-table .col-qty { width: 80px; }
-.lines-table .col-amount { width: 110px; }
-.lines-table .col-category { width: 130px; }
-.lines-table .col-actions { width: 36px; }
+.lines-table { table-layout: fixed; }
+.lines-table col.col-price { width: 78px; }
+.lines-table col.col-qty { width: 52px; }
+.lines-table col.col-amount { width: 72px; }
+.lines-table col.col-category { width: 92px; }
+.lines-table col.col-actions { width: 22px; }
+.lines-table th, .lines-table td { padding: 6px 8px; }
+.lines-table input, .lines-table select {
+  padding: 6px;
+  height: 30px;
+  font-size: var(--fs-13);
+}
 .full { width: 100%; }
 
 .add-line { align-self: flex-start; }

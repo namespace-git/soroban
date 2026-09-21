@@ -3,11 +3,24 @@
 // 数字・文言（title/detail/profit_hint）は main（getInbox）が組み立て済みのものをそのまま出す。
 // レンダラー側では利益を再計算しない。
 import { ref, reactive, computed, onMounted, watch, inject, type Ref } from 'vue'
-import type { Inbox, InboxItem, ShippingMethod, DashboardStats } from '../../shared/types'
+import type { Inbox, InboxItem, InboxKind, ShippingMethod, DashboardStats } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
+import StatusPill from '../components/StatusPill.vue'
+import ProfitStripBar from '../components/ProfitStripBar.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+
+// グループ見出しの表示名。InboxGroup.label は main が返すが、文言はここで固定する
+// （main 側のラベル変更に画面が引きずられないように）
+const groupLabels: Record<InboxKind, string> = {
+  ship: '発送する',
+  shipping: '送料を入れる',
+  link: '在庫を紐付ける',
+  confirm: '仕入の価格を入れる',
+  collect: '取り込みの問題',
+  reminder: '忘れていませんか',
+}
 
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
@@ -71,6 +84,19 @@ function profitHintText(kind: string, hint: { min: number; max: number } | null 
   if (!hint) return null
   const verb = kind === 'shipping' ? '送料を入れると粗利 ' : kind === 'link' ? '紐付けると粗利 ' : '粗利 '
   return hint.min === hint.max ? `${verb}約 ${yen(hint.min)}` : `${verb}${yen(hint.min)}〜${yen(hint.max)}`
+}
+// 幅の下限が負なら赤（片方だけ負でも赤）。両方 0 以上なら緑
+function profitHintClass(hint: { min: number; max: number } | null | undefined): string {
+  return hint && hint.min < 0 ? 'loss' : 'profit'
+}
+
+// --- サムネイル。読み込み失敗したら以後プレースホルダに固定する（Sales.vue と同じやり方） ---
+const thumbFailed = ref<Set<string>>(new Set())
+function showThumb(item: InboxItem): boolean {
+  return !!item.thumb_url && !thumbFailed.value.has(item.id)
+}
+function onThumbError(id: string) {
+  thumbFailed.value = new Set(thumbFailed.value).add(id)
 }
 
 // --- ship / shipping：行内の発送方法セレクト ---
@@ -159,36 +185,8 @@ function gotoTopModel() {
     </div>
 
     <template v-if="inbox">
-      <!-- 上：利益ストリップ（ProfitStripBar 相当。共通部品が無いためここに直接実装） -->
-      <div class="profit-strip">
-        <div class="stat-card brand">
-          <span class="stat-card-label">今月の粗利</span>
-          <span class="stat-card-value">{{ yen(inbox.strip.gross_profit) }}</span>
-          <span class="stat-card-sub">
-            売上 {{ yen(inbox.strip.revenue) }} ・ {{ inbox.strip.sales_count }} 件 ・ 純利益 {{ yen(inbox.strip.net_profit) }}
-          </span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-card-label">入力すれば増える見込み</span>
-          <span class="stat-card-value dim">+{{ yen(inbox.strip.pending_profit_estimate) }}</span>
-          <span class="stat-card-sub">送料・紐付け待ち {{ inbox.strip.pending_count }} 件（下の「今やること」）</span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-card-label">売上金の反映待ち</span>
-          <span class="stat-card-value dim">{{ yen(inbox.strip.awaiting_payout) }}</span>
-          <span class="stat-card-sub">発送済み・受取評価待ち {{ inbox.strip.awaiting_payout_count }} 件</span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-card-label">先月の純利益</span>
-          <span class="stat-card-value dim">{{ inbox.strip.last_month ? yen(inbox.strip.last_month.net_profit) : '—' }}</span>
-          <span class="stat-card-sub">
-            <template v-if="inbox.strip.last_month">
-              {{ inbox.strip.last_month.closed ? '締め済み' : '未締め' }} ・ {{ inbox.strip.last_month.month }}
-            </template>
-            <template v-else>データなし</template>
-          </span>
-        </div>
-      </div>
+      <!-- 上：利益ストリップ（共通部品） -->
+      <ProfitStripBar :strip="inbox.strip" />
 
       <div class="inbox-grid">
         <!-- 左（主）：今やること -->
@@ -203,14 +201,21 @@ function gotoTopModel() {
           <template v-else>
             <div v-for="group in inbox.groups" :key="group.kind" v-show="group.items.length" class="group">
               <p class="group-title">
-                <span class="group-label">{{ group.label }}</span>
+                <span class="group-label">{{ groupLabels[group.kind] }}</span>
                 <span class="n" :class="{ soft: group.kind === 'reminder' }">{{ group.items.length }}</span>
                 <span class="group-hint">{{ group.hint }}</span>
               </p>
 
               <div v-for="item in group.items" :key="item.id" class="inbox-row">
                 <div class="row-thumb">
-                  <img v-if="item.thumb_url" class="row-thumb-img" :src="item.thumb_url" alt="" loading="lazy" />
+                  <img
+                    v-if="showThumb(item)"
+                    class="row-thumb-img"
+                    :src="item.thumb_url!"
+                    alt=""
+                    loading="lazy"
+                    @error="onThumbError(item.id)"
+                  />
                   <span v-else class="row-thumb-ph" :class="{ warn: group.kind === 'collect' }">
                     {{ group.kind === 'collect' ? '!' : placeholderChar(item.title) }}
                   </span>
@@ -219,12 +224,12 @@ function gotoTopModel() {
                 <div class="row-main">
                   <div class="row-title">
                     <span>{{ item.title }}</span>
-                    <StatusChip v-if="group.kind === 'ship'" tone="warn" label="発送してください" />
+                    <StatusPill v-if="group.kind === 'ship'" tone="solid-info" label="発送してください" />
                     <StatusChip v-if="group.kind === 'confirm' && item.purchase" tone="neutral" :label="item.purchase.shop_account_name" />
                   </div>
                   <div class="row-detail">
                     <span class="dim">{{ item.detail }}</span>
-                    <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint">
+                    <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint" :class="profitHintClass(item.profit_hint)">
                       ・ {{ profitHintText(group.kind, item.profit_hint) }}
                     </b>
                   </div>
@@ -366,20 +371,16 @@ function gotoTopModel() {
 </template>
 
 <style scoped>
-/* --- 利益ストリップ。左端がやや広い主役カード、残り3枚は同幅 --- */
+/* --- 利益ストリップ（読み込み中はこのカード分割のまま。読み込み後は ProfitStripBar に置き換える） --- */
+.profit-strip-bar {
+  margin-bottom: 18px;
+}
 .profit-strip {
   display: grid;
   grid-template-columns: 1.4fr 1fr 1fr 1fr;
   gap: 12px;
   margin-bottom: 18px;
 }
-.profit-strip .stat-card-value {
-  font-size: var(--fs-28);
-}
-.profit-strip .stat-card.brand .stat-card-value {
-  font-size: var(--fs-36);
-}
-.stat-card-value.dim { color: var(--text-dim); }
 .unit { font-size: var(--fs-12); font-weight: 400; margin-left: 2px; }
 
 /* --- レイアウト。左：今やること（主）、右：見直すもの --- */
@@ -479,7 +480,8 @@ function gotoTopModel() {
   margin-top: 2px;
   font-size: var(--fs-12);
 }
-.profit-hint { color: var(--profit); font-weight: 700; }
+/* 色は .profit / .loss（style.css）に委ねる。負の見込みを緑で出さない */
+.profit-hint { font-weight: 700; }
 
 .row-act {
   display: flex;

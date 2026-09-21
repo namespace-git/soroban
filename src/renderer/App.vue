@@ -399,9 +399,9 @@ watch(dataRevision, loadProfitStrip)
         <button class="topbar-profit-btn" title="ホームで詳しく見る" @click="goto('dashboard')">
           <ProfitStripBar compact :strip="profitStrip" />
         </button>
-        <span class="run-status" :class="{ warn: runIsWarn }">
-          <Icon v-if="runIsWarn" name="alert" :size="14" />
-          {{ runStatusText }}
+        <span class="run-status" :class="{ warn: runIsWarn }" :title="runStatusText">
+          <Icon v-if="runIsWarn" name="alert" :size="14" class="run-status-icon" />
+          <span class="run-status-text">{{ runStatusText }}</span>
         </span>
         <button class="primary" :disabled="collecting" @click="collect">
           <Icon name="refresh" :size="16" />
@@ -578,6 +578,10 @@ watch(dataRevision, loadProfitStrip)
 
 .global-search { flex-shrink: 0; }
 
+@media (max-width: 1099px) {
+  .global-search :deep(.search-box) { width: 200px; }
+}
+
 .topbar-profit-btn {
   flex-shrink: 0;
   background: transparent;
@@ -588,17 +592,26 @@ watch(dataRevision, loadProfitStrip)
 }
 
 .run-status {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+  flex: 1 1 auto;
   font-size: var(--fs-13);
   color: var(--text-dim);
-  white-space: nowrap;
 }
 .run-status.warn { color: var(--warn); }
+.run-status-icon { flex-shrink: 0; }
+.run-status-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 
 .topbar button {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 6px;
   white-space: nowrap;
