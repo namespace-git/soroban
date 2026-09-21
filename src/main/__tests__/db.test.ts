@@ -839,6 +839,22 @@ describe('db（:memory:）', () => {
     expect(db.getShopAccount(shopId)!.import_keywords).toBeNull()
   })
 
+  it('updateShopAccount：default_shipping_fee の保存・null に戻す・負や小数はエラー', () => {
+    expect(db.getShopAccount(shopId)!.default_shipping_fee).toBeNull()
+
+    db.updateShopAccount(shopId, { default_shipping_fee: 399 })
+    expect(db.getShopAccount(shopId)!.default_shipping_fee).toBe(399)
+    expect(db.listShopAccounts().find(a => a.id === shopId)!.default_shipping_fee).toBe(399)
+
+    db.updateShopAccount(shopId, { default_shipping_fee: null })
+    expect(db.getShopAccount(shopId)!.default_shipping_fee).toBeNull()
+
+    expect(() => db.updateShopAccount(shopId, { default_shipping_fee: -1 }))
+      .toThrow('送料は 0 以上の整数で')
+    expect(() => db.updateShopAccount(shopId, { default_shipping_fee: 1.5 }))
+      .toThrow('送料は 0 以上の整数で')
+  })
+
   it('resetData：仕入・販売・紐付け・runを消す。マスタ（shop_account/shipping_method/setting）は残す', () => {
     db.createPurchase({
       shop_account_id: shopId,
@@ -1188,7 +1204,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('16')
+      expect(db.getSettings().schema_version).toBe('17')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1309,7 +1325,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('16')
+      expect(db.getSettings().schema_version).toBe('17')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')

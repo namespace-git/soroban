@@ -190,6 +190,18 @@ async function saveAccountKeywords(a: ShopAccount, value: string) {
   toast('保存しました', 'ok')
 }
 
+async function saveAccountShippingFee(a: ShopAccount, value: string) {
+  const fee = value === '' ? null : Number(value)
+  if (fee !== null && (!Number.isFinite(fee) || fee < 0)) {
+    toast('送料は 0 以上の整数で入力してください', 'warn')
+    accounts.value = await window.soroban.listShopAccounts()
+    return
+  }
+  await window.soroban.updateShopAccount(a.id, { default_shipping_fee: fee })
+  accounts.value = await window.soroban.listShopAccounts()
+  toast('保存しました', 'ok')
+}
+
 // --- 仕入先の自動タグ：作成する仕入・その在庫・販売にそのまま引き継がれる（後から外せる） ---
 
 const tagPickerAccount = ref<ShopAccount | null>(null)
@@ -480,7 +492,7 @@ const runLabel: Record<string, string> = {
         </div>
         <table class="compact accounts-table">
           <thead>
-            <tr><th>名前</th><th>種別</th><th>取り込みキーワード</th><th>自動タグ</th><th></th></tr>
+            <tr><th>名前</th><th>種別</th><th>取り込みキーワード</th><th>自動タグ</th><th class="num">送料の既定値</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="a in accounts" :key="a.id">
@@ -511,6 +523,17 @@ const runLabel: Record<string, string> = {
                   <button class="sm ghost" @click="openAccountTagPicker(a, $event)" title="自動タグを編集する">タグ</button>
                 </div>
               </td>
+              <td class="num">
+                <span class="num money-cell">
+                  <span class="yen">¥</span>
+                  <input
+                    type="number" min="0" step="1" style="width:90px"
+                    :value="a.default_shipping_fee ?? ''"
+                    title="手入力の仕入でこの仕入先を選んだとき送料に入る（税込）"
+                    @change="saveAccountShippingFee(a, ($event.target as HTMLInputElement).value)"
+                  />
+                </span>
+              </td>
               <td class="actions">
                 <button class="sm ghost" @click="renameAccount(a)">改名</button>
                 <button v-if="a.kind === 'mellojoy' && a.is_active" class="sm" @click="openShopLogin(a.id)">
@@ -537,6 +560,9 @@ const runLabel: Record<string, string> = {
         </p>
         <p class="faint hint">
           自動タグは、この仕入先の仕入に、登録時に自動で付きます（後から外せます）。在庫・販売まで引き継がれます。
+        </p>
+        <p class="faint hint">
+          送料の既定値は、手入力の仕入でこの仕入先を選んだときに入ります（TikTok Shop なら 399 など）。
         </p>
       </div>
 

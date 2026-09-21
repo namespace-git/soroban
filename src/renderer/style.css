@@ -160,10 +160,13 @@ input, textarea { caret-color: var(--accent); }
   margin: 0;
 }
 
+.nowrap { white-space: nowrap; }
+
 .toolbar {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
   margin-bottom: 12px;
   font-size: var(--fs-13);
   color: var(--text-dim);

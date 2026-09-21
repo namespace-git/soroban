@@ -232,9 +232,9 @@ function extractAllCodes(text: string): string[] {
 // ------------------------------------------------------------
 
 const shopAccounts: ShopAccount[] = [
-  { id: uid(), name: 'メロジョイA', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null, auto_tags: [] },
-  { id: uid(), name: 'メロジョイB', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null, auto_tags: [] },
-  { id: uid(), name: 'TikTok Shop', kind: 'tiktok', note: null, is_active: 1, import_keywords: null, auto_tags: [] },
+  { id: uid(), name: 'メロジョイA', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null, auto_tags: [], default_shipping_fee: null },
+  { id: uid(), name: 'メロジョイB', kind: 'mellojoy', note: null, is_active: 1, import_keywords: null, auto_tags: [], default_shipping_fee: null },
+  { id: uid(), name: 'TikTok Shop', kind: 'tiktok', note: null, is_active: 1, import_keywords: null, auto_tags: [], default_shipping_fee: 399 },
 ]
 
 /** タグ。deleteTag で配列ごと差し替えるので let */
@@ -2319,11 +2319,11 @@ const api: SorobanApi = {
 
   async createShopAccount(name: string, kind: ShopAccountKind = 'other') {
     const id = uid()
-    shopAccounts.push({ id, name, kind, note: null, is_active: 1, import_keywords: null, auto_tags: [] })
+    shopAccounts.push({ id, name, kind, note: null, is_active: 1, import_keywords: null, auto_tags: [], default_shipping_fee: null })
     return wait(id)
   },
 
-  async updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null; auto_tag_ids?: string[] }) {
+  async updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null; auto_tag_ids?: string[]; default_shipping_fee?: number | null }) {
     const account = shopAccounts.find(s => s.id === id)
     if (!account) throw new Error('仕入先が見つかりません')
     if (patch.name !== undefined) account.name = patch.name
@@ -2335,6 +2335,13 @@ const api: SorobanApi = {
     if (patch.auto_tag_ids !== undefined) {
       // 既存の仕入・在庫・販売には遡って付け直さない（次にこの仕入先で作る仕入から効く）
       account.auto_tags = patch.auto_tag_ids.map(tid => tags.find(t => t.id === tid)).filter((t): t is Tag => !!t)
+    }
+    if (patch.default_shipping_fee !== undefined) {
+      const fee = patch.default_shipping_fee
+      if (fee !== null && (!Number.isInteger(fee) || fee < 0)) {
+        throw new Error('送料は 0 以上の整数で')
+      }
+      account.default_shipping_fee = fee
     }
     return wait(undefined)
   },

@@ -11,8 +11,13 @@ import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
 import PurchaseDrawer from '../components/PurchaseDrawer.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
+import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
+import SortTh from '../components/SortTh.vue'
+import { useSort } from '../composables/useSort'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import type { ConfirmChoice } from '../components/ConfirmDialog.vue'
+
+type SortKey = 'ordered_at' | 'shop_account_name' | 'first_line_name' | 'line_count' | 'subtotal' | 'shipping_fee' | 'total_cost'
 
 const MODEL_CODE_PREVIEW_RE = /【?([A-Z]\d{3}(?:-\d+)?)】?/
 
@@ -55,19 +60,46 @@ function placeholderChar(p: PurchaseSummary): string {
   return '—'
 }
 
-/** 下書きを一覧の先頭に（それぞれの中の順序は listPurchases の並びのまま） */
+// --- 並び替え（列見出しクリック） ---
+
+const { sortKey, sortDir, toggle, sortRows } = useSort<SortKey>('ordered_at', 'desc')
+function onSort(key: string) {
+  toggle(key as SortKey)
+}
+function sortValue(p: PurchaseSummary, key: SortKey): string | number | null {
+  switch (key) {
+    case 'ordered_at': return p.ordered_at
+    case 'shop_account_name': return p.shop_account_name
+    case 'first_line_name': return p.first_line_name
+    case 'line_count': return p.line_count
+    case 'subtotal': return p.subtotal
+    case 'shipping_fee': return p.shipping_fee
+    case 'total_cost': return p.total_cost
+  }
+}
+
+/** 下書きを一覧の先頭に（それぞれの中の順序は選んだ並び替えのまま） */
 const sortedPurchases = computed(() =>
-  [...purchases.value].sort((a, b) => (a.status === b.status ? 0 : a.status === 'draft' ? -1 : 1)),
+  [...sortRows(purchases.value, sortValue)]
+    .sort((a, b) => (a.status === b.status ? 0 : a.status === 'draft' ? -1 : 1)),
 )
 
-// --- 検索（クライアント側で絞る） ---
+// --- 検索・期間（クライアント側で絞る） ---
 
 const searchText = ref('')
+const period = ref<Period>('all')
 const filteredPurchases = computed(() =>
-  sortedPurchases.value.filter(p => matchesSearch(
-    [p.first_line_name, p.order_no, p.shop_account_name, p.note, ...p.tags.map(t => t.name)],
-    searchText.value,
-  )),
+  sortedPurchases.value.filter(p =>
+    matchesSearch(
+      [p.first_line_name, p.order_no, p.shop_account_name, p.note, ...p.tags.map(t => t.name)],
+      searchText.value,
+    ) && inPeriod(p.ordered_at, period.value),
+  ),
+)
+
+/** 絞り込んだ範囲の総原価合計（下書きは価格未入力なので除く） */
+const periodTotalCost = computed(() =>
+  filteredPurchases.value.filter(p => p.status !== 'draft').reduce((s, p) => s + p.total_cost, 0),
 )
 
 function previewModelCode(line: PurchaseLineInput): string {
@@ -426,8 +458,9 @@ async function remove(p: PurchaseSummary) {
 
     <div class="toolbar">
       <SearchBox v-model="searchText" placeholder="代表商品名・注文番号・仕入先・メモを検索" />
+      <PeriodSelect v-model="period" />
       <span class="grow" />
-      <span class="faint">{{ filteredPurchases.length }}件</span>
+      <span class="faint">{{ filteredPurchases.length }}件 ／ 総原価 {{ yen(periodTotalCost) }}</span>
     </div>
 
     <Skeleton v-if="!loaded" :rows="5" />
@@ -437,14 +470,14 @@ async function remove(p: PurchaseSummary) {
         <table>
           <thead>
             <tr>
-              <th>注文日</th>
+              <SortTh label="注文日" sort-key="ordered_at" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
               <th class="col-thumb"></th>
-              <th>仕入先</th>
-              <th>商品</th>
-              <th class="num">明細</th>
-              <th class="num">商品計</th>
-              <th class="num">送料</th>
-              <th class="num">総原価</th>
+              <SortTh label="仕入先" sort-key="shop_account_name" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="商品" sort-key="first_line_name" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="明細" sort-key="line_count" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="商品計" sort-key="subtotal" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="送料" sort-key="shipping_fee" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+              <SortTh label="総原価" sort-key="total_cost" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
               <th></th>
             </tr>
           </thead>
@@ -556,7 +589,6 @@ async function remove(p: PurchaseSummary) {
 </template>
 
 <style scoped>
-.nowrap { white-space: nowrap; }
 .form {
   display: flex;
   flex-direction: column;

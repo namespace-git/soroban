@@ -89,6 +89,8 @@ export interface ShopAccount {
    * 後から外せる）。例：マージン対象の口座に「マージン」を付けておくと、その在庫・販売まで派生して見える
    */
   auto_tags: Tag[]
+  /** 手入力の仕入フォームで、この仕入先を選んだときに入る送料の既定値（円、税込）。null なら 0 */
+  default_shipping_fee: number | null
 }
 
 /**
@@ -720,7 +722,7 @@ export interface SorobanApi {
   // マスタ
   listShopAccounts(): Promise<ShopAccount[]>
   createShopAccount(name: string, kind?: ShopAccountKind): Promise<string>
-  updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null; auto_tag_ids?: string[] }): Promise<void>
+  updateShopAccount(id: string, patch: { name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null; auto_tag_ids?: string[]; default_shipping_fee?: number | null }): Promise<void>
   /** 仕入で使われていれば例外（消せない）。使われていなければ削除。ログイン用プロファイルも消す */
   deleteShopAccount(id: string): Promise<void>
   listShippingMethods(): Promise<ShippingMethod[]>

@@ -886,6 +886,16 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 17) {
+    // 仕入先ごとの送料の既定値（手入力の仕入フォームで、この仕入先を選んだときに入る）
+    addColumnIfMissing('shop_account', 'default_shipping_fee', 'INTEGER')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '17')
+         ON CONFLICT(key) DO UPDATE SET value = '17'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -3581,6 +3591,8 @@ export function updateShopAccount(
     name?: string; kind?: ShopAccountKind; is_active?: number; import_keywords?: string | null
     /** 置き換え（丸ごと入れ替え）。この口座の以後の仕入作成時にだけ効く（過去の仕入は変わらない） */
     auto_tag_ids?: string[]
+    /** 手入力の仕入フォームで、この仕入先を選んだときに入る送料の既定値（円）。null で未設定に戻す */
+    default_shipping_fee?: number | null
   },
 ): void {
   const sets: string[] = []
@@ -3593,6 +3605,13 @@ export function updateShopAccount(
   if (patch.import_keywords !== undefined) {
     const trimmed = patch.import_keywords?.trim()
     put('import_keywords', trimmed ? patch.import_keywords : null)
+  }
+  if (patch.default_shipping_fee !== undefined) {
+    const fee = patch.default_shipping_fee
+    if (fee !== null && (!Number.isInteger(fee) || fee < 0)) {
+      throw new Error('送料は 0 以上の整数で')
+    }
+    put('default_shipping_fee', fee)
   }
 
   const tx = db.transaction(() => {

@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS shop_account (
   is_active  INTEGER NOT NULL DEFAULT 1,
   -- 取り込みキーワード（改行・カンマ区切り）。空/NULLなら全部取り込む。詳細は shared/types.ts
   import_keywords TEXT,
+  -- 手入力の仕入フォームで、この仕入先を選んだときに入る送料の既定値（円）。NULL なら 0
+  default_shipping_fee INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

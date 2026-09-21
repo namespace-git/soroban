@@ -10,10 +10,14 @@ import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
 import TimelineDrawer from '../components/TimelineDrawer.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
+import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
+import SortTh from '../components/SortTh.vue'
+import { useSort } from '../composables/useSort'
 
 const MODEL_CODE_RE = /^[A-Z]\d{3}(-\d+)?$/
 
 type StatusFilter = 'all' | 'unlisted' | 'listed' | 'sold' | 'other'
+type SortKey = 'name' | 'shop_account_name' | 'acquired_at' | 'aging_days' | 'landed_cost'
 
 const items = ref<InventoryItem[]>([])
 const statusFilter = ref<StatusFilter>('unlisted')
@@ -51,8 +55,24 @@ function openTimeline(item: InventoryItem) {
 const allTags = ref<Tag[]>([])
 const tagFilter = ref('')
 const searchText = ref('')
+const period = ref<Period>('all')
 // 検索中は状態の絞り込みを無視して全状態から探す（検索したのに見つからないと誤認させないため）
 const hasSearch = computed(() => !!searchText.value.trim())
+
+// --- 並び替え（列見出しクリック）。既定は滞留 desc（現状の並びと同じ） ---
+const { sortKey, sortDir, toggle, sortRows } = useSort<SortKey>('aging_days', 'desc')
+function onSort(key: string) {
+  toggle(key as SortKey)
+}
+function sortValue(i: InventoryItem, key: SortKey): string | number | null {
+  switch (key) {
+    case 'name': return i.name
+    case 'shop_account_name': return i.shop_account_name
+    case 'acquired_at': return i.acquired_at
+    case 'aging_days': return i.aging_days
+    case 'landed_cost': return i.landed_cost
+  }
+}
 
 async function load() {
   // 未出品／出品中は在庫としては同じ in_stock。listing の有無で client 側に分ける。
@@ -135,6 +155,9 @@ const filteredItems = computed(() => {
     ],
     searchText.value,
   ))
+  list = list.filter(i => inPeriod(i.acquired_at, period.value))
+  list = sortRows(list, sortValue)
+  // 「すべて」のときは状態順を優先し、その中を選んだ並びにする
   if (!hasSearch.value && statusFilter.value === 'all') {
     list = [...list].sort((a, b) => statusRank(a) - statusRank(b))
   }
@@ -264,7 +287,7 @@ async function editNote(item: InventoryItem) {
         <option value="unlisted">未出品</option>
         <option value="listed">出品中</option>
         <option value="sold">販売済</option>
-        <option value="other">その他（廃棄・自家消費・分割済）</option>
+        <option value="other">その他（廃棄・自家消費・分割）</option>
       </select>
       <select v-model="tagFilter">
         <option value="">すべてのタグ</option>
@@ -279,9 +302,10 @@ async function editNote(item: InventoryItem) {
         </optgroup>
       </select>
       <SearchBox v-model="searchText" placeholder="名前・型番・素材・メモ・タグ・仕入先を検索" />
+      <PeriodSelect v-model="period" />
       <span v-if="hasSearch" class="faint search-hint">検索中は状態の絞り込みも解除して表示</span>
       <span class="grow" />
-      <span class="faint">{{ filteredItems.length }}点 ／ 原価計 {{ yen(total) }}</span>
+      <span class="faint nowrap">{{ filteredItems.length }}点 ／ 原価計 {{ yen(total) }}</span>
     </div>
     <p class="faint hint-row">
       在庫コード（S-0012）をクリックするとコピーできます。メルカリのタイトルに貼るとその1点が自動で引き当たります。2個セットは【S-0012】【S-0013】のように並べます
@@ -293,11 +317,11 @@ async function editNote(item: InventoryItem) {
         <thead>
           <tr>
             <th class="col-thumb"></th>
-            <th>商品</th>
-            <th>仕入先</th>
-            <th>仕入日</th>
-            <th class="num">滞留</th>
-            <th class="num">原価</th>
+            <SortTh label="商品" sort-key="name" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+            <SortTh label="仕入先" sort-key="shop_account_name" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+            <SortTh label="仕入日" sort-key="acquired_at" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+            <SortTh label="滞留" sort-key="aging_days" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
+            <SortTh label="原価" sort-key="landed_cost" align="right" :active-key="sortKey" :dir="sortDir" @sort="onSort" />
             <th></th>
           </tr>
         </thead>
@@ -357,7 +381,7 @@ async function editNote(item: InventoryItem) {
               </div>
             </td>
             <td class="faint">{{ i.shop_account_name ?? '—' }}</td>
-            <td class="faint">{{ i.acquired_at }}</td>
+            <td class="faint nowrap">{{ i.acquired_at }}</td>
             <td class="num">
               <StatusChip
                 v-if="i.aging_days >= warnDays"
