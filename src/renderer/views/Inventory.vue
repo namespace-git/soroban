@@ -83,6 +83,21 @@ function selectStage(key: string) {
   }
 }
 
+// --- 状態セレクト（4枚のカードに無い「販売済／その他／すべて」も含めて絞る）。
+// カードと同じ groupFilter を共有するので、カードを押せばセレクトも自動で同期する ---
+const statusOptions: Array<{ value: InventoryGroupFilter; label: string }> = [
+  { value: 'unlisted_arrived', label: '届いていて未出品' },
+  { value: 'not_arrived', label: '未着' },
+  { value: 'listed', label: '出品中' },
+  { value: 'sold', label: '販売済' },
+  { value: 'other', label: 'その他（廃棄・自家消費・分割）' },
+  { value: 'all', label: 'すべて' },
+]
+const statusSelectValue = computed<InventoryGroupFilter>({
+  get: () => groupFilter.value,
+  set: (v) => { groupFilter.value = v; agingMinFilter.value = null },
+})
+
 // --- 読み込み ---
 async function loadOverview() {
   overview.value = await window.soroban.getInventoryOverview()
@@ -490,6 +505,10 @@ async function mergeSplit(item: InventoryItem) {
 }
 
 async function editModelCode(item: InventoryItem) {
+  if (item.status === 'sold' && !await confirmDialog(
+    '型番を変更しますか？',
+    { message: '販売済みの在庫の型番を変えると、その販売の利益は新しい型番の集計に移ります' },
+  )) return
   const input = await ask('型番', { initial: item.model_code ?? '', placeholder: '例：Z078-2' })
   if (input === null) return
   const trimmed = input.trim().toUpperCase()
@@ -528,6 +547,9 @@ async function editNote(item: InventoryItem) {
         <button type="button" :class="{ on: viewMode === 'group' }" @click="viewMode = 'group'">型番ごと</button>
         <button type="button" :class="{ on: viewMode === 'flat' }" @click="viewMode = 'flat'">1点ずつ</button>
       </span>
+      <select v-model="statusSelectValue">
+        <option v-for="o in statusOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+      </select>
       <select v-model="tagFilter">
         <option value="">すべてのタグ</option>
         <optgroup v-if="directTagOptions.length" label="直接">
@@ -666,6 +688,14 @@ async function editNote(item: InventoryItem) {
                   <button class="sm ghost" @click="dispose(i, 'disposed')" title="在庫から外して廃棄にする">廃棄</button>
                   <button class="sm ghost" @click="dispose(i, 'personal_use')" title="在庫から外して自家消費にする">自家消費</button>
                 </template>
+                <template v-else-if="i.status === 'sold'">
+                  <button
+                    class="sm ghost" @click="editModelCode(i)"
+                    :title="i.model_code ? '型番を編集する' : '型番を設定する'"
+                  >{{ i.model_code ? '型番編集' : '型番' }}</button>
+                  <button class="sm ghost" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
+                  <button class="sm ghost" @click="editNote(i)" title="メモを編集する">メモ</button>
+                </template>
                 <template v-else-if="i.status === 'split'">
                   <button
                     class="sm ghost" @click="mergeSplit(i)"
@@ -718,7 +748,7 @@ async function editNote(item: InventoryItem) {
                 <CodeChip kind="item" :code="i.item_code" />
                 <CodeChip v-if="i.model_code" kind="model" :code="i.model_code" />
                 <button
-                  v-if="i.status === 'in_stock'" class="sm ghost" @click="editModelCode(i)"
+                  v-if="i.status === 'in_stock' || i.status === 'sold'" class="sm ghost" @click="editModelCode(i)"
                   :title="i.model_code ? '型番を編集する' : '型番を設定する'"
                 >{{ i.model_code ? '型番編集' : '型番' }}</button>
                 <StatusPill
@@ -768,6 +798,10 @@ async function editNote(item: InventoryItem) {
                 <button class="sm ghost" @click="editNote(i)" title="メモを編集する">メモ</button>
                 <button class="sm ghost" @click="dispose(i, 'disposed')" title="在庫から外して廃棄にする">廃棄</button>
                 <button class="sm ghost" @click="dispose(i, 'personal_use')" title="在庫から外して自家消費にする">自家消費</button>
+              </template>
+              <template v-else-if="i.status === 'sold'">
+                <button class="sm ghost" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
+                <button class="sm ghost" @click="editNote(i)" title="メモを編集する">メモ</button>
               </template>
               <template v-else-if="i.status === 'split'">
                 <button
