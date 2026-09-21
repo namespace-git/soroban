@@ -29,6 +29,8 @@ jobs:
         env:
           # 配布用の署名（Apple Developer Program）は付けていない（README の「初回起動」参照）
           CSC_IDENTITY_AUTO_DISCOVERY: false
+          # publish しなくても、latest-mac.yml を作るために publish 設定の初期化でトークンが要る
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
           name: mac
@@ -52,6 +54,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: build (windows)
         run: pnpm dist:win -- --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
           name: windows
