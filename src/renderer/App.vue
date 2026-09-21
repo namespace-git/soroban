@@ -201,6 +201,8 @@ function chooseDialog(
 provide('confirm', confirmDialog)
 provide('choose', chooseDialog)
 provide('toast', (text: string, kind: 'ok' | 'warn') => showNotice({ text, kind }))
+// main.ts の errorHandler から。処理が失敗したのに何も起きない、を防ぐ
+window.addEventListener('soroban:error', (e) => showNotice({ text: `エラー：${(e as CustomEvent<string>).detail}`, kind: 'warn' }))
 
 const needsTotal = computed(() => pendingCount.value)
 

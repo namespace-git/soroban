@@ -37,7 +37,8 @@ const tablesSql = viewMarkerIndex === -1 ? schemaSql : schemaSql.slice(0, viewMa
 const viewsSql = viewMarkerIndex === -1 ? '' : schemaSql.slice(viewMarkerIndex)
 
 export function getDbPath(): string {
-  return join(app.getPath('userData'), 'soroban.db')
+  // 検証用：環境変数で別ファイルを指せる（本番では未設定）
+  return process.env.SOROBAN_DB_PATH || join(app.getPath('userData'), 'soroban.db')
 }
 
 /**

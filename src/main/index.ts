@@ -273,6 +273,7 @@ app.whenReady().then(async () => {
 })
 
 async function collectInBackground(): Promise<void> {
+  if (process.env.SOROBAN_NO_COLLECT) return // 検証用：自動収集を止める
   try {
     const intervalH = Number(db.getSettings().collect_interval_h ?? 1)
     if (db.hoursSinceLastOk() < intervalH) return

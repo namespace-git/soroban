@@ -772,6 +772,9 @@ export interface UpdateStatus {
 
 declare global {
   interface Window {
+    /** 画面が使う API。renderer/main.ts が sorobanBridge を包んで定義する（引数を素のオブジェクトに直す） */
     soroban: SorobanApi
+    /** preload が contextBridge で公開する生の API。画面からは直接使わない */
+    sorobanBridge?: SorobanApi
   }
 }

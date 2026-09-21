@@ -93,7 +93,10 @@ const api: SorobanApi = {
   installUpdate: invoke('installUpdate'),
 } as SorobanApi
 
-contextBridge.exposeInMainWorld('soroban', api)
+// 'soroban' ではなく 'sorobanBridge' として出す。contextBridge の境界は Vue のリアクティブ（Proxy）を
+// 渡すと同期例外（An object could not be cloned）になるので、renderer/main.ts が引数を素の
+// オブジェクトに直す包みを window.soroban として定義する
+contextBridge.exposeInMainWorld('sorobanBridge', api)
 
 // 起動時の自動収集が終わったら知らせる（メルカリ→仕入先の順の配列）
 contextBridge.exposeInMainWorld('sorobanEvents', {
