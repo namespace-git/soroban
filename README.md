@@ -85,12 +85,13 @@ pnpm electron-builder install-app-deps
 
 配布用の署名（Apple Developer Program）は付けていないので、初回だけ Gatekeeper に止められる。
 
-1. Applications の「そろばん」を **右クリック → 開く** → ダイアログで「開く」
-2. それでも「壊れているため開けません」と出る場合は、ターミナルで隔離属性を外す
+ターミナルで隔離属性を外すのが確実（macOS 26 以降は「右クリック → 開く」だけでは通らないことがある）：
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Soroban.app
 ```
+
+そのあと普通にダブルクリックで起動できる。
 
 2 回目以降は Launchpad や Dock から普通に起動できる。Dock に残しておけばデスクトップから 1 クリック。
 
