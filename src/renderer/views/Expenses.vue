@@ -2,7 +2,7 @@
 // 経費タブ：レシート1枚＝経費1件。購入店・購入日・明細・金額・レシート画像・計上月を管理する。
 // 月次の按分・純利益はこの経費を月（計上月）で拾う（Monthly.vue 側。ここでは再計算しない）。
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { Expense, ExpenseCategory, ExpenseInput, ExpenseLineInput, ReceiptDraft, ReceiptRead } from '../../shared/types'
+import type { AiStatus, Expense, ExpenseCategory, ExpenseInput, ExpenseLineInput, ReceiptDraft, ReceiptRead } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
@@ -37,11 +37,13 @@ const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+const goto = inject<(t: string) => void>('goto')!
 
 const expenses = ref<Expense[]>([])
 const loaded = ref(false)
 const showForm = ref(false)
 const editingId = ref<string | null>(null)
+const aiStatus = ref<AiStatus | null>(null)
 
 type LineForm = ExpenseLineInput & { category: ExpenseCategory }
 
@@ -65,6 +67,7 @@ const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
 
 async function load() {
   expenses.value = await window.soroban.listExpenses()
+  aiStatus.value = await window.soroban.getAiStatus()
   loaded.value = true
   // ドロワーを開いたまま更新された場合は表示中の内容も差し替える
   if (drawerExpense.value) {
@@ -197,14 +200,47 @@ const receiptPreviewUrl = ref<string | null>(null)
 const receiptRawText = ref<string | null>(null)
 /** レシートの「合計」行の値。明細合計と食い違っていたら警告する */
 const receiptDraftTotal = ref<number | null>(null)
+/** AI が読んだ消費税などの差額。明細合計＋この値＝合計 なら「税として追加」ボタンを出す */
+const receiptDraftTax = ref<number | null>(null)
+/** AI が気づいたこと（事業と関係なさそうな行、分類の判断など） */
+const receiptWarnings = ref<string[]>([])
 /** レシートの登録番号（T＋13桁）。登録・保存時に渡すと「この番号＝この店名」を覚える（shop_alias） */
 const receiptRegistrationNo = ref<string | null>(null)
 /** 店名が前回の学習から決まったら true（購入店の横に出す） */
 const receiptShopLearned = ref(false)
 
+// --- AI が入れた値の印（薄い黄色の枠）。人が触ったら該当欄だけ解除する ---
+const aiFilledShop = ref(false)
+const aiFilledOccurredAt = ref(false)
+const aiFilledLines = ref<Set<number>>(new Set())
+function clearAiLine(i: number) {
+  if (!aiFilledLines.value.has(i)) return
+  const next = new Set(aiFilledLines.value)
+  next.delete(i)
+  aiFilledLines.value = next
+}
+
+/** 明細合計＋税＝レシート合計 が成り立つときだけ「税として追加」ボタンを出す */
+const taxAddable = computed(() => {
+  const tax = receiptDraftTax.value
+  const total = receiptDraftTotal.value
+  if (tax == null || tax <= 0 || total == null) return false
+  return lineSubtotal.value + tax === total
+})
+
+function addTaxLine() {
+  const tax = receiptDraftTax.value
+  if (tax == null) return
+  const category = form.value.lines[0]?.category ?? 'packaging'
+  form.value.lines.push({ name: '消費税', unit_price: tax, quantity: 1, category })
+  aiFilledLines.value = new Set(aiFilledLines.value).add(form.value.lines.length - 1)
+  receiptDraftTax.value = null
+}
+
 const receiptTotalMismatch = computed(() => {
   if (receiptDraftTotal.value == null) return null
   if (receiptDraftTotal.value === lineSubtotal.value) return null
+  if (taxAddable.value) return null
   return receiptDraftTotal.value
 })
 
@@ -213,8 +249,13 @@ function clearReceiptDraft() {
   receiptPreviewUrl.value = null
   receiptRawText.value = null
   receiptDraftTotal.value = null
+  receiptDraftTax.value = null
+  receiptWarnings.value = []
   receiptRegistrationNo.value = null
   receiptShopLearned.value = false
+  aiFilledShop.value = false
+  aiFilledOccurredAt.value = false
+  aiFilledLines.value = new Set()
 }
 
 /** 画像を選んで読んだ下書きをフォームへ反映する。draft の値がある項目だけ上書きする */
@@ -223,18 +264,27 @@ function applyReceiptDraft(result: ReceiptRead) {
   receiptPreviewUrl.value = result.receipt_url
   receiptRawText.value = result.draft.raw_text
   receiptDraftTotal.value = result.draft.total
+  receiptDraftTax.value = result.draft.tax
+  receiptWarnings.value = result.draft.warnings
   receiptRegistrationNo.value = result.draft.registration_no
   receiptShopLearned.value = result.draft.shop_learned
-  if (result.draft.shop) form.value.shop = result.draft.shop
-  if (result.draft.occurred_at) form.value.occurred_at = result.draft.occurred_at
+  if (result.draft.shop) { form.value.shop = result.draft.shop; aiFilledShop.value = true }
+  if (result.draft.occurred_at) { form.value.occurred_at = result.draft.occurred_at; aiFilledOccurredAt.value = true }
   if (result.draft.lines.length) {
     form.value.lines = result.draft.lines.map(l => ({
-      name: l.name, unit_price: l.unit_price, quantity: l.quantity, category: 'packaging' as ExpenseCategory,
+      name: l.name, unit_price: l.unit_price, quantity: l.quantity, category: l.category ?? 'packaging',
     }))
+    aiFilledLines.value = new Set(form.value.lines.map((_, i) => i))
   }
 }
 
 async function readReceiptForForm() {
+  const status = await window.soroban.getAiStatus()
+  aiStatus.value = status
+  if (!status.configured) {
+    toast('AI 読み取りの設定がありません', 'warn')
+    return
+  }
   receiptBusy.value = true
   try {
     const result = await window.soroban.readReceiptImage()
@@ -268,17 +318,20 @@ function openEdit(e: Expense) {
 /** ドロワーの「レシートを読み取って編集」。既存の値は上書きせず、空の項目だけ埋める */
 async function onDrawerReadEdit(e: Expense, draft: ReceiptDraft) {
   openEdit(e)
-  if (draft.shop && !form.value.shop.trim()) form.value.shop = draft.shop
-  if (draft.occurred_at && !form.value.occurred_at) form.value.occurred_at = draft.occurred_at
+  if (draft.shop && !form.value.shop.trim()) { form.value.shop = draft.shop; aiFilledShop.value = true }
+  if (draft.occurred_at && !form.value.occurred_at) { form.value.occurred_at = draft.occurred_at; aiFilledOccurredAt.value = true }
   receiptRawText.value = draft.raw_text
   receiptDraftTotal.value = draft.total
+  receiptDraftTax.value = draft.tax
+  receiptWarnings.value = draft.warnings
   receiptRegistrationNo.value = draft.registration_no
   receiptShopLearned.value = draft.shop_learned
   if (draft.lines.length) {
     if (await confirmDialog('読み取った明細で置き換えますか？', { message: '今の明細は消えます' })) {
       form.value.lines = draft.lines.map(l => ({
-        name: l.name, unit_price: l.unit_price, quantity: l.quantity, category: 'packaging' as ExpenseCategory,
+        name: l.name, unit_price: l.unit_price, quantity: l.quantity, category: l.category ?? 'packaging',
       }))
+      aiFilledLines.value = new Set(form.value.lines.map((_, i) => i))
     }
   }
 }
@@ -368,9 +421,10 @@ async function onDrawerDelete(e: Expense) {
         <div class="receipt-scan-main">
           <button class="ghost sm" :disabled="receiptBusy" @click="readReceiptForForm">
             <Icon name="receipt" :size="14" />
-            {{ receiptBusy ? '読み取り中…（数秒）' : 'レシートを読み取る' }}
+            {{ receiptBusy ? 'AI が読み取り中…（数秒）' : 'レシートを読み取る' }}
           </button>
-          <span class="faint">画像を選ぶと、店名・日付・明細を推定して下に入れます（アプリ内で処理。必ず確認してから登録）</span>
+          <button v-if="aiStatus && !aiStatus.configured" class="ghost sm" @click="goto('settings')">設定を開く</button>
+          <span class="faint">画像を Google の Gemini に送って、店名・日付・明細・項目を推定して下に入れます（必ず確認してから登録）</span>
         </div>
         <div v-if="receiptPreviewUrl" class="receipt-scan-preview">
           <img class="receipt-scan-thumb" :src="receiptPreviewUrl" alt="" />
@@ -384,6 +438,17 @@ async function onDrawerDelete(e: Expense) {
       <p v-if="receiptTotalMismatch !== null" class="faint">
         レシートの合計 {{ yen(receiptTotalMismatch) }} と明細合計 {{ yen(lineSubtotal) }} が違います。明細を直してください
       </p>
+      <p v-if="taxAddable" class="faint tax-add-row">
+        レシートの合計と明細合計の差額 {{ yen(receiptDraftTax!) }} は消費税のようです。
+        <button class="ghost sm" @click="addTaxLine">差額 {{ yen(receiptDraftTax!) }} を税として追加</button>
+      </p>
+
+      <div v-if="receiptWarnings.length" class="receipt-warnings faint">
+        <p class="warnings-title">AI のメモ</p>
+        <ul>
+          <li v-for="(w, i) in receiptWarnings" :key="i">{{ w }}</li>
+        </ul>
+      </div>
 
       <details v-if="receiptRawText" class="receipt-raw">
         <summary>読み取ったテキストを見る</summary>
@@ -393,7 +458,10 @@ async function onDrawerDelete(e: Expense) {
       <div class="fields">
         <label class="field">
           <span>購入店</span>
-          <input v-model="form.shop" placeholder="任意" list="expense-shops" />
+          <input
+            v-model="form.shop" placeholder="任意" list="expense-shops"
+            :class="{ 'ai-filled': aiFilledShop }" @input="aiFilledShop = false"
+          />
           <datalist id="expense-shops">
             <option v-for="shop in shopOptions" :key="shop" :value="shop" />
           </datalist>
@@ -401,7 +469,10 @@ async function onDrawerDelete(e: Expense) {
         </label>
         <label class="field">
           <span>購入日</span>
-          <input type="date" v-model="form.occurred_at" />
+          <input
+            type="date" v-model="form.occurred_at"
+            :class="{ 'ai-filled': aiFilledOccurredAt }" @input="aiFilledOccurredAt = false"
+          />
         </label>
         <label class="field">
           <span>計上月</span>
@@ -423,12 +494,30 @@ async function onDrawerDelete(e: Expense) {
         </thead>
         <tbody>
           <tr v-for="(l, i) in form.lines" :key="i">
-            <td><input v-model="l.name" class="full" placeholder="品名" /></td>
-            <td><input type="number" v-model.number="l.unit_price" class="full" /></td>
-            <td><input type="number" v-model.number="l.quantity" class="full" min="1" /></td>
+            <td>
+              <input
+                v-model="l.name" class="full" placeholder="品名"
+                :class="{ 'ai-filled': aiFilledLines.has(i) }" @input="clearAiLine(i)"
+              />
+            </td>
+            <td>
+              <input
+                type="number" v-model.number="l.unit_price" class="full"
+                :class="{ 'ai-filled': aiFilledLines.has(i) }" @input="clearAiLine(i)"
+              />
+            </td>
+            <td>
+              <input
+                type="number" v-model.number="l.quantity" class="full" min="1"
+                :class="{ 'ai-filled': aiFilledLines.has(i) }" @input="clearAiLine(i)"
+              />
+            </td>
             <td class="num">{{ yen(lineAmount(l)) }}</td>
             <td>
-              <select v-model="l.category" class="full">
+              <select
+                v-model="l.category" class="full"
+                :class="{ 'ai-filled': aiFilledLines.has(i) }" @change="clearAiLine(i)"
+              >
                 <option v-for="o in CATEGORY_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
               </select>
             </td>
@@ -602,6 +691,28 @@ async function onDrawerDelete(e: Expense) {
   border-radius: var(--radius-sm);
   object-fit: cover;
 }
+.tax-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.receipt-warnings {
+  font-size: var(--fs-12);
+}
+.warnings-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+.receipt-warnings ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.ai-filled {
+  border-color: var(--brand) !important;
+}
+
 .receipt-scan-actions {
   display: flex;
   flex-direction: column;

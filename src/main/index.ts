@@ -7,6 +7,10 @@ import * as collector from './collector'
 import * as collectorMellojoy from './collector-mellojoy'
 import * as updater from './updater'
 import * as receipts from './receipts'
+import * as ai from './ai-receipt'
+import * as backup from './backup'
+import * as inbox from './inbox'
+import * as views from './views'
 import * as applog from './applog'
 import type { CollectorRun, SorobanApi } from '../shared/types'
 
@@ -149,6 +153,14 @@ function registerIpc(): void {
   }
 
   handle('getDashboard', () => db.getDashboard())
+  handle('getInbox', () => inbox.getInbox())
+  handle('snoozeReminder', (type, id) => inbox.snoozeReminder(type, id ?? null))
+  handle('getSalesProgress', () => views.getSalesProgress())
+  handle('getInventoryOverview', () => views.getInventoryOverview())
+  handle('listInventoryGroups', (f) => views.listInventoryGroups(f))
+  handle('getProductKarte', (code) => views.getProductKarte(code))
+  handle('getMonthStatement', (m) => views.getMonthStatement(m))
+  handle('listPurchaseAccountCards', (from, to) => views.listPurchaseAccountCards(from, to))
 
   handle('listSales', (filter) => db.listSales(filter))
   handle('saleTotals', (filter) => db.saleTotals(filter))
@@ -187,6 +199,10 @@ function registerIpc(): void {
   handle('removeReceipt', (id) => receipts.removeReceipt(id))
   handle('readReceiptImage', () => receipts.readReceiptImage(mainWindow))
   handle('readReceipt', (id) => receipts.readReceipt(id))
+  handle('getAiStatus', () => ai.getAiStatus())
+  handle('setGeminiApiKey', (key) => ai.setGeminiApiKey(key))
+  handle('setAiModel', (model) => ai.setAiModel(model))
+  handle('testGemini', () => ai.testGemini())
   handle('getMonthDetail', (month, opts) => db.getMonthDetail(month, opts))
   handle('setMonthAllocMethod', (month, method) => db.setMonthAllocMethod(month, method))
   handle('closeMonth', (month) => db.closeMonth(month))
@@ -229,7 +245,8 @@ function registerIpc(): void {
   handle('listShippingMethods', () => db.listShippingMethods())
   handle('saveShippingMethod', (m) => db.saveShippingMethod(m))
   handle('deleteShippingMethod', (id) => db.deleteShippingMethod(id))
-  handle('getSettings', () => db.getSettings())
+  // 暗号化済みの API キーは画面に出さない（getAiStatus で有無だけ返す）
+  handle('getSettings', () => { const { gemini_api_key_enc: _k, ...rest } = db.getSettings() as Record<string, string>; return rest })
   handle('setSetting', (k, v) => db.setSetting(k, v))
 
   handle('collect', () => collectAll(db.getSettings().collect_show_window !== '1'))
@@ -256,18 +273,8 @@ function registerIpc(): void {
     return filePath
   })
 
-  handle('backupDb', async () => {
-    const { filePath, canceled } = await dialog.showSaveDialog({
-      title: 'データベースをバックアップ',
-      defaultPath: `soroban-backup-${new Date().toISOString().slice(0, 10)}.db`,
-      filters: [{ name: 'SQLite', extensions: ['db'] }],
-    })
-    if (canceled || !filePath) return null
-    // WALを取り込んだ一貫したコピーを作る
-    db.getDb().pragma('wal_checkpoint(TRUNCATE)')
-    copyFileSync(db.getDbPath(), filePath)
-    return filePath
-  })
+  handle('backupDb', () => backup.backupToZip(mainWindow))
+  handle('restoreBackup', () => backup.restoreFromZip(mainWindow))
 
   handle('revealDbFolder', () => {
     shell.showItemInFolder(db.getDbPath())

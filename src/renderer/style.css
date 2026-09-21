@@ -23,9 +23,10 @@
   --text-faint:    #97979e;
 
   /* ブランド黄：バッジ・アクティブ・主役カード・帯。文字色には使わない（コントラスト不足） */
-  --brand:         #f5c842;
-  --brand-hover:   #ebb92a;
-  --brand-soft:    #fff6dd;   /* クリーム。副次カード・選択行 */
+  --brand:         #fbcf52;   /* Milestone の黄（実測 #fbcf52） */
+  --brand-hover:   #f2c23a;
+  --brand-soft:    #fdf3d8;   /* クリーム。副次カード・選択行（Milestone 実測） */
+  --brand-icon:    #fad36a;   /* 見出しの黄色い丸 */
   --brand-ink:     #7a5a00;   /* クリーム地の上の文字（4.5:1） */
 
   /* 主ボタン＝チャコール */
@@ -40,9 +41,11 @@
   /* 意味色（数字とチップに限定。装飾に使わない） */
   --profit:        #2f9e5a;   /* 文字用 */
   --profit-bg:     #e6f6ec;
+  --profit-pill:   #c9f2d6;   /* 塗りのピル（収入＝緑）。文字は --profit */
   --profit-solid:  #3aa25c;   /* ピル（白字） */
   --loss:          #d9463f;
   --loss-bg:       #fdeceb;
+  --loss-pill:     #f0605f;   /* 塗りのピル（支出＝赤）。文字は白 */
   --loss-solid:    #e04a42;
   --warn:          #b45f06;   /* 要対応＝橙。ブランドの黄と区別する */
   --warn-bg:       #fff0e0;
@@ -50,6 +53,8 @@
   --warn-solid:    #e07a12;
   --info:          #2f6fcf;
   --info-bg:       #e8f0fc;
+  /* グラフの積み上げ（仕入先・タグごと）。Milestone の淡い暖色 */
+  --chart-1: #ff7d7b; --chart-2: #fc9f5c; --chart-3: #fbcf52; --chart-4: #a3f4ba; --chart-5: #8fd3f4; --chart-6: #c9b6f0;
 
   --radius:        14px;      /* カード */
   --radius-md:     10px;      /* 入力・小さいカード */

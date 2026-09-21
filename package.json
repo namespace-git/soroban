@@ -23,11 +23,12 @@
   },
   "dependencies": {
     "@fontsource-variable/m-plus-2": "^5.3.0",
+    "adm-zip": "^0.6.1",
     "better-sqlite3": "^12.11.1",
-    "electron-updater": "^6.8.9",
-    "tesseract.js": "^6.0.1"
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/better-sqlite3": "^9.6.0",
     "@vitejs/plugin-vue": "^5.1.4",
     "cross-env": "^10.1.0",
@@ -58,12 +59,6 @@
     "files": [
       "out/**/*",
       "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "resources/tessdata",
-        "to": "tessdata"
-      }
     ],
     "win": {
       "target": [
@@ -105,11 +100,7 @@
       "sign": false
     },
     "artifactName": "soroban-${version}-${arch}.${ext}",
-    "afterPack": "scripts/after-pack.cjs",
-    "asarUnpack": [
-      "node_modules/tesseract.js/**",
-      "node_modules/tesseract.js-core/**"
-    ]
+    "afterPack": "scripts/after-pack.cjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

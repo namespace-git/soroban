@@ -3,7 +3,7 @@
 // 編集・削除は Expenses.vue の処理を呼んでもらう（ここでは持たない）。
 // レシートの添付・取り外しだけはここで完結し、終わったら changed を投げて親に再読込させる。
 import { ref, watch, inject } from 'vue'
-import type { Expense, ExpenseCategory, ReceiptDraft } from '../../shared/types'
+import type { AiStatus, Expense, ExpenseCategory, ReceiptDraft } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import Icon from './Icon.vue'
@@ -22,6 +22,7 @@ const emit = defineEmits<{
 }>()
 
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+const goto = inject<(t: string) => void>('goto')!
 
 const CATEGORY_LABEL: Record<ExpenseCategory, string> = {
   packaging: '梱包費',
@@ -37,9 +38,11 @@ const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleStr
 const busy = ref(false)
 const expanded = ref(false)
 const readingReceipt = ref(false)
+const aiStatus = ref<AiStatus | null>(null)
 
-watch(() => props.open, (isOpen) => {
-  if (!isOpen) expanded.value = false
+watch(() => props.open, async (isOpen) => {
+  if (!isOpen) { expanded.value = false; return }
+  aiStatus.value = await window.soroban.getAiStatus()
 })
 
 function monthDiffers(): boolean {
@@ -76,9 +79,15 @@ function onDelete() {
   if (props.expense) emit('delete', props.expense)
 }
 
-/** 添付済みのレシートを OCR で読み直し、親に編集フォームを開かせる */
+/** 添付済みのレシートを AI で読み直し、親に編集フォームを開かせる */
 async function readForEdit() {
   if (!props.expense) return
+  const status = await window.soroban.getAiStatus()
+  aiStatus.value = status
+  if (!status.configured) {
+    toast('AI 読み取りの設定がありません', 'warn')
+    return
+  }
   readingReceipt.value = true
   try {
     const draft = await window.soroban.readReceipt(props.expense.id)
@@ -153,8 +162,13 @@ async function readForEdit() {
           @click="readForEdit"
         >
           <Icon name="receipt" :size="14" />
-          {{ readingReceipt ? '読み取り中…（数秒）' : 'レシートを読み取って編集' }}
+          {{ readingReceipt ? 'AI が読み取り中…（数秒）' : 'レシートを読み取って編集' }}
         </button>
+        <button
+          v-if="expense.receipt_url && aiStatus && !aiStatus.configured"
+          class="ghost sm receipt-read-btn"
+          @click="goto('settings')"
+        >設定を開く</button>
       </div>
     </template>
 

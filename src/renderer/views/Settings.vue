@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
-import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats } from '../../shared/types'
+import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus } from '../../shared/types'
 
 type SaleExclusion = { mercari_item_id: string; title: string; excluded_at: string }
 import Icon from '../components/Icon.vue'
@@ -31,9 +31,14 @@ const updateStatus = ref<UpdateStatus | null>(null)
 const checkingUpdate = ref(false)
 const installingUpdate = ref(false)
 const saleExclusions = ref<SaleExclusion[]>([])
+const aiStatus = ref<AiStatus | null>(null)
+const aiApiKeyInput = ref('')
+const aiModel = ref('gemini-2.5-pro')
+const savingAiKey = ref(false)
+const testingAi = ref(false)
 
 async function load() {
-  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes] = await Promise.all([
+  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes] = await Promise.all([
     window.soroban.listShippingMethods(),
     window.soroban.getSettings(),
     window.soroban.listRuns(10),
@@ -42,6 +47,7 @@ async function load() {
     window.soroban.checkForUpdate(),
     window.soroban.listShopAccountStats(),
     window.soroban.listSaleExclusions(),
+    window.soroban.getAiStatus(),
   ])
   methods.value = methodsRes
   settings.value = settingsRes
@@ -51,6 +57,8 @@ async function load() {
   updateStatus.value = updateRes
   shopStats.value = shopStatsRes
   saleExclusions.value = exclusionsRes
+  aiStatus.value = aiStatusRes
+  aiModel.value = aiStatusRes.model
   loaded.value = true
 }
 onMounted(load)
@@ -93,6 +101,46 @@ const updateResultText = computed(() => {
   const firstLine = s.notes?.split('\n').map(l => l.trim()).find(l => l) ?? ''
   return `v${s.latest} があります${firstLine ? `（${firstLine}）` : ''}`
 })
+
+// --- AI 読み取り（Gemini） ---
+
+async function saveAiKey() {
+  const key = aiApiKeyInput.value.trim()
+  if (!key) return
+  savingAiKey.value = true
+  try {
+    await window.soroban.setGeminiApiKey(key)
+    aiApiKeyInput.value = ''
+    aiStatus.value = await window.soroban.getAiStatus()
+    toast('保存しました', 'ok')
+  } finally {
+    savingAiKey.value = false
+  }
+}
+
+async function deleteAiKey() {
+  if (!await confirmDialog('API キーを削除しますか？', { okLabel: '削除する', danger: true })) return
+  await window.soroban.setGeminiApiKey(null)
+  aiApiKeyInput.value = ''
+  aiStatus.value = await window.soroban.getAiStatus()
+  toast('削除しました', 'ok')
+}
+
+async function changeAiModel(model: string) {
+  aiModel.value = model
+  await window.soroban.setAiModel(model)
+  toast('保存しました', 'ok')
+}
+
+async function testAiConnection() {
+  testingAi.value = true
+  try {
+    const r = await window.soroban.testGemini()
+    toast(r.ok ? '接続できました' : r.message, r.ok ? 'ok' : 'warn')
+  } finally {
+    testingAi.value = false
+  }
+}
 
 // 仕入タブでアカウントを増やしたら、こちらの一覧も追従させる
 watch(revision, async () => {
@@ -671,6 +719,70 @@ const runLabel: Record<string, string> = {
         </div>
       </div>
 
+      <!-- AI 読み取り（Gemini） -->
+      <div class="panel">
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="receipt" :size="16" /></span>
+          <h2 class="section-head-title">AI 読み取り（Gemini）</h2>
+        </div>
+        <p class="faint hint">
+          レシートの画像を Google の Gemini に送って、店名・日付・明細・項目を読み取ります（利用者の API キー。無料枠あり）。
+        </p>
+        <p class="faint hint">
+          画像は Google に送られます。無料枠ではデータが Google の改善に使われる規約です。
+        </p>
+        <p class="faint hint">
+          キーは OS の安全な保存（キーチェーン／資格情報マネージャー）で暗号化して保存し、DB には入れません。
+        </p>
+
+        <div class="fields">
+          <label class="field">
+            <span>API キー</span>
+            <input
+              type="password" style="width:260px"
+              v-model="aiApiKeyInput"
+              :disabled="!aiStatus?.safe_storage"
+              placeholder="新しいキーを入力"
+            />
+            <span v-if="aiStatus?.configured" class="faint">保存済み（••••）</span>
+          </label>
+        </div>
+        <div class="row">
+          <button class="sm" :disabled="!aiStatus?.safe_storage || !aiApiKeyInput.trim() || savingAiKey" @click="saveAiKey">
+            {{ savingAiKey ? '保存中…' : '保存' }}
+          </button>
+          <button v-if="aiStatus?.configured" class="sm ghost" @click="deleteAiKey">削除</button>
+        </div>
+        <p v-if="aiStatus && !aiStatus.safe_storage" class="faint hint">
+          このPCでは OS の安全な保存が使えないため、API キーを保存できません。
+        </p>
+
+        <div class="fields">
+          <label class="field">
+            <span>モデル</span>
+            <select :value="aiModel" style="width:260px" @change="changeAiModel(($event.target as HTMLSelectElement).value)">
+              <option value="gemini-2.5-pro">gemini-2.5-pro（既定・精度重視。無料枠は少なめ）</option>
+              <option value="gemini-flash-latest">gemini-flash-latest（最新の Flash。速い・無料枠が多い）</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+              <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite（無料枠が一番多い）</option>
+            </select>
+          </label>
+        </div>
+        <p class="faint hint">
+          無料枠の上限に当たったら Flash に切り替えてください。
+        </p>
+
+        <div class="row">
+          <button class="ghost sm" :disabled="!aiStatus?.configured || testingAi" @click="testAiConnection">
+            <Icon name="refresh" :size="14" /> {{ testingAi ? '確認中…' : '接続を確認' }}
+          </button>
+        </div>
+
+        <p class="faint hint">
+          キーの取得：Google AI Studio で作成 ↗　<code class="ai-key-url">https://aistudio.google.com/apikey</code>
+        </p>
+      </div>
+
       <!-- アプリの更新 -->
       <div class="panel">
         <div class="section-head">
@@ -807,6 +919,8 @@ const runLabel: Record<string, string> = {
   border-color: var(--line);
   background: var(--surface);
 }
+
+.ai-key-url { user-select: all; font-size: var(--fs-12); background: var(--surface-hi); padding: 1px 6px; border-radius: var(--radius-sm); }
 
 .money-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; width: auto; }
 .money-cell .yen { color: var(--text-dim); font-size: var(--fs-12); }

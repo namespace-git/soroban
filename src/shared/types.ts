@@ -606,9 +606,12 @@ export interface ExpenseLineInput {
 }
 
 /**
- * レシート画像を OCR（アプリ内・オフライン。Tesseract＋日本語モデルを同梱）で読んだ下書き。
+ * レシート画像を AI（Gemini、利用者の API キー）で読んだ下書き。画像は Google に送られる。
  * 推定なので必ず人が直す前提。読めなかった項目は null／空
  */
+/** 画像上の位置。[ymin, xmin, ymax, xmax]、0〜1000 の正規化座標（Gemini の box_2d と同じ） */
+export type ReceiptBox = [number, number, number, number]
+
 export interface ReceiptDraft {
   shop: string | null
   /** レシートの事業者登録番号（T＋13 桁）。会社ごとに固定なので店名の学習キーに使う。無ければ null */
@@ -619,11 +622,27 @@ export interface ReceiptDraft {
   occurred_at: string | null
   /** 「合計」などの行から取った税込の合計。無ければ null */
   total: number | null
-  lines: Array<{ name: string; unit_price: number; quantity: number }>
-  /** OCR の生テキスト（確認用） */
+  /** 明細。category は AI の分類（梱包費／消耗品／送料／手数料／その他）。無ければ画面の既定。box は画像上の位置 */
+  lines: Array<{ name: string; unit_price: number; quantity: number; category?: ExpenseCategory; box?: ReceiptBox | null }>
+  /** 店名・日付・合計を読んだ画像上の位置（AI の推定。確認用の枠に使う）。無ければ null */
+  boxes: { shop: ReceiptBox | null; date: ReceiptBox | null; total: ReceiptBox | null }
+  /** 消費税などで明細合計と合計が違うときの差額（AI が読めたとき）。無ければ null */
+  tax: number | null
+  /** AI が気づいたこと（例：事業と関係なさそうな行、合計が合わない） */
+  warnings: string[]
+  /** AI の生の応答（確認用） */
   raw_text: string
   /** 0〜100 */
   confidence: number
+}
+
+export interface AiStatus {
+  /** API キーが保存されていれば true */
+  configured: boolean
+  /** 使うモデル（設定 ai_model。既定 gemini-2.5-pro） */
+  model: string
+  /** OS の安全な保存（safeStorage）が使えるか。false なら保存を断る */
+  safe_storage: boolean
 }
 
 /** 画像を選んで読み取った結果。temp_file は createExpense の receipt_temp_file に渡すと本添付になる */
@@ -737,6 +756,176 @@ export interface DashboardStats {
   recentRuns: CollectorRun[]
 }
 
+
+// ------------------------------------------------------------
+// v0.2 画面の作り直し用の契約（ホーム＝受信箱、売上＝進捗、在庫＝型番グループ、商品＝カルテ、月次＝計算書、仕入＝ヘッダ）
+// 数字は全部 main が計算する。画面は表示と操作だけ
+// ------------------------------------------------------------
+
+/** ホーム「今やること」の 1 件。kind ごとに画面での操作が決まる */
+export type InboxKind =
+  | 'ship'            // 売れて未発送（メルカリで発送する）。sale
+  | 'shipping'        // 送料未入力。sale。行内の発送方法セレクトで片付く
+  | 'link'            // 未紐付け。sale。候補が 1 点なら candidate で 1 クリック
+  | 'confirm'         // 価格未入力の仕入（下書き）。purchase
+  | 'collect'         // 取り込みの問題（ログイン切れ・失敗）。run
+  | 'reminder'        // 忘れていませんか（自分で入れるもの）。reminder
+
+export type ReminderType = 'manual_purchase' | 'delivery' | 'expense' | 'close_month'
+
+export interface InboxItem {
+  kind: InboxKind
+  /** 画面のキー。sale_id / purchase_id / run_id / reminder の種類 */
+  id: string
+  title: string
+  /** 補足 1 行（日付・金額・買い手・仕入先など。main が組み立てる） */
+  detail: string
+  thumb_url: string | null
+  /** 販売の場合の中身（発送方法セレクト・紐付けに使う） */
+  sale?: SaleProfit
+  /** 未紐付けで候補が 1 点だけのとき（型番一致・先入先出）。ボタン 1 つで紐付け */
+  candidate?: { inventory_item_id: string; item_code: string; landed_cost: number; acquired_at: string } | null
+  /** 片付けたときの粗利（見込み）。null なら出さない */
+  profit_hint?: { min: number; max: number } | null
+  /** 仕入の下書きの場合 */
+  purchase?: PurchaseSummary
+  /** 取り込みの問題の場合 */
+  run?: CollectorRun
+  /** reminder の場合の種類と、押すボタン */
+  reminder?: { type: ReminderType; action_label: string; purchase_id?: string; month?: string }
+}
+
+export interface InboxGroup { kind: InboxKind; label: string; hint: string; items: InboxItem[] }
+
+/** ホームの上の利益ストリップ。トップバーの「今月の粗利」にも使う */
+export interface ProfitStrip {
+  month: string
+  gross_profit: number
+  net_profit: number
+  revenue: number
+  sales_count: number
+  /** 送料・紐付けを入れれば増える見込み（未確定の販売の粗利の見込みの合計） */
+  pending_profit_estimate: number
+  pending_count: number
+  /** 売上金の反映待ち（発送済み・受取評価待ち・評価待ちの販売の 価格−手数料 の合計） */
+  awaiting_payout: number
+  awaiting_payout_count: number
+  /** 先月の純利益と締め状態 */
+  last_month: { month: string; net_profit: number; closed: boolean } | null
+}
+
+export interface Inbox {
+  strip: ProfitStrip
+  groups: InboxGroup[]
+  /** 今日片付けた件数（app_log の書き込み系から。目安） */
+  done_today: number
+  /** 右側「見直すもの」 */
+  review: {
+    aging_count: number
+    aging_days: number
+    unallocated_listings: number
+    last_month_unclosed: string | null
+    top_model: { model_code: string; name: string; total_profit: number } | null
+  }
+}
+
+/** 売上タブの上の進捗（メルカリ側の状態）と入力（アプリ側の状態） */
+export interface SalesProgress {
+  listed: { count: number; expected_profit: number; unallocated: number }
+  to_ship: { count: number; revenue: number }
+  /** 発送済み・受取評価待ち・評価待ち（売上金の反映待ち） */
+  in_transit: { count: number; revenue: number }
+  completed_this_month: { count: number; revenue: number }
+  all: number
+  inputs: { needs_shipping: number; needs_link: number; done: number }
+}
+
+/** 在庫タブの上の状態カード */
+export interface InventoryOverview {
+  unlisted_arrived: { count: number; cost: number }
+  not_arrived: { count: number; cost: number }
+  listed: { count: number; expected_profit: number }
+  aging: { count: number; cost: number; days: number }
+}
+
+export type InventoryGroupFilter = 'unlisted' | 'unlisted_arrived' | 'not_arrived' | 'listed' | 'sold' | 'other' | 'all'
+
+/** 在庫タブの型番グループ 1 つ（中の点は InventoryItem[]） */
+export interface InventoryGroup {
+  model_code: string | null
+  name: string
+  thumb_url: string | null
+  tags: Tag[]
+  unlisted: number
+  unlisted_arrived: number
+  not_arrived: number
+  listed: number
+  sold: number
+  avg_price: number | null
+  avg_profit: number | null
+  cost_per_item: number | null
+  oldest_acquired_at: string | null
+  oldest_aging_days: number | null
+  items: InventoryItem[]
+}
+
+/** 商品カルテ */
+export interface ProductKarte {
+  summary: ProductSummary
+  /** 仕入明細の元の名前（表示名と違うとき） */
+  source_name: string | null
+  in_stock: { count: number; arrived: number; not_arrived: number; cost: number }
+  listed: { count: number; price_total: number; expected_profit: number }
+  sold_recent: { count: number; days: number }
+  price_range: { min: number; max: number } | null
+  profit_rate: number | null
+  items: InventoryItem[]
+  sales: SaleProfit[]
+  listings: Listing[]
+  /** 「この金額で売ったら？」の既定（先入先出の未出品 1 点、発送方法は最後に使ったもの） */
+  estimate_default: { inventory_item_id: string | null; shipping_method_id: string | null }
+}
+
+/** 月次の計算書（MonthDetail の totals を縦組みで読むための並び。数字は同じ） */
+export interface MonthStatement {
+  month: string
+  sales_count: number
+  revenue: number
+  fee: number
+  shipping: number
+  shipping_actual_count: number
+  packaging: number
+  cost: number
+  cost_items: number
+  gross_profit: number
+  gross_rate: number | null
+  expenses: Array<{ category: ExpenseCategory; amount: number }>
+  expense_total: number
+  net_profit: number
+  net_rate: number | null
+  /** 参考 */
+  awaiting_payout: number
+  personal_revenue: number
+  purchase_paid: number
+  /** タグ別の集計（重複タグの販売は両方に数える。画面で注意を出す） */
+  by_tag: Array<{ tag: Tag; count: number; gross_profit: number; allocated_expense: number; net_profit: number }>
+  multi_tag_count: number
+}
+
+/** 仕入タブの上の仕入先カード（期間内の確定した仕入） */
+export interface PurchaseAccountCard {
+  /** null = すべて */
+  shop_account_id: string | null
+  name: string
+  kind: ShopAccountKind | null
+  orders: number
+  items: number
+  total_cost: number
+  drafts: number
+  not_arrived: number
+  auth_required: boolean
+}
+
 // ------------------------------------------------------------
 // 収集
 // ------------------------------------------------------------
@@ -762,6 +951,22 @@ export interface CollectorRun {
 export interface SorobanApi {
   // ダッシュボード
   getDashboard(): Promise<DashboardStats>
+  /** ホーム（受信箱）。今やること・利益ストリップ・見直すもの */
+  getInbox(): Promise<Inbox>
+  /** 「忘れていませんか」を 7 日消す */
+  snoozeReminder(type: ReminderType, id?: string | null): Promise<void>
+  /** 売上タブの進捗と入力の件数（completed は今月） */
+  getSalesProgress(): Promise<SalesProgress>
+  /** 在庫タブの上の状態カード */
+  getInventoryOverview(): Promise<InventoryOverview>
+  /** 在庫を型番ごとにまとめて返す */
+  listInventoryGroups(filter: InventoryGroupFilter): Promise<InventoryGroup[]>
+  /** 商品カルテ */
+  getProductKarte(modelCode: string): Promise<ProductKarte>
+  /** 月次の計算書 */
+  getMonthStatement(month: string): Promise<MonthStatement>
+  /** 仕入タブの仕入先カード（期間で絞る。from/to は YYYY-MM-DD、null なら全部） */
+  listPurchaseAccountCards(from: string | null, to: string | null): Promise<PurchaseAccountCard[]>
 
   // 販売
   listSales(filter?: SaleFilter): Promise<SaleProfit[]>
@@ -833,10 +1038,18 @@ export interface SorobanApi {
   /** レシート画像をファイル選択で添付（userData/thumbs/receipt-<id>.<ext> にコピー）。キャンセルなら null */
   attachReceipt(id: string): Promise<string | null>
   removeReceipt(id: string): Promise<void>
-  /** 画像を選んで OCR。キャンセルなら null。数秒かかる（初回はモデルの展開でさらに数秒） */
+  /** 画像を選んで AI で読む。キャンセルなら null。キー未設定なら Error('AI 読み取りの設定がありません') */
   readReceiptImage(): Promise<ReceiptRead | null>
-  /** 添付済みのレシートを OCR。レシートが無ければ Error */
+  /** 添付済みのレシートを AI で読む。レシートが無ければ Error */
   readReceipt(id: string): Promise<ReceiptDraft>
+  /** AI 読み取りの状態。キーそのものは返さない */
+  getAiStatus(): Promise<AiStatus>
+  /** API キーを保存（safeStorage で暗号化）／null で削除 */
+  setGeminiApiKey(key: string | null): Promise<void>
+  /** モデル名を保存（設定 ai_model） */
+  setAiModel(model: string): Promise<void>
+  /** 保存したキーで 1 回だけ小さな要求を送って疎通を確かめる */
+  testGemini(): Promise<{ ok: boolean; message: string }>
 
   /** 月次の明細。tagId で絞った合計も同時に返す */
   getMonthDetail(month: string, opts?: { tagId?: string | null }): Promise<MonthDetail>
@@ -930,7 +1143,16 @@ export interface SorobanApi {
 
   // バックアップ
   exportCsv(): Promise<string | null>
+  /**
+   * バックアップを zip で保存（保存先を選ぶ。キャンセルなら null）。中身：soroban.db（SQLite の backup API で整合したコピー）、
+   * thumbs/（レシート画像・サムネ）、meta.json（バージョン・OS・日時）。不具合報告もこのファイル 1 本
+   */
   backupDb(): Promise<string | null>
+  /**
+   * zip から復元。復元前に今の DB と画像を userData/backup-before-restore-<日時>/ に退避してから入れ替え、アプリを再起動する。
+   * 古い形式（.db 単体）も受け付ける。キャンセルなら null、成功なら再起動するので戻らない
+   */
+  restoreBackup(): Promise<{ restarting: true } | null>
   revealDbFolder(): Promise<void>
   /** 取引データ（販売・仕入・在庫・紐付け・取り込み履歴・期間費用）を全部消す。設定・仕入先・発送方法は残す */
   resetData(): Promise<void>

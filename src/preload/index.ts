@@ -12,6 +12,14 @@ const invoke = (name: string) => (...args: unknown[]) => ipcRenderer.invoke(name
 
 const api: SorobanApi = {
   getDashboard: invoke('getDashboard'),
+  getInbox: invoke('getInbox'),
+  snoozeReminder: invoke('snoozeReminder'),
+  getSalesProgress: invoke('getSalesProgress'),
+  getInventoryOverview: invoke('getInventoryOverview'),
+  listInventoryGroups: invoke('listInventoryGroups'),
+  getProductKarte: invoke('getProductKarte'),
+  getMonthStatement: invoke('getMonthStatement'),
+  listPurchaseAccountCards: invoke('listPurchaseAccountCards'),
 
   listSales: invoke('listSales'),
   saleTotals: invoke('saleTotals'),
@@ -50,6 +58,10 @@ const api: SorobanApi = {
   removeReceipt: invoke('removeReceipt'),
   readReceiptImage: invoke('readReceiptImage'),
   readReceipt: invoke('readReceipt'),
+  getAiStatus: invoke('getAiStatus'),
+  setGeminiApiKey: invoke('setGeminiApiKey'),
+  setAiModel: invoke('setAiModel'),
+  testGemini: invoke('testGemini'),
   getMonthDetail: invoke('getMonthDetail'),
   setMonthAllocMethod: invoke('setMonthAllocMethod'),
   closeMonth: invoke('closeMonth'),
@@ -101,6 +113,7 @@ const api: SorobanApi = {
 
   exportCsv: invoke('exportCsv'),
   backupDb: invoke('backupDb'),
+  restoreBackup: invoke('restoreBackup'),
   revealDbFolder: invoke('revealDbFolder'),
   resetData: invoke('resetData'),
 

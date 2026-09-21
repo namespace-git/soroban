@@ -3,19 +3,18 @@ import { join, extname } from 'node:path'
 import { mkdirSync, copyFileSync, statSync, unlinkSync, readdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import * as db from './db'
-import { recognizeImage } from './ocr'
-import { parseReceiptText } from './receipt-parse'
+import { readReceiptWithGemini } from './ai-receipt'
 import type { ReceiptDraft, ReceiptRead } from '../shared/types'
 
 // ============================================================
-// 経費（レシート）画像の添付・削除・OCR読み取り。
+// 経費（レシート）画像の添付・削除・AI（Gemini）読み取り。
 //
 // 画像はユーザーが選んだファイルをコピーするだけ（読み取り専用のダイアログ操作）。
 // userData/thumbs は collector.ts が保存するサムネイルと同じディレクトリを共有する。
 // ファイル名は receipt-<経費id>.<拡張子> なので soroban-thumb:// の禁止文字
 // （'/' '\\' '..'）に触れない。
 //
-// OCRの一時ファイルは receipt-tmp-<uuid>.<拡張子>。createExpense/updateExpense で
+// AI 読み取りの一時ファイルは receipt-tmp-<uuid>.<拡張子>。createExpense/updateExpense で
 // receipt_temp_file に渡すと db.ts 側が receipt-<経費id>.<拡張子> にリネームして本添付になる
 // ============================================================
 
@@ -23,7 +22,7 @@ const MAX_BYTES = 10 * 1024 * 1024
 const TEMP_PREFIX = 'receipt-tmp-'
 const TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
-/** parseReceiptText が registration_no を抜けなかったときの保険。生テキストから T＋13桁を拾う */
+/** AI が registration_no を抜けなかったときの保険。生テキスト（AI の応答）から T＋13桁を拾う */
 function extractRegistrationNoFallback(text: string): string | null {
   const m = text.normalize('NFKC').match(/T\s*(\d{13})/)
   return m ? `T${m[1]}` : null
@@ -31,7 +30,7 @@ function extractRegistrationNoFallback(text: string): string | null {
 
 /**
  * 登録番号が学習済み（shop_alias）なら店名を上書きする。当たらなければそのまま
- * （shop_learned はそのまま false／parseReceiptText の判定を尊重）
+ * （shop_learned はそのまま false／ai-receipt.ts の判定を尊重）
  */
 function applyShopAlias(draft: ReceiptDraft): ReceiptDraft {
   const registrationNo = draft.registration_no ?? extractRegistrationNoFallback(draft.raw_text)
@@ -131,16 +130,15 @@ export async function removeReceipt(id: string): Promise<void> {
   db.setExpenseReceiptFile(id, null)
 }
 
-/** 画像ファイルを OCR して下書きを作る（アプリ内・オフライン） */
-async function ocrDraft(filePath: string): Promise<ReceiptDraft> {
-  const { text, confidence } = await recognizeImage(filePath)
-  const draft: ReceiptDraft = { ...parseReceiptText(text), raw_text: text, confidence }
+/** 画像ファイルを AI（Gemini）で読んで下書きを作る。キー未設定なら readReceiptWithGemini が Error */
+async function aiDraft(filePath: string): Promise<ReceiptDraft> {
+  const draft = await readReceiptWithGemini(filePath)
   return applyShopAlias(draft)
 }
 
 /**
  * レシート画像をファイル選択で読み取る。userData/thumbs に一時ファイル
- * （receipt-tmp-<uuid>.<拡張子>）としてコピーしてから OCR する。キャンセルなら null。
+ * （receipt-tmp-<uuid>.<拡張子>）としてコピーしてから AI で読む。キャンセルなら null。
  * temp_file は createExpense/updateExpense の receipt_temp_file にそのまま渡せる
  */
 export async function readReceiptImage(win: BrowserWindow | null): Promise<ReceiptRead | null> {
@@ -155,14 +153,14 @@ export async function readReceiptImage(win: BrowserWindow | null): Promise<Recei
   const destPath = join(dir, file)
   copyFileSync(srcPath, destPath)
 
-  const draft = await ocrDraft(destPath)
+  const draft = await aiDraft(destPath)
   return { temp_file: file, receipt_url: toThumbUrl(file) as string, draft }
 }
 
-/** 添付済みのレシートを OCR する。レシートが無ければ Error */
+/** 添付済みのレシートを AI（Gemini）で読む。レシートが無ければ Error */
 export async function readReceipt(id: string): Promise<ReceiptDraft> {
   const file = db.getExpenseReceiptFile(id)
   if (!file) throw new Error('レシートが添付されていません')
   const path = join(app.getPath('userData'), 'thumbs', file)
-  return ocrDraft(path)
+  return aiDraft(path)
 }

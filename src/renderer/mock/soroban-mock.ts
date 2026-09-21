@@ -19,7 +19,7 @@ import type {
   ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
   Listing, ListingStatus,
   Expense, ExpenseInput, ExpenseLineInput, ExpenseLine, ExpenseCategory,
-  ReceiptDraft, ReceiptRead,
+  ReceiptDraft, ReceiptRead, AiStatus,
   AllocMethod, MonthClose, MonthDetail, MonthSaleRow, MonthTotals,
   SearchHit,
   UpdateStatus,
@@ -269,6 +269,16 @@ let settings: Record<string, string> = {
   collect_interval_h: '1',
   aging_warn_days: '90',
   mercari_keyword: '【',
+}
+
+// --- AI 読み取り（Gemini）。キー本体は返さない。安全な保存は常に使える体で動かす ---
+let aiKeyConfigured = true
+let aiModelSetting = 'gemini-2.5-pro'
+const AI_SAFE_STORAGE = true
+
+/** 実際の Gemini 呼び出しは数秒かかる想定に寄せて 1 秒待つ */
+function waitAi<T>(value: T): Promise<T> {
+  return new Promise(resolve => setTimeout(() => resolve(value), 1000))
 }
 
 // ------------------------------------------------------------
@@ -1033,13 +1043,15 @@ const MOCK_RECEIPT_DRAFT: ReceiptDraft = {
   registration_no: 'T2290801007056',
   shop_learned: false,
   occurred_at: '2026-09-15',
-  total: 880,
+  total: 920,
   lines: [
-    { name: 'ビニール袋 100枚', unit_price: 110, quantity: 1 },
-    { name: 'OPP袋 A4', unit_price: 110, quantity: 2 },
-    { name: '緩衝材 プチプチ', unit_price: 330, quantity: 1 },
-    { name: 'ダンボール 小', unit_price: 220, quantity: 1 },
+    { name: 'ビニール袋 100枚', unit_price: 110, quantity: 1, category: 'packaging' },
+    { name: 'OPP袋 A4', unit_price: 110, quantity: 2, category: 'packaging' },
+    { name: '緩衝材 プチプチ', unit_price: 330, quantity: 1, category: 'packaging' },
+    { name: 'レジ袋小 3', unit_price: 220, quantity: 1, category: 'packaging' },
   ],
+  tax: 40,
+  warnings: ['「レジ袋小 3」は袋代として梱包費にしました'],
   raw_text: [
     'ダイソー ○○店',
     '2026/09/15 (火) 12:34',
@@ -1047,9 +1059,11 @@ const MOCK_RECEIPT_DRAFT: ReceiptDraft = {
     'ビニール袋100枚          ¥110',
     'OPP袋A4       2         ¥220',
     '緩衝材プチプチ           ¥330',
-    'ダンボール小             ¥220',
+    'レジ袋小3              ¥220',
     '',
-    '合計                     ¥880',
+    '小計                     ¥880',
+    '消費税                    ¥40',
+    '合計                     ¥920',
   ].join('\n'),
   confidence: 76,
 }
@@ -2415,6 +2429,7 @@ const api: SorobanApi = {
   },
 
   async readReceiptImage() {
+    if (!aiKeyConfigured) throw new Error('AI 読み取りの設定がありません（設定 → AI 読み取り）')
     const result: ReceiptRead = {
       temp_file: `receipt-draft-${uid()}.jpg`,
       receipt_url: '/mock/receipt.svg',
@@ -2424,9 +2439,28 @@ const api: SorobanApi = {
   },
 
   async readReceipt(id: string) {
+    if (!aiKeyConfigured) throw new Error('AI 読み取りの設定がありません（設定 → AI 読み取り）')
     const e = expenses.find(x => x.id === id)
     if (!e || !e.receipt_url) throw new Error('レシートが添付されていません')
     return waitReceipt(MOCK_RECEIPT_DRAFT)
+  },
+
+  async getAiStatus(): Promise<AiStatus> {
+    return wait({ configured: aiKeyConfigured, model: aiModelSetting, safe_storage: AI_SAFE_STORAGE })
+  },
+
+  async setGeminiApiKey(key: string | null) {
+    aiKeyConfigured = !!key
+    return wait(undefined)
+  },
+
+  async setAiModel(model: string) {
+    aiModelSetting = model
+    return wait(undefined)
+  },
+
+  async testGemini() {
+    return waitAi({ ok: true, message: '接続できました' })
   },
 
   async getMonthDetail(month: string, opts?: { tagId?: string | null }) {
