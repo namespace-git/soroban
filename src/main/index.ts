@@ -7,6 +7,7 @@ import * as collector from './collector'
 import * as collectorMellojoy from './collector-mellojoy'
 import * as updater from './updater'
 import * as receipts from './receipts'
+import * as productImage from './product-image'
 import * as ai from './ai-receipt'
 import * as backup from './backup'
 import * as inbox from './inbox'
@@ -170,10 +171,10 @@ function registerIpc(): void {
   handle('updateSale', (id, patch) => db.updateSale(id, patch))
   handle('deleteSale', (id) => db.deleteSale(id))
 
-  handle('linkInventory', (saleId, ids) => db.linkInventory(saleId, ids))
+  handle('linkInventory', (saleId, ids, opts) => db.linkInventory(saleId, ids, 'manual', opts))
   handle('autoLinkPending', () => db.autoLinkPending())
   handle('unlinkInventory', (saleId, id) => db.unlinkInventory(saleId, id))
-  handle('suggestInventory', (saleId, limit) => db.suggestInventory(saleId, limit))
+  handle('suggestInventory', (saleId, limit, opts) => db.suggestInventory(saleId, limit, opts))
   handle('listSaleLines', (saleId) => db.listSaleLines(saleId))
 
   handle('listPurchases', () => db.listPurchases())
@@ -220,6 +221,9 @@ function registerIpc(): void {
   handle('setPurchaseTags', (purchaseId, tagIds) => db.setPurchaseTags(purchaseId, tagIds))
   handle('setProductTags', (modelCode, tagIds) => db.setProductTags(modelCode, tagIds))
   handle('setProductName', (code, name) => db.setProductName(code, name))
+  handle('setProductImage', (code) => productImage.setProductImage(code, mainWindow))
+  handle('setProductImageAuto', (code, auto) => productImage.setProductImageAuto(code, auto))
+  handle('refetchSaleDates', (saleId) => collector.refetchSaleDates(saleId))
   handle('listShopAccountStats', () => db.listShopAccountStats())
   handle('listVariantSummary', (sort) => db.listVariantSummary(sort))
 
@@ -228,9 +232,9 @@ function registerIpc(): void {
   handle('getItemTimeline', (id) => db.getItemTimeline(id))
 
   handle('listListings', (filter) => db.listListings(filter))
-  handle('reserveInventory', (mercariItemId, ids) => db.reserveInventory(mercariItemId, ids))
+  handle('reserveInventory', (mercariItemId, ids, opts) => db.reserveInventory(mercariItemId, ids, opts))
   handle('unreserveInventory', (mercariItemId, id) => db.unreserveInventory(mercariItemId, id))
-  handle('suggestForListing', (mercariItemId, limit) => db.suggestForListing(mercariItemId, limit))
+  handle('suggestForListing', (mercariItemId, limit, opts) => db.suggestForListing(mercariItemId, limit, opts))
   handle('endListing', (mercariItemId) => db.endListing(mercariItemId))
   handle('autoReserveListings', () => db.autoReserveListings())
   handle('setListingShipping', (mercariItemId, shippingMethodId) =>

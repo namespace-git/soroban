@@ -14,7 +14,7 @@ import type {
   Material, MonthClose, MonthDetail, MonthlySummary, MonthSaleRow, MonthTotals, ProductDetail,
   ProductMonthPoint, ProductSummary, PurchaseDetail,
   PurchaseDraftInput, PurchaseImportResult, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
-  PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleStatus, SaleTotals,
+  PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleSource, SaleStatus, SaleTotals,
   SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, ShopAccountStats, Tag, TimelineEvent, VariantSummary,
   CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
@@ -55,6 +55,16 @@ export function toThumbUrl(file: string | null): string | null {
 /** 金額を桁区切りの「¥2,699」形式にする。getItemTimeline の title/detail で使う */
 function yenText(n: number): string {
   return `¥${n.toLocaleString('ja-JP')}`
+}
+
+/**
+ * purchased_at（`YYYY-MM-DDTHH:mm` か `YYYY-MM-DD`）を「YYYY/MM/DD HH:mm」表示に直す。
+ * 時刻が無ければ日付だけ。getItemTimeline の detail で使う
+ */
+function formatPurchasedAt(purchasedAt: string): string {
+  const [datePart, timePart] = purchasedAt.split('T')
+  const dateText = datePart.replace(/-/g, '/')
+  return timePart ? `${dateText} ${timePart}` : dateText
 }
 
 export function initDb(path?: string): void {
@@ -1039,6 +1049,29 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 23) {
+    // 型番ごとに人がセットした商品画像。新規テーブルなので ALTER 不要。resetData() では消さない
+    // （shop_alias・product_name と同じ、学習に近い知識のため）
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS product_image (
+        model_code TEXT PRIMARY KEY,
+        file       TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `)
+    // 保存したサムネイルの元URL（クエリ・フラグメント除く）。変わったら取り直す
+    addColumnIfMissing('listing', 'thumb_src', 'TEXT')
+    addColumnIfMissing('sale', 'thumb_src', 'TEXT')
+    // 購入日時（取引画面）。取れていなければ NULL。取引画面を一度開いたら checked=1（失敗でも再試行しない）
+    addColumnIfMissing('sale', 'purchased_at', 'TEXT')
+    addColumnIfMissing('sale', 'purchased_at_checked', 'INTEGER NOT NULL DEFAULT 0')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '23')
+         ON CONFLICT(key) DO UPDATE SET value = '23'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -1764,10 +1797,11 @@ export function updateSale(id: string, patch: SalePatch): void {
  *     それ以外は shipping_fee=0・shipping_source='actual' で記録しつつ is_shipping_confirmed は
  *     立てない（＝送料未入力として要対応に出す。人が発送方法を選べば updateSale が master にして確定する）
  *
- * sold_at は source='collector' かつ status が未取得（取引中タブで先に追っていない）
- * 販売にだけ反映する。手入力の日付は上書きしない（一覧の取得日を仮の販売日として
- * 保存していたものを、本当の購入完了日に直すため）。取引中タブで先に status が付いた
- * 販売は sold_at を「初めて見た日」のまま固定する（本当の完了日は completed_at に持つ）。
+ * sold_at は source='collector' の販売にだけ反映する。手入力の日付は上書きしない。
+ * status が未取得（取引中タブで先に追っていない）なら sold_at をそのまま実の日付に直す
+ * （一覧の取得日を仮の販売日として保存していたものを、本当の購入完了日に直すため）。
+ * status='completed'・completedAt 付きで呼ばれたとき（取引完了を観測した）は、取引中タブで
+ * 先に status が付いていた販売でも sold_at を completedAt に動かす（仮置きから本当の完了日へ）。
  *
  * status に 'completed' を渡すと、completed_at が未設定なら completedAt で埋める
  * （既に入っていれば触らない。「最初に観測した日」を刻む他の日付と同じ規則）。
@@ -1803,9 +1837,16 @@ export function applySaleActuals(
     }
   }
   if (actuals.sold_at !== undefined) {
-    // status が既に付いている（取引中タブで先に取り込んだ）販売は sold_at を触らない
-    sets.push(`sold_at = CASE WHEN source = 'collector' AND status IS NULL THEN ? ELSE sold_at END`)
-    vals.push(actuals.sold_at)
+    if (actuals.status === 'completed' && actuals.completedAt !== undefined) {
+      // 取引完了を観測した：source='collector' の販売は sold_at を完了日へ動かす
+      // （取引中タブで先に status が付いていた仮置きも、ここで本当の完了日に直す）
+      sets.push(`sold_at = CASE WHEN source = 'collector' THEN ? ELSE sold_at END`)
+      vals.push(actuals.completedAt)
+    } else {
+      // status が既に付いている（取引中タブで先に取り込んだ）販売は sold_at を触らない
+      sets.push(`sold_at = CASE WHEN source = 'collector' AND status IS NULL THEN ? ELSE sold_at END`)
+      vals.push(actuals.sold_at)
+    }
   }
   if (actuals.status !== undefined) {
     sets.push('status = ?')
@@ -1845,17 +1886,17 @@ export function updateCollectedActuals(
   let updated = 0
   for (const r of rows) {
     const sale = db.prepare(
-      'SELECT id, sold_at, status, fee, shipping_fee FROM sale WHERE mercari_item_id = ?',
+      'SELECT id, sold_at, status, fee, shipping_fee, source FROM sale WHERE mercari_item_id = ?',
     ).get(r.mercariItemId) as
-      | { id: string; sold_at: string; status: SaleStatus | null; fee: number; shipping_fee: number }
+      | { id: string; sold_at: string; status: SaleStatus | null; fee: number; shipping_fee: number; source: SaleSource }
       | undefined
     if (!sale) continue
 
     const feeChanged = r.fee != null && r.fee !== sale.fee
     const shippingChanged = r.shippingFee != null && r.shippingFee !== sale.shipping_fee
-    // sold_at は status が未取得（null）の販売にしか反映されない（applySaleActuals の規則）ので、
-    // それ以外は比較しても実際には変わらない
-    const soldAtChanged = sale.status === null && sale.sold_at !== r.soldAt
+    // status に関わらず、source='collector' の販売は完了観測で sold_at が完了日へ動く
+    // （applySaleActuals の規則）ので、それだけを見る
+    const soldAtChanged = sale.source === 'collector' && sale.sold_at !== r.soldAt
     const statusChanged = sale.status !== 'completed'
 
     if (!feeChanged && !shippingChanged && !soldAtChanged && !statusChanged) continue
@@ -1870,6 +1911,52 @@ export function updateCollectedActuals(
     updated++
   }
   return updated
+}
+
+/** 販売の mercari_item_id（取り込みでなければ null）。refetchSaleDates（collector）が使う */
+export function saleMercariItemId(saleId: string): string | null {
+  const row = db.prepare('SELECT mercari_item_id FROM sale WHERE id = ?').get(saleId) as
+    | { mercari_item_id: string | null } | undefined
+  return row?.mercari_item_id ?? null
+}
+
+/**
+ * 取引画面の「購入日時」を保存する。取れなかった（null）ときも purchased_at_checked を
+ * 立てて、以後は再試行しない。sold_at・thumb と同じ理由で updated_at は触らない
+ * （appendModelCodes の「人が手で触ったか」判定を壊さないため）。
+ *
+ * source='collector' の販売で、まだ取引完了を観測していなければ（status が 'completed' でなければ）
+ * sold_at の仮置き（初めて見た日）を購入日（日付部分）に直す。完了済みなら sold_at は
+ * 既に completed_at を反映済みなので触らない。
+ */
+export function setSalePurchasedAt(saleId: string, purchasedAt: string | null): void {
+  if (purchasedAt !== null) {
+    db.prepare('UPDATE sale SET purchased_at = ?, purchased_at_checked = 1 WHERE id = ?')
+      .run(purchasedAt, saleId)
+  } else {
+    db.prepare('UPDATE sale SET purchased_at_checked = 1 WHERE id = ?').run(saleId)
+    return
+  }
+
+  const sale = db.prepare('SELECT source, status FROM sale WHERE id = ?').get(saleId) as
+    | { source: SaleSource; status: SaleStatus | null } | undefined
+  if (sale && sale.source === 'collector' && sale.status !== 'completed') {
+    db.prepare('UPDATE sale SET sold_at = ? WHERE id = ?').run(purchasedAt.slice(0, 10), saleId)
+  }
+}
+
+/**
+ * 購入日時がまだ取れていない取り込み済み販売（取引画面を一度も開いていないもの）。
+ * collector が予算を切って回す。新しい順。
+ */
+export function salesNeedingPurchasedAt(limit: number): Array<{ id: string; mercari_item_id: string }> {
+  return db.prepare(`
+    SELECT id, mercari_item_id FROM sale
+     WHERE source = 'collector' AND purchased_at IS NULL AND purchased_at_checked = 0
+       AND mercari_item_id IS NOT NULL
+     ORDER BY sold_at DESC
+     LIMIT ?
+  `).all(limit) as Array<{ id: string; mercari_item_id: string }>
 }
 
 /**
@@ -2237,26 +2324,48 @@ export function saleTotals(filter?: SaleFilter): SaleTotals {
  * in_stock でない在庫（売却済み・廃棄済み・自家消費・分割済み）が混ざっていれば例外。
  * 出品に引き当て中（listing_line）の在庫は紐付けてよい。人が「この販売に使う」と
  * 決めたのでその引き当ては優先して外す（出品自体の status は変えない）。
+ *
+ * opts.takeFromSale: true なら、既に別の販売に紐付いている（status='sold'）在庫も、
+ * 同じトランザクションの中でその sale_line を先に外してからこちらへ付け替える
+ * （メンテ用。画面で警告してから呼ぶ）。それ以外の非 in_stock（廃棄・自家消費・分割済み）は
+ * takeFromSale を付けても例外。既にこの販売自身に紐付いている在庫は無視する（例外にしない）。
  */
 export function linkInventory(
   saleId: string, itemIds: string[], source: LinkSource = 'manual',
+  opts?: { takeFromSale?: boolean },
 ): void {
-  if (itemIds.length > 0) {
-    const ph = itemIds.map(() => '?').join(',')
-    const rows = db.prepare(
-      `SELECT id, status FROM inventory_item WHERE id IN (${ph})`,
-    ).all(...itemIds) as Array<{ id: string; status: InventoryStatus }>
-    if (rows.some(r => r.status !== 'in_stock')) {
-      throw new Error('販売済み・廃棄済みの在庫は紐付けられません')
-    }
+  if (itemIds.length === 0) return
+
+  const ph = itemIds.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT i.id, i.status, sl.sale_id AS sold_sale_id
+      FROM inventory_item i
+      LEFT JOIN sale_line sl ON sl.inventory_item_id = i.id
+     WHERE i.id IN (${ph})
+  `).all(...itemIds) as Array<{ id: string; status: InventoryStatus; sold_sale_id: string | null }>
+  const byId = new Map(rows.map(r => [r.id, r]))
+
+  // 既にこの販売自身に紐付いている在庫は対象から外す（例外にしない）
+  const targets = itemIds.filter(id => byId.get(id)?.sold_sale_id !== saleId)
+  if (targets.length === 0) return
+
+  for (const id of targets) {
+    const row = byId.get(id)
+    const ok = !!row && (row.status === 'in_stock' || (row.status === 'sold' && !!opts?.takeFromSale))
+    if (!ok) throw new Error('販売済み・廃棄済みの在庫は紐付けられません')
   }
 
   const ins = db.prepare(
     `INSERT INTO sale_line (id, sale_id, inventory_item_id, link_source) VALUES (?, ?, ?, ?)`,
   )
   const delListing = db.prepare('DELETE FROM listing_line WHERE inventory_item_id = ?')
+  // takeFromSale で付け替える対象（status='sold'）は、先に元の sale_line を外す
+  // （trg_sline_unsold で in_stock に戻ってから、この販売へ INSERT し直す）。
+  // in_stock の在庫には該当する行が無いので何もしない
+  const delOldSaleLine = db.prepare('DELETE FROM sale_line WHERE inventory_item_id = ?')
   const tx = db.transaction(() => {
-    for (const itemId of itemIds) {
+    for (const itemId of targets) {
+      delOldSaleLine.run(itemId)
       ins.run(randomUUID(), saleId, itemId, source)
       delListing.run(itemId)
     }
@@ -2430,38 +2539,56 @@ function normalizeName(s: string): string {
  * SQL側では正規化できないため、in_stock を全件取ってJS側で並べ替える
  * （規模は月20〜50件程度の想定）。
  */
-/** inventory_view の1行。thumb_url・listing は組み立てる前の生の列 */
-type InventoryRow = Omit<InventoryItem, 'tags' | 'inherited_tags' | 'thumb_url' | 'listing'> & {
+/** inventory_view の1行。thumb_url・listing・sold_to は組み立てる前の生の列 */
+type InventoryRow = Omit<InventoryItem, 'tags' | 'inherited_tags' | 'thumb_url' | 'listing' | 'sold_to'> & {
   thumb_file: string | null
   listing_id: string | null
   listing_price: number | null
   listing_status: ListingStatus | null
+  sold_sale_id: string | null
+  sold_title: string | null
+  sold_price: number | null
+  sold_sold_at: string | null
 }
 
 /**
  * in_stock（等）を inventory_view から引いた結果に、まとめて引いた直接タグと
  * 派生タグ（仕入・商品＝型番から。優先順位 purchase > product。tags と重複するものは除く）を付ける。
+ * サムネイルが無い（＝未販売の）行は、型番があれば商品画像（productImageFiles）で埋める。
  */
 function attachInventoryTags(items: InventoryRow[]): InventoryItem[] {
   const ids = items.map(i => i.id)
   const tagMap = loadTagsFor('inventory_tag', 'inventory_item_id', ids)
   const purchaseMap = loadPurchaseTagsForInventory(ids)
   const productMap = loadProductTagsForInventory(items)
+
+  const missingThumbCodes = [...new Set(
+    items.filter(i => !i.thumb_file && i.model_code).map(i => i.model_code as string),
+  )]
+  const imageMap = productImageFiles(missingThumbCodes)
+
   return items.map(i => {
-    const { thumb_file, listing_id, listing_price, listing_status, ...rest } = i
+    const {
+      thumb_file, listing_id, listing_price, listing_status,
+      sold_sale_id, sold_title, sold_price, sold_sold_at, ...rest
+    } = i
     const tags = tagMap.get(i.id) ?? []
     const directIds = new Set(tags.map(t => t.id))
     const inherited_tags = mergeInheritedTags(directIds, [
       { from: 'purchase', tags: purchaseMap.get(i.id) ?? [] },
       { from: 'product', tags: productMap.get(i.id) ?? [] },
     ])
+    const fallbackThumb = !thumb_file && i.model_code ? imageMap.get(i.model_code)?.file ?? null : null
     return {
       ...rest,
-      thumb_url: toThumbUrl(thumb_file),
+      thumb_url: toThumbUrl(thumb_file ?? fallbackThumb),
       tags,
       inherited_tags,
       listing: listing_id
         ? { mercari_item_id: listing_id, price: listing_price!, status: listing_status! }
+        : null,
+      sold_to: sold_sale_id
+        ? { sale_id: sold_sale_id, title: sold_title!, price: sold_price!, sold_at: sold_sold_at! }
         : null,
     }
   })
@@ -2489,10 +2616,15 @@ function rankInventoryMatch(
  * 在庫候補を返す。並びは 在庫コード一致 → 型番完全一致 → シリーズ一致 → 商品名の類似度
  * （完全一致 → 前方一致 → 部分一致 → 残り）。同順位は滞留日数が長い方を先に
  * （型番一致の中では先入先出と同じ順になる）。
- * SQL側では正規化できないため、in_stock を全件取ってJS側で並べ替える
+ * SQL側では正規化できないため、in_stock（＋includeSoldならsold）を全件取ってJS側で並べ替える
  * （規模は月20〜50件程度の想定）。他の出品に引き当て済みの在庫は候補から除く。
+ *
+ * opts.includeSold: 販売済み（他の販売に紐付いた）在庫も候補に含める（sold_to 付き。付け替え用）。
+ * 自分自身（saleId）の販売に既に付いている在庫は除く。同順位では in_stock を sold より先に出す。
  */
-export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
+export function suggestInventory(
+  saleId: string, limit = 20, opts?: { includeSold?: boolean },
+): InventoryItem[] {
   const sale = db.prepare('SELECT title, model_codes FROM sale WHERE id = ?').get(saleId) as
     | { title: string; model_codes: string } | undefined
   if (!sale) return []
@@ -2505,13 +2637,22 @@ export function suggestInventory(saleId: string, limit = 20): InventoryItem[] {
   const target = normalizeName(sale.title)
   const head = target.slice(0, 6)
 
+  const statusClause = opts?.includeSold ? `status IN ('in_stock','sold')` : `status = 'in_stock'`
   const items = db.prepare(
-    `SELECT * FROM inventory_view WHERE status = 'in_stock' AND listing_id IS NULL`,
+    `SELECT * FROM inventory_view WHERE ${statusClause} AND listing_id IS NULL`,
   ).all() as InventoryRow[]
+  // 自分自身の販売に既に紐付いている在庫は候補に出さない（紐付け解除で外せるので不要）
+  const candidates = items.filter(item => !(item.status === 'sold' && item.sold_sale_id === saleId))
 
-  const picked = items
+  const picked = candidates
     .map(item => ({ item, r: rankInventoryMatch(item, itemCodeSet, codeSet, seriesCodes, target, head) }))
-    .sort((a, b) => (a.r !== b.r ? a.r - b.r : b.item.aging_days - a.item.aging_days))
+    .sort((a, b) => {
+      if (a.r !== b.r) return a.r - b.r
+      const aSold = a.item.status === 'sold' ? 1 : 0
+      const bSold = b.item.status === 'sold' ? 1 : 0
+      if (aSold !== bSold) return aSold - bSold
+      return b.item.aging_days - a.item.aging_days
+    })
     .slice(0, limit)
     .map(({ item }) => item)
 
@@ -2702,8 +2843,15 @@ export function setListingShipping(mercariItemId: string, shippingMethodId: stri
  * 在庫は、その引き当てを同じトランザクション内で先に外してからこちらへ移す
  * （再出品・付け替え。人の最新の決定を優先。元の出品は未引き当てに戻る）。
  * 販売済み・廃棄済みの在庫は trg_listing_line_guard がそのまま拒否する。
+ *
+ * opts.takeFromSale: true なら、販売済み（status='sold'）の在庫はその sale_line を
+ * 同じトランザクションの中で先に外してから（in_stock に戻して）引き当てる
+ * （メンテ用。画面で警告してから呼ぶ）。それ以外の非 in_stock は従来どおりトリガーが拒否する。
  */
-export function reserveInventory(mercariItemId: string, inventoryItemIds: string[]): void {
+export function reserveInventory(
+  mercariItemId: string, inventoryItemIds: string[],
+  opts?: { takeFromSale?: boolean },
+): void {
   // トリガー（trg_listing_line_guard）でも拒否されるが、そこに任せると SQLite の
   // 生のエラーメッセージが上がってしまうため、先に同じ文言で明示的に弾く
   const listing = db.prepare('SELECT status FROM listing WHERE mercari_item_id = ?')
@@ -2717,11 +2865,17 @@ export function reserveInventory(mercariItemId: string, inventoryItemIds: string
      WHERE inventory_item_id = ?
        AND listing_id IN (SELECT mercari_item_id FROM listing WHERE status IN ('active','suspended'))
   `)
+  const delSaleLine = db.prepare('DELETE FROM sale_line WHERE inventory_item_id = ?')
+  const statusOf = db.prepare('SELECT status FROM inventory_item WHERE id = ?')
   const ins = db.prepare(
     `INSERT INTO listing_line (id, listing_id, inventory_item_id) VALUES (?, ?, ?)`,
   )
   const tx = db.transaction(() => {
     for (const itemId of inventoryItemIds) {
+      if (opts?.takeFromSale) {
+        const row = statusOf.get(itemId) as { status: InventoryStatus } | undefined
+        if (row?.status === 'sold') delSaleLine.run(itemId)
+      }
       delOther.run(itemId)
       ins.run(randomUUID(), mercariItemId, itemId)
     }
@@ -2736,11 +2890,15 @@ export function unreserveInventory(mercariItemId: string, inventoryItemId: strin
 
 /**
  * 出品の引き当て候補。在庫コード一致 → 型番の完全一致 → シリーズ一致 → 名前の一致の順。
- * 販売済み・廃棄済みは除く。他の出品に引き当て済みの在庫も候補に含める
+ * 廃棄済みは除く。他の出品に引き当て済みの在庫も候補に含める
  * （InventoryItem.listing に引き当て先が入る。この出品自身に引き当て済みのものは除く）。
- * 同順位なら未引き当てを先に。
+ * 同順位なら未引き当てを先に、次に sold より in_stock を先に。
+ *
+ * opts.includeSold: 販売済み（sale_line あり）在庫も候補に含める（sold_to 付き。付け替え用）
  */
-export function suggestForListing(mercariItemId: string, limit = 20): InventoryItem[] {
+export function suggestForListing(
+  mercariItemId: string, limit = 20, opts?: { includeSold?: boolean },
+): InventoryItem[] {
   const listing = db.prepare('SELECT title FROM listing WHERE mercari_item_id = ?')
     .get(mercariItemId) as { title: string } | undefined
   if (!listing) return []
@@ -2753,8 +2911,9 @@ export function suggestForListing(mercariItemId: string, limit = 20): InventoryI
   const target = normalizeName(listing.title)
   const head = target.slice(0, 6)
 
+  const statusClause = opts?.includeSold ? `status IN ('in_stock','sold')` : `status = 'in_stock'`
   const items = db.prepare(
-    `SELECT * FROM inventory_view WHERE status = 'in_stock' AND (listing_id IS NULL OR listing_id != ?)`,
+    `SELECT * FROM inventory_view WHERE ${statusClause} AND (listing_id IS NULL OR listing_id != ?)`,
   ).all(mercariItemId) as InventoryRow[]
 
   const picked = items
@@ -2764,6 +2923,9 @@ export function suggestForListing(mercariItemId: string, limit = 20): InventoryI
       const aReserved = a.item.listing_id ? 1 : 0
       const bReserved = b.item.listing_id ? 1 : 0
       if (aReserved !== bReserved) return aReserved - bReserved
+      const aSold = a.item.status === 'sold' ? 1 : 0
+      const bSold = b.item.status === 'sold' ? 1 : 0
+      if (aSold !== bSold) return aSold - bSold
       return b.item.aging_days - a.item.aging_days
     })
     .slice(0, limit)
@@ -2893,10 +3055,111 @@ export function listingsWithoutThumb(mercariItemIds: string[]): string[] {
   return rows.map(r => r.id)
 }
 
-export function setListingThumb(mercariItemId: string, file: string): void {
+/**
+ * サムネイルURLを比較用の文字列にする（前後の空白とフラグメントだけ落とす）。
+ * メルカリの画像URLは `.../m123_1.jpg?1789781431` の形で、パスは写真の番号、
+ * クエリは画像の更新時刻。写真を差し替えるとパスは同じままクエリだけ変わるので、
+ * **クエリは落とさない**（落とすと差し替えを見逃す）。
+ */
+export function normalizeThumbSrc(url: string): string {
+  return url.trim().split('#')[0]
+}
+
+/**
+ * 出品と同じ画像（thumb_file・thumb_src）を、対になる sale（mercari_item_id が同じ）にも書く
+ * （売れる前は listing、売れた後は sale がサムネイルの持ち主だが、同じ画像を共有しているため）。
+ */
+export function setListingThumb(mercariItemId: string, file: string, src: string | null = null): void {
   db.prepare(
-    `UPDATE listing SET thumb_file = ?, updated_at = datetime('now') WHERE mercari_item_id = ?`,
-  ).run(file, mercariItemId)
+    `UPDATE listing SET thumb_file = ?, thumb_src = ?, updated_at = datetime('now') WHERE mercari_item_id = ?`,
+  ).run(file, src, mercariItemId)
+  db.prepare(
+    `UPDATE sale SET thumb_file = ?, thumb_src = ? WHERE mercari_item_id = ?`,
+  ).run(file, src, mercariItemId)
+}
+
+/**
+ * サムネイルを差し替えるべき対象を返す。scraped は今回の一覧取得で分かった
+ * （mercariItemId, 画像URL）の組。判定規則：
+ *   (a) thumb_file が無い → 対象（新規保存）
+ *   (b) thumb_file はあるが thumb_src が無い（旧データ）→ 対象にせず、今の src を記録するだけ
+ *   (c) thumb_src はあるが正規化した URL と違う → 対象（差し替え）
+ * (a) を先、(c) を後の順で返す（予算は呼び出し側の collector が切る）。画像URLが無いものは対象外。
+ * 旧ファイルの削除はしない（collector 側の仕事）。
+ */
+export function salesNeedingThumb(
+  scraped: Array<{ mercariItemId: string; thumbUrl: string | null }>,
+): Array<{ id: string; mercariItemId: string; thumbUrl: string }> {
+  const withUrl = scraped.filter((r): r is { mercariItemId: string; thumbUrl: string } => !!r.thumbUrl)
+  if (withUrl.length === 0) return []
+
+  const ph = withUrl.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT id, mercari_item_id AS mercariItemId, thumb_file AS thumbFile, thumb_src AS thumbSrc
+      FROM sale WHERE mercari_item_id IN (${ph})
+  `).all(...withUrl.map(r => r.mercariItemId)) as
+    Array<{ id: string; mercariItemId: string; thumbFile: string | null; thumbSrc: string | null }>
+  const byMercariId = new Map(rows.map(r => [r.mercariItemId, r]))
+
+  const toFetch: Array<{ id: string; mercariItemId: string; thumbUrl: string }> = []
+  const toReplace: Array<{ id: string; mercariItemId: string; thumbUrl: string }> = []
+  const updateSrcOnly = db.prepare('UPDATE sale SET thumb_src = ? WHERE id = ?')
+
+  const tx = db.transaction(() => {
+    for (const r of withUrl) {
+      const row = byMercariId.get(r.mercariItemId)
+      if (!row) continue
+      const normalized = normalizeThumbSrc(r.thumbUrl)
+      if (row.thumbFile === null) {
+        toFetch.push({ id: row.id, mercariItemId: r.mercariItemId, thumbUrl: r.thumbUrl })
+      } else if (row.thumbSrc === null) {
+        updateSrcOnly.run(normalized, row.id)
+      } else if (row.thumbSrc !== normalized) {
+        toReplace.push({ id: row.id, mercariItemId: r.mercariItemId, thumbUrl: r.thumbUrl })
+      }
+    }
+  })
+  tx()
+
+  return [...toFetch, ...toReplace]
+}
+
+/** salesNeedingThumb と同じ判定規則を listing（mercari_item_id が主キー）に対して行う */
+export function listingsNeedingThumb(
+  scraped: Array<{ mercariItemId: string; thumbUrl: string | null }>,
+): Array<{ id: string; thumbUrl: string }> {
+  const withUrl = scraped.filter((r): r is { mercariItemId: string; thumbUrl: string } => !!r.thumbUrl)
+  if (withUrl.length === 0) return []
+
+  const ph = withUrl.map(() => '?').join(',')
+  const rows = db.prepare(`
+    SELECT mercari_item_id AS id, thumb_file AS thumbFile, thumb_src AS thumbSrc
+      FROM listing WHERE mercari_item_id IN (${ph})
+  `).all(...withUrl.map(r => r.mercariItemId)) as
+    Array<{ id: string; thumbFile: string | null; thumbSrc: string | null }>
+  const byId = new Map(rows.map(r => [r.id, r]))
+
+  const toFetch: Array<{ id: string; thumbUrl: string }> = []
+  const toReplace: Array<{ id: string; thumbUrl: string }> = []
+  const updateSrcOnly = db.prepare('UPDATE listing SET thumb_src = ? WHERE mercari_item_id = ?')
+
+  const tx = db.transaction(() => {
+    for (const r of withUrl) {
+      const row = byId.get(r.mercariItemId)
+      if (!row) continue
+      const normalized = normalizeThumbSrc(r.thumbUrl)
+      if (row.thumbFile === null) {
+        toFetch.push({ id: r.mercariItemId, thumbUrl: r.thumbUrl })
+      } else if (row.thumbSrc === null) {
+        updateSrcOnly.run(normalized, r.mercariItemId)
+      } else if (row.thumbSrc !== normalized) {
+        toReplace.push({ id: r.mercariItemId, thumbUrl: r.thumbUrl })
+      }
+    }
+  })
+  tx()
+
+  return [...toFetch, ...toReplace]
 }
 
 // ============================================================
@@ -3619,6 +3882,96 @@ export function listVariantSummary(
 // 商品（型番）ページ・在庫の履歴
 // ============================================================
 
+/** 型番が人がセットした商品画像（product_image）。無ければ null */
+export function getProductImage(modelCode: string): { file: string } | null {
+  const row = db.prepare('SELECT file FROM product_image WHERE model_code = ?').get(modelCode) as
+    | { file: string } | undefined
+  return row ?? null
+}
+
+/** 商品画像を保存する（置き換え）。ファイルのコピー・旧ファイルの削除は product-image.ts の仕事 */
+export function upsertProductImage(modelCode: string, file: string): void {
+  db.prepare(`
+    INSERT INTO product_image (model_code, file, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(model_code) DO UPDATE SET file = excluded.file, updated_at = excluded.updated_at
+  `).run(modelCode, file)
+}
+
+export function deleteProductImage(modelCode: string): void {
+  db.prepare('DELETE FROM product_image WHERE model_code = ?').run(modelCode)
+}
+
+/**
+ * 型番ごとの商品画像ファイルを優先順位で決める：
+ *   ① product_image（人がセット。setProductImage）→ manual: true
+ *   ② その型番の最新の出品の画像（listing_line 経由、またはタイトルに型番文字列を含む。
+ *      last_seen_at が新しい順、画像があるもの）
+ *   ③ その型番の最新の販売の画像（sale_line 経由、sold_at が新しい順）
+ * 画像が無い型番は Map に入れない。
+ */
+export function productImageFiles(modelCodes: string[]): Map<string, { file: string; manual: boolean }> {
+  const map = new Map<string, { file: string; manual: boolean }>()
+  if (modelCodes.length === 0) return map
+
+  const remaining = new Set(modelCodes)
+
+  // ① 人がセットした画像
+  const ph = modelCodes.map(() => '?').join(',')
+  const manualRows = db.prepare(
+    `SELECT model_code, file FROM product_image WHERE model_code IN (${ph})`,
+  ).all(...modelCodes) as Array<{ model_code: string; file: string }>
+  for (const r of manualRows) {
+    map.set(r.model_code, { file: r.file, manual: true })
+    remaining.delete(r.model_code)
+  }
+  if (remaining.size === 0) return map
+
+  // ② その型番の最新の出品（listing_line 経由、またはタイトルに型番文字列を含む）
+  const findLatestListingThumb = db.prepare(`
+    SELECT thumb_file FROM (
+      SELECT l.thumb_file AS thumb_file, l.last_seen_at AS last_seen_at
+        FROM listing l
+        JOIN listing_line ll ON ll.listing_id = l.mercari_item_id
+        JOIN inventory_item i ON i.id = ll.inventory_item_id
+       WHERE i.model_code = ? AND l.thumb_file IS NOT NULL
+      UNION
+      SELECT l.thumb_file AS thumb_file, l.last_seen_at AS last_seen_at
+        FROM listing l
+       WHERE l.title LIKE '%' || ? || '%' AND l.thumb_file IS NOT NULL
+    )
+    ORDER BY last_seen_at DESC
+    LIMIT 1
+  `)
+  for (const code of [...remaining]) {
+    const row = findLatestListingThumb.get(code, code) as { thumb_file: string } | undefined
+    if (row) {
+      map.set(code, { file: row.thumb_file, manual: false })
+      remaining.delete(code)
+    }
+  }
+  if (remaining.size === 0) return map
+
+  // ③ その型番の最新の販売
+  const findLatestSaleThumb = db.prepare(`
+    SELECT sp.thumb_file AS thumb_file
+      FROM inventory_item i
+      JOIN sale_line   sl ON sl.inventory_item_id = i.id
+      JOIN sale_profit sp ON sp.id = sl.sale_id
+     WHERE i.model_code = ?
+     ORDER BY sp.sold_at DESC
+     LIMIT 1
+  `)
+  for (const code of [...remaining]) {
+    const row = findLatestSaleThumb.get(code) as { thumb_file: string | null } | undefined
+    if (row?.thumb_file) {
+      map.set(code, { file: row.thumb_file, manual: false })
+    }
+  }
+
+  return map
+}
+
 type ProductSummarySort = 'total_profit' | 'avg_profit' | 'sold' | 'in_stock' | 'last_purchased_at'
 
 type ProductSummaryRow = VariantSummary & {
@@ -3626,11 +3979,10 @@ type ProductSummaryRow = VariantSummary & {
   avg_cost: number | null
   last_purchased_at: string | null
   last_sold_at: string | null
-  thumb_file: string | null
 }
 
 /**
- * variant_summary に仕入額・最新日・サムネイルを足したもの。
+ * variant_summary に仕入額・最新日を足したもの（画像は productImageFiles で別途付ける）。
  * purchase_total / avg_cost は split 親を除いた在庫（= variant_summary の purchased と同じ母集団）で計算する。
  */
 function selectProducts(sort: ProductSummarySort): ProductSummaryRow[] {
@@ -3649,16 +4001,7 @@ function selectProducts(sort: ProductSummarySort): ProductSummaryRow[] {
       COALESCE(pt.purchase_total, 0)                        AS purchase_total,
       pt.avg_cost                                           AS avg_cost,
       pt.last_purchased_at                                  AS last_purchased_at,
-      st.last_sold_at                                       AS last_sold_at,
-      (
-        SELECT sp2.thumb_file
-        FROM inventory_item i2
-        JOIN sale_line   sl2 ON sl2.inventory_item_id = i2.id
-        JOIN sale_profit sp2 ON sp2.id = sl2.sale_id
-        WHERE i2.model_code = vs.model_code
-        ORDER BY sp2.sold_at DESC
-        LIMIT 1
-      ) AS thumb_file
+      st.last_sold_at                                       AS last_sold_at
     FROM variant_summary vs
     LEFT JOIN (
       SELECT
@@ -3681,15 +4024,17 @@ function selectProducts(sort: ProductSummarySort): ProductSummaryRow[] {
   `).all() as ProductSummaryRow[]
 }
 
-function toProductSummary(r: ProductSummaryRow, tags: Tag[]): ProductSummary {
-  const { thumb_file, ...rest } = r
-  return { ...rest, thumb_url: toThumbUrl(thumb_file), tags }
+function toProductSummary(
+  r: ProductSummaryRow, tags: Tag[], image: { file: string; manual: boolean } | undefined,
+): ProductSummary {
+  return { ...r, thumb_url: toThumbUrl(image?.file ?? null), image_manual: image?.manual ?? false, tags }
 }
 
 export function listProducts(sort: ProductSummarySort = 'total_profit'): ProductSummary[] {
   const rows = selectProducts(sort)
   const tagMap = loadTagsFor('product_tag', 'model_code', rows.map(r => r.model_code))
-  return rows.map(r => toProductSummary(r, tagMap.get(r.model_code) ?? []))
+  const imageMap = productImageFiles(rows.map(r => r.model_code))
+  return rows.map(r => toProductSummary(r, tagMap.get(r.model_code) ?? [], imageMap.get(r.model_code)))
 }
 
 /** 'YYYY-MM' を1か月進める */
@@ -3788,7 +4133,11 @@ export function getProduct(modelCode: string): ProductDetail | null {
   `).all(modelCode) as SaleProfitRow[]
 
   return {
-    ...toProductSummary(base, loadTagsFor('product_tag', 'model_code', [modelCode]).get(modelCode) ?? []),
+    ...toProductSummary(
+      base,
+      loadTagsFor('product_tag', 'model_code', [modelCode]).get(modelCode) ?? [],
+      productImageFiles([modelCode]).get(modelCode),
+    ),
     months,
     items,
     sales: hydrateSaleProfitRows(saleRows),
@@ -3916,9 +4265,11 @@ export function getItemTimeline(inventoryItemId: string): ItemTimeline | null {
       detailParts.push(`（まとめ売り ${sale.item_count} 点、1 点あたり ${yenText(perItem)}）`)
     }
     if (sale.buyer) detailParts.push(`買い手：${sale.buyer}`)
+    if (sale.purchased_at) detailParts.push(`購入日時 ${formatPurchasedAt(sale.purchased_at)}`)
 
     events.push({
-      date: sale.sold_at,
+      // 購入日時が取れていればそちらを優先（sold_at は取引完了までの仮置きのことがある）
+      date: sale.purchased_at ? sale.purchased_at.slice(0, 10) : sale.sold_at,
       kind: 'sold',
       title: 'メルカリで売れた',
       detail: detailParts.join(' '),
@@ -4662,13 +5013,20 @@ export function insertCollected(
 }
 
 /**
- * サムネイルのファイル名を保存する（collector が、新規に取り込んだ販売について
- * 画像取得に成功したときだけ呼ぶ）。生成後の landed_cost と違い、サムネイルは
- * 後から書き込んでも過去の利益には影響しないので updated_at は触らない
- * （appendModelCodes の「人が手で触ったか」判定を壊さないため）。
+ * サムネイルのファイル名を保存する（collector が、画像取得に成功したときに呼ぶ）。
+ * 生成後の landed_cost と違い、サムネイルは後から書き込んでも過去の利益には影響しないので
+ * updated_at は触らない（appendModelCodes の「人が手で触ったか」判定を壊さないため）。
+ * 対になる listing（mercari_item_id が同じ）があれば、そちらにも同じ画像を書く
+ * （売れる前後で持ち主が変わるだけで、同じ画像を共有しているため）。
  */
-export function setSaleThumb(saleId: string, file: string): void {
-  db.prepare('UPDATE sale SET thumb_file = ? WHERE id = ?').run(file, saleId)
+export function setSaleThumb(saleId: string, file: string, src: string | null = null): void {
+  const row = db.prepare('SELECT mercari_item_id FROM sale WHERE id = ?').get(saleId) as
+    | { mercari_item_id: string | null } | undefined
+  db.prepare('UPDATE sale SET thumb_file = ?, thumb_src = ? WHERE id = ?').run(file, src, saleId)
+  if (row?.mercari_item_id) {
+    db.prepare('UPDATE listing SET thumb_file = ?, thumb_src = ? WHERE mercari_item_id = ?')
+      .run(file, src, row.mercari_item_id)
+  }
 }
 
 // ============================================================

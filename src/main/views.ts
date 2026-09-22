@@ -124,17 +124,11 @@ export function listInventoryGroups(filter: InventoryGroupFilter): InventoryGrou
   const allItems = ALL_INVENTORY_STATUSES.flatMap(status => db.listInventory(status))
   const productMap = new Map(db.listProducts().map(p => [p.model_code, p]))
 
-  // グループの代表サムネ：その型番が紐付いた販売のうち、一番新しく売れたもの
-  const thumbRows = db.getDb().prepare(`
-    SELECT i.model_code AS model_code, sp.thumb_file AS thumb_file
-      FROM inventory_item i
-      JOIN sale_line   sl ON sl.inventory_item_id = i.id
-      JOIN sale_profit sp ON sp.id = sl.sale_id
-     WHERE i.model_code IS NOT NULL
-     ORDER BY sp.sold_at DESC
-  `).all() as Array<{ model_code: string; thumb_file: string | null }>
-  const thumbMap = new Map<string, string | null>()
-  for (const r of thumbRows) if (!thumbMap.has(r.model_code)) thumbMap.set(r.model_code, r.thumb_file)
+  // グループの代表サムネ：商品画像と同じ優先順位（①人がセット ②最新の出品 ③最新の販売）
+  const modelCodes = [...new Set(
+    allItems.map(it => it.model_code).filter((c): c is string => c !== null),
+  )]
+  const imageMap = db.productImageFiles(modelCodes)
 
   const byModel = new Map<string | null, InventoryItem[]>()
   for (const item of allItems) {
@@ -166,7 +160,7 @@ export function listInventoryGroups(filter: InventoryGroupFilter): InventoryGrou
     groups.push({
       model_code: modelCode,
       name: product?.name ?? '型番なし',
-      thumb_url: modelCode ? db.toThumbUrl(thumbMap.get(modelCode) ?? null) : null,
+      thumb_url: modelCode ? db.toThumbUrl(imageMap.get(modelCode)?.file ?? null) : null,
       tags: product?.tags ?? [],
       unlisted: unlisted_arrived + not_arrived,
       unlisted_arrived,

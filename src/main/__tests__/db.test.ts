@@ -1239,7 +1239,7 @@ describe('db（:memory:）', () => {
       expect(s.delivered_at).toBe('2026-08-09')
     })
 
-    it('updateCollectedActuals：売却済み一覧で観測したらstatus=completed・completed_atが付く。取引中タブで先に入ったsold_atは上書きしない', () => {
+    it('updateCollectedActuals：売却済み一覧で観測したらstatus=completed・completed_atが付き、取引中タブで先に入っていたsold_atも完了日へ動く', () => {
       // 取引中タブで先に取り込まれた販売（sold_atは「初めて見た日」の仮日付）
       db.insertCollected([
         { mercariItemId: 'ip-done', title: '取引中から入った商品', price: 2000, soldAt: '2026-08-01', status: 'waiting_shipment' },
@@ -1253,7 +1253,7 @@ describe('db（:memory:）', () => {
       expect(updated).toBe(1)
 
       const s = db.listSales().find(s => s.mercari_item_id === 'ip-done')!
-      expect(s.sold_at).toBe('2026-08-01') // 「初めて見た日」のまま。上書きしない
+      expect(s.sold_at).toBe('2026-08-10') // 仮置きから本当の完了日へ動く
       expect(s.status).toBe('completed')
       expect(s.completed_at).toBe('2026-08-10')
       expect(s.fee).toBe(200)
@@ -1303,7 +1303,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('22')
+      expect(db.getSettings().schema_version).toBe('23')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1461,8 +1461,8 @@ describe('db（:memory:）', () => {
     expect(other.last_ordered_at).toBeNull()
   })
 
-  it('migrate：schema_versionが22になる', () => {
-    expect(db.getSettings().schema_version).toBe('22')
+  it('migrate：schema_versionが23になる', () => {
+    expect(db.getSettings().schema_version).toBe('23')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1548,7 +1548,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('22')
+      expect(db.getSettings().schema_version).toBe('23')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1582,7 +1582,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('22')
+      expect(db.getSettings().schema_version).toBe('23')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -3781,6 +3781,253 @@ describe('db（:memory:）', () => {
     it('saveShippingMethod：料金が小数だとthrow', () => {
       expect(() => db.saveShippingMethod({ name: 'テスト', fee: 100.5 }))
         .toThrow('料金は整数で入力してください')
+    })
+  })
+
+  describe('linkInventory / reserveInventory：takeFromSale（付け替え）', () => {
+    it('takeFromSaleで売却済みの在庫を別の販売へ付け替える。元の販売は点数・原価が減り、新しい販売は1行だけ・原価が移る', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [
+          { name: '在庫A', unit_price: 1000, quantity: 1 },
+          { name: '在庫B', unit_price: 500, quantity: 1 },
+        ],
+      })
+      const [itemA, itemB] = db.listInventory('in_stock')
+
+      const sale1 = db.createSale({ title: '販売1', sold_at: '2026-01-05', price: 3000 })
+      db.linkInventory(sale1, [itemA.id, itemB.id])
+      expect(db.listSales().find(s => s.id === sale1)!.item_count).toBe(2)
+      expect(db.listSales().find(s => s.id === sale1)!.cost).toBe(1500)
+
+      const sale2 = db.createSale({ title: '販売2', sold_at: '2026-01-06', price: 2000 })
+      db.linkInventory(sale2, [itemA.id], 'manual', { takeFromSale: true })
+
+      const s1 = db.listSales().find(s => s.id === sale1)!
+      expect(s1.item_count).toBe(1) // 元の販売から1点減る
+      expect(s1.cost).toBe(500)
+
+      const s2 = db.listSales().find(s => s.id === sale2)!
+      expect(s2.item_count).toBe(1) // 在庫は新しい販売に1行だけ
+      expect(s2.cost).toBe(1000)   // 合計原価が新しい販売に移る
+      expect(db.listSaleLines(sale2).map(i => i.id)).toEqual([itemA.id])
+    })
+
+    it('takeFromSale無しで売却済みの在庫を紐付けようとすると例外（元の販売は変わらない）', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '在庫A', unit_price: 1000, quantity: 1 }],
+      })
+      const [itemA] = db.listInventory('in_stock')
+      const sale1 = db.createSale({ title: '販売1', sold_at: '2026-01-05', price: 3000 })
+      db.linkInventory(sale1, [itemA.id])
+
+      const sale2 = db.createSale({ title: '販売2', sold_at: '2026-01-06', price: 2000 })
+      expect(() => db.linkInventory(sale2, [itemA.id])).toThrow('販売済み・廃棄済みの在庫は紐付けられません')
+      expect(db.listSales().find(s => s.id === sale1)!.item_count).toBe(1)
+      expect(db.listSales().find(s => s.id === sale2)!.item_count).toBe(0)
+    })
+
+    it('自分自身の販売に既に付いている在庫を渡しても無視される（例外にしない・二重にならない）', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '在庫A', unit_price: 1000, quantity: 1 }],
+      })
+      const [itemA] = db.listInventory('in_stock')
+      const sale1 = db.createSale({ title: '販売1', sold_at: '2026-01-05', price: 3000 })
+      db.linkInventory(sale1, [itemA.id])
+
+      expect(() => db.linkInventory(sale1, [itemA.id])).not.toThrow()
+      expect(db.listSales().find(s => s.id === sale1)!.item_count).toBe(1)
+    })
+
+    it('reserveInventory：takeFromSaleで売却済みの在庫を出品へ付け替えられる。無しなら未販売の在庫だけというエラー', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '在庫A', unit_price: 1000, quantity: 1 }],
+      })
+      const [itemA] = db.listInventory('in_stock')
+      const sale1 = db.createSale({ title: '販売1', sold_at: '2026-01-05', price: 3000 })
+      db.linkInventory(sale1, [itemA.id])
+      db.upsertListings([
+        { mercariItemId: 'TFS-1', title: '出品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+
+      expect(() => db.reserveInventory('TFS-1', [itemA.id])).toThrow('未販売の在庫だけ引き当てられます')
+
+      db.reserveInventory('TFS-1', [itemA.id], { takeFromSale: true })
+      expect(db.listListings().find(l => l.mercari_item_id === 'TFS-1')!.items.map(i => i.id))
+        .toEqual([itemA.id])
+      // 元の販売の紐付けは外れた（在庫が付け替わったので item_count が0）
+      expect(db.listSales().find(s => s.id === sale1)!.item_count).toBe(0)
+    })
+
+    it('suggestInventory / suggestForListing：includeSoldで売却済み（sold_to付き）も候補に含む。自分の販売に付いているものは除く', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [
+          { name: '在庫A', unit_price: 1000, quantity: 1 },
+          { name: '在庫B', unit_price: 1000, quantity: 1 },
+        ],
+      })
+      const [itemA, itemB] = db.listInventory('in_stock')
+      const sale1 = db.createSale({ title: '販売1', sold_at: '2026-01-05', price: 3000 })
+      db.linkInventory(sale1, [itemA.id])
+
+      // 通常は売却済みは候補に出ない
+      const sale2 = db.createSale({ title: '販売2', sold_at: '2026-01-06', price: 2000 })
+      expect(db.suggestInventory(sale2).map(i => i.id)).not.toContain(itemA.id)
+
+      // includeSoldで候補に出る。sold_toに元の販売が入る
+      const withSold = db.suggestInventory(sale2, 20, { includeSold: true })
+      const found = withSold.find(i => i.id === itemA.id)
+      expect(found).toBeTruthy()
+      expect(found!.sold_to).toEqual({ sale_id: sale1, title: '販売1', price: 3000, sold_at: '2026-01-05' })
+
+      // 自分自身（sale1）から見れば、自分に付いている在庫は候補に出ない
+      const fromSale1 = db.suggestInventory(sale1, 20, { includeSold: true })
+      expect(fromSale1.map(i => i.id)).not.toContain(itemA.id)
+      expect(fromSale1.map(i => i.id)).toContain(itemB.id)
+
+      // suggestForListingも同様にincludeSoldで売却済みが候補に出る
+      db.upsertListings([
+        { mercariItemId: 'INCL-1', title: '出品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      expect(db.suggestForListing('INCL-1').map(i => i.id)).not.toContain(itemA.id)
+      expect(db.suggestForListing('INCL-1', 20, { includeSold: true }).map(i => i.id)).toContain(itemA.id)
+    })
+  })
+
+  describe('setSalePurchasedAt / salesNeedingPurchasedAt：取引画面の購入日時', () => {
+    it('purchased_atを保存し、未完了ならsold_atの仮置きを購入日（日付部分）に直す', () => {
+      const [inserted] = db.insertCollected([
+        { mercariItemId: 'pa-1', title: '購入日時テスト', price: 1000, soldAt: '2026-08-01' },
+      ])
+      db.setSalePurchasedAt(inserted.id, '2026-07-30T21:15')
+
+      const s = db.listSales().find(s => s.id === inserted.id)!
+      expect(s.purchased_at).toBe('2026-07-30T21:15')
+      expect(s.sold_at).toBe('2026-07-30') // 仮置き(2026-08-01)から購入日へ直る
+
+      // 取引完了済みならsold_atは触らない
+      db.updateCollectedActuals([{ mercariItemId: 'pa-1', soldAt: '2026-08-05', fee: 100 }])
+      db.setSalePurchasedAt(inserted.id, '2026-07-29T10:00')
+      expect(db.listSales().find(s => s.id === inserted.id)!.sold_at).toBe('2026-08-05')
+    })
+
+    it('purchased_atがnull（取れなかった）でもchecked扱いになり、salesNeedingPurchasedAtの対象から外れる', () => {
+      const [inserted] = db.insertCollected([
+        { mercariItemId: 'pa-2', title: '取れなかった商品', price: 1000, soldAt: '2026-08-01' },
+      ])
+      expect(db.salesNeedingPurchasedAt(10).map(r => r.mercari_item_id)).toEqual(['pa-2'])
+
+      db.setSalePurchasedAt(inserted.id, null)
+      expect(db.salesNeedingPurchasedAt(10)).toEqual([])
+      expect(db.listSales().find(s => s.id === inserted.id)!.purchased_at).toBeNull()
+    })
+  })
+
+  describe('salesNeedingThumb：サムネイルの差し替え判定', () => {
+    it('(a)未保存は対象、(b)旧データ（thumb_srcが無い）はsrcだけ記録して対象外、(c)urlが変われば対象（クエリ違いは対象外）', () => {
+      const [, s2, s3] = db.insertCollected([
+        { mercariItemId: 'th-a', title: '未保存', price: 1000, soldAt: '2026-01-01' },
+        { mercariItemId: 'th-b', title: '旧データ', price: 1000, soldAt: '2026-01-02' },
+        { mercariItemId: 'th-c', title: '差し替え', price: 1000, soldAt: '2026-01-03' },
+      ])
+      // (b) 旧データ：thumb_fileはあるがthumb_srcが無い状態を再現
+      db.getDb().prepare('UPDATE sale SET thumb_file = ? WHERE id = ?').run('th-b.jpg', s2.id)
+      // (c) 差し替え対象：既存のsrcと違うURL
+      db.setSaleThumb(s3.id, 'th-c-old.jpg', 'https://example.com/th-c-old.jpg')
+
+      const targets = db.salesNeedingThumb([
+        { mercariItemId: 'th-a', thumbUrl: 'https://example.com/th-a.jpg' },
+        { mercariItemId: 'th-b', thumbUrl: 'https://example.com/th-b.jpg?w=200' },
+        { mercariItemId: 'th-c', thumbUrl: 'https://example.com/th-c-new.jpg' },
+        { mercariItemId: 'th-none', thumbUrl: null },
+      ])
+
+      // (a)が先、(c)が後
+      expect(targets.map(t => t.mercariItemId)).toEqual(['th-a', 'th-c'])
+
+      // (b)は対象にせず、srcだけ記録される
+      const row = db.getDb().prepare('SELECT thumb_src FROM sale WHERE id = ?').get(s2.id) as { thumb_src: string | null }
+      expect(row.thumb_src).toBe('https://example.com/th-b.jpg?w=200')
+
+      // クエリは画像の更新時刻なので、クエリが変われば「変わった」（差し替え対象）
+      const again = db.salesNeedingThumb([
+        { mercariItemId: 'th-b', thumbUrl: 'https://example.com/th-b.jpg?w=999' },
+      ])
+      expect(again.map(t => t.mercariItemId)).toEqual(['th-b'])
+      // 同じ URL なら対象にならない
+      expect(db.salesNeedingThumb([
+        { mercariItemId: 'th-b', thumbUrl: 'https://example.com/th-b.jpg?w=200' },
+      ])).toEqual([])
+    })
+
+    it('listingsNeedingThumb：listingに対しても同じ判定規則で動く', () => {
+      db.upsertListings([
+        { mercariItemId: 'lth-a', title: '未保存', price: 1000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'lth-c', title: '差し替え', price: 1000, suspended: false, thumbUrl: null },
+      ])
+      db.setListingThumb('lth-c', 'lth-c-old.jpg', 'https://example.com/lth-c-old.jpg')
+
+      const targets = db.listingsNeedingThumb([
+        { mercariItemId: 'lth-a', thumbUrl: 'https://example.com/lth-a.jpg' },
+        { mercariItemId: 'lth-c', thumbUrl: 'https://example.com/lth-c-new.jpg' },
+      ])
+      expect(targets.map(t => t.id)).toEqual(['lth-a', 'lth-c'])
+    })
+  })
+
+  describe('attachInventoryTags：thumb_fileが無い未販売在庫は商品画像で埋める', () => {
+    it('出品の画像があれば、未販売の在庫のthumb_urlに出る', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'クリームわん【P200】', unit_price: 1000, quantity: 1 }],
+      })
+      const [item] = db.listInventory('in_stock')
+      expect(item.thumb_url).toBeNull()
+
+      db.upsertListings([
+        { mercariItemId: 'P200-L', title: 'クリームわん【P200】', price: 2000, suspended: false, thumbUrl: null },
+      ])
+      db.setListingThumb('P200-L', 'listing-p200.jpg', null)
+
+      const after = db.listInventory('in_stock').find(i => i.id === item.id)!
+      expect(after.thumb_url).toBe('soroban-thumb://listing-p200.jpg')
+    })
+  })
+
+  describe('productImageFiles：商品画像の優先順位', () => {
+    it('①人がセット ＞ ②最新の出品 ＞ ③最新の販売 の順で選ばれる。無ければMapに入らない', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [
+          { name: 'クリームわん【P100】', unit_price: 1000, quantity: 1 },
+          { name: 'クリームわん【P101】', unit_price: 1000, quantity: 1 },
+          { name: 'クリームわん【P102】', unit_price: 1000, quantity: 1 },
+        ],
+      })
+      const [, item2] = db.listInventory('in_stock')
+
+      // P102：画像が何も無い → Mapに入らない
+      // P101：販売の画像だけ
+      const sale = db.createSale({ title: 'クリームわん【P101】', sold_at: '2026-01-10', price: 2000 })
+      db.linkInventory(sale, [item2.id])
+      db.setSaleThumb(sale, 'sale-p101.jpg', null)
+
+      // P100：出品の画像もあるが、人がセットした画像を優先
+      db.upsertListings([
+        { mercariItemId: 'PI-LISTING', title: 'クリームわん【P100】', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.setListingThumb('PI-LISTING', 'listing-p100.jpg', null)
+      db.upsertProductImage('P100', 'product-p100-manual.jpg')
+
+      const map = db.productImageFiles(['P100', 'P101', 'P102', 'P199'])
+      expect(map.get('P100')).toEqual({ file: 'product-p100-manual.jpg', manual: true })
+      expect(map.get('P101')).toEqual({ file: 'sale-p101.jpg', manual: false })
+      expect(map.has('P102')).toBe(false)
+      expect(map.has('P199')).toBe(false)
     })
   })
 })

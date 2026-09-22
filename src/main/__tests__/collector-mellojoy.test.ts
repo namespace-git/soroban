@@ -101,7 +101,8 @@ vi.mock('../db', () => ({
 import {
   collectShopOrders,
   filterPurchaseDraftByKeywords, filterPurchaseInputByKeywords, fulfillmentFromStatus, hashKeywords,
-  inferOrderDate, isShopLoginUrl, parseOrderDetailHtml, parseOrderListHtml, shouldSkipDetail, toPurchaseInput,
+  inferOrderDate, isCancelledDetail, isShopLoginUrl, parseOrderDetailHtml, parseOrderListHtml, shouldSkipDetail,
+  toPurchaseInput,
 } from '../collector-mellojoy'
 import * as db from '../db'
 
@@ -433,6 +434,30 @@ describe('collector-mellojoy（electronに依存しない部分）', () => {
     })
   })
 
+  describe('isCancelledDetail', () => {
+    it('合計が ￥0 と明示的に読めれば true', () => {
+      const html = `
+        <h1>注文 (#400001)</h1>
+        <h3 id="MoneyLine-Heading1">注文合計</h3>
+        <div role="table" aria-labelledby="MoneyLine-Heading1">
+          <div role="row"><div role="rowheader"><span>小計・0アイテム</span></div><div role="cell"><span>￥0</span></div></div>
+          <div role="row"><div role="rowheader"><strong>合計</strong></div><div role="cell"><strong>￥0</strong></div></div>
+        </div>
+      `
+      expect(isCancelledDetail(parseOrderDetailHtml(html))).toBe(true)
+    })
+
+    it('明細が単に描画待ちで読めていないだけ（合計も読めない）なら false（shouldSkipDetail 側の再試行に任せる）', () => {
+      const detail = parseOrderDetailHtml('<h1>注文 (#999999)</h1>')
+      expect(isCancelledDetail(detail)).toBe(false)
+      expect(shouldSkipDetail(detail)).toBe(true)
+    })
+
+    it('fixture（合計￥5,397）は false', () => {
+      expect(isCancelledDetail(parseOrderDetailHtml(orderDetailHtml))).toBe(false)
+    })
+  })
+
   describe('isShopLoginUrl', () => {
     it('注文一覧のURLは false', () => {
       expect(isShopLoginUrl('https://shopify.com/69465800944/account/orders')).toBe(false)
@@ -581,6 +606,49 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
     expect(run.status).toBe('ok')
     expect(db.createPurchase).not.toHaveBeenCalled()
     expect(state.loadedUrls).not.toContain('https://shop.example.com/order/300001')
+  })
+
+  it('状態表示に「キャンセル」の文字がなくても合計￥0なら一覧の時点で除外する（詳細を開かない）', async () => {
+    state.opts.listHtml = buildListHtml([
+      { orderNo: '#500001', href: 'https://shop.example.com/order/500001', status: '確認済み', total: 0 },
+    ])
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(state.loadedUrls).not.toContain('https://shop.example.com/order/500001')
+    expect(db.createPurchase).not.toHaveBeenCalled()
+    expect(run.message).toContain('キャンセル 1')
+    expect(run.status).toBe('ok')
+  })
+
+  it('一覧の合計が読めない注文が、詳細で合計￥0と判明したらキャンセル扱いにする（失敗にしない）', async () => {
+    // 一覧に ￥...JPY の表記が無い＝parseOrderListHtml では total が null になり active に残る
+    state.opts.listHtml = `
+      <article aria-labelledby="order-#400001">
+        <a aria-label="注文を表示するテスト" href="https://shop.example.com/order/400001">link</a>
+        <h2 role="presentation">確認済み</h2>
+      </article>
+    `
+    state.opts.detailHtmlByUrl = {
+      'https://shop.example.com/order/400001': `
+        <h1>注文 (#400001)</h1>
+        <span>確認日: 1月1日</span>
+        <h3 id="MoneyLine-Heading1">注文合計</h3>
+        <div role="table" aria-labelledby="MoneyLine-Heading1">
+          <div role="row"><div role="rowheader"><span>小計・0アイテム</span></div><div role="cell"><span>￥0</span></div></div>
+          <div role="row"><div role="rowheader"><strong>合計</strong></div><div role="cell"><strong>￥0</strong></div></div>
+        </div>
+      `,
+    }
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(state.loadedUrls).toContain('https://shop.example.com/order/400001')
+    expect(db.markMellojoyOrderExcluded).toHaveBeenCalledWith('shop-1', '#400001', hashKeywords([]))
+    expect(db.createPurchase).not.toHaveBeenCalled()
+    expect(run.message).toContain('キャンセル 1')
+    expect(run.message).not.toContain('明細が読めませんでした')
+    expect(run.status).toBe('ok')
   })
 
   it('一覧が0件なら従来どおり empty', async () => {

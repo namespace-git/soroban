@@ -140,9 +140,16 @@ export interface ShippingMethod {
 export interface SaleProfit {
   id: string
   mercari_item_id: string | null
-  /** 商品サムネイル。取り込み時に1度だけ保存したもの（`soroban-thumb://<file>`）。無ければ null */
+  /** 商品サムネイル（`soroban-thumb://<file>`）。取り込みで保存し、メルカリ側の画像が変わっていれば差し替える。無ければ null */
   thumb_url: string | null
+  /**
+   * 計上日（YYYY-MM-DD）。月次・月フィルタはこれで切る。
+   * 取り込みの販売は「取引完了（購入完了日）」。未完了のうちは購入日時（無ければ初めて見た日）の仮置きで、
+   * 完了を観測した時点で完了日に動く。手入力の販売は入力した日付のまま
+   */
   sold_at: string
+  /** 購入日時（取引画面の「購入日時」。ISO 分精度 `YYYY-MM-DDTHH:mm` か日付だけ）。まだ取れていなければ null */
+  purchased_at: string | null
   title: string
   kind: SaleKind
   price: number
@@ -362,6 +369,8 @@ export interface InventoryItem {
   thumb_url: string | null
   /** 出品に引き当て済みなら、その出品（派生。在庫の status は in_stock のまま） */
   listing: { mercari_item_id: string; price: number; status: ListingStatus } | null
+  /** 販売済み（sale_line あり）なら、その販売。付け替え（takeFromSale）の警告に使う */
+  sold_to: { sale_id: string; title: string; price: number; sold_at: string } | null
 }
 
 // ------------------------------------------------------------
@@ -463,8 +472,10 @@ export interface ProductSummary extends VariantSummary {
   /** 最新の仕入日・販売日 */
   last_purchased_at: string | null
   last_sold_at: string | null
-  /** 代表サムネイル（紐付いた販売のもの。無ければ null） */
+  /** 商品画像。①人がセットした画像（setProductImage）＞②最新の出品の画像＞③最新の販売の画像。無ければ null */
   thumb_url: string | null
+  /** 1 なら人がセットした画像（取り込みで上書きしない）。setProductImageAuto(code, true) で自動に戻す */
+  image_manual: boolean
   /** 商品（型番）に付いたタグ。付け外しは setProductTags。その型番の在庫・販売に派生する */
   tags: Tag[]
 }
@@ -979,12 +990,14 @@ export interface SorobanApi {
   deleteSale(id: string): Promise<void>
 
   // 紐付け
-  linkInventory(saleId: string, inventoryItemIds: string[]): Promise<void>
+  /** takeFromSale: 販売済みの在庫を、今の販売から外してこの販売に付け替える（メンテ用。画面で警告してから呼ぶ） */
+  linkInventory(saleId: string, inventoryItemIds: string[], opts?: { takeFromSale?: boolean }): Promise<void>
   /** 未紐付けの転売のうち型番が完全一致するものを先入先出で自動確定する。戻り値は確定した販売数 */
   autoLinkPending(): Promise<number>
   unlinkInventory(saleId: string, inventoryItemId: string): Promise<void>
   /** 商品名の類似度で在庫の候補を返す（確定はしない） */
-  suggestInventory(saleId: string, limit?: number): Promise<InventoryItem[]>
+  /** includeSold: 販売済み（他の販売に紐付いた）在庫も候補に含める（sold_to 付き）。既定は未販売だけ */
+  suggestInventory(saleId: string, limit?: number, opts?: { includeSold?: boolean }): Promise<InventoryItem[]>
   /** その販売に紐付いている在庫（解除・付け替え用） */
   listSaleLines(saleId: string): Promise<InventoryItem[]>
 
@@ -1077,6 +1090,12 @@ export interface SorobanApi {
   setProductTags(modelCode: string, tagIds: string[]): Promise<void>
   /** 型番の表示名を付ける／外す（null）。仕入明細・在庫の元の名前は変えない。商品タブ・ランキング・在庫・売上の表示に使う */
   setProductName(modelCode: string, name: string | null): Promise<void>
+  /** 商品画像を人がセットする（main でファイル選択ダイアログを開く）。選んだら true、キャンセルは false。以後は取り込みで上書きしない */
+  setProductImage(modelCode: string): Promise<boolean>
+  /** auto=true：人がセットした画像を捨てて自動（出品・販売の最新画像）に戻す。auto=false：今の自動画像をコピーして固定する */
+  setProductImageAuto(modelCode: string, auto: boolean): Promise<void>
+  /** 取引画面を 1 ページだけ開いて購入日時を取り直す（メンテ用）。取れた購入日時、取れなければ null。CAPTCHA なら例外 */
+  refetchSaleDates(saleId: string): Promise<{ purchased_at: string | null }>
   /** 仕入先ごとの累計（確定した仕入）。注文数・点数・支払合計（総原価）・最終注文日 */
   listShopAccountStats(): Promise<ShopAccountStats[]>
   listVariantSummary(sort?: 'total_profit' | 'avg_profit' | 'sold'): Promise<VariantSummary[]>
@@ -1094,14 +1113,15 @@ export interface SorobanApi {
    * 他の active/suspended な出品に引き当て済みの在庫は、その引き当てを外してこちらへ**移す**
    * （再出品・付け替え。人の最新の決定を優先。元の出品は未引き当てに戻る）
    */
-  reserveInventory(mercariItemId: string, inventoryItemIds: string[]): Promise<void>
+  /** takeFromSale: 販売済みの在庫を、その販売から外してこの出品に引き当てる（メンテ用。画面で警告してから呼ぶ） */
+  reserveInventory(mercariItemId: string, inventoryItemIds: string[], opts?: { takeFromSale?: boolean }): Promise<void>
   unreserveInventory(mercariItemId: string, inventoryItemId: string): Promise<void>
   /**
    * 出品の引き当て候補。型番の完全一致 → シリーズ一致 → 名前の一致の順。販売済み・廃棄済みは除く。
    * 他の出品に引き当て済みの在庫も返す（`listing` に引き当て先が入る。画面では「出品 X から移す」と見せる）。
    * この出品自身に引き当て済みのものは除く
    */
-  suggestForListing(mercariItemId: string, limit?: number): Promise<InventoryItem[]>
+  suggestForListing(mercariItemId: string, limit?: number, opts?: { includeSold?: boolean }): Promise<InventoryItem[]>
   /** 人が「取り下げた」と記録する。引き当ては外れ、在庫は未出品に戻る */
   endListing(mercariItemId: string): Promise<void>
   /**

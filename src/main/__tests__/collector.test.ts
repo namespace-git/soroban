@@ -109,7 +109,11 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return { ...actual, mkdirSync: vi.fn() }
 })
-vi.mock('node:fs/promises', () => ({ writeFile: vi.fn(async () => {}) }))
+vi.mock('node:fs/promises', () => ({
+  writeFile: vi.fn(async () => {}),
+  readdir: vi.fn(async () => [] as string[]),
+  unlink: vi.fn(async () => {}),
+}))
 
 // randomWait（ページ間の待ち）を即時にし、テストを遅くしない
 vi.mock('node:timers/promises', () => ({ setTimeout: vi.fn(async () => {}) }))
@@ -130,21 +134,35 @@ vi.mock('../db', () => ({
     rows.map((r, i) => ({ id: `sale-${i}-${r.mercariItemId}`, mercariItemId: r.mercariItemId }))),
   updateCollectedActuals: vi.fn(() => 0),
   updateSaleStatus: vi.fn(() => true),
-  salesWithoutThumb: vi.fn(() => []),
+  // 正規化はクエリ・フラグメントを落とす簡易実装（実装は db.ts 側、ここではテスト用の代用）
+  normalizeThumbSrc: vi.fn((url: string) => url.trim().split('#')[0]),
+  // 既定では「渡された scraped のうち thumbUrl があるものは全部対象」という単純な代用にする。
+  // id は mercariItemId から作る（サムネ保存のテストでは id の値そのものは見ない）
+  salesNeedingThumb: vi.fn((scraped: Array<{ mercariItemId: string; thumbUrl: string | null }>) =>
+    scraped
+      .filter((s): s is { mercariItemId: string; thumbUrl: string } => !!s.thumbUrl)
+      .map(s => ({ id: `sale-for-${s.mercariItemId}`, mercariItemId: s.mercariItemId, thumbUrl: s.thumbUrl }))),
+  listingsNeedingThumb: vi.fn((scraped: Array<{ mercariItemId: string; thumbUrl: string | null }>) =>
+    scraped
+      .filter((s): s is { mercariItemId: string; thumbUrl: string } => !!s.thumbUrl)
+      .map(s => ({ id: s.mercariItemId, thumbUrl: s.thumbUrl }))),
   setSaleThumb: vi.fn(),
   setListingThumb: vi.fn(),
+  salesNeedingPurchasedAt: vi.fn(() => [] as Array<{ id: string; mercari_item_id: string }>),
+  setSalePurchasedAt: vi.fn(),
+  saleMercariItemId: vi.fn(() => null as string | null),
   parseKeywords: vi.fn(() => [] as string[]),
   getSettings: vi.fn(() => ({ mercari_keyword: '' })),
   matchesAnyKeyword: vi.fn(() => true),
   upsertListings: vi.fn((rows: unknown[]) => ({ inserted: rows.length, updated: 0 })),
-  listingsWithoutThumb: vi.fn(() => [] as string[]),
   listSales: vi.fn(() => []),
   appendModelCodes: vi.fn(() => false),
 }))
 
 import {
   buildUserAgent, collect, extractInProgressTotal, extractListingTotal, extractTotalCount,
-  isChallengeText, parseInProgressHtml, parseListingsHtml, parseSoldHtml, parseSoldRow, randomWaitMs,
+  isChallengeText, parseInProgressHtml, parseListingsHtml, parsePurchasedAt, parseSoldHtml, parseSoldRow,
+  randomWaitMs, thumbFileName,
 } from '../collector'
 import * as db from '../db'
 
@@ -433,6 +451,57 @@ describe('collector（electronに依存しない部分）', () => {
       expect(extractInProgressTotal('該当の記載なし')).toBeNull()
     })
   })
+
+  describe('parsePurchasedAt', () => {
+    it('スラッシュ表記＋時刻：2026/09/10 21:34', () => {
+      expect(parsePurchasedAt('購入日時\n2026/09/10 21:34')).toBe('2026-09-10T21:34')
+    })
+
+    it('年月日表記＋時刻：2026年9月10日 21:34', () => {
+      expect(parsePurchasedAt('購入日時\n2026年9月10日 21:34')).toBe('2026-09-10T21:34')
+    })
+
+    it('日付のみ：2026/9/10（時刻なし）', () => {
+      expect(parsePurchasedAt('購入日時\n2026/9/10')).toBe('2026-09-10')
+    })
+
+    it('区切りが改行・空白・コロン混じりでも読む', () => {
+      expect(parsePurchasedAt('購入日時：\n  2026/09/10　21:34')).toBe('2026-09-10T21:34')
+    })
+
+    it('「購入完了日」しかなければ null（別物なので拾わない）', () => {
+      expect(parsePurchasedAt('購入完了日 2026/09/12')).toBeNull()
+    })
+
+    it('「購入完了日」と「購入日時」の両方があれば購入日時の方を拾う', () => {
+      const text = '購入完了日 2026/09/12\n購入日時 2026/09/10 21:34'
+      expect(parsePurchasedAt(text)).toBe('2026-09-10T21:34')
+    })
+
+    it('どちらのラベルもなければ null', () => {
+      expect(parsePurchasedAt('該当の記載なし')).toBeNull()
+    })
+  })
+
+  describe('thumbFileName（db.normalizeThumbSrc をモックしたハッシュ生成）', () => {
+    it('クエリ（画像の更新時刻）が違えば違う名前。同じ URL なら同じ名前', () => {
+      const a = thumbFileName('m1', 'https://static.mercdn.net/img.jpg?123')
+      const b = thumbFileName('m1', 'https://static.mercdn.net/img.jpg?456')
+      expect(a).not.toBe(b)
+      expect(thumbFileName('m1', 'https://static.mercdn.net/img.jpg?123')).toBe(a)
+    })
+
+    it('パスが違えば違う名前', () => {
+      const a = thumbFileName('m1', 'https://static.mercdn.net/img1.jpg')
+      const b = thumbFileName('m1', 'https://static.mercdn.net/img2.jpg')
+      expect(a).not.toBe(b)
+    })
+
+    it('mercariItemId-hash8.jpg の形になる', () => {
+      expect(thumbFileName('m12345', 'https://static.mercdn.net/img.jpg'))
+        .toMatch(/^m12345-[0-9a-f]{8}\.jpg$/)
+    })
+  })
 })
 
 // ============================================================
@@ -548,9 +617,8 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     const fetchMock = vi.fn(async () => ({ ok: false, arrayBuffer: async () => new ArrayBuffer(0) }))
     state.opts.fetchImpl = fetchMock
 
-    // 出品側にもサムネイル未取得の対象がある状態にする（旧実装なら追加で試行されてしまう）
-    const listingIds = parseListingsHtml(listingsFixtureHtml).map(l => l.mercariItemId)
-    vi.mocked(db.listingsWithoutThumb).mockReturnValue(listingIds)
+    // 出品側（listingsFixtureHtml、4件）にもサムネイル未取得の対象がある状態
+    // （db.listingsNeedingThumb の既定モック＝thumbUrl があれば全件対象。旧実装なら追加で試行されてしまう）
 
     await collect(true)
 
@@ -569,8 +637,8 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     vi.mocked(db.matchesAnyKeyword).mockImplementation(
       (text: string, keywords: string[]) => keywords.some(k => text.toLowerCase().includes(k.toLowerCase())),
     )
-    // 他テストの mockReturnValue の持ち越し（vi.clearAllMocks は実装までは戻さない）を断つ
-    vi.mocked(db.listingsWithoutThumb).mockReturnValue([])
+    // このテストは販売側だけを見たいので、出品側のサムネイル取得は起こさない
+    vi.mocked(db.listingsNeedingThumb).mockReturnValue([])
 
     const fetchMock = vi.fn(async (_url: string) => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }))
     state.opts.fetchImpl = fetchMock
@@ -590,7 +658,7 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     expect(run.message).toContain('キーワード不一致で除外 1 件')
   })
 
-  it('キーワードを変更後：既知の不一致販売はサムネイル対象から除外する（db.salesWithoutThumb への入力で確認）', async () => {
+  it('キーワードを変更後：既知の不一致販売はサムネイル対象から除外する（db.salesNeedingThumb への入力で確認）', async () => {
     const sales = parseSoldHtml(soldFixtureHtml) // 3件。m43306721545（キャバドレス）はメロジョイ不一致
     state.opts.scrapeResult = { sales, totalCount: sales.length }
     state.opts.listingsHtml = listingsFixtureHtml
@@ -600,7 +668,6 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     vi.mocked(db.matchesAnyKeyword).mockImplementation(
       (text: string, keywords: string[]) => keywords.some(k => text.toLowerCase().includes(k.toLowerCase())),
     )
-    vi.mocked(db.listingsWithoutThumb).mockReturnValue([])
 
     // 3件とも既に取り込み済み（新規挿入は0件、実額更新だけ）にする
     vi.mocked(db.existingMercariIds).mockImplementation((ids: string[]) => new Set(ids))
@@ -610,9 +677,10 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     expect(db.insertCollected).not.toHaveBeenCalled()
     expect(db.updateCollectedActuals).toHaveBeenCalledTimes(1)
 
-    // サムネイル対象（db.salesWithoutThumb への入力）に、キーワード不一致の
+    // サムネイル対象（db.salesNeedingThumb への入力）に、キーワード不一致の
     // m43306721545（キャバドレス）が含まれない
-    const idsPassed = vi.mocked(db.salesWithoutThumb).mock.calls[0][0] as string[]
+    const passed = vi.mocked(db.salesNeedingThumb).mock.calls[0][0] as Array<{ mercariItemId: string }>
+    const idsPassed = passed.map(s => s.mercariItemId)
     expect(idsPassed).not.toContain('m43306721545')
     expect(idsPassed.sort()).toEqual(['m84307165710', 'm87039845554'])
 
@@ -627,7 +695,6 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     vi.mocked(db.matchesAnyKeyword).mockImplementation(
       (text: string, keywords: string[]) => keywords.some(k => text.toLowerCase().includes(k.toLowerCase())),
     )
-    vi.mocked(db.listingsWithoutThumb).mockReturnValue([])
     vi.mocked(db.listSales).mockReturnValue([{
       id: 'sale-x', mercari_item_id: 'm90000000001', title: 'ワンピース キャバドレス（対象外）',
       kind: 'resale', unmatched: 1, model_codes: [],
@@ -648,7 +715,6 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
 
     vi.mocked(db.getSettings).mockReturnValue({ mercari_keyword: '' } as never)
     vi.mocked(db.parseKeywords).mockReturnValue([])
-    vi.mocked(db.listingsWithoutThumb).mockReturnValue([])
     vi.mocked(db.isMercariItemExcluded).mockImplementation((id: string) => id === 'm43306721545')
 
     const run = await collect(true)

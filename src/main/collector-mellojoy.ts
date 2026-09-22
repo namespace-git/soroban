@@ -561,6 +561,17 @@ export function shouldSkipDetail(detail: OrderDetail): boolean {
   return detail.lines.length === 0
 }
 
+/**
+ * 詳細ページから見て、この注文がキャンセル（合計0円）と判定できるかを見る。
+ * 一覧の状態表示が更新されない（＝一覧側では total が読めず active に残る）ケースの保険。
+ * MoneyLine の「合計」行が明示的に ¥0／無料と読めたときだけ true にする
+ * （`detail.total` は parseMoneyCell が実際に読めたときしか 0 にならないので、
+ * 描画待ちで行が取れていないだけの状態と混同しない＝shouldSkipDetail とは食い違わない）。
+ */
+export function isCancelledDetail(detail: OrderDetail): boolean {
+  return detail.total === 0
+}
+
 // ------------------------------------------------------------
 // ログイン判定
 // ------------------------------------------------------------
@@ -678,8 +689,11 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
       )
     }
 
-    const active = list.filter(o => !o.status.includes('キャンセル'))
-    const cancelledCount = list.length - active.length
+    // 状態表示に「キャンセル」が無くても、金額が ￥0 JPY ならキャンセル扱い（メロジョイの
+    // 一覧はキャンセル済み注文の状態表示が更新されないことがある）。読めなかった（null）は
+    // 従来通り active のまま
+    const active = list.filter(o => !o.status.includes('キャンセル') && o.total !== 0)
+    let cancelledCount = list.length - active.length
 
     const importKeys = active.map(o => `mellojoy:${o.orderNo}`)
     const known = db.existingImportKeys(importKeys)
@@ -737,6 +751,12 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
 
         const detailHtml = await win.webContents.executeJavaScript('document.documentElement.outerHTML') as string
         const detail = parseOrderDetailHtml(detailHtml)
+
+        if (isCancelledDetail(detail)) {
+          db.markMellojoyOrderExcluded(shopAccountId, order.orderNo, currentKeywordsHash)
+          cancelledCount++
+          continue
+        }
 
         if (shouldSkipDetail(detail)) {
           failures.push(`${order.orderNo}：明細が読めませんでした（次回に再試行）`)

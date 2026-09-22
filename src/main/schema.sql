@@ -79,6 +79,15 @@ CREATE TABLE IF NOT EXISTS product_name (
   updated_at TEXT NOT NULL
 );
 
+-- 型番ごとに人がセットした商品画像（setProductImage）。無ければ ProductSummary.thumb_url は
+-- 最新の出品・最新の販売の画像から自動で決まる（db.ts の productImageFiles）。
+-- resetData() では消さない（product_name と同じ扱い）
+CREATE TABLE IF NOT EXISTS product_image (
+  model_code TEXT PRIMARY KEY,
+  file       TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- メロジョイの注文取り込みで人が除外した注文（「もう取り込まない」）。
 -- キーワードが変わったら（keywords_hash 不一致）再評価する。
 -- resetData() では消さない（shop_alias・product_name と同じ、学習に近い知識のため）
@@ -263,6 +272,13 @@ CREATE TABLE IF NOT EXISTS sale (
   -- 買い手のニックネーム。取れていなければ NULL
   buyer              TEXT,
 
+  -- 購入日時（取引画面の「購入日時」）。YYYY-MM-DDTHH:mm か YYYY-MM-DD だけ。取れていなければ NULL
+  purchased_at          TEXT,
+  -- 1 = 取引画面を一度だけ開いた（取れなくても再試行しない）
+  purchased_at_checked  INTEGER NOT NULL DEFAULT 0,
+  -- 保存したサムネイルの元URL（クエリ・フラグメント除く）。変わったら取り直す
+  thumb_src             TEXT,
+
   note               TEXT,
   source             TEXT NOT NULL DEFAULT 'collector'
                      CHECK (source IN ('collector','manual')),
@@ -339,6 +355,8 @@ CREATE TABLE IF NOT EXISTS listing (
   -- 出品時に決めた発送方法（設定の発送方法）。売れたとき販売へ引き継ぐ（db.ts の takeOverListing）
   shipping_method_id TEXT REFERENCES shipping_method(id) ON DELETE SET NULL,
   thumb_file      TEXT,
+  -- 保存したサムネイルの元URL（クエリ・フラグメント除く）。変わったら取り直す
+  thumb_src       TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -523,6 +541,7 @@ SELECT
   s.mercari_item_id,
   s.thumb_file,
   s.sold_at,
+  s.purchased_at,
   s.title,
   s.kind,
   s.price,
@@ -597,6 +616,11 @@ SELECT
   -- 紐付いた販売のサムネイル（売れた在庫だけ）。1在庫は1販売にしか紐付かない
   -- （sale_line.inventory_item_id が UNIQUE）ので LEFT JOIN で行が増えることはない
   sale.thumb_file,
+  -- 付け替え（takeFromSale）の警告用。売れた在庫がどの販売に紐付いているか
+  sale.id      AS sold_sale_id,
+  sale.title   AS sold_title,
+  sale.price   AS sold_price,
+  sale.sold_at AS sold_sold_at,
   -- 出品への引き当て（active/suspended のみ。trg_listing_line_guard により
   -- 1在庫につき active/suspended な引き当ては高々1件なので行は増えない）
   lst.mercari_item_id AS listing_id,

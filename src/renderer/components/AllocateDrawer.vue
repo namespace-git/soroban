@@ -9,6 +9,7 @@ import CodeChip from './CodeChip.vue'
 import EmptyState from './EmptyState.vue'
 import Icon from './Icon.vue'
 import { matchesSearch } from './SearchBox.vue'
+import type { ConfirmChoice } from './ConfirmDialog.vue'
 
 type MatchedRow = { id: string; item_code: string; name: string; model_code?: string | null; product_name?: string | null; landed_cost: number; aging_days?: number }
 type ProfitEstimate = { fee: number; shipping_fee: number; packaging_cost: number; cost: number; gross_profit: number }
@@ -22,12 +23,15 @@ const props = defineProps<{
 const emit = defineEmits<{ close: []; changed: [] }>()
 
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+const choose = inject<(title: string, choices: ConfirmChoice[], opts?: { message?: string }) => Promise<string | null>>('choose')!
 
 const candidates = ref<InventoryItem[]>([])
 const matchedItems = ref<MatchedRow[]>([])
 const picked = ref<Set<string>>(new Set())
 const search = ref('')
 const loading = ref(false)
+// メンテ用：販売済み（他の販売に紐付いた）在庫も候補に出す。ドロワーを開き直すたびに off に戻す
+const includeSold = ref(false)
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -46,7 +50,7 @@ async function load() {
   if (props.mode === 'listing') {
     const l = props.listing
     if (!l) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
-    const sugg = await window.soroban.suggestForListing(l.mercari_item_id, 50)
+    const sugg = await window.soroban.suggestForListing(l.mercari_item_id, 50, { includeSold: includeSold.value })
     candidates.value = sugg
     matchedItems.value = l.items.map(it => ({ id: it.id, item_code: it.item_code, name: it.name, model_code: it.model_code, product_name: it.product_name, landed_cost: it.landed_cost }))
   } else {
@@ -54,7 +58,7 @@ async function load() {
     if (!s) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
     const [linked, sugg] = await Promise.all([
       window.soroban.listSaleLines(s.id),
-      window.soroban.suggestInventory(s.id, 50),
+      window.soroban.suggestInventory(s.id, 50, { includeSold: includeSold.value }),
     ])
     matchedItems.value = linked
     candidates.value = sugg
@@ -67,10 +71,15 @@ watch(
   ([isOpen]) => {
     picked.value = new Set()
     search.value = ''
+    includeSold.value = false
     if (isOpen) load()
   },
   { immediate: true },
 )
+
+watch(includeSold, () => {
+  if (props.open) load()
+})
 
 const filtered = computed(() => {
   if (!search.value.trim()) return candidates.value
@@ -156,13 +165,42 @@ watch(
 
 const previewProfit = computed(() => estimate.value?.gross_profit ?? 0)
 
+function truncate(text: string, n: number): string {
+  return text.length > n ? text.slice(0, n) + '…' : text
+}
+function soldDate(d: string): string {
+  const [, m, day] = d.split('-')
+  return m && day ? `${m}/${day}` : d
+}
+function soldToLabel(sold: { title: string; price: number }): string {
+  return `販売「${truncate(sold.title, 12)}」${yen(sold.price)} に紐付け済み`
+}
+
+// picked の中に販売済み（他の販売に紐付いた）在庫が含まれるなら、付け替えの警告を出してから進む
 async function confirmPick() {
   if (picked.value.size === 0) return
   const ids = [...picked.value]
+  const soldPicks = candidates.value.filter(c => ids.includes(c.id) && c.sold_to)
+  let takeFromSale = false
+  if (soldPicks.length > 0) {
+    const lines = soldPicks.slice(0, 5).map(c => {
+      const s = c.sold_to!
+      return `${c.item_code}「${truncate(c.product_name ?? c.name, 12)}」は販売「${truncate(s.title, 12)}」（${yen(s.price)}・${soldDate(s.sold_at)}）に紐付いています。`
+    })
+    if (soldPicks.length > 5) lines.push(`ほか${soldPicks.length - 5}点`)
+    lines.push('外してこちらに付け替えると、元の販売は未紐付けに戻り、その粗利が変わります（ホームの要対応に出ます）。')
+    const choice = await choose('販売済みの在庫を付け替えます', [
+      { label: 'キャンセル', value: 'cancel', tone: 'ghost' },
+      { label: '付け替える', value: 'replace', tone: 'danger' },
+    ], { message: lines.join('\n') })
+    if (choice !== 'replace') return
+    takeFromSale = true
+  }
+  const opts = takeFromSale ? { takeFromSale: true } : undefined
   try {
     if (props.mode === 'listing' && props.listing) {
       const moved = candidates.value.filter(c => ids.includes(c.id) && c.listing).length
-      await window.soroban.reserveInventory(props.listing.mercari_item_id, ids)
+      await window.soroban.reserveInventory(props.listing.mercari_item_id, ids, opts)
       picked.value = new Set()
       emit('changed')
       await load()
@@ -173,7 +211,7 @@ async function confirmPick() {
         'ok',
       )
     } else if (props.mode === 'sale' && props.sale) {
-      await window.soroban.linkInventory(props.sale.id, ids)
+      await window.soroban.linkInventory(props.sale.id, ids, opts)
       picked.value = new Set()
       emit('changed')
       emit('close')
@@ -254,7 +292,7 @@ function placeholderChar(): string {
       <div class="candidates">
         <label
           v-for="c in filtered" :key="c.id"
-          class="item" :class="{ on: picked.has(c.id) }"
+          class="item" :class="{ on: picked.has(c.id), sold: !!c.sold_to }"
         >
           <input
             type="checkbox"
@@ -268,6 +306,7 @@ function placeholderChar(): string {
             tone="neutral"
             :label="`出品 ${yen(c.listing.price)} に引き当て済み`"
           />
+          <StatusChip v-if="c.sold_to" tone="warn" :label="soldToLabel(c.sold_to)" />
           <span class="grow name-cell">
             <span class="name-main">{{ c.product_name ?? c.name }}</span>
             <span v-if="c.product_name" class="name-sub">{{ c.name }}</span>
@@ -277,6 +316,11 @@ function placeholderChar(): string {
         </label>
         <EmptyState v-if="!loading && !filtered.length" title="候補になる在庫がありません" />
       </div>
+
+      <label class="faint maint-toggle">
+        <input type="checkbox" v-model="includeSold" />
+        販売済みの在庫も表示（付け替え）
+      </label>
     </template>
 
     <template #footer>
@@ -356,8 +400,19 @@ function placeholderChar(): string {
   line-height: 1.3;
 }
 .item:hover { background: var(--surface-hi); }
+.item.sold { background: var(--warn-bg); }
 .item.on { background: var(--accent-soft); }
 .matched-item { cursor: default; }
+
+.maint-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: var(--fs-12);
+  cursor: pointer;
+}
+.maint-toggle input { width: 13px; height: 13px; }
 
 .name-cell { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
 .name-main { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

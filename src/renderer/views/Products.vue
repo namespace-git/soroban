@@ -17,6 +17,8 @@ const revision = inject<Ref<number>>('revision')!
 const gotoPayload = inject<Ref<{ modelCode?: string } | null>>('gotoPayload', ref(null))
 const goto = inject<(t: string, payload?: { search?: string; focusId?: string }) => void>('goto')!
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
+const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
+const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 
 const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
@@ -211,6 +213,31 @@ async function renameProduct(modelCode: string, currentName: string | null): Pro
   if (karte.value?.summary.model_code === modelCode) await refreshKarte()
 }
 
+// --- 商品画像：人がセット（取り込みで上書きしない）／取り込みの自動更新に戻す ---
+
+async function changeProductImage(modelCode: string) {
+  const ok = await window.soroban.setProductImage(modelCode)
+  if (!ok) return
+  await load()
+  if (karte.value?.summary.model_code === modelCode) await refreshKarte()
+  toast('画像をセットしました（取り込みで上書きしません）', 'ok')
+}
+
+async function onToggleAutoImage(modelCode: string, e: Event) {
+  const el = e.target as HTMLInputElement
+  const auto = el.checked
+  if (auto) {
+    const ok = await confirmDialog('自動更新に戻しますか？', {
+      message: 'セットした画像を捨てて、出品・販売の最新の画像に戻します',
+      okLabel: '戻す',
+    })
+    if (!ok) { el.checked = false; return }
+  }
+  await window.soroban.setProductImageAuto(modelCode, auto)
+  await load()
+  if (karte.value?.summary.model_code === modelCode) await refreshKarte()
+}
+
 // --- 手元の在庫：状態ピル・「追跡」で在庫タブへ ---
 
 function itemStatePill(i: InventoryItem): { tone: 'info' | 'warn' | 'neutral'; label: string } {
@@ -354,12 +381,30 @@ const estimateCompare = computed(() => {
 
         <template v-else-if="karte">
           <div class="panel karte-head">
-            <img
-              v-if="showThumb(karte.summary.thumb_url, karte.summary.model_code)"
-              class="thumb thumb-lg" :src="karte.summary.thumb_url!" alt=""
-              @error="onThumbError(karte.summary.model_code)"
-            />
-            <span v-else class="thumb-placeholder thumb-lg">{{ placeholderChar(karte.summary.model_code, karte.summary.name) }}</span>
+            <div class="karte-thumb-col">
+              <span class="karte-thumb-wrap">
+                <img
+                  v-if="showThumb(karte.summary.thumb_url, karte.summary.model_code)"
+                  class="thumb thumb-lg" :src="karte.summary.thumb_url!" :key="karte.summary.thumb_url ?? ''" alt=""
+                  @error="onThumbError(karte.summary.model_code)"
+                />
+                <span v-else class="thumb-placeholder thumb-lg">{{ placeholderChar(karte.summary.model_code, karte.summary.name) }}</span>
+                <StatusChip
+                  v-if="karte.summary.image_manual" tone="neutral" label="固定" class="thumb-manual-chip"
+                  title="人がセットした画像（取り込みで上書きしません）"
+                />
+              </span>
+              <div class="karte-thumb-actions">
+                <button class="sm ghost" @click="changeProductImage(karte.summary.model_code)">画像を変える</button>
+                <label class="thumb-auto-check">
+                  <input
+                    type="checkbox" :checked="!karte.summary.image_manual"
+                    @change="onToggleAutoImage(karte.summary.model_code, $event)"
+                  />
+                  取り込みの画像で自動更新
+                </label>
+              </div>
+            </div>
             <div class="karte-head-text">
               <div class="chip-row">
                 <CodeChip kind="model" :code="karte.summary.model_code" />
@@ -604,8 +649,28 @@ const estimateCompare = computed(() => {
 /* --- 右：カルテ --- */
 
 .karte { display: flex; flex-direction: column; gap: 16px; }
-.karte-head { display: flex; align-items: center; gap: 16px; }
+.karte-head { display: flex; align-items: flex-start; gap: 16px; }
 .thumb-lg.thumb, .thumb-lg.thumb-placeholder { width: 56px; height: 56px; font-size: var(--fs-16); flex-shrink: 0; }
+.karte-thumb-col { display: flex; flex-direction: column; align-items: center; gap: 6px; flex-shrink: 0; }
+.karte-thumb-wrap { position: relative; display: block; }
+.thumb-manual-chip {
+  position: absolute;
+  bottom: -6px;
+  right: -6px;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+.karte-thumb-actions { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.thumb-auto-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-11);
+  color: var(--text-dim);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.thumb-auto-check input { margin: 0; }
 .karte-head-text { min-width: 0; flex: 1; }
 .karte-name { margin: 4px 0 0; font-size: var(--fs-20); font-weight: 700; }
 .karte-sub { margin: 4px 0 0; font-size: var(--fs-12); }

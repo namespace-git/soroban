@@ -16,10 +16,12 @@ const props = defineProps<{
 const emit = defineEmits<{ close: [] }>()
 
 const goto = inject<(tab: string, payload?: { modelCode?: string; search?: string; focusId?: string }) => void>('goto')!
+const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 
 const timeline = ref<ItemTimeline | null>(null)
 const purchaseDetail = ref<PurchaseDetail | null>(null)
 const loading = ref(false)
+const refetchBusy = ref(false)
 
 // --- 取引の進み具合のチップ。Sales.vue と同じ表記に揃える ---
 const SALE_STATUS_CHIP: Record<SaleStatus, { tone: 'warn' | 'info' | 'ok'; label: string }> = {
@@ -55,6 +57,34 @@ function formatDate(d: string | null): string {
   if (!d) return '予定'
   const [y, m, day] = d.split('-')
   return Number(y) === new Date().getFullYear() ? `${m}/${day}` : `${y}/${m}/${day}`
+}
+
+// 購入日時（取引画面の「購入日時」）。分まで取れていれば時刻も出す。日付だけなら日付だけ
+function formatPurchasedAt(d: string | null): string {
+  if (!d) return '—'
+  const [datePart, timePart] = d.split('T')
+  const [y, m, day] = datePart.split('-')
+  const dateStr = `${y}/${m}/${day}`
+  return timePart ? `${dateStr} ${timePart}` : dateStr
+}
+const purchasedAtLabel = computed(() => formatPurchasedAt(timeline.value?.sale?.purchased_at ?? null))
+
+async function refetchPurchasedAt() {
+  const sale = timeline.value?.sale
+  if (!sale || refetchBusy.value) return
+  refetchBusy.value = true
+  try {
+    const result = await window.soroban.refetchSaleDates(sale.id)
+    toast(
+      result.purchased_at ? '購入日時を取り直しました' : '取引画面に購入日時が見つかりませんでした',
+      result.purchased_at ? 'ok' : 'warn',
+    )
+    await load()
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    refetchBusy.value = false
+  }
 }
 
 function placeholderChar(): string {
@@ -242,6 +272,17 @@ function openProduct() {
         </div>
       </div>
 
+      <div v-if="timeline.sale" class="purchased-row">
+        <span class="faint">購入日時 {{ purchasedAtLabel }}</span>
+        <button
+          v-if="saleMercariId"
+          type="button" class="sm ghost"
+          title="取引画面を1ページ開いて購入日時を読み直します"
+          :disabled="refetchBusy"
+          @click="refetchPurchasedAt"
+        >取り直す</button>
+      </div>
+
       <h3>この1点の足あと</h3>
       <ol class="timeline">
         <li
@@ -357,6 +398,13 @@ function openProduct() {
 .money-value.loss { color: var(--loss); }
 .money-value.faint { color: var(--text-faint); font-size: var(--fs-16); }
 .money-sub { margin-top: 2px; font-size: var(--fs-11); color: var(--text-faint); }
+
+.purchased-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
 
 h3 {
   margin: 14px 0 8px;

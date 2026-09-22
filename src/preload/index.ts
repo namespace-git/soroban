@@ -77,6 +77,9 @@ const api: SorobanApi = {
   setPurchaseTags: invoke('setPurchaseTags'),
   setProductTags: invoke('setProductTags'),
   setProductName: invoke('setProductName'),
+  setProductImage: invoke('setProductImage'),
+  setProductImageAuto: invoke('setProductImageAuto'),
+  refetchSaleDates: invoke('refetchSaleDates'),
   listShopAccountStats: invoke('listShopAccountStats'),
   listVariantSummary: invoke('listVariantSummary'),
 

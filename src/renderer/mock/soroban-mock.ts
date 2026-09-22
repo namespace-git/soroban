@@ -131,6 +131,20 @@ function statusInfoFor(status: SaleStatus, soldAt: string, seed: number): {
   }
 }
 
+/**
+ * 購入日時（取引画面の「購入日時」）のモック。取引完了なら販売日の2〜5日前 21:34、
+ * 取引中（発送待ち等、状態は取れている）ならまだ確定していないので当日、
+ * 状態がまだ取れていなければ（手入力・観測不足）null
+ */
+function purchasedAtFor(status: SaleStatus | null, soldAt: string, seed: number): string | null {
+  if (!status) return null
+  if (status !== 'completed') return todayLocal()
+  const [y, m, d] = soldAt.split('-').map(Number)
+  const sold = new Date(y, m - 1, d)
+  const days = 2 + (seed % 4) // 2〜5日前
+  return `${todayLocal(new Date(sold.getTime() - days * 86400000))}T21:34`
+}
+
 /** 開発中に Skeleton が一瞬見えるよう、擬似的な遅延を入れる */
 function wait<T>(value: T): Promise<T> {
   const ms = 80 + Math.random() * 70
@@ -254,6 +268,12 @@ const productTags = new Map<string, Tag[]>()
 
 /** 商品（型番）の表示名。型番 → 表示名（setProductName で置き換える。無い型番は最新の在庫名を使う） */
 const productCustomName = new Map<string, string>()
+
+/**
+ * 人が固定した商品画像。型番 → サムネURL（setProductImage / setProductImageAuto(code, false) で入る。
+ * 取り込みで上書きしない）。キーが無ければ自動判定（①出品の最新画像 ②販売の最新画像）
+ */
+const productManualImage = new Map<string, string | null>()
 
 const shippingMethods: ShippingMethod[] = [
   { id: uid(), name: 'ネコポス', carrier: 'らくらくメルカリ便', fee: 210, sort_order: 1, is_active: 1 },
@@ -406,6 +426,7 @@ function addConfirmedPurchase(opts: {
         fulfillment,
         thumb_url: null,
         listing: null,
+        sold_to: null,
       })
       itemPurchaseId.set(itemId, purchaseId)
       itemIds.push(itemId)
@@ -506,6 +527,7 @@ function addTiktokPurchase(opts: {
         fulfillment,
         thumb_url: null,
         listing: null,
+        sold_to: null,
       })
       itemPurchaseId.set(itemId, purchaseId)
       itemIds.push(itemId)
@@ -740,12 +762,14 @@ function buildSaleFixed(opts: {
   // 取り込み風・手入力風を半々にする（実際の収集は行わない）
   const source: SaleSource = opts.i % 2 === 0 ? 'collector' : 'manual'
   const soldAt = soldAtFor(opts.i)
+  const statusInfo = opts.statusOverride ? statusInfoFor(opts.statusOverride, soldAt, opts.i) : saleStatusFor(source, soldAt)
 
   const sale: SaleProfit = {
     id: uid(),
     mercari_item_id: mercariId(),
     thumb_url: thumbUrlFor(opts.i, source),
     sold_at: soldAt,
+    purchased_at: purchasedAtFor(statusInfo.status, soldAt, opts.i),
     title: opts.title,
     kind: opts.kind,
     price,
@@ -765,7 +789,7 @@ function buildSaleFixed(opts: {
     source,
     tags: [],
     inherited_tags: [],
-    ...(opts.statusOverride ? statusInfoFor(opts.statusOverride, soldAt, opts.i) : saleStatusFor(source, soldAt)),
+    ...statusInfo,
   }
 
   if (itemCount > 0) {
@@ -773,6 +797,7 @@ function buildSaleFixed(opts: {
     for (const it of opts.items) {
       it.status = 'sold'
       it.thumb_url = sale.thumb_url
+      it.sold_to = { sale_id: sale.id, title: sale.title, price: sale.price, sold_at: sale.sold_at }
     }
   }
   return sale
@@ -1470,6 +1495,16 @@ function recalcSale(sale: SaleProfit): void {
   recalcSaleInheritedTags(sale)
 }
 
+/** takeFromSale：販売済みの在庫を、いま紐付いている販売から外す（元の販売の cost・item_count が減る） */
+function detachFromCurrentSale(item: InventoryItem): void {
+  if (!item.sold_to) return
+  const fromSaleId = item.sold_to.sale_id
+  const fromIds = saleLines.get(fromSaleId) ?? []
+  saleLines.set(fromSaleId, fromIds.filter(id => id !== item.id))
+  const fromSale = sales.find(s => s.id === fromSaleId)
+  if (fromSale) recalcSale(fromSale)
+}
+
 /**
  * 在庫の inherited_tags = 紐付く仕入のタグ ∪ 同じ型番の商品タグ
  * （在庫に直接付いたタグと重複するものは除く。出どころは tag.from に残す）
@@ -1632,6 +1667,16 @@ function variantSummaryFor(model: string): VariantSummary {
   }
 }
 
+/** 自動判定の商品画像：①最新の出品の画像 ＞ ②最新の販売の画像（人がセットした画像は考えない） */
+function autoProductThumb(model: string): string | null {
+  const latestListing = listingRecords
+    .filter(r => r.model_codes.includes(model) && r.thumb_url)
+    .sort((a, b) => (a.listed_at < b.listed_at ? 1 : a.listed_at > b.listed_at ? -1 : 0))[0]
+  if (latestListing) return latestListing.thumb_url
+  const linkedSales = linkedSalesForModel(model)
+  return linkedSales.slice().sort((a, b) => b.sold_at.localeCompare(a.sold_at))[0]?.thumb_url ?? null
+}
+
 function buildProductSummary(model: string): ProductSummary {
   const summary = variantSummaryFor(model)
   const items = inventory.filter(i => i.model_code === model)
@@ -1644,7 +1689,8 @@ function buildProductSummary(model: string): ProductSummary {
   const lastSoldAt = linkedSales.reduce<string | null>(
     (max, s) => (!max || s.sold_at > max ? s.sold_at : max), null,
   )
-  const thumbUrl = linkedSales.slice().sort((a, b) => b.sold_at.localeCompare(a.sold_at))[0]?.thumb_url ?? null
+  const isManual = productManualImage.has(model)
+  const thumbUrl = isManual ? (productManualImage.get(model) ?? null) : autoProductThumb(model)
 
   return {
     ...summary,
@@ -1653,6 +1699,7 @@ function buildProductSummary(model: string): ProductSummary {
     last_purchased_at: lastPurchasedAt,
     last_sold_at: lastSoldAt,
     thumb_url: thumbUrl,
+    image_manual: isManual,
     tags: productTags.get(model) ?? [],
   }
 }
@@ -2471,6 +2518,7 @@ const api: SorobanApi = {
       mercari_item_id: input.mercari_item_id ?? null,
       thumb_url: null, // 手入力の販売はサムネイルを持たない
       sold_at: input.sold_at,
+      purchased_at: null, // 手入力の販売は取引画面を取っていないので分からない
       title: input.title,
       kind: input.kind ?? 'resale',
       price,
@@ -2504,6 +2552,7 @@ const api: SorobanApi = {
       if (item) {
         item.status = 'sold'
         item.thumb_url = sale.thumb_url
+        item.sold_to = { sale_id: sale.id, title: sale.title, price: sale.price, sold_at: sale.sold_at }
         saleLines.set(id, [item.id])
         sale.auto_linked = 1
         recalcSale(sale)
@@ -2555,6 +2604,7 @@ const api: SorobanApi = {
       if (item) {
         item.status = 'in_stock'
         item.thumb_url = null
+        item.sold_to = null
       }
     }
     saleLines.delete(id)
@@ -2569,19 +2619,25 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
-  async linkInventory(saleId: string, inventoryItemIds: string[]) {
+  async linkInventory(saleId: string, inventoryItemIds: string[], opts?: { takeFromSale?: boolean }) {
     const sale = findSale(saleId)
+    const takeFromSale = opts?.takeFromSale ?? false
     for (const itemId of inventoryItemIds) {
       const item = inventory.find(it => it.id === itemId)
-      if (!item || item.status !== 'in_stock') {
-        throw new Error('すでに販売済みの在庫です')
+      if (!item) throw new Error('在庫が見つかりません')
+      if (item.status === 'sold') {
+        if (!takeFromSale) throw new Error('販売済み・廃棄済みの在庫は紐付けられません')
+      } else if (item.status !== 'in_stock') {
+        throw new Error('販売済み・廃棄済みの在庫は紐付けられません')
       }
     }
     const current = saleLines.get(saleId) ?? []
     for (const itemId of inventoryItemIds) {
       const item = inventory.find(it => it.id === itemId)!
+      if (item.status === 'sold') detachFromCurrentSale(item)
       item.status = 'sold'
       item.thumb_url = sale.thumb_url
+      item.sold_to = { sale_id: sale.id, title: sale.title, price: sale.price, sold_at: sale.sold_at }
     }
     saleLines.set(saleId, [...current, ...inventoryItemIds])
     sale.auto_linked = 0 // 人が確定した紐付けなので「自動」チップは外す
@@ -2598,6 +2654,7 @@ const api: SorobanApi = {
       if (!item) continue
       item.status = 'sold'
       item.thumb_url = sale.thumb_url
+      item.sold_to = { sale_id: sale.id, title: sale.title, price: sale.price, sold_at: sale.sold_at }
       saleLines.set(sale.id, [item.id])
       sale.auto_linked = 1
       recalcSale(sale)
@@ -2614,13 +2671,14 @@ const api: SorobanApi = {
     if (item) {
       item.status = 'in_stock'
       item.thumb_url = null
+      item.sold_to = null
     }
     sale.auto_linked = 0
     recalcSale(sale)
     return wait(undefined)
   },
 
-  async suggestInventory(saleId: string, limit = 20) {
+  async suggestInventory(saleId: string, limit = 20, opts?: { includeSold?: boolean }) {
     const sale = findSale(saleId)
     const target = normalizeName(sale.title)
     const items = inventory.filter(i => i.status === 'in_stock')
@@ -2629,7 +2687,10 @@ const api: SorobanApi = {
       .sort((a, b) => (b.score !== a.score ? b.score - a.score : b.item.aging_days - a.item.aging_days))
       .slice(0, limit)
       .map(({ item }) => item)
-    return wait(ranked)
+    if (!opts?.includeSold) return wait(ranked)
+    // 販売済み（他の販売に紐付いた）在庫も末尾に足す。この販売自身が紐付けたものは除く
+    const soldItems = inventory.filter(i => i.status === 'sold' && i.sold_to?.sale_id !== saleId)
+    return wait([...ranked, ...soldItems])
   },
 
   async listSaleLines(saleId: string) {
@@ -2707,6 +2768,7 @@ const api: SorobanApi = {
           fulfillment: null,
           thumb_url: null,
           listing: null,
+          sold_to: null,
         })
         itemPurchaseId.set(itemId, purchaseId)
         itemIds.push(itemId)
@@ -2830,6 +2892,7 @@ const api: SorobanApi = {
           fulfillment: null,
           thumb_url: null,
           listing: null,
+          sold_to: null,
         })
         itemPurchaseId.set(itemId, p.id)
         itemIds.push(itemId)
@@ -2935,6 +2998,7 @@ const api: SorobanApi = {
         fulfillment: item.fulfillment,
         thumb_url: null,
         listing: null,
+        sold_to: null,
       })
       childIds.push(childId)
       if (purchaseId) itemPurchaseId.set(childId, purchaseId)
@@ -3211,6 +3275,29 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
+  /**
+   * 商品画像を人がセットする（本物はファイル選択ダイアログを main が開く）。
+   * ブラウザのモックではダイアログを開けないので、いまの自動判定の画像をそのまま固定する
+   */
+  async setProductImage(modelCode: string) {
+    productManualImage.set(modelCode, autoProductThumb(modelCode))
+    return wait(true)
+  },
+
+  /** auto=true：人がセットした画像を捨てて自動に戻す。auto=false：今の自動画像を固定する */
+  async setProductImageAuto(modelCode: string, auto: boolean) {
+    if (auto) productManualImage.delete(modelCode)
+    else productManualImage.set(modelCode, autoProductThumb(modelCode))
+    return wait(undefined)
+  },
+
+  /** 取引画面を1ページだけ開いて購入日時を取り直す（メンテ用）のモック */
+  async refetchSaleDates(saleId: string) {
+    const sale = findSale(saleId)
+    sale.purchased_at = '2026-09-10T21:34'
+    return wait({ purchased_at: sale.purchased_at })
+  },
+
   /** 仕入先ごとの累計（確定した仕入のみ）。注文数・点数（明細の数量合計）・支払合計・最終注文日 */
   async listShopAccountStats(): Promise<ShopAccountStats[]> {
     const confirmed = purchases.filter(p => p.status === 'confirmed')
@@ -3274,20 +3361,31 @@ const api: SorobanApi = {
     return wait(rows)
   },
 
-  async reserveInventory(mercariItemId: string, inventoryItemIds: string[]) {
+  async reserveInventory(mercariItemId: string, inventoryItemIds: string[], opts?: { takeFromSale?: boolean }) {
     const rec = listingRecords.find(r => r.mercari_item_id === mercariItemId)
     if (!rec) throw new Error('出品が見つかりません')
     if (rec.status !== 'active' && rec.status !== 'suspended') {
       throw new Error('この出品は終了しているため引き当てできません')
     }
+    const takeFromSale = opts?.takeFromSale ?? false
     for (const id of inventoryItemIds) {
       const item = inventory.find(i => i.id === id)
-      if (!item || item.status !== 'in_stock') {
-        throw new Error('すでに販売済み・分割済みの在庫です')
+      if (!item) throw new Error('在庫が見つかりません')
+      if (item.status === 'sold') {
+        if (!takeFromSale) throw new Error('販売済み・廃棄済みの在庫は紐付けられません')
+      } else if (item.status !== 'in_stock') {
+        throw new Error('販売済み・廃棄済みの在庫は紐付けられません')
       }
     }
     for (const id of inventoryItemIds) {
       const item = inventory.find(i => i.id === id)!
+      if (item.status === 'sold') {
+        // 販売から外して在庫に戻し、こちらの出品へ引き当てる
+        detachFromCurrentSale(item)
+        item.status = 'in_stock'
+        item.thumb_url = null
+        item.sold_to = null
+      }
       // 他の出品に引き当て済みなら、そちらの引き当てを外してこちらへ移す
       if (item.listing && item.listing.mercari_item_id !== mercariItemId) {
         const fromId = item.listing.mercari_item_id
@@ -3308,7 +3406,7 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
-  async suggestForListing(mercariItemId: string, limit = 20) {
+  async suggestForListing(mercariItemId: string, limit = 20, opts?: { includeSold?: boolean }) {
     const rec = listingRecords.find(r => r.mercari_item_id === mercariItemId)
     if (!rec) return wait([])
     const already = new Set(listingItems.get(mercariItemId) ?? [])
@@ -3329,7 +3427,10 @@ const api: SorobanApi = {
       .sort((a, b) => (b.score !== a.score ? b.score - a.score : b.item.aging_days - a.item.aging_days))
       .slice(0, limit)
       .map(({ item }) => item)
-    return wait(ranked)
+    if (!opts?.includeSold) return wait(ranked)
+    // 販売済み（他の販売に紐付いた）在庫も末尾に足す
+    const soldItems = inventory.filter(i => i.status === 'sold' && !already.has(i.id))
+    return wait([...ranked, ...soldItems])
   },
 
   async endListing(mercariItemId: string) {
@@ -3625,6 +3726,7 @@ const api: SorobanApi = {
     listingItems.clear()
     lineItemIds.clear()
     productTags.clear()
+    productManualImage.clear()
     monthBook.clear()
     return wait(undefined)
   },
@@ -3703,6 +3805,12 @@ function assignInitialProductTags(): void {
   })
 }
 
+/** 商品画像を1件だけ人が固定したことにする（見え方の確認用。値は自動判定のものをそのまま） */
+function assignInitialProductImage(): void {
+  const model = allModelCodes().find(m => autoProductThumb(m) !== null)
+  if (model) productManualImage.set(model, autoProductThumb(model))
+}
+
 export function installMock(): void {
   assignInitialAutoTags()
   buildInitialPurchasesAndInventory()
@@ -3714,6 +3822,7 @@ export function installMock(): void {
   assignInitialTags()
   assignInitialPurchaseTags()
   assignInitialProductTags()
+  assignInitialProductImage()
   recalcAllInheritance()
 
   window.soroban = api

@@ -115,7 +115,7 @@ watch(() => props.open, async (isOpen) => {
   position: fixed;
   inset: 0;
   background: rgba(38, 38, 42, .32);
-  z-index: 100;
+  z-index: 110; /* ドロワー（100）より上。ドロワーの中から出す確認は上に重ねる */
   display: flex;
   align-items: center;
   justify-content: center;
