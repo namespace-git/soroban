@@ -218,6 +218,8 @@ export interface PurchaseLineInput {
   model_code?: string | null
   series_code?: string | null
   material?: Material | null
+  /** 仕入先の商品画像の URL（メロジョイの注文詳細から）。取り込み後に main が保存して image_file にする */
+  image_url?: string | null
 }
 
 export interface PurchaseImportResult {
@@ -293,6 +295,8 @@ export interface PurchaseLineItem {
   sale_id: string | null
   sale_price: number | null
   sold_at: string | null
+  /** 仕入先の商品画像（soroban-thumb://）。無ければ null */
+  image_url: string | null
 }
 
 /** 1注文の全部（下書きの確定フォーム用） */
@@ -472,7 +476,7 @@ export interface ProductSummary extends VariantSummary {
   /** 最新の仕入日・販売日 */
   last_purchased_at: string | null
   last_sold_at: string | null
-  /** 商品画像。①人がセットした画像（setProductImage）＞②最新の出品の画像＞③最新の販売の画像。無ければ null */
+  /** 商品画像。①人がセット（setProductImage）＞②仕入先（メロジョイ）の商品画像＞③最新の出品＞④最新の販売。無ければ null */
   thumb_url: string | null
   /** 1 なら人がセットした画像（取り込みで上書きしない）。setProductImageAuto(code, true) で自動に戻す */
   image_manual: boolean
@@ -861,7 +865,8 @@ export interface InventoryOverview {
   aging: { count: number; cost: number; days: number }
 }
 
-export type InventoryGroupFilter = 'unlisted' | 'unlisted_arrived' | 'not_arrived' | 'listed' | 'sold' | 'other' | 'all'
+/** split＝分割前の親だけ（メンテナンス用）。other／all には分割前の親を含めない */
+export type InventoryGroupFilter = 'unlisted' | 'unlisted_arrived' | 'not_arrived' | 'listed' | 'sold' | 'other' | 'split' | 'all'
 
 /** 在庫タブの型番グループ 1 つ（中の点は InventoryItem[]） */
 export interface InventoryGroup {
@@ -1096,6 +1101,8 @@ export interface SorobanApi {
   setProductImageAuto(modelCode: string, auto: boolean): Promise<void>
   /** 取引画面を 1 ページだけ開いて購入日時を取り直す（メンテ用）。取れた購入日時、取れなければ null。CAPTCHA なら例外 */
   refetchSaleDates(saleId: string): Promise<{ purchased_at: string | null }>
+  /** メロジョイの注文詳細を 1 ページだけ開き直して、明細の商品画像を取り込む（メンテ用）。保存できた枚数 */
+  refetchPurchaseImages(purchaseId: string): Promise<{ saved: number }>
   /** 仕入先ごとの累計（確定した仕入）。注文数・点数・支払合計（総原価）・最終注文日 */
   listShopAccountStats(): Promise<ShopAccountStats[]>
   listVariantSummary(sort?: 'total_profit' | 'avg_profit' | 'sold'): Promise<VariantSummary[]>

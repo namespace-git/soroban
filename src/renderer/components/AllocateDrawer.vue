@@ -272,8 +272,8 @@ function placeholderChar(): string {
         <CodeChip kind="item" :code="m.item_code" />
         <StatusChip v-if="m.model_code" tone="neutral" :label="m.model_code" />
         <span class="grow name-cell">
-          <span class="name-main">{{ m.product_name ?? m.name }}</span>
-          <span v-if="m.product_name" class="name-sub">{{ m.name }}</span>
+          <span class="name-main" :title="m.product_name ?? m.name">{{ m.product_name ?? m.name }}</span>
+          <span class="name-sub" :title="m.product_name ? m.name : ''">{{ m.product_name ? m.name : '' }}</span>
         </span>
         <span v-if="m.aging_days != null" class="faint nowrap">{{ m.aging_days }}日</span>
         <span class="num">{{ yen(m.landed_cost) }}</span>
@@ -308,8 +308,8 @@ function placeholderChar(): string {
           />
           <StatusChip v-if="c.sold_to" tone="warn" :label="soldToLabel(c.sold_to)" />
           <span class="grow name-cell">
-            <span class="name-main">{{ c.product_name ?? c.name }}</span>
-            <span v-if="c.product_name" class="name-sub">{{ c.name }}</span>
+            <span class="name-main" :title="c.product_name ?? c.name">{{ c.product_name ?? c.name }}</span>
+            <span class="name-sub" :title="c.product_name ? c.name : ''">{{ c.product_name ? c.name : '' }}</span>
           </span>
           <span class="faint nowrap">{{ c.aging_days }}日</span>
           <span class="num">{{ yen(c.landed_cost) }}</span>
@@ -341,6 +341,12 @@ function placeholderChar(): string {
 </template>
 
 <style scoped>
+/* 出品／販売タイトル（Drawer.vue の見出し）は切れずに折り返して全文を見せる */
+:deep(.drawer-title) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .head-sub {
   display: flex;
   align-items: center;
@@ -392,7 +398,7 @@ function placeholderChar(): string {
 
 .item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
@@ -414,9 +420,27 @@ function placeholderChar(): string {
 }
 .maint-toggle input { width: 13px; height: 13px; }
 
+/* 行の高さを商品ごとに変えないよう、表示名（最大2行）・明細名（最大3行）の高さを常に確保する。
+   はみ出す分は省略せず折り返す（-webkit-line-clamp）。全文は :title で見られる */
 .name-cell { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-.name-main { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.name-sub { font-size: var(--fs-12); color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name-main {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  line-height: 1.3;
+  min-height: calc(1.3em * 2);
+}
+.name-sub {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  font-size: var(--fs-12);
+  color: var(--text-faint);
+  line-height: 1.3;
+  min-height: calc(1.3em * 3);
+}
 
 .item input[type="checkbox"] {
   width: 14px;

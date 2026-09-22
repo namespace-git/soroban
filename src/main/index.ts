@@ -224,6 +224,7 @@ function registerIpc(): void {
   handle('setProductImage', (code) => productImage.setProductImage(code, mainWindow))
   handle('setProductImageAuto', (code, auto) => productImage.setProductImageAuto(code, auto))
   handle('refetchSaleDates', (saleId) => collector.refetchSaleDates(saleId))
+  handle('refetchPurchaseImages', (purchaseId) => collectorMellojoy.refetchPurchaseImages(purchaseId))
   handle('listShopAccountStats', () => db.listShopAccountStats())
   handle('listVariantSummary', (sort) => db.listVariantSummary(sort))
 

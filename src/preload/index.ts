@@ -80,6 +80,7 @@ const api: SorobanApi = {
   setProductImage: invoke('setProductImage'),
   setProductImageAuto: invoke('setProductImageAuto'),
   refetchSaleDates: invoke('refetchSaleDates'),
+  refetchPurchaseImages: invoke('refetchPurchaseImages'),
   listShopAccountStats: invoke('listShopAccountStats'),
   listVariantSummary: invoke('listVariantSummary'),
 

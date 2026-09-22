@@ -177,6 +177,11 @@ CREATE TABLE IF NOT EXISTS purchase_line (
   allocated_cost   INTEGER NOT NULL DEFAULT 0, -- この明細に配賦された送料等
   landed_unit_cost INTEGER NOT NULL DEFAULT 0, -- 1点あたりの按分後原価
 
+  -- 仕入先（メロジョイ）の商品画像。image_url は注文詳細から取った元URL、
+  -- image_file は userData/thumbs に保存した後のファイル名（collector が埋める）
+  image_url   TEXT,
+  image_file  TEXT,
+
   sort_order  INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );

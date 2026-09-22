@@ -1,6 +1,9 @@
-import { BrowserWindow, session } from 'electron'
+import { app, BrowserWindow, session } from 'electron'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
+import { mkdirSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
+import { extname, join } from 'node:path'
 import * as db from './db'
 import { extractCode, extractMaterial } from './code'
 import { buildUserAgent, CHALLENGE_MESSAGE, isChallengeText, randomWait, revealForChallenge } from './collector'
@@ -237,6 +240,8 @@ export interface OrderDetailLine {
   variant: string | null
   quantity: number
   price: number
+  /** 明細行1つめのセルにある商品画像の src。無ければ null（プレースホルダのみの注文がある） */
+  imageUrl: string | null
 }
 
 export interface OrderDetail {
@@ -263,6 +268,10 @@ function parseOrderItemRow(rowHtml: string): OrderDetailLine | null {
   const qtyMatch = /数量<\/span>\s*(\d+)/.exec(cells[0])
   const quantity = qtyMatch ? parseInt(qtyMatch[1], 10) : 1
 
+  // セル1にはサムネイルもある（画像が無い注文はプレースホルダのみでimgが無い）
+  const imgMatch = /<img\b[^>]*\bsrc="([^"]+)"/.exec(cells[0])
+  const imageUrl = imgMatch ? decodeEntities(imgMatch[1]) : null
+
   // セル2：商品名 + <small> のバリアント名
   const titleMatch = /<span[^>]*>([^<]*)<\/span>/.exec(cells[1])
   const title = titleMatch ? decodeEntities(titleMatch[1]).trim() : ''
@@ -275,7 +284,15 @@ function parseOrderItemRow(rowHtml: string): OrderDetailLine | null {
   const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, ''), 10) : NaN
 
   if (!title || Number.isNaN(price)) return null
-  return { title, variant, quantity, price }
+  return { title, variant, quantity, price, imageUrl }
+}
+
+/**
+ * サムネイル用の `_128x128` を保存用の `_400x400` に差し替える（Shopify CDN の
+ * ファイル名サフィックスでサイズを変えられる）。サフィックスが無ければそのまま返す
+ */
+export function toDetailImageUrl(url: string): string {
+  return url.replace(/_128x128(?=\.[a-zA-Z0-9]+(?:\?|$))/, '_400x400')
 }
 
 /**
@@ -466,6 +483,7 @@ export function toPurchaseInput(
         unit_price: unitPrices[i],
         quantity: l.quantity,
         ...buildCodeAndMaterial(l),
+        image_url: l.imageUrl ? toDetailImageUrl(l.imageUrl) : null,
       })),
     }
     return { kind: 'confirmed', input }
@@ -649,6 +667,130 @@ async function waitForDetailReady(win: BrowserWindow): Promise<void> {
   }
 }
 
+// ------------------------------------------------------------
+// 明細の商品画像（メロジョイの注文詳細から）
+// ------------------------------------------------------------
+
+/** 1注文につき保存する画像の上限。連打しないための枠（残りは image_file が NULL のまま次回に回す） */
+const MAX_IMAGES_PER_ORDER = 10
+
+/** サムネイル保存先ディレクトリ（無ければ作る）。collector.ts・receipts.ts と同じ userData/thumbs を使う */
+function ensureThumbDir(): string {
+  const dir = join(app.getPath('userData'), 'thumbs')
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/**
+ * 保存ファイル名。`purchase-line-<lineId>-<sha1先頭8桁>.<拡張子>`。
+ * 拡張子は URL から取る（読めなければ .jpg）。sha1 は URL 由来なので、画像が
+ * 差し替わればファイル名も変わる
+ */
+function purchaseLineImageFileName(lineId: string, url: string): string {
+  const hash8 = createHash('sha1').update(url).digest('hex').slice(0, 8)
+  const ext = extname(url.split('?')[0]) || '.jpg'
+  return `purchase-line-${lineId}-${hash8}${ext}`
+}
+
+/**
+ * 商品画像を1枚 GET して userData/thumbs に保存する。session.fetch を使うことで、
+ * 普通のブラウザの画像取得と同じ Cookie/UA に見える（書き込み操作ではない）
+ */
+async function downloadPurchaseLineImage(shopAccountId: string, lineId: string, url: string): Promise<string> {
+  const res = await session.fromPartition(partitionFor(shopAccountId)).fetch(url)
+  if (!res.ok) throw new Error(`商品画像の取得に失敗しました（${res.status}）: ${url}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  const file = purchaseLineImageFileName(lineId, url)
+  await writeFile(join(ensureThumbDir(), file), buf)
+  return file
+}
+
+/**
+ * 仕入の取り込み直後に、明細の商品画像を保存する。対象は `db.purchaseLinesNeedingImage`
+ * が返す「image_url はあるが image_file がまだ無い」明細だけ（画像の無い注文は0件）。
+ * 1注文につき最大 `MAX_IMAGES_PER_ORDER` 枚、各画像の間に 300〜800ms 待つ。
+ * 失敗しても再試行しない（image_file が NULL のままなので、メンテの取り直し
+ * （refetchPurchaseImages）で拾える）
+ */
+export async function savePurchaseImages(shopAccountId: string, purchaseId: string): Promise<number> {
+  const targets = db.purchaseLinesNeedingImage(purchaseId).slice(0, MAX_IMAGES_PER_ORDER)
+
+  let saved = 0
+  for (const line of targets) {
+    try {
+      const file = await downloadPurchaseLineImage(shopAccountId, line.id, line.image_url)
+      db.setPurchaseLineImage(line.id, file)
+      saved++
+    } catch {
+      // 失敗しても再試行しない
+    }
+    await sleep(300 + Math.floor(Math.random() * 500))
+  }
+  return saved
+}
+
+/**
+ * メンテ用：1件の仕入について、注文一覧 → 詳細ページを開き直して明細の商品画像を取り込む。
+ * `collectShopOrders` の定期取り込みとは別に、人が明示的に呼ぶ想定。
+ * メロジョイ経由の注文（import_key が `mellojoy:` 始まり）でなければ例外。
+ * ログイン切れ・CAPTCHA は collectShopOrders と同じく例外にして人に渡す
+ */
+export async function refetchPurchaseImages(purchaseId: string): Promise<{ saved: number }> {
+  const purchase = db.getPurchase(purchaseId)
+  if (!purchase.import_key || !purchase.import_key.startsWith('mellojoy:')) {
+    throw new Error('メロジョイの注文ではありません')
+  }
+  const orderNo = purchase.import_key.slice('mellojoy:'.length)
+  const shopAccountId = purchase.shop_account_id
+
+  ensureShopSession(shopAccountId)
+  const win = createShopWindow(shopAccountId, false)
+  let keepWindowOpen = false
+
+  try {
+    await win.loadURL(ORDERS_URL)
+    await randomWait()
+    await waitForOrdersReady(win)
+
+    if (isShopLoginUrl(win.webContents.getURL())) throw new Error(AUTH_MESSAGE)
+    if (await isChallenge(win)) {
+      keepWindowOpen = true
+      revealForChallenge(win)
+      throw new Error(CHALLENGE_MESSAGE)
+    }
+
+    const listUrl = win.webContents.getURL()
+    const listHtml = await win.webContents.executeJavaScript('document.documentElement.outerHTML') as string
+    const order = parseOrderListHtml(listHtml).find(o => o.orderNo === orderNo)
+    if (!order) throw new Error('注文一覧に見つかりませんでした')
+
+    const detailUrl = new URL(order.href, listUrl).toString()
+    await win.loadURL(detailUrl)
+    await randomWait()
+    await waitForDetailReady(win)
+
+    if (isShopLoginUrl(win.webContents.getURL())) throw new Error(AUTH_MESSAGE)
+    if (await isChallenge(win)) {
+      keepWindowOpen = true
+      revealForChallenge(win)
+      throw new Error(CHALLENGE_MESSAGE)
+    }
+
+    const detailHtml = await win.webContents.executeJavaScript('document.documentElement.outerHTML') as string
+    const detail = parseOrderDetailHtml(detailHtml)
+
+    const urls = detail.lines
+      .filter((l): l is OrderDetailLine & { imageUrl: string } => l.imageUrl !== null)
+      .map(l => ({ name: l.title, image_url: toDetailImageUrl(l.imageUrl) }))
+    db.setPurchaseLineImageUrls(purchaseId, urls)
+
+    const saved = await savePurchaseImages(shopAccountId, purchaseId)
+    return { saved }
+  } finally {
+    if (!keepWindowOpen && !win.isDestroyed()) win.destroy()
+  }
+}
+
 /**
  * メロジョイの注文履歴を読み、`purchase` に積む（確定 or 下書き）。
  * @param silent true なら画面を出さない
@@ -724,6 +866,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     let confirmedCount = 0
     let draftCount = 0
     let skippedByKeyword = 0
+    let imagesSaved = 0
     const failures: string[] = []
 
     for (const order of targets) {
@@ -777,8 +920,9 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
             db.markMellojoyOrderExcluded(shopAccountId, order.orderNo, currentKeywordsHash)
             continue
           }
-          db.createPurchase(filtered)
+          const purchaseId = db.createPurchase(filtered)
           confirmedCount++
+          imagesSaved += await savePurchaseImages(shopAccountId, purchaseId)
         } else {
           const filteredDraft = filterPurchaseDraftByKeywords(result.input, importKeywords)
           if (filteredDraft === null) {
@@ -786,8 +930,9 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
             db.markMellojoyOrderExcluded(shopAccountId, order.orderNo, currentKeywordsHash)
             continue
           }
-          db.createPurchaseDraft(filteredDraft)
+          const purchaseId = db.createPurchaseDraft(filteredDraft)
           draftCount++
+          if (purchaseId) imagesSaved += await savePurchaseImages(shopAccountId, purchaseId)
         }
       } catch (e) {
         failures.push(`${order.orderNo}：${e instanceof Error ? e.message : String(e)}`)
@@ -798,6 +943,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
       `確定 ${confirmedCount}・下書き ${draftCount}・既取込 ${alreadyImported}・キャンセル ${cancelledCount}`,
     ]
     if (fulfillmentUpdated > 0) parts.push(`到着状態の更新 ${fulfillmentUpdated}`)
+    if (imagesSaved > 0) parts.push(`画像 ${imagesSaved} 枚`)
     if (skippedByKeyword > 0) parts.push(`キーワード不一致で除外 ${skippedByKeyword} 件`)
     if (skippedExcluded > 0) parts.push(`不一致で除外済み・スキップ ${skippedExcluded} 件`)
     if (freshNotExcluded.length > targets.length) {

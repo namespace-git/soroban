@@ -90,8 +90,9 @@ const statusOptions: Array<{ value: InventoryGroupFilter; label: string }> = [
   { value: 'not_arrived', label: '未着' },
   { value: 'listed', label: '出品中' },
   { value: 'sold', label: '販売済' },
-  { value: 'other', label: 'その他（廃棄・自家消費・分割）' },
+  { value: 'other', label: 'その他（廃棄・自家消費）' },
   { value: 'all', label: 'すべて' },
+  { value: 'split', label: '分割前の親（メンテナンス）' },
 ]
 const statusSelectValue = computed<InventoryGroupFilter>({
   get: () => groupFilter.value,
@@ -110,23 +111,24 @@ async function loadGroups() {
 async function loadFlatItems() {
   const f = groupFilter.value
   if (f === 'all') {
-    const [inStock, sold, disposed, personalUse, split] = await Promise.all([
+    // 分割前の親（split）は分割済みなのでここには含めない（'split' フィルタでだけ見る）
+    const [inStock, sold, disposed, personalUse] = await Promise.all([
       window.soroban.listInventory('in_stock'),
       window.soroban.listInventory('sold'),
       window.soroban.listInventory('disposed'),
       window.soroban.listInventory('personal_use'),
-      window.soroban.listInventory('split'),
     ])
-    items.value = [...inStock, ...sold, ...disposed, ...personalUse, ...split]
+    items.value = [...inStock, ...sold, ...disposed, ...personalUse]
   } else if (f === 'sold') {
     items.value = await window.soroban.listInventory('sold')
+  } else if (f === 'split') {
+    items.value = await window.soroban.listInventory('split')
   } else if (f === 'other') {
-    const [disposed, personalUse, split] = await Promise.all([
+    const [disposed, personalUse] = await Promise.all([
       window.soroban.listInventory('disposed'),
       window.soroban.listInventory('personal_use'),
-      window.soroban.listInventory('split'),
     ])
-    items.value = [...disposed, ...personalUse, ...split]
+    items.value = [...disposed, ...personalUse]
   } else {
     // unlisted / unlisted_arrived / not_arrived / listed はすべて in_stock の中
     items.value = await window.soroban.listInventory('in_stock')
@@ -212,6 +214,9 @@ function matchesGroupFilter(bucket: Bucket, filter: InventoryGroupFilter): boole
     case 'listed': return bucket === 'listed'
     case 'sold': return bucket === 'sold'
     case 'other': return bucket === 'other'
+    // split（分割前の親）も bucketOf 上は 'other' に入るが、loadFlatItems が
+    // 'split' フィルタのときは status='split' の在庫しか読まないので、ここでは通すだけでよい
+    case 'split': return bucket === 'other'
   }
 }
 

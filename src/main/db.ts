@@ -1072,6 +1072,18 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 24) {
+    // 仕入先（メロジョイ）の商品画像。image_url は注文詳細から取った元URL、
+    // image_file は userData/thumbs に保存した後のファイル名（collector が埋める）
+    addColumnIfMissing('purchase_line', 'image_url', 'TEXT')
+    addColumnIfMissing('purchase_line', 'image_file', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '24')
+         ON CONFLICT(key) DO UPDATE SET value = '24'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -1137,6 +1149,7 @@ function insertLinesAndItems(
     unit_price: l.unit_price,
     quantity: l.quantity,
     sort_order: i,
+    image_url: l.image_url ?? null,
     ...resolveLineCode(l),
   }))
 
@@ -1146,8 +1159,8 @@ function insertLinesAndItems(
     `INSERT INTO purchase_line
        (id, purchase_id, name, unit_price, quantity,
         model_code, series_code, material,
-        allocated_cost, landed_unit_cost, sort_order)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        allocated_cost, landed_unit_cost, sort_order, image_url)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
   const insItem = db.prepare(
     `INSERT INTO inventory_item
@@ -1164,7 +1177,7 @@ function insertLinesAndItems(
     insLine.run(
       l.id, purchaseId, l.name, l.unit_price, l.quantity,
       l.model_code, l.series_code, l.material,
-      a.allocated, baseUnit, l.sort_order,
+      a.allocated, baseUnit, l.sort_order, l.image_url,
     )
     // 数量分だけ在庫アイテムを生成する。
     // landed_cost・item_code はここで確定し、以後は独立（過去の利益を動かさない）
@@ -1392,8 +1405,10 @@ function loadPurchaseLineItems(lineIds: string[]): Map<string, PurchaseLine['ite
       lst.price    AS listing_price,
       sl.sale_id   AS sale_id,
       sale.price   AS sale_price,
-      sale.sold_at AS sold_at
+      sale.sold_at AS sold_at,
+      pl.image_file AS image_file
     FROM inventory_item i
+    JOIN purchase_line     pl  ON pl.id = i.purchase_line_id
     LEFT JOIN listing_line ll  ON ll.inventory_item_id = i.id
     LEFT JOIN listing      lst ON lst.mercari_item_id = ll.listing_id AND lst.status IN ('active','suspended')
     LEFT JOIN sale_line    sl  ON sl.inventory_item_id = i.id
@@ -1405,6 +1420,7 @@ function loadPurchaseLineItems(lineIds: string[]): Map<string, PurchaseLine['ite
     id: string; item_code: string; status: InventoryStatus; landed_cost: number
     listing_price: number | null
     sale_id: string | null; sale_price: number | null; sold_at: string | null
+    image_file: string | null
   }>
 
   for (const r of rows) {
@@ -1418,6 +1434,7 @@ function loadPurchaseLineItems(lineIds: string[]): Map<string, PurchaseLine['ite
       sale_id: r.sale_id,
       sale_price: r.sale_price,
       sold_at: r.sold_at,
+      image_url: toThumbUrl(r.image_file),
     })
     map.set(r.line_id, arr)
   }
@@ -1521,19 +1538,36 @@ type FulfillmentRow = {
   delivered_at: string | null
 }
 
+/** 到着状態の順位。noDowngrade の判定にだけ使う */
+const FULFILLMENT_RANK: Record<Fulfillment, number> = { pending: 0, shipped: 1, delivered: 2 }
+
 /**
  * 到着状態の更新の共通処理。import_key / id のどちらで引くかだけが呼び出し側で違う。
  * 変化が無ければ何もせず false。到着状態が shipped / delivered に進んだのを最初に
- * 観測した日を shipped_at / delivered_at に刻む（既に入っていれば触らない。後戻りしても消さない）
+ * 観測した日を shipped_at / delivered_at に刻む（既に入っていれば触らない。後戻りしても消さない）。
+ *
+ * opts.noDowngrade：true なら今より低い状態（pending < shipped < delivered）や null には変えない
+ * （人が「到着済」にしたものを、収集の自動更新が古い一覧の表示で巻き戻さないため）。
+ * 「分からない（null）」から進める分は降格ではないので許可する
  */
 function applyFulfillment(
   whereCol: 'import_key' | 'id', whereVal: string, fulfillment: Fulfillment | null,
+  opts?: { noDowngrade?: boolean },
 ): boolean {
   const cur = db.prepare(
     `SELECT fulfillment, shipped_at, delivered_at FROM purchase WHERE ${whereCol} = ?`,
   ).get(whereVal) as FulfillmentRow | undefined
   if (!cur) return false
   if (cur.fulfillment === fulfillment) return false
+
+  if (opts?.noDowngrade) {
+    if (fulfillment === null) {
+      // 分かっている状態から「分からない」には戻さない
+      if (cur.fulfillment !== null) return false
+    } else if (cur.fulfillment !== null && FULFILLMENT_RANK[fulfillment] < FULFILLMENT_RANK[cur.fulfillment]) {
+      return false
+    }
+  }
 
   const today = todayLocal()
   let shippedAt = cur.shipped_at
@@ -1556,11 +1590,12 @@ function applyFulfillment(
 /**
  * 仕入元の注文の到着状態を更新する（collector が一覧の表示から更新する）。
  * import_key で引く。変化が無ければ何もせず false を返す。
+ * 今より低い状態には変えない（人が手で進めた状態を、1ページしか読まない収集で巻き戻さない）
  */
 export function updatePurchaseFulfillment(
   importKey: string, fulfillment: Fulfillment | null,
 ): boolean {
-  return applyFulfillment('import_key', importKey, fulfillment)
+  return applyFulfillment('import_key', importKey, fulfillment, { noDowngrade: true })
 }
 
 /**
@@ -1572,6 +1607,52 @@ export function setPurchaseFulfillment(id: string, fulfillment: Fulfillment | nu
   const exists = db.prepare('SELECT id FROM purchase WHERE id = ?').get(id) as { id: string } | undefined
   if (!exists) throw new Error('仕入が見つかりません')
   applyFulfillment('id', id, fulfillment)
+}
+
+/**
+ * この仕入の明細のうち、元URLはあるがまだ保存（ダウンロード）していないもの
+ * （image_url IS NOT NULL AND image_file IS NULL）。collector が取り込む対象を探すのに使う。
+ */
+export function purchaseLinesNeedingImage(purchaseId: string): Array<{ id: string; image_url: string }> {
+  return db.prepare(
+    `SELECT id, image_url FROM purchase_line
+      WHERE purchase_id = ? AND image_url IS NOT NULL AND image_file IS NULL`,
+  ).all(purchaseId) as Array<{ id: string; image_url: string }>
+}
+
+/** ダウンロードした画像のファイル名を明細に保存する（collector が呼ぶ） */
+export function setPurchaseLineImage(lineId: string, file: string): void {
+  db.prepare('UPDATE purchase_line SET image_file = ? WHERE id = ?').run(file, lineId)
+}
+
+/**
+ * メンテ用：仕入の明細を名前で突き合わせて image_url を更新する（refetchPurchaseImages が使う）。
+ * image_file はそのまま持つが、URL が変わった行だけ image_file を NULL に戻して取り直させる。
+ * 更新した行数を返す
+ */
+export function setPurchaseLineImageUrls(
+  purchaseId: string, urls: Array<{ name: string; image_url: string }>,
+): number {
+  const findByName = db.prepare(
+    'SELECT id, image_url FROM purchase_line WHERE purchase_id = ? AND name = ?',
+  )
+  const update = db.prepare(
+    'UPDATE purchase_line SET image_url = ?, image_file = NULL WHERE id = ?',
+  )
+  let updated = 0
+  const tx = db.transaction(() => {
+    for (const u of urls) {
+      const rows = findByName.all(purchaseId, u.name) as Array<{ id: string; image_url: string | null }>
+      for (const row of rows) {
+        if (row.image_url !== u.image_url) {
+          update.run(u.image_url, row.id)
+          updated += 1
+        }
+      }
+    }
+  })
+  tx()
+  return updated
 }
 
 /** listPurchases / getPurchaseSummary で共通の SELECT（WHERE・ORDER BY は呼び出し側で足す） */
@@ -3905,9 +3986,10 @@ export function deleteProductImage(modelCode: string): void {
 /**
  * 型番ごとの商品画像ファイルを優先順位で決める：
  *   ① product_image（人がセット。setProductImage）→ manual: true
- *   ② その型番の最新の出品の画像（listing_line 経由、またはタイトルに型番文字列を含む。
+ *   ② その型番の仕入先（メロジョイ）の商品画像（purchase_line.image_file、注文日が最新の明細）
+ *   ③ その型番の最新の出品の画像（listing_line 経由、またはタイトルに型番文字列を含む。
  *      last_seen_at が新しい順、画像があるもの）
- *   ③ その型番の最新の販売の画像（sale_line 経由、sold_at が新しい順）
+ *   ④ その型番の最新の販売の画像（sale_line 経由、sold_at が新しい順）
  * 画像が無い型番は Map に入れない。
  */
 export function productImageFiles(modelCodes: string[]): Map<string, { file: string; manual: boolean }> {
@@ -3927,7 +4009,25 @@ export function productImageFiles(modelCodes: string[]): Map<string, { file: str
   }
   if (remaining.size === 0) return map
 
-  // ② その型番の最新の出品（listing_line 経由、またはタイトルに型番文字列を含む）
+  // ② その型番の仕入先（メロジョイ）の商品画像。注文日（ordered_at）が最新の明細を使う
+  const findLatestPurchaseThumb = db.prepare(`
+    SELECT pl.image_file AS image_file
+      FROM purchase_line pl
+      JOIN purchase p ON p.id = pl.purchase_id
+     WHERE pl.model_code = ? AND pl.image_file IS NOT NULL
+     ORDER BY p.ordered_at DESC, pl.created_at DESC
+     LIMIT 1
+  `)
+  for (const code of [...remaining]) {
+    const row = findLatestPurchaseThumb.get(code) as { image_file: string } | undefined
+    if (row) {
+      map.set(code, { file: row.image_file, manual: false })
+      remaining.delete(code)
+    }
+  }
+  if (remaining.size === 0) return map
+
+  // ③ その型番の最新の出品（listing_line 経由、またはタイトルに型番文字列を含む）
   const findLatestListingThumb = db.prepare(`
     SELECT thumb_file FROM (
       SELECT l.thumb_file AS thumb_file, l.last_seen_at AS last_seen_at
@@ -3952,7 +4052,7 @@ export function productImageFiles(modelCodes: string[]): Map<string, { file: str
   }
   if (remaining.size === 0) return map
 
-  // ③ その型番の最新の販売
+  // ④ その型番の最新の販売
   const findLatestSaleThumb = db.prepare(`
     SELECT sp.thumb_file AS thumb_file
       FROM inventory_item i

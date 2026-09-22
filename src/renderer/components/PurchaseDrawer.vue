@@ -9,6 +9,8 @@ import StatusChip from './StatusChip.vue'
 import CodeChip from './CodeChip.vue'
 import Icon from './Icon.vue'
 
+const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+
 const props = defineProps<{
   open: boolean
   purchaseId: string | null
@@ -129,6 +131,26 @@ function draftReason(note: string | null): string {
   const m = note?.match(/注文履歴から自動取得（下書き）(?:：(.+))?/)
   return m?.[1]?.trim() || '価格か送料が読めなかったので確認してください'
 }
+
+// --- 画像を取り直す（メンテ用）：メロジョイの取り込みだけ ---
+const refetchingImages = ref(false)
+function canRefetchImages(): boolean {
+  return !!detail.value?.import_key?.startsWith('mellojoy:')
+}
+async function onRefetchImages() {
+  if (!detail.value || refetchingImages.value) return
+  refetchingImages.value = true
+  try {
+    const { saved } = await window.soroban.refetchPurchaseImages(detail.value.id)
+    if (saved > 0) toast(`画像を${saved}枚取り込みました`, 'ok')
+    else toast('この注文には商品画像がありません', 'warn')
+    await load()
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    refetchingImages.value = false
+  }
+}
 </script>
 
 <template>
@@ -188,7 +210,13 @@ function draftReason(note: string | null): string {
         <tbody>
           <tr v-for="l in detail.lines" :key="l.id">
             <td class="line-cell">
-              <div class="line-name">{{ l.name }}</div>
+              <div class="line-name-row">
+                <img
+                  v-if="l.items[0]?.image_url" :key="l.items[0]!.image_url!" class="line-thumb"
+                  :src="l.items[0]!.image_url!" alt="" loading="lazy"
+                />
+                <div class="line-name">{{ l.name }}</div>
+              </div>
               <div v-if="l.model_code" class="chip-row">
                 <StatusChip tone="neutral" :label="l.model_code" />
               </div>
@@ -235,6 +263,11 @@ function draftReason(note: string | null): string {
       <div class="footer-row">
         <button v-if="detail.status === 'draft'" class="primary" @click="onConfirmDraft">確定する</button>
         <span class="grow" />
+        <button
+          v-if="canRefetchImages()" class="sm ghost" :disabled="refetchingImages"
+          title="メロジョイの注文詳細を1ページ開いて商品画像を取り込みます"
+          @click="onRefetchImages"
+        >{{ refetchingImages ? '取り込み中…' : '画像を取り直す' }}</button>
         <button class="ghost sm" @click="onEditTag">タグ</button>
         <button class="ghost sm" @click="onEditNote">メモ</button>
       </div>
@@ -316,6 +349,18 @@ function draftReason(note: string | null): string {
 
 .lines-table { margin-top: 4px; }
 .line-cell { min-width: 0; }
+.line-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.line-thumb {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  flex-shrink: 0;
+}
 .line-name {
   font-size: var(--fs-14);
   font-weight: 500;

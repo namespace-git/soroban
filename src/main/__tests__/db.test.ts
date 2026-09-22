@@ -10,6 +10,7 @@ import { todayLocal } from '../../shared/date'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 
 import * as db from '../db'
+import * as views from '../views'
 
 // ============================================================
 // Phase 1 の実物スキーマ（`git show 64f69fd:src/main/schema.sql`）。
@@ -1303,7 +1304,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('23')
+      expect(db.getSettings().schema_version).toBe('24')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1461,8 +1462,8 @@ describe('db（:memory:）', () => {
     expect(other.last_ordered_at).toBeNull()
   })
 
-  it('migrate：schema_versionが23になる', () => {
-    expect(db.getSettings().schema_version).toBe('23')
+  it('migrate：schema_versionが24になる', () => {
+    expect(db.getSettings().schema_version).toBe('24')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1548,7 +1549,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('23')
+      expect(db.getSettings().schema_version).toBe('24')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1582,7 +1583,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('23')
+      expect(db.getSettings().schema_version).toBe('24')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -1820,6 +1821,40 @@ describe('db（:memory:）', () => {
 
     // 未知の import_key は false
     expect(db.updatePurchaseFulfillment('mellojoy:#no-such', 'shipped')).toBe(false)
+  })
+
+  it('updatePurchaseFulfillment：今より低い状態には巻き戻さない（人が到着済にしたものを収集で戻さない）', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-03-05',
+      import_key: 'mellojoy:#downgrade',
+      fulfillment: 'delivered',
+      lines: [{ name: '巻き戻り防止テスト', unit_price: 1000, quantity: 1 }],
+    })
+    expect(db.listPurchases()[0].fulfillment).toBe('delivered')
+
+    // delivered → shipped（一覧が「配送中」を指している）は変えない
+    expect(db.updatePurchaseFulfillment('mellojoy:#downgrade', 'shipped')).toBe(false)
+    expect(db.listPurchases()[0].fulfillment).toBe('delivered')
+
+    // shipped → null（取れなかった）も変えない
+    expect(db.updatePurchaseFulfillment('mellojoy:#downgrade', null)).toBe(false)
+    expect(db.listPurchases()[0].fulfillment).toBe('delivered')
+
+    // pending → shipped は進むので変わる
+    const draftId = db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-03-06',
+      import_key: 'mellojoy:#upgrade',
+      fulfillment: 'pending',
+      lines: [{ name: '前進はできる', unit_price: 1000, quantity: 1 }],
+    })
+    expect(db.updatePurchaseFulfillment('mellojoy:#upgrade', 'shipped')).toBe(true)
+    expect(db.getPurchase(draftId).fulfillment).toBe('shipped')
+
+    // 手動（setPurchaseFulfillment）は今まで通り何にでも変えられる（shipped → pending に戻せる）
+    db.setPurchaseFulfillment(draftId, 'pending')
+    expect(db.getPurchase(draftId).fulfillment).toBe('pending')
   })
 
   it('fulfillment：指定しなければ null。confirmPurchaseはfulfillmentに触らない', () => {
@@ -4028,6 +4063,135 @@ describe('db（:memory:）', () => {
       expect(map.get('P101')).toEqual({ file: 'sale-p101.jpg', manual: false })
       expect(map.has('P102')).toBe(false)
       expect(map.has('P199')).toBe(false)
+    })
+
+    it('②仕入先の商品画像 は ①人がセット の次、③出品より優先。同じ型番で複数明細があれば注文日が新しい方を使う', () => {
+      const firstId = db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-02-01', shipping_fee: 0,
+        lines: [{ name: 'クリームわん【P300】', unit_price: 1000, quantity: 1 }],
+      })
+      const firstLine = db.getPurchase(firstId).lines[0]
+      db.setPurchaseLineImage(firstLine.id, 'purchase-p300-old.jpg')
+
+      // 出品の画像もあるが、仕入先の商品画像を優先する
+      db.upsertListings([
+        { mercariItemId: 'PI-P300', title: 'クリームわん【P300】', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.setListingThumb('PI-P300', 'listing-p300.jpg', null)
+
+      expect(db.productImageFiles(['P300']).get('P300')).toEqual({ file: 'purchase-p300-old.jpg', manual: false })
+
+      // 同じ型番の後の注文（注文日が新しい）に画像があれば、そちらに差し替わる
+      const secondId = db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-02-10', shipping_fee: 0,
+        lines: [{ name: 'クリームわん【P300】', unit_price: 1000, quantity: 1 }],
+      })
+      const secondLine = db.getPurchase(secondId).lines[0]
+      db.setPurchaseLineImage(secondLine.id, 'purchase-p300-new.jpg')
+
+      expect(db.productImageFiles(['P300']).get('P300')).toEqual({ file: 'purchase-p300-new.jpg', manual: false })
+    })
+  })
+
+  describe('仕入明細の画像（purchase_line.image_url / image_file）', () => {
+    it('createPurchase で image_url を保存し、在庫アイテムの image_url に同じサムネURLが出る（数量分すべて同じ）', () => {
+      const id = db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-04-01', shipping_fee: 0,
+        lines: [{ name: '画像テスト', unit_price: 1000, quantity: 2, image_url: 'https://mellojoy.example/img/300.jpg' }],
+      })
+      const detail = db.getPurchase(id)
+      expect(detail.lines[0].items).toHaveLength(2)
+      // まだダウンロード前（image_file が無い）なので item.image_url は null
+      expect(detail.lines[0].items[0].image_url).toBeNull()
+      expect(detail.lines[0].items[1].image_url).toBeNull()
+
+      const needing = db.purchaseLinesNeedingImage(id)
+      expect(needing).toEqual([{ id: detail.lines[0].id, image_url: 'https://mellojoy.example/img/300.jpg' }])
+
+      db.setPurchaseLineImage(detail.lines[0].id, 'purchase-300.jpg')
+      const after = db.getPurchase(id)
+      expect(after.lines[0].items[0].image_url).toBe('soroban-thumb://purchase-300.jpg')
+      expect(after.lines[0].items[1].image_url).toBe('soroban-thumb://purchase-300.jpg')
+      // ダウンロード済みなので needing から消える
+      expect(db.purchaseLinesNeedingImage(id)).toEqual([])
+    })
+
+    it('image_url を省略すれば null（items の image_url も null、needing にも出ない）', () => {
+      const id = db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-04-02', shipping_fee: 0,
+        lines: [{ name: '画像なし', unit_price: 1000, quantity: 1 }],
+      })
+      const detail = db.getPurchase(id)
+      expect(detail.lines[0].items[0].image_url).toBeNull()
+      expect(db.purchaseLinesNeedingImage(id)).toEqual([])
+    })
+
+    it('setPurchaseLineImageUrls：名前で突き合わせて image_url を更新し、変わった行だけ image_file をリセットする', () => {
+      const id = db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-04-03', shipping_fee: 0,
+        lines: [
+          { name: 'A商品', unit_price: 1000, quantity: 1, image_url: 'https://x/a-old.jpg' },
+          { name: 'B商品', unit_price: 1000, quantity: 1 },
+        ],
+      })
+      const before = db.getPurchase(id)
+      db.setPurchaseLineImage(before.lines[0].id, 'a-old.jpg')
+
+      // A商品：URLが変わった → image_file はリセットされ、取り直し対象になる
+      // B商品：新しくURLが付いた → 同様に取り直し対象
+      // 存在しない名前は無視
+      const updated = db.setPurchaseLineImageUrls(id, [
+        { name: 'A商品', image_url: 'https://x/a-new.jpg' },
+        { name: 'B商品', image_url: 'https://x/b-new.jpg' },
+        { name: 'C商品（無い）', image_url: 'https://x/c.jpg' },
+      ])
+      expect(updated).toBe(2)
+
+      const needing = db.purchaseLinesNeedingImage(id)
+      expect(needing.map(n => n.image_url).sort()).toEqual(['https://x/a-new.jpg', 'https://x/b-new.jpg'])
+
+      // 同じURLをもう一度渡しても変化なし（0件）
+      expect(db.setPurchaseLineImageUrls(id, [{ name: 'A商品', image_url: 'https://x/a-new.jpg' }])).toBe(0)
+    })
+
+    it('confirmPurchase：下書きを確定するときも image_url を保存する', () => {
+      const draftId = db.createPurchaseDraft({
+        import_key: 'mellojoy:#img-draft', shop_account_id: shopId, ordered_at: '2026-04-04',
+        lines: [{ name: '下書き画像', quantity: 1 }],
+      })
+      db.confirmPurchase(draftId, {
+        shop_account_id: shopId, ordered_at: '2026-04-04', shipping_fee: 0,
+        lines: [{ name: '下書き画像', unit_price: 1000, quantity: 1, image_url: 'https://x/confirm.jpg' }],
+      })
+      expect(db.purchaseLinesNeedingImage(draftId)).toEqual([
+        { id: db.getPurchase(draftId).lines[0].id, image_url: 'https://x/confirm.jpg' },
+      ])
+    })
+  })
+
+  describe('listInventoryGroups：分割前の親（split）の絞り込み', () => {
+    it('split は all にも other にも含めず、split フィルタでだけ見える', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-05-01', shipping_fee: 0,
+        lines: [{ name: '分割元【P400】', unit_price: 3000, quantity: 1 }],
+      })
+      const [item] = db.listInventory('in_stock')
+      db.splitInventory(item.id, 2)
+
+      const all = views.listInventoryGroups('all')
+      const p400All = all.find(g => g.model_code === 'P400')
+      // all には子（in_stock）2点だけが残り、親（split）は入らない
+      expect(p400All?.items.every(i => i.status !== 'split')).toBe(true)
+      expect(p400All?.items).toHaveLength(2)
+
+      const other = views.listInventoryGroups('other')
+      expect(other.find(g => g.model_code === 'P400')).toBeUndefined()
+
+      const splitOnly = views.listInventoryGroups('split')
+      const p400Split = splitOnly.find(g => g.model_code === 'P400')
+      expect(p400Split?.items).toHaveLength(1)
+      expect(p400Split?.items[0].status).toBe('split')
+      expect(p400Split?.items[0].id).toBe(item.id)
     })
   })
 })

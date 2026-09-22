@@ -92,28 +92,31 @@ export function getInventoryOverview(): InventoryOverview {
   return { unlisted_arrived, not_arrived, listed, aging }
 }
 
-type Bucket = 'unlisted_arrived' | 'not_arrived' | 'listed' | 'sold' | 'other'
+type Bucket = 'unlisted_arrived' | 'not_arrived' | 'listed' | 'sold' | 'other' | 'split'
 
 function bucketOf(item: InventoryItem): Bucket {
+  if (item.status === 'split') return 'split'
   if (item.status === 'sold') return 'sold'
   if (item.status === 'in_stock') {
     if (item.listing) return 'listed'
     if (item.fulfillment === 'pending' || item.fulfillment === 'shipped') return 'not_arrived'
     return 'unlisted_arrived'
   }
-  // disposed / personal_use / split
+  // disposed / personal_use
   return 'other'
 }
 
+/** split（分割前の親）は 'all' にも 'other' にも含めない。メンテ用の 'split' でだけ見える */
 function matchesFilter(bucket: Bucket, filter: InventoryGroupFilter): boolean {
   switch (filter) {
-    case 'all': return true
+    case 'all': return bucket !== 'split'
     case 'unlisted': return bucket === 'unlisted_arrived' || bucket === 'not_arrived'
     case 'unlisted_arrived': return bucket === 'unlisted_arrived'
     case 'not_arrived': return bucket === 'not_arrived'
     case 'listed': return bucket === 'listed'
     case 'sold': return bucket === 'sold'
     case 'other': return bucket === 'other'
+    case 'split': return bucket === 'split'
   }
 }
 

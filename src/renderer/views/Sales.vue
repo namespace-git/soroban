@@ -405,8 +405,9 @@ function placeholderChar(r: Row): string {
 
 /** 日付＋買い手（＋私物の注記）の1行テキスト。MM/DD 表記でメルカリのタイトルに寄せる */
 function saleSubText(s: SaleProfit): string {
-  const purchasedDate = (s.purchased_at ?? s.sold_at).slice(0, 10)
-  const parts = [`購入 ${purchasedDate.slice(5).replace('-', '/')}`]
+  const parts = s.purchased_at
+    ? [`購入 ${s.purchased_at.slice(5, 10).replace('-', '/')}`]
+    : [`${s.sold_at.slice(5, 10).replace('-', '/')} に売れた`]
   if (s.status === 'completed' && s.completed_at) {
     parts.push(`完了 ${s.completed_at.slice(5).replace('-', '/')}`)
   }

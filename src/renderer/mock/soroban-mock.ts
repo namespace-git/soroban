@@ -355,6 +355,11 @@ let inventory: InventoryItem[] = []
 const itemPurchaseId = new Map<string, string>()
 /** 仕入明細 id → 生まれた在庫 id[]（PurchaseLine.items は都度組み立てて現在の状態を反映する） */
 const lineItemIds = new Map<string, string[]>()
+/**
+ * 仕入明細 id → 仕入先の商品画像 URL（メロジョイの注文詳細から）。同じ明細の items は同じ URL を持つ。
+ * モックでは見本として数明細だけに入れ、他は無し（null）にする
+ */
+const lineImageUrl = new Map<string, string>()
 /** 在庫アイテム → 廃棄／自家消費にした日（履歴タイムライン用。実データは main が操作時刻を記録する） */
 const itemDisposedAt = new Map<string, string>()
 /** 在庫アイテム → 分割した日（履歴タイムライン用） */
@@ -674,6 +679,14 @@ function buildInitialPurchasesAndInventory(): void {
     lines: [{ model: 'A012', qty: 2 }, { model: 'Z012-3', qty: 1 }],
     importKey: 'mellojoy:#271041',
   })
+
+  // 仕入先の商品画像（メロジョイの注文詳細から）の見本：確定済みのメロジョイ仕入の最初の2〜3明細だけに入れる。
+  // 同じ明細の items（在庫）は同じ URL を持つ（buildPurchaseLineItems 参照）
+  purchases
+    .filter(p => p.status === 'confirmed' && p.import_key?.startsWith('mellojoy:'))
+    .flatMap(p => p.lines)
+    .slice(0, 3)
+    .forEach((l, i) => lineImageUrl.set(l.id, `soroban-thumb://m${8000 + i}.jpg`))
 }
 
 /** 型番一致の在庫を古い順（先入先出）に1点取る。M-06/M-09 と同じルール */
@@ -1581,6 +1594,7 @@ function findPurchase(id: string): PurchaseDetail {
  */
 function buildPurchaseLineItems(lineId: string) {
   const ids = lineItemIds.get(lineId) ?? []
+  const imageUrl = lineImageUrl.get(lineId) ?? null
   return ids
     .map(id => inventory.find(i => i.id === id))
     .filter((i): i is InventoryItem => !!i)
@@ -1595,6 +1609,7 @@ function buildPurchaseLineItems(lineId: string) {
         sale_id: sale?.id ?? null,
         sale_price: sale?.price ?? null,
         sold_at: sale?.sold_at ?? null,
+        image_url: imageUrl,
       }
     })
 }
@@ -2314,6 +2329,9 @@ const api: SorobanApi = {
 
       const filtered = items
         .filter(i => {
+          // split（分割前の親）は 'split' フィルタでだけ見る。'all'／'other' には含めない
+          if (filter === 'split') return i.status === 'split'
+          if (i.status === 'split') return false
           if (filter === 'all') return true
           const b = inventoryBucket(i)
           if (filter === 'unlisted') return b === 'unlisted_arrived' || b === 'not_arrived'
@@ -3298,6 +3316,24 @@ const api: SorobanApi = {
     return wait({ purchased_at: sale.purchased_at })
   },
 
+  /**
+   * メロジョイの注文詳細を1ページだけ開き直して、明細の商品画像を取り込む（メンテ用）のモック。
+   * まだ画像を持っていない明細（在庫が生成済みのもの）に最大2件だけ入れる
+   */
+  async refetchPurchaseImages(purchaseId: string) {
+    const p = purchases.find(x => x.id === purchaseId)
+    if (!p) throw new Error('仕入が見つかりません')
+    let saved = 0
+    for (const l of p.lines) {
+      if (saved >= 2) break
+      if (lineImageUrl.has(l.id)) continue
+      if ((lineItemIds.get(l.id) ?? []).length === 0) continue // 下書きなど在庫が無い明細は対象外
+      lineImageUrl.set(l.id, `soroban-thumb://mj-${l.id.slice(0, 6)}.jpg`)
+      saved++
+    }
+    return wait({ saved })
+  },
+
   /** 仕入先ごとの累計（確定した仕入のみ）。注文数・点数（明細の数量合計）・支払合計・最終注文日 */
   async listShopAccountStats(): Promise<ShopAccountStats[]> {
     const confirmed = purchases.filter(p => p.status === 'confirmed')
@@ -3725,6 +3761,7 @@ const api: SorobanApi = {
     itemSplitAt.clear()
     listingItems.clear()
     lineItemIds.clear()
+    lineImageUrl.clear()
     productTags.clear()
     productManualImage.clear()
     monthBook.clear()
