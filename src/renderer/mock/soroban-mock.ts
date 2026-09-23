@@ -2711,6 +2711,14 @@ const api: SorobanApi = {
     return wait([...ranked, ...soldItems])
   },
 
+  async suggestProductInventory(modelCode: string, quantity: number, excludeIds: string[] = []) {
+    if (!Number.isSafeInteger(quantity) || quantity < 1) throw new Error('点数は1以上の整数で指定してください')
+    const excluded = new Set(excludeIds)
+    return wait(inventory.filter(i => i.model_code === modelCode && i.status === 'in_stock' && !i.listing && !excluded.has(i.id))
+      .sort((a, b) => a.acquired_at.localeCompare(b.acquired_at))
+      .slice(0, quantity).map(i => i.id))
+  },
+
   async listSaleLines(saleId: string) {
     const ids = saleLines.get(saleId) ?? []
     const items = ids.map(id => inventory.find(it => it.id === id)).filter((it): it is InventoryItem => !!it)

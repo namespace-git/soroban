@@ -1003,6 +1003,8 @@ export interface SorobanApi {
   /** 商品名の類似度で在庫の候補を返す（確定はしない） */
   /** includeSold: 販売済み（他の販売に紐付いた）在庫も候補に含める（sold_to 付き）。既定は未販売だけ */
   suggestInventory(saleId: string, limit?: number, opts?: { includeSold?: boolean }): Promise<InventoryItem[]>
+  /** 商品コード完全一致・未販売・未引き当ての在庫を先入先出で選ぶ（読取専用）。選択済みIDは除外する */
+  suggestProductInventory(modelCode: string, quantity: number, excludeIds?: string[]): Promise<string[]>
   /** その販売に紐付いている在庫（解除・付け替え用） */
   listSaleLines(saleId: string): Promise<InventoryItem[]>
 

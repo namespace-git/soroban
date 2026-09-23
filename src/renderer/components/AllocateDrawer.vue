@@ -30,6 +30,10 @@ const matchedItems = ref<MatchedRow[]>([])
 const picked = ref<Set<string>>(new Set())
 const search = ref('')
 const loading = ref(false)
+const selectionMode = ref<'inventory' | 'product'>('inventory')
+const productQuantity = ref(1)
+const pickingProduct = ref(false)
+let productPickRequest = 0
 // メンテ用：販売済み（他の販売に紐付いた）在庫も候補に出す。ドロワーを開き直すたびに off に戻す
 const includeSold = ref(false)
 
@@ -50,7 +54,8 @@ async function load() {
   if (props.mode === 'listing') {
     const l = props.listing
     if (!l) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
-    const sugg = await window.soroban.suggestForListing(l.mercari_item_id, 50, { includeSold: includeSold.value })
+    // 注文番号で候補順位の低い在庫も探せるよう、検索前に件数を切らない。
+    const sugg = await window.soroban.suggestForListing(l.mercari_item_id, Number.MAX_SAFE_INTEGER, { includeSold: includeSold.value })
     candidates.value = sugg
     matchedItems.value = l.items.map(it => ({ id: it.id, item_code: it.item_code, name: it.name, model_code: it.model_code, product_name: it.product_name, landed_cost: it.landed_cost }))
   } else {
@@ -58,7 +63,7 @@ async function load() {
     if (!s) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
     const [linked, sugg] = await Promise.all([
       window.soroban.listSaleLines(s.id),
-      window.soroban.suggestInventory(s.id, 50, { includeSold: includeSold.value }),
+      window.soroban.suggestInventory(s.id, Number.MAX_SAFE_INTEGER, { includeSold: includeSold.value }),
     ])
     matchedItems.value = linked
     candidates.value = sugg
@@ -71,6 +76,10 @@ watch(
   ([isOpen]) => {
     picked.value = new Set()
     search.value = ''
+    selectionMode.value = 'inventory'
+    productQuantity.value = 1
+    productPickRequest++
+    pickingProduct.value = false
     includeSold.value = false
     if (isOpen) load()
   },
@@ -83,8 +92,54 @@ watch(includeSold, () => {
 
 const filtered = computed(() => {
   if (!search.value.trim()) return candidates.value
-  return candidates.value.filter(c => matchesSearch([c.name, c.product_name, c.model_code, c.item_code], search.value))
+  return candidates.value.filter(c => matchesSearch([
+    c.name, c.product_name, c.model_code, c.item_code, c.order_no, c.shop_account_name,
+  ], search.value))
 })
+
+watch(selectionMode, () => { search.value = '' })
+
+const pickedItems = computed(() => candidates.value.filter(c => picked.value.has(c.id)))
+const validProductQuantity = computed(() => Number.isSafeInteger(productQuantity.value) && productQuantity.value > 0)
+const products = computed(() => {
+  const groups = new Map<string, { code: string; name: string; available: number; names: string[] }>()
+  for (const c of candidates.value) {
+    if (!c.model_code || c.status !== 'in_stock' || c.listing || c.sold_to || picked.value.has(c.id)) continue
+    const group = groups.get(c.model_code) ?? { code: c.model_code, name: c.product_name ?? c.name, available: 0, names: [] }
+    group.available++
+    group.names.push(c.name, c.product_name ?? '')
+    groups.set(c.model_code, group)
+  }
+  return [...groups.values()].filter(p => matchesSearch([p.code, ...p.names], search.value))
+})
+
+async function pickProduct(modelCode: string) {
+  if (!validProductQuantity.value || pickingProduct.value) return
+  const request = ++productPickRequest
+  const quantity = productQuantity.value
+  pickingProduct.value = true
+  try {
+    const ids = await window.soroban.suggestProductInventory(modelCode, quantity,
+      [...matchedItems.value.map(i => i.id), ...picked.value])
+    if (request !== productPickRequest || !props.open) return
+    const candidateIds = new Set(candidates.value.map(c => c.id))
+    if (ids.some(id => !candidateIds.has(id))) {
+      toast('在庫が更新されています。画面を開き直してください', 'warn')
+      return
+    }
+    picked.value = new Set([...picked.value, ...ids])
+    if (ids.length < quantity) toast(`選べる在庫は${ids.length}点です（指定${quantity}点）`, 'warn')
+  } catch (e) {
+    if (request === productPickRequest) toast(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    if (request === productPickRequest) pickingProduct.value = false
+  }
+}
+
+function candidateDescription(c: InventoryItem): string {
+  return [c.product_name ? c.name : null, c.shop_account_name, c.order_no ? `注文 ${c.order_no}` : null]
+    .filter(Boolean).join(' ・ ')
+}
 
 // 出品モード：終了済み（sold／ended）の出品には新規に引き当てられない。引き当て済みの表示だけ残す
 const canReserve = computed(() =>
@@ -284,12 +339,43 @@ function placeholderChar(): string {
     <p v-if="!canReserve" class="dim ended-note">この出品は終了しています（引き当てできません）</p>
 
     <template v-else>
+      <div class="selection-modes" role="group" aria-label="在庫の選び方">
+        <button class="sm" :class="selectionMode === 'inventory' ? 'primary' : 'ghost'" :aria-pressed="selectionMode === 'inventory'" @click="selectionMode = 'inventory'">在庫から選ぶ</button>
+        <button class="sm" :class="selectionMode === 'product' ? 'primary' : 'ghost'" :aria-pressed="selectionMode === 'product'" @click="selectionMode = 'product'">商品から選ぶ（先入れ先出し）</button>
+      </div>
       <label class="search-field">
         <Icon name="search" :size="16" />
-        <input v-model="search" placeholder="在庫を検索" />
+        <input v-model="search" :placeholder="selectionMode === 'inventory' ? '商品名・型番・在庫コード・注文番号・仕入先で検索' : '商品名・商品コードで検索'" />
       </label>
 
-      <div class="candidates">
+      <div v-if="pickedItems.length" class="picked-block">
+        <p class="panel-title">選択中 {{ pickedItems.length }}点（まだ確定していません）</p>
+        <div v-for="c in pickedItems" :key="c.id" class="picked-row">
+          <CodeChip kind="item" :code="c.item_code" />
+          <span class="grow faint">{{ c.acquired_at }} ・ {{ c.order_no ?? c.shop_account_name }}</span>
+          <span class="num">{{ yen(c.landed_cost) }}</span>
+          <button class="sm ghost" :aria-label="`${c.item_code}の選択を外す`" @click="toggle(c.id)">外す</button>
+        </div>
+      </div>
+
+      <template v-if="selectionMode === 'product'">
+        <p class="faint product-help">商品コードが一致する未引き当て在庫を、仕入日の古い順に選びます。</p>
+        <label class="product-quantity">追加する点数 <input v-model.number="productQuantity" type="number" min="1" step="1" aria-label="追加する点数" /></label>
+        <div class="candidates">
+          <div v-for="p in products" :key="p.code" class="product-row">
+            <div class="grow name-cell">
+              <CodeChip kind="model" :code="p.code" />
+              <span :title="p.name">{{ p.name }}</span>
+              <span class="faint">選べる在庫 {{ p.available }}点</span>
+            </div>
+            <button class="sm" :disabled="!validProductQuantity || pickingProduct || loading" :aria-label="`${p.code}を古い順に選ぶ`" @click="pickProduct(p.code)">古い順に選ぶ</button>
+          </div>
+          <EmptyState v-if="!loading && !products.length" title="選べる商品がありません" />
+        </div>
+        <p class="faint product-help">商品コードのない在庫や、引き当て済みの在庫は「在庫から選ぶ」で指定できます。</p>
+      </template>
+
+      <div v-else class="candidates">
         <label
           v-for="c in filtered" :key="c.id"
           class="item" :class="{ on: picked.has(c.id), sold: !!c.sold_to }"
@@ -309,7 +395,7 @@ function placeholderChar(): string {
           <StatusChip v-if="c.sold_to" tone="warn" :label="soldToLabel(c.sold_to)" />
           <span class="grow name-cell">
             <span class="name-main" :title="c.product_name ?? c.name">{{ c.product_name ?? c.name }}</span>
-            <span class="name-sub" :title="c.product_name ? c.name : ''">{{ c.product_name ? c.name : '' }}</span>
+            <span class="name-sub" :title="candidateDescription(c)">{{ candidateDescription(c) }}</span>
           </span>
           <span class="faint nowrap">{{ c.aging_days }}日</span>
           <span class="num">{{ yen(c.landed_cost) }}</span>
@@ -317,7 +403,7 @@ function placeholderChar(): string {
         <EmptyState v-if="!loading && !filtered.length" title="候補になる在庫がありません" />
       </div>
 
-      <label class="faint maint-toggle">
+      <label v-if="selectionMode === 'inventory'" class="faint maint-toggle">
         <input type="checkbox" v-model="includeSold" />
         販売済みの在庫も表示（付け替え）
       </label>
@@ -332,7 +418,7 @@ function placeholderChar(): string {
             {{ profitLabel }} {{ yen(previewProfit) }}
           </strong>
         </div>
-        <button v-if="canReserve" class="primary" :disabled="!picked.size" @click="confirmPick">
+        <button v-if="canReserve" class="primary" :disabled="!picked.size || pickingProduct" @click="confirmPick">
           {{ confirmLabel }}
         </button>
       </div>
@@ -393,6 +479,14 @@ function placeholderChar(): string {
 }
 
 .ended-note { padding: 6px 8px; }
+
+.selection-modes { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.product-help { font-size: var(--fs-12); margin: 8px 0; }
+.product-quantity { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.product-quantity input { width: 76px; }
+.product-row { display: flex; gap: 12px; align-items: center; padding: 10px 8px; border-bottom: 1px solid var(--line-soft); }
+.picked-block { margin-bottom: 14px; padding: 8px; background: var(--accent-soft); border-radius: var(--radius-sm); }
+.picked-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 .candidates { display: flex; flex-direction: column; gap: 2px; }
 

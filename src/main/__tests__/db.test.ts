@@ -4093,6 +4093,40 @@ describe('db（:memory:）', () => {
     })
   })
 
+  describe('商品単位の手動FIFO選択', () => {
+    it('商品選択は自動引き当てと同じFIFO順。枝番違い・予約済み・販売済み・選択済みを除外し、プレビューでは保存しない', () => {
+      const make = (date: string, code = 'A037') => {
+        const id = db.createPurchase({ shop_account_id: shopId, ordered_at: date,
+          lines: [{ name: `商品【${code}】`, unit_price: 1000, quantity: 1 }] })
+        return db.getPurchase(id).lines[0].items[0].id
+      }
+      const newer = make('2026-04-04')
+      const older = make('2026-04-03')
+      const reserved = make('2026-04-01')
+      const sold = make('2026-03-01')
+      make('2026-02-01', 'A037-1')
+      db.upsertListings([{ mercariItemId: 'fifo-reserved', title: '予約先', price: 3000, suspended: false, thumbUrl: null }])
+      db.reserveInventory('fifo-reserved', [reserved])
+      const saleId = db.createSale({ title: '販売済み', sold_at: '2026-04-05', price: 2000 })
+      db.linkInventory(saleId, [sold])
+      expect(db.suggestProductInventory('A037', 5)).toEqual([older, newer])
+      expect(db.suggestProductInventory('A037', 2, [older])).toEqual([newer])
+      expect(db.suggestProductInventory('A037', 2, [older, newer])).toEqual([])
+      expect(db.listInventory('in_stock').find(i => i.id === older)?.listing).toBeNull()
+      db.upsertListings([{ mercariItemId: 'fifo-auto', title: '商品【A037】×2', price: 4000, suspended: false, thumbUrl: null }])
+      db.autoReserveListings()
+      expect(db.listListings().find(l => l.mercari_item_id === 'fifo-auto')?.items.map(i => i.id).sort()).toEqual([older, newer].sort())
+    })
+
+    it('商品選択の不正な点数を拒否する', () => {
+      for (const qty of [0, -1, 1.5, NaN, Infinity]) {
+        expect(() => db.suggestProductInventory('A037', qty)).toThrow('点数は1以上の整数')
+      }
+      expect(() => db.suggestProductInventory('', 1)).toThrow('商品コードを指定')
+    })
+
+  })
+
   describe('仕入明細の画像（purchase_line.image_url / image_file）', () => {
     it('画像巡回は同じ口座・対象注文・キーワード一致の自動更新商品のみ', () => {
       const id = db.createPurchase({

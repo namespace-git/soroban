@@ -31,6 +31,7 @@ const api: SorobanApi = {
   autoLinkPending: invoke('autoLinkPending'),
   unlinkInventory: invoke('unlinkInventory'),
   suggestInventory: invoke('suggestInventory'),
+  suggestProductInventory: invoke('suggestProductInventory'),
   listSaleLines: invoke('listSaleLines'),
 
   listPurchases: invoke('listPurchases'),

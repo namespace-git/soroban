@@ -263,7 +263,9 @@ async function load() {
     sales.value = []
   } else if (stage.value === 'all') {
     const [ls, ss] = await Promise.all([
-      window.soroban.listListings({ status: ['active', 'suspended', 'sold', 'ended'] }),
+      // 売却済みは販売行で在庫・原価を表示する。出品時の予約は販売へ移管済みなので、
+      // 古い出品行を重ねると紐付け済みでも「未引き当て」と誤表示してしまう。
+      window.soroban.listListings({ status: ['active', 'suspended', 'ended'] }),
       window.soroban.listSales(tagFilter.value ? { tagId: tagFilter.value } : undefined),
     ])
     listings.value = ls

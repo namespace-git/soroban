@@ -2520,10 +2520,11 @@ function findInventoryIdsByItemCodes(itemCodes: string[]): string[] {
  * 他の active/suspended な出品に引き当て済みの在庫は候補から外す
  * （人が出品に予約した意思を、型番一致の自動確定で横取りしない）。
  */
-function findInventoryIdsByModelCodeFifo(modelCode: string, qty: number): string[] {
+function findInventoryIdsByModelCodeFifo(modelCode: string, qty: number, excludeIds: string[] = []): string[] {
   const rows = db.prepare(`
     SELECT id FROM inventory_item i
      WHERE i.model_code = ? AND i.status = 'in_stock'
+       ${excludeIds.length ? `AND i.id NOT IN (${excludeIds.map(() => '?').join(',')})` : ''}
        AND NOT EXISTS (
          SELECT 1 FROM listing_line ll
          JOIN listing l ON l.mercari_item_id = ll.listing_id
@@ -2531,8 +2532,15 @@ function findInventoryIdsByModelCodeFifo(modelCode: string, qty: number): string
        )
      ORDER BY i.acquired_at ASC, i.created_at ASC
      LIMIT ?
-  `).all(modelCode, qty) as Array<{ id: string }>
+  `).all(modelCode, ...excludeIds, qty) as Array<{ id: string }>
   return rows.map(r => r.id)
+}
+
+/** 商品を手動で選ぶ画面のプレビュー。自動紐付けと同じFIFOを使い、保存はしない。 */
+export function suggestProductInventory(modelCode: string, quantity: number, excludeIds: string[] = []): string[] {
+  if (!modelCode.trim()) throw new Error('商品コードを指定してください')
+  if (!Number.isSafeInteger(quantity) || quantity < 1) throw new Error('点数は1以上の整数で指定してください')
+  return findInventoryIdsByModelCodeFifo(modelCode, quantity, [...new Set(excludeIds)])
 }
 
 /**
