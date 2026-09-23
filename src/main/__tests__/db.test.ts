@@ -4094,6 +4094,46 @@ describe('db（:memory:）', () => {
   })
 
   describe('仕入明細の画像（purchase_line.image_url / image_file）', () => {
+    it('画像巡回は同じ口座・対象注文・キーワード一致の自動更新商品のみ', () => {
+      const id = db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-04-01', import_key: 'mellojoy:#images',
+        lines: [{ name: 'テスト【A001-2】青', unit_price: 1000, quantity: 1 }],
+      })
+      const keys = ['mellojoy:#images']
+      expect(db.purchaseImageRefreshCandidates(shopId, keys, ['テスト'])).toEqual([{ id, import_key: keys[0] }])
+      expect(db.purchaseImageRefreshCandidates('other-shop', keys, [])).toEqual([])
+      expect(db.purchaseImageRefreshCandidates(shopId, ['mellojoy:#other'], [])).toEqual([])
+      expect(db.purchaseImageRefreshCandidates(shopId, keys, ['不一致'])).toEqual([])
+      db.upsertProductImage('A001-2', 'fixed.jpg')
+      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toEqual([])
+      db.deleteProductImage('A001-2')
+      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toHaveLength(1)
+    })
+
+    it('バリアントを取り違えず更新し、自動OFFの画像は固定、ONなら公式画像を優先する', () => {
+      const id = db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-04-01',
+        lines: [
+          { name: '商品 【A001-1】赤', unit_price: 1000, quantity: 1, image_url: 'https://cdn.example/red.jpg' },
+          { name: '商品 【A001-2】青', unit_price: 1000, quantity: 1, image_url: 'https://cdn.example/blue.jpg' },
+        ],
+      })
+      const [red, blue] = db.getPurchase(id).lines
+      db.setPurchaseLineImage(red.id, 'red.jpg')
+      db.setPurchaseLineImage(blue.id, 'blue.jpg')
+      db.upsertProductImage('A001-2', 'fixed.jpg')
+      expect(db.setPurchaseLineImageUrls(id, [{ name: blue.name, image_url: 'https://cdn.example/blue.jpg?v=2' }])).toBe(1)
+      expect(db.purchaseLinesNeedingImage(id)).toEqual([{ id: blue.id, image_url: 'https://cdn.example/blue.jpg?v=2' }])
+      expect(db.purchaseLinesNeedingImage(id, ['赤'])).toEqual([])
+      db.setPurchaseLineImage(blue.id, 'blue-new.jpg')
+      expect(db.productImageFiles(['A001-1', 'A001-2']).get('A001-1')?.file).toBe('red.jpg')
+      expect(db.productImageFiles(['A001-2']).get('A001-2')).toEqual({ file: 'fixed.jpg', manual: true })
+      db.deleteProductImage('A001-2')
+      expect(db.productImageFiles(['A001-2']).get('A001-2')).toEqual({ file: 'blue-new.jpg', manual: false })
+      expect(db.setPurchaseLineImageUrls(id, [{ name: blue.name, image_url: 'https://cdn.example/blue.jpg?v=2' }])).toBe(0)
+      expect(db.purchaseLinesNeedingImage(id)).toEqual([])
+    })
+
     it('createPurchase で image_url を保存し、在庫アイテムの image_url に同じサムネURLが出る（数量分すべて同じ）', () => {
       const id = db.createPurchase({
         shop_account_id: shopId, ordered_at: '2026-04-01', shipping_fee: 0,

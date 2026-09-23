@@ -1613,11 +1613,34 @@ export function setPurchaseFulfillment(id: string, fulfillment: Fulfillment | nu
  * この仕入の明細のうち、元URLはあるがまだ保存（ダウンロード）していないもの
  * （image_url IS NOT NULL AND image_file IS NULL）。collector が取り込む対象を探すのに使う。
  */
-export function purchaseLinesNeedingImage(purchaseId: string): Array<{ id: string; image_url: string }> {
-  return db.prepare(
-    `SELECT id, image_url FROM purchase_line
+export function purchaseLinesNeedingImage(purchaseId: string, keywords: string[] = []): Array<{ id: string; image_url: string }> {
+  const rows = db.prepare(
+    `SELECT id, name, image_url FROM purchase_line
       WHERE purchase_id = ? AND image_url IS NOT NULL AND image_file IS NULL`,
-  ).all(purchaseId) as Array<{ id: string; image_url: string }>
+  ).all(purchaseId) as Array<{ id: string; name: string; image_url: string }>
+  return rows.filter(r => keywords.length === 0 || matchesAnyKeyword(r.name, keywords))
+    .map(({ id, image_url }) => ({ id, image_url }))
+}
+
+/** 一覧にある既取込注文のうち、自動画像を使う商品を含むもの。口座とキーワードも照合する。 */
+export function purchaseImageRefreshCandidates(
+  shopAccountId: string, importKeys: string[], keywords: string[],
+): Array<{ id: string; import_key: string }> {
+  if (importKeys.length === 0) return []
+  const rows = db.prepare(`
+    SELECT p.id, p.import_key, pl.name
+      FROM purchase p JOIN purchase_line pl ON pl.purchase_id = p.id
+     WHERE p.shop_account_id = ? AND p.import_key IN (${importKeys.map(() => '?').join(',')})
+       AND NOT EXISTS (SELECT 1 FROM product_image pi WHERE pi.model_code = pl.model_code)
+     ORDER BY p.ordered_at DESC, p.id
+  `).all(shopAccountId, ...importKeys) as Array<{ id: string; import_key: string; name: string }>
+  const candidates = new Map<string, { id: string; import_key: string }>()
+  for (const row of rows) {
+    if (keywords.length === 0 || matchesAnyKeyword(row.name, keywords)) {
+      candidates.set(row.id, { id: row.id, import_key: row.import_key })
+    }
+  }
+  return [...candidates.values()]
 }
 
 /** ダウンロードした画像のファイル名を明細に保存する（collector が呼ぶ） */

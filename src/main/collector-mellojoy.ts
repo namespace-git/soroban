@@ -204,8 +204,8 @@ export function parseOrderListHtml(html: string): OrderListRow[] {
     const hrefMatch = linkTagMatch ? /href="([^"]*)"/.exec(linkTagMatch[0]) : null
     const href = hrefMatch ? decodeEntities(hrefMatch[1]) : ''
 
-    const statusMatch = /<h2\b[^>]*role="presentation"[^>]*>([^<]*)<\/h2>/.exec(block)
-    const status = statusMatch ? decodeEntities(statusMatch[1]).trim() : ''
+    const statusMatch = /<h2\b[^>]*role="presentation"[^>]*>([\s\S]*?)<\/h2>/.exec(block)
+    const status = statusMatch ? stripTags(statusMatch[1]) : ''
 
     const totalMatch = /￥([\d,]+)\s*JPY/.exec(block)
     const total = totalMatch ? parseInt(totalMatch[1].replace(/,/g, ''), 10) : null
@@ -674,6 +674,15 @@ async function waitForDetailReady(win: BrowserWindow): Promise<void> {
 /** 1注文につき保存する画像の上限。連打しないための枠（残りは image_file が NULL のまま次回に回す） */
 const MAX_IMAGES_PER_ORDER = 10
 
+interface ImageBudget { remaining: number; failures: string[] }
+
+/** 詳細の名前は新規取り込みと同じくバリアントを含める。保存済み明細への完全一致だけで更新。 */
+function updatePurchaseImageUrls(purchaseId: string, detail: OrderDetail, keywords: string[] = []): void {
+  db.setPurchaseLineImageUrls(purchaseId, detail.lines
+    .filter(l => l.imageUrl && (keywords.length === 0 || db.matchesAnyKeyword(buildName(l), keywords)))
+    .map(l => ({ name: buildName(l), image_url: toDetailImageUrl(l.imageUrl!) })))
+}
+
 /** サムネイル保存先ディレクトリ（無ければ作る）。collector.ts・receipts.ts と同じ userData/thumbs を使う */
 function ensureThumbDir(): string {
   const dir = join(app.getPath('userData'), 'thumbs')
@@ -709,20 +718,24 @@ async function downloadPurchaseLineImage(shopAccountId: string, lineId: string, 
  * 仕入の取り込み直後に、明細の商品画像を保存する。対象は `db.purchaseLinesNeedingImage`
  * が返す「image_url はあるが image_file がまだ無い」明細だけ（画像の無い注文は0件）。
  * 1注文につき最大 `MAX_IMAGES_PER_ORDER` 枚、各画像の間に 300〜800ms 待つ。
- * 失敗しても再試行しない（image_file が NULL のままなので、メンテの取り直し
- * （refetchPurchaseImages）で拾える）
+ * 失敗は結果に記録し、その場で再試行しない（次回の既存注文の巡回で拾う）。
  */
-export async function savePurchaseImages(shopAccountId: string, purchaseId: string): Promise<number> {
-  const targets = db.purchaseLinesNeedingImage(purchaseId).slice(0, MAX_IMAGES_PER_ORDER)
+export async function savePurchaseImages(
+  shopAccountId: string, purchaseId: string,
+  budget: ImageBudget = { remaining: MAX_IMAGES_PER_ORDER, failures: [] }, keywords: string[] = [],
+): Promise<number> {
+  const targets = db.purchaseLinesNeedingImage(purchaseId, keywords)
+    .slice(0, Math.min(MAX_IMAGES_PER_ORDER, budget.remaining))
 
   let saved = 0
   for (const line of targets) {
+    budget.remaining--
     try {
       const file = await downloadPurchaseLineImage(shopAccountId, line.id, line.image_url)
       db.setPurchaseLineImage(line.id, file)
       saved++
-    } catch {
-      // 失敗しても再試行しない
+    } catch (e) {
+      budget.failures.push(`商品画像：${e instanceof Error ? e.message : String(e)}`)
     }
     await sleep(300 + Math.floor(Math.random() * 500))
   }
@@ -779,12 +792,12 @@ export async function refetchPurchaseImages(purchaseId: string): Promise<{ saved
     const detailHtml = await win.webContents.executeJavaScript('document.documentElement.outerHTML') as string
     const detail = parseOrderDetailHtml(detailHtml)
 
-    const urls = detail.lines
-      .filter((l): l is OrderDetailLine & { imageUrl: string } => l.imageUrl !== null)
-      .map(l => ({ name: l.title, image_url: toDetailImageUrl(l.imageUrl) }))
-    db.setPurchaseLineImageUrls(purchaseId, urls)
-
-    const saved = await savePurchaseImages(shopAccountId, purchaseId)
+    if (shouldSkipDetail(detail)) throw new Error('注文詳細の商品明細が読めませんでした')
+    const keywords = db.parseKeywords(db.getShopAccount(shopAccountId)?.import_keywords ?? '')
+    updatePurchaseImageUrls(purchaseId, detail, keywords)
+    const imageBudget: ImageBudget = { remaining: MAX_IMAGES_PER_ORDER, failures: [] }
+    const saved = await savePurchaseImages(shopAccountId, purchaseId, imageBudget, keywords)
+    if (imageBudget.failures.length > 0) throw new Error(imageBudget.failures.join('、'))
     return { saved }
   } finally {
     if (!keepWindowOpen && !win.isDestroyed()) win.destroy()
@@ -863,11 +876,21 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     const budget = Math.max(0, Math.min(MAX_DETAILS_PER_RUN, MAX_PAGES_PER_RUN - pagesOpened))
     const targets = freshNotExcluded.slice(0, budget)
 
+    // 新規取り込み後の余った詳細枠で既存注文も巡回する。画像なしの注文で後続を塞がない。
+    const refreshCandidates = db.purchaseImageRefreshCandidates(shopAccountId, [...known], importKeywords)
+    const cursorKey = `mellojoy_image_cursor:${shopAccountId}`
+    const cursor = db.getSettings()[cursorKey]
+    const cursorIndex = refreshCandidates.findIndex(p => p.id === cursor)
+    const refreshOrdered = [...refreshCandidates.slice(cursorIndex + 1), ...refreshCandidates.slice(0, cursorIndex + 1)]
+    const refreshTargets = refreshOrdered.slice(0, budget - targets.length)
+
     let confirmedCount = 0
     let draftCount = 0
     let skippedByKeyword = 0
     let imagesSaved = 0
     const failures: string[] = []
+    const imageBudget: ImageBudget = { remaining: 30, failures: [] }
+    let imagesChecked = 0
 
     for (const order of targets) {
       if (pagesOpened >= MAX_PAGES_PER_RUN) break
@@ -922,7 +945,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           }
           const purchaseId = db.createPurchase(filtered)
           confirmedCount++
-          imagesSaved += await savePurchaseImages(shopAccountId, purchaseId)
+          imagesSaved += await savePurchaseImages(shopAccountId, purchaseId, imageBudget, importKeywords)
         } else {
           const filteredDraft = filterPurchaseDraftByKeywords(result.input, importKeywords)
           if (filteredDraft === null) {
@@ -932,17 +955,50 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           }
           const purchaseId = db.createPurchaseDraft(filteredDraft)
           draftCount++
-          if (purchaseId) imagesSaved += await savePurchaseImages(shopAccountId, purchaseId)
+          if (purchaseId) {
+            updatePurchaseImageUrls(purchaseId, detail, importKeywords)
+            imagesSaved += await savePurchaseImages(shopAccountId, purchaseId, imageBudget, importKeywords)
+          }
         }
       } catch (e) {
         failures.push(`${order.orderNo}：${e instanceof Error ? e.message : String(e)}`)
       }
     }
 
+    for (const purchase of refreshTargets) {
+      if (imageBudget.remaining <= 0 || pagesOpened >= MAX_PAGES_PER_RUN) break
+      imagesChecked++
+      const order = active.find(o => `mellojoy:${o.orderNo}` === purchase.import_key)!
+      try {
+        await win.loadURL(new URL(order.href, listUrl).toString())
+        pagesOpened++
+        await randomWait()
+        await waitForDetailReady(win)
+        if (isShopLoginUrl(win.webContents.getURL())) {
+          return db.finishRun(runId, 'auth_required', list.length, confirmedCount + draftCount, AUTH_MESSAGE)
+        }
+        if (await isChallenge(win)) {
+          keepWindowOpen = true
+          revealForChallenge(win)
+          return db.finishRun(runId, 'auth_required', list.length, confirmedCount + draftCount, CHALLENGE_MESSAGE)
+        }
+        const detail = parseOrderDetailHtml(await win.webContents.executeJavaScript('document.documentElement.outerHTML') as string)
+        if (shouldSkipDetail(detail)) throw new Error('商品画像の明細が読めませんでした')
+        updatePurchaseImageUrls(purchase.id, detail, importKeywords)
+        imagesSaved += await savePurchaseImages(shopAccountId, purchase.id, imageBudget, importKeywords)
+      } catch (e) {
+        failures.push(`${order.orderNo}：${e instanceof Error ? e.message : String(e)}`)
+      }
+      db.setSetting(cursorKey, purchase.id)
+    }
+
+    const detailFailures = failures.length
+    failures.push(...imageBudget.failures)
     const parts = [
       `確定 ${confirmedCount}・下書き ${draftCount}・既取込 ${alreadyImported}・キャンセル ${cancelledCount}`,
     ]
     if (fulfillmentUpdated > 0) parts.push(`到着状態の更新 ${fulfillmentUpdated}`)
+    if (imagesChecked > 0) parts.push(`既取込の画像確認 ${imagesChecked} 注文`)
     if (imagesSaved > 0) parts.push(`画像 ${imagesSaved} 枚`)
     if (skippedByKeyword > 0) parts.push(`キーワード不一致で除外 ${skippedByKeyword} 件`)
     if (skippedExcluded > 0) parts.push(`不一致で除外済み・スキップ ${skippedExcluded} 件`)
@@ -954,9 +1010,10 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     // 詳細取得の対象があり、その全件が例外・解析失敗（failures）なら failed とする。
     // 「既取込のみ」「不一致のみ（skippedByKeyword）」「正常な差分0件」は ok のまま
     // （message で区別できる）
-    const allDetailsFailed = targets.length > 0 && failures.length === targets.length
-    const status: RunStatus = allDetailsFailed ? 'failed' : 'ok'
-    if (allDetailsFailed) parts.unshift(`詳細の取得に全て失敗しました（${targets.length} 件）`)
+    const detailCount = targets.length + imagesChecked
+    const allDetailsFailed = detailCount > 0 && detailFailures === detailCount
+    const status: RunStatus = allDetailsFailed || imageBudget.failures.length > 0 ? 'failed' : 'ok'
+    if (allDetailsFailed) parts.unshift(`詳細の取得に全て失敗しました（${detailCount} 件）`)
 
     return db.finishRun(runId, status, list.length, confirmedCount + draftCount, parts.join('。'))
 

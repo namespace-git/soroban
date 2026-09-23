@@ -143,7 +143,7 @@ async function onRefetchImages() {
   try {
     const { saved } = await window.soroban.refetchPurchaseImages(detail.value.id)
     if (saved > 0) toast(`画像を${saved}枚取り込みました`, 'ok')
-    else toast('この注文には商品画像がありません', 'warn')
+    else toast('新しく取得する画像はありません（取得済み、または画像なし）', 'warn')
     await load()
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), 'warn')

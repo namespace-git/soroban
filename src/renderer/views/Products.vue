@@ -80,14 +80,14 @@ const filteredProducts = computed(() => {
   })
 })
 
-// --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
+// --- サムネイル。同じURLの失敗だけを抑止し、取り込みでURLが変われば表示を再試行する ---
 
 const thumbFailed = ref<Set<string>>(new Set())
 function showThumb(url: string | null, key: string): boolean {
-  return !!url && !thumbFailed.value.has(key)
+  return !!url && !thumbFailed.value.has(`${key}:${url}`)
 }
-function onThumbError(key: string) {
-  thumbFailed.value = new Set(thumbFailed.value).add(key)
+function onThumbError(key: string, url: string | null) {
+  thumbFailed.value = new Set(thumbFailed.value).add(`${key}:${url}`)
 }
 function placeholderChar(modelCode: string, name: string): string {
   const c = modelCode[0] ?? name.trim().charAt(0)
@@ -346,7 +346,7 @@ const estimateCompare = computed(() => {
               <img
                 v-if="showThumb(p.thumb_url, p.model_code)"
                 class="thumb" :src="p.thumb_url!" alt="" loading="lazy"
-                @error="onThumbError(p.model_code)"
+                @error="onThumbError(p.model_code, p.thumb_url)"
               />
               <span v-else class="thumb-placeholder">{{ placeholderChar(p.model_code, p.name) }}</span>
             </span>
@@ -386,7 +386,7 @@ const estimateCompare = computed(() => {
                 <img
                   v-if="showThumb(karte.summary.thumb_url, karte.summary.model_code)"
                   class="thumb thumb-lg" :src="karte.summary.thumb_url!" :key="karte.summary.thumb_url ?? ''" alt=""
-                  @error="onThumbError(karte.summary.model_code)"
+                  @error="onThumbError(karte.summary.model_code, karte.summary.thumb_url)"
                 />
                 <span v-else class="thumb-placeholder thumb-lg">{{ placeholderChar(karte.summary.model_code, karte.summary.name) }}</span>
                 <StatusChip
