@@ -1,3 +1,4 @@
+import { createCompletedSale } from '../completed-sale'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 import * as db from '../../db'
@@ -19,7 +20,7 @@ describe('ペルソナ04：家族が間違える人', () => {
     })
     const item = db.listInventory('in_stock')[0]
 
-    const saleId = db.createSale({ title: '商品', sold_at: '2026-05-05', price: 2000 })
+    const saleId = createCompletedSale({ title: '商品', sold_at: '2026-05-05', price: 2000 })
     db.linkInventory(saleId, [item.id])
     // fee = floor(2000*1000/10000) = 200、粗利 = 2000-200-0-0-1000 = 800
     expect(db.listSales().find(s => s.id === saleId)!.gross_profit).toBe(800)
@@ -48,7 +49,7 @@ describe('ペルソナ04：家族が間違える人', () => {
       lines: [{ name: '商品', unit_price: 1000, quantity: 1 }],
     })
     const item = db.listInventory('in_stock')[0]
-    const saleId = db.createSale({ title: '商品', sold_at: '2026-05-05', price: 2000 })
+    const saleId = createCompletedSale({ title: '商品', sold_at: '2026-05-05', price: 2000 })
     db.linkInventory(saleId, [item.id])
 
     expect(() => db.disposeInventory(item.id, '間違えて廃棄しようとした'))
@@ -63,7 +64,7 @@ describe('ペルソナ04：家族が間違える人', () => {
       lines: [{ name: '商品', unit_price: 1000, quantity: 1 }],
     })
     const item = db.listInventory('in_stock')[0]
-    const saleId = db.createSale({ title: '商品', sold_at: '2026-05-05', price: 2000 })
+    const saleId = createCompletedSale({ title: '商品', sold_at: '2026-05-05', price: 2000 })
     db.linkInventory(saleId, [item.id])
     expect(db.listInventory('in_stock')).toHaveLength(0)
 
@@ -81,7 +82,7 @@ describe('ペルソナ04：家族が間違える人', () => {
       lines: [{ name: '商品', unit_price: 1000, quantity: 1 }],
     })
     const item = db.listInventory('in_stock')[0]
-    const saleId = db.createSale({ title: '商品', sold_at: '2026-05-05', price: 2000 })
+    const saleId = createCompletedSale({ title: '商品', sold_at: '2026-05-05', price: 2000 })
     db.linkInventory(saleId, [item.id])
 
     expect(() => db.deletePurchase(purchaseId)).toThrow('販売済みの在庫')

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { isRealized, realizedTotals } from '../../shared/recognition'
 // 売上タブ：出品中（メルカリの出品）と販売（成約済み）を1つの作業リストにまとめる。
 // 上＝進捗ストリップ（getSalesProgress）で段階を選ぶ、その下＝利益の入力（送料未入力／未紐付け）で絞る、
 // 下＝行のグリッド（1行1販売）。既定の並びは「未確定（粗利が出ていない行）が先、次に日付降順」。1件10秒。
@@ -103,8 +104,8 @@ const stageCards = computed<StageStripStage[]>(() => {
   const p = progress.value
   return [
     { key: 'listed', label: '出品中', count: p?.listed.count ?? 0, money: p ? p.listed.expected_profit : null, sub: `未引き当て ${p?.listed.unallocated ?? 0}` },
-    { key: 'to_ship', label: '売れた・発送する', count: p?.to_ship.count ?? 0, money: p ? p.to_ship.revenue : null, sub: 'メルカリで発送する' },
-    { key: 'in_transit', label: '配送中・受取待ち', count: p?.in_transit.count ?? 0, money: p ? p.in_transit.revenue : null, sub: '売上金の反映待ち' },
+    { key: 'to_ship', label: '売れた・発送する', count: p?.to_ship.count ?? 0, money: p ? p.to_ship.revenue : null, sub: '見込み売上・発送待ち' },
+    { key: 'in_transit', label: '配送中・受取待ち', count: p?.in_transit.count ?? 0, money: p ? p.in_transit.revenue : null, sub: '見込み売上・取引完了待ち' },
     { key: 'done', label: '取引完了', count: p?.completed_this_month.count ?? 0, money: p ? p.completed_this_month.revenue : null, sub: '今月・反映済み' },
     { key: 'all', label: 'すべて', count: p?.all ?? 0, sub: '出品も含む' },
   ]
@@ -229,16 +230,7 @@ function matchesStage(st: Stage, s: SaleProfit): boolean {
 }
 
 function sumSaleTotals(rowsToSum: SaleProfit[]): SaleTotals {
-  return rowsToSum.reduce((acc, s) => {
-    acc.count += 1
-    acc.revenue += s.price
-    acc.total_fee += s.fee
-    acc.total_shipping += s.shipping_fee
-    acc.total_packaging += s.packaging_cost
-    acc.total_cost += s.cost
-    acc.gross_profit += s.gross_profit
-    return acc
-  }, { count: 0, revenue: 0, total_fee: 0, total_shipping: 0, total_packaging: 0, total_cost: 0, gross_profit: 0 })
+  return realizedTotals(rowsToSum)
 }
 
 async function loadTotals() {
@@ -839,7 +831,8 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 
     <div v-if="tagFilter && totals" class="panel totals-bar">
       <span class="faint">{{ totals.count }}件</span>
-      <span class="num">売上 {{ yen(totals.revenue) }}</span>
+      <span class="num">実績売上 {{ yen(totals.revenue) }}</span>
+      <span v-if="totals.forecast?.count" class="num faint">見込み：売上 {{ yen(totals.forecast.revenue) }} ・ 粗利 {{ yen(totals.forecast.gross_profit) }}</span>
       <span class="num dim">手数料 {{ yen(totals.total_fee) }}</span>
       <span class="num dim">送料 {{ yen(totals.total_shipping) }}</span>
       <span class="num dim">原価 {{ yen(totals.total_cost) }}</span>
@@ -1036,7 +1029,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
                   v-else-if="r.kind === 'sale' && r.sale && !rowUnresolved(r)"
                   :key="'c' + r.sale.gross_profit"
                   :class="r.sale.gross_profit >= 0 ? 'profit' : 'loss'"
-                >{{ yen(r.sale.gross_profit) }}</strong>
+                >{{ !isRealized(r.sale) ? '見込み ' : '' }}{{ yen(r.sale.gross_profit) }}</strong>
                 <div v-else-if="r.kind === 'sale' && r.sale" key="u" class="profit-na">
                   <span class="faint">{{ pendingReasonLabel(r.sale) }}</span>
                   <span v-if="profitWhyText(r.sale)" class="why">{{ profitWhyText(r.sale) }}</span>

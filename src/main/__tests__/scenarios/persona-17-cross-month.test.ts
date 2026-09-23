@@ -1,3 +1,4 @@
+import { createCompletedSale } from '../completed-sale'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 import * as db from '../../db'
@@ -10,22 +11,22 @@ beforeEach(() => { db.initDb(':memory:') })
 describe('ペルソナ17：月をまたぐ人', () => {
   it('listMonthlyの各月・合計がsaleTotalsと一致する', () => {
     // 07月：転売1件（送料確定）・私物1件（送料確定）
-    const a = db.createSale({ title: '転売A', price: 3000, sold_at: '2026-07-10', kind: 'resale' })
+    const a = createCompletedSale({ title: '転売A', price: 3000, sold_at: '2026-07-10', kind: 'resale' })
     db.updateSale(a, { shipping_fee: 300 }) // fee=300, profit=3000-300-300=2400
 
-    const b = db.createSale({ title: '私物B', price: 1000, sold_at: '2026-07-20', kind: 'personal' })
+    const b = createCompletedSale({ title: '私物B', price: 1000, sold_at: '2026-07-20', kind: 'personal' })
     db.updateSale(b, { shipping_fee: 100 }) // fee=100, profit=1000-100-100=800
 
     // 08月：転売2件。1件は送料未入力のまま（＝未処理）
-    const c = db.createSale({ title: '転売C', price: 4000, sold_at: '2026-08-05', kind: 'resale' })
+    const c = createCompletedSale({ title: '転売C', price: 4000, sold_at: '2026-08-05', kind: 'resale' })
     db.updateSale(c, { shipping_fee: 400 }) // fee=400, profit=4000-400-400=3200
 
-    const d = db.createSale({ title: '転売D', price: 2000, sold_at: '2026-08-15', kind: 'resale' })
+    const d = createCompletedSale({ title: '転売D', price: 2000, sold_at: '2026-08-15', kind: 'resale' })
     // 送料はあえて未入力のまま（is_shipping_confirmed=0, shipping_fee=0既定）
     // fee=200, profit=2000-200-0=1800（送料0円換算で仮の粗利になる）
 
     // 09月：転売1件
-    const e = db.createSale({ title: '転売E', price: 5000, sold_at: '2026-09-01', kind: 'resale' })
+    const e = createCompletedSale({ title: '転売E', price: 5000, sold_at: '2026-09-01', kind: 'resale' })
     db.updateSale(e, { shipping_fee: 500 }) // fee=500, profit=5000-500-500=4000
 
     const monthly = db.listMonthly()

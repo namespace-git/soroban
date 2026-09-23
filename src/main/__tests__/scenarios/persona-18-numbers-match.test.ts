@@ -1,3 +1,4 @@
+import { createCompletedSale } from '../completed-sale'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 import * as db from '../../db'
@@ -36,7 +37,7 @@ describe('ペルソナ18：数字を突き合わせる人', () => {
     expect(items[1].landed_cost).toBe(1100)
 
     // 販売：1点を型番完全一致で自動紐付け、送料300円を確定
-    const saleId = db.createSale({ title: 'ぬいぐるみ【X001-1】美品', price: 3000, sold_at: todayLocal() })
+    const saleId = createCompletedSale({ title: 'ぬいぐるみ【X001-1】美品', price: 3000, sold_at: todayLocal() })
     db.updateSale(saleId, { shipping_fee: 300 })
     // fee=300, profit = 3000-300-300-1100 = 1300
     const sale = db.listSales().find(s => s.id === saleId)!

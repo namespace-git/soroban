@@ -8,6 +8,7 @@ import schemaSql from './schema.sql?raw'
 import { allocate, assertQty, assertYen, calcFee, splitEvenly } from './money'
 import { extractCode, extractCodeQuantities, extractCodes, extractItemCodes, extractMaterial } from './code'
 import { thisMonthLocal, todayLocal } from '../shared/date'
+import { isRealized, forecastTotals, realizedTotals } from '../shared/recognition'
 import type {
   AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, Fulfillment,
   InventoryItem, InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus,
@@ -2399,20 +2400,7 @@ export function listSales(filter?: SaleFilter): SaleProfit[] {
 
 /** 絞り込んだ販売の合計。DB側で集計する（0件なら全部0） */
 export function saleTotals(filter?: SaleFilter): SaleTotals {
-  const { where, vals } = buildSaleFilterWhere(filter)
-
-  return db.prepare(`
-    SELECT
-      COUNT(*)                          AS count,
-      COALESCE(SUM(price), 0)           AS revenue,
-      COALESCE(SUM(fee), 0)             AS total_fee,
-      COALESCE(SUM(shipping_fee), 0)    AS total_shipping,
-      COALESCE(SUM(packaging_cost), 0)  AS total_packaging,
-      COALESCE(SUM(cost), 0)            AS total_cost,
-      COALESCE(SUM(gross_profit), 0)    AS gross_profit
-    FROM sale_profit
-    ${where}
-  `).get(...vals) as SaleTotals
+  return realizedTotals(listSales(filter))
 }
 
 // ============================================================
@@ -3454,14 +3442,22 @@ export function disposeInventory(
 
 /** 月次集計。expense_total は expense.month（計上月）で集計する */
 export function listMonthly(): MonthlySummary[] {
-  const rows = db.prepare(
-    `SELECT * FROM monthly_summary ORDER BY month DESC, kind`,
-  ).all() as Array<Omit<MonthlySummary, 'unconfirmed_shipping' | 'expense_total' | 'net_profit' | 'closed'>>
+  const groups = new Map<string, SaleProfit[]>()
+  for (const sale of listSales()) {
+    const key = `${sale.sold_at.slice(0, 7)}:${sale.kind}`
+    const group = groups.get(key) ?? []
+    group.push(sale)
+    groups.set(key, group)
+  }
+  const rows = [...groups].map(([key, sales]) => {
+    const [month, kind] = key.split(':') as [string, SaleKind]
+    return { month, kind, ...sumSaleTotals(sales.filter(isRealized)), forecast: forecastTotals(sales) }
+  })
 
   // 送料未入力の件数（月×kind）
   const unconfirmedRows = db.prepare(`
     SELECT substr(sold_at, 1, 7) AS month, kind, COUNT(*) AS c
-    FROM sale WHERE is_shipping_confirmed = 0
+    FROM sale WHERE is_shipping_confirmed = 0 AND (status = 'completed' OR (source = 'manual' AND status IS NULL))
     GROUP BY substr(sold_at, 1, 7), kind
   `).all() as Array<{ month: string; kind: SaleKind; c: number }>
   const unconfirmedMap = new Map(unconfirmedRows.map(r => [`${r.month}:${r.kind}`, r.c]))
@@ -3810,8 +3806,11 @@ function allocateExpenseToSales(
 
 /** 月次の明細（月次タブの月をクリック）。tagId を渡すとそのタグの分だけの合計も返す */
 export function getMonthDetail(month: string, opts?: { tagId?: string | null }): MonthDetail {
-  const sales = listSales({ month, kind: 'resale' })
-  const personal_sales = listSales({ month, kind: 'personal' })
+  const allSales = listSales({ month, kind: 'resale' })
+  const sales = allSales.filter(isRealized)
+  const forecast_sales = allSales.filter(s => !isRealized(s))
+  const allPersonalSales = listSales({ month, kind: 'personal' })
+  const personal_sales = allPersonalSales.filter(isRealized)
   const expenses = listExpenses(month)
   const expenseTotal = expenses.reduce((s, e) => s + e.amount, 0)
 
@@ -3920,6 +3919,8 @@ export function getMonthDetail(month: string, opts?: { tagId?: string | null }):
 
   return {
     month, alloc_method, close, changed_since_close,
+    forecast_sales, forecast: forecastTotals(allSales),
+    personal_forecast: forecastTotals(allPersonalSales),
     sales: monthSales, personal_sales, expenses, expense_by_category,
     totals, filtered, purchases_by_account, pending,
   }
@@ -4187,13 +4188,13 @@ export function getProduct(modelCode: string): ProductDetail | null {
 
   // 1点あたりの売上・粗利は sale_line_share の整数按分をそのまま使う（端数は最終行に寄っている）
   const soldRows = db.prepare(`
-    SELECT sp.sold_at, sls.price_share AS price, sls.profit_share AS profit
+    SELECT sp.sold_at, sp.status, sp.source, sls.price_share AS price, sls.profit_share AS profit
     FROM inventory_item i
     JOIN sale_line       sl  ON sl.inventory_item_id = i.id
     JOIN sale_profit     sp  ON sp.id = sl.sale_id
     JOIN sale_line_share sls ON sls.inventory_item_id = i.id
     WHERE i.model_code = ?
-  `).all(modelCode) as Array<{ sold_at: string; price: number; profit: number }>
+  `).all(modelCode) as Array<{ sold_at: string; status: SaleStatus | null; source: SaleSource; price: number; profit: number }>
 
   const disposedRows = db.prepare(`
     SELECT disposed_at
@@ -4210,13 +4211,18 @@ export function getProduct(modelCode: string): ProductDetail | null {
     purchaseByMonth.set(m, cur)
   }
 
-  const soldByMonth = new Map<string, { sold: number; sales_amount: number; profit: number }>()
+  const soldByMonth = new Map<string, { sold: number; sales_amount: number; profit: number; forecast_sales_amount: number; forecast_profit: number }>()
   for (const r of soldRows) {
     const m = r.sold_at.slice(0, 7)
-    const cur = soldByMonth.get(m) ?? { sold: 0, sales_amount: 0, profit: 0 }
+    const cur = soldByMonth.get(m) ?? { sold: 0, sales_amount: 0, profit: 0, forecast_sales_amount: 0, forecast_profit: 0 }
     cur.sold += 1
-    cur.sales_amount += r.price
-    cur.profit += r.profit
+    if (isRealized(r)) {
+      cur.sales_amount += r.price
+      cur.profit += r.profit
+    } else {
+      cur.forecast_sales_amount += r.price
+      cur.forecast_profit += r.profit
+    }
     soldByMonth.set(m, cur)
   }
 
@@ -4234,7 +4240,7 @@ export function getProduct(modelCode: string): ProductDetail | null {
   let cumulative = 0
   for (let m = firstMonth; m <= lastMonth; m = nextMonth(m)) {
     const p = purchaseByMonth.get(m) ?? { purchased: 0, purchase_amount: 0 }
-    const s = soldByMonth.get(m) ?? { sold: 0, sales_amount: 0, profit: 0 }
+    const s = soldByMonth.get(m) ?? { sold: 0, sales_amount: 0, profit: 0, forecast_sales_amount: 0, forecast_profit: 0 }
     const disposed = disposedByMonth.get(m) ?? 0
     cumulative += p.purchased - s.sold - disposed
     months.push({
@@ -4245,6 +4251,8 @@ export function getProduct(modelCode: string): ProductDetail | null {
       purchase_amount: p.purchase_amount,
       sales_amount: s.sales_amount,
       profit: s.profit,
+      forecast_sales_amount: s.forecast_sales_amount,
+      forecast_profit: s.forecast_profit,
     })
   }
 
@@ -5168,6 +5176,7 @@ export function exportRows(): string {
   const rows = db.prepare(`
     SELECT
       sp.sold_at         AS 販売日,
+      CASE WHEN sp.status = 'completed' OR (sp.source = 'manual' AND sp.status IS NULL) THEN '実績' ELSE '見込み' END AS 集計区分,
       sp.title           AS 商品名,
       CASE sp.kind WHEN 'resale' THEN '転売' ELSE '私物' END AS 区分,
       CASE sp.source WHEN 'collector' THEN '自動取得' ELSE '手入力' END AS 取得元,

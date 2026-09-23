@@ -1,3 +1,4 @@
+import { createCompletedSale } from '../completed-sale'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 import * as db from '../../db'
@@ -13,13 +14,13 @@ describe('ペルソナ16：タグで整理する人', () => {
     expect(db.listTags().map(t => t.name)).toEqual(['セール', 'まとめ売り'])
 
     // 販売3件。手数料率は既定10%（切り捨て）。送料は手入力で確定させる
-    const s1 = db.createSale({ title: 'ぬいぐるみA', price: 3000, sold_at: '2026-05-01' })
+    const s1 = createCompletedSale({ title: 'ぬいぐるみA', price: 3000, sold_at: '2026-05-01' })
     db.updateSale(s1, { shipping_fee: 300 }) // fee=300, profit=3000-300-300=2400
 
-    const s2 = db.createSale({ title: 'ぬいぐるみB', price: 5000, sold_at: '2026-05-02' })
+    const s2 = createCompletedSale({ title: 'ぬいぐるみB', price: 5000, sold_at: '2026-05-02' })
     db.updateSale(s2, { shipping_fee: 400 }) // fee=500, profit=5000-500-400=4100
 
-    const s3 = db.createSale({ title: 'ぬいぐるみC', price: 2000, sold_at: '2026-05-03' })
+    const s3 = createCompletedSale({ title: 'ぬいぐるみC', price: 2000, sold_at: '2026-05-03' })
     db.updateSale(s3, { shipping_fee: 200 }) // fee=200, profit=2000-200-200=1600
 
     // 3件のうち2件（s1, s2）に「セール」タグを付ける

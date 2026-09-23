@@ -121,6 +121,9 @@ function expenseContent(e: Expense): string {
 </script>
 
 <template>
+  <p v-if="detail?.forecast?.count" class="faint">
+    取引未完了 {{ detail.forecast.count }}件：見込み売上 {{ yen(detail.forecast.revenue) }} ・ 見込み粗利 {{ yen(detail.forecast.gross_profit) }}（以下の実績・経費按分には含めません）
+  </p>
   <div class="sales-block">
     <Skeleton v-if="!loaded" :rows="6" />
 

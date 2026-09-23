@@ -486,6 +486,8 @@ export interface ProductSummary extends VariantSummary {
 
 /** 月ごとの在庫の増減 */
 export interface ProductMonthPoint {
+  forecast_sales_amount?: number
+  forecast_profit?: number
   /** YYYY-MM */
   month: string
   purchased: number
@@ -506,6 +508,7 @@ export interface ProductDetail extends ProductSummary {
 }
 
 export interface VariantSummary {
+  forecast_profit?: number
   model_code: string
   series_code: string | null
   material: Material | null
@@ -538,6 +541,7 @@ export interface SaleFilter {
 
 /** 絞り込んだ販売の合計。DB 側で集計する（画面で足さない） */
 export interface SaleTotals {
+  forecast?: { count: number; revenue: number; gross_profit: number }
   count: number
   revenue: number
   total_fee: number
@@ -548,6 +552,8 @@ export interface SaleTotals {
 }
 
 export interface MonthlySummary {
+  /** 未完了分のみ。経費は実績側で一度だけ控除する */
+  forecast?: { count: number; revenue: number; gross_profit: number }
   month: string
   kind: SaleKind
   sales_count: number
@@ -724,6 +730,9 @@ export interface MonthTotals {
  * floor で配って余りは最後の行に寄せ、Σallocated_expense = expense_total にする。販売が 0 件なら誰にも配賦しない
  */
 export interface MonthDetail {
+  personal_forecast?: { count: number; revenue: number; gross_profit: number }
+  forecast_sales?: SaleProfit[]
+  forecast?: { count: number; revenue: number; gross_profit: number }
   month: string
   alloc_method: AllocMethod
   close: MonthClose | null
@@ -821,7 +830,7 @@ export interface ProfitStrip {
   net_profit: number
   revenue: number
   sales_count: number
-  /** 送料・紐付けを入れれば増える見込み（未確定の販売の粗利の見込みの合計） */
+  /** 今月の取引未完了分の見込み粗利（赤字も含む） */
   pending_profit_estimate: number
   pending_count: number
   /** 売上金の反映待ち（発送済み・受取評価待ち・評価待ちの販売の 価格−手数料 の合計） */
@@ -906,6 +915,8 @@ export interface ProductKarte {
 
 /** 月次の計算書（MonthDetail の totals を縦組みで読むための並び。数字は同じ） */
 export interface MonthStatement {
+  personal_forecast?: { count: number; revenue: number; gross_profit: number }
+  forecast?: { count: number; revenue: number; gross_profit: number }
   month: string
   sales_count: number
   revenue: number

@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { isRealized } from '../../shared/recognition'
 // 在庫の引き当て／紐付け。出品（mode='listing'）と販売（mode='sale'）の両方から使う。
 // チェックした瞬間に下端の原価合計・粗利プレビューが動く。確定は「引き当てる／紐付ける」ボタンで初めて起きる。
 import { ref, computed, watch, inject } from 'vue'
-import type { Listing, InventoryItem, ListingStatus, SaleProfit } from '../../shared/types'
+import type { Listing, InventoryItem, ListingStatus, SaleProfit, ProductSummary } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import CodeChip from './CodeChip.vue'
@@ -30,6 +31,8 @@ const matchedItems = ref<MatchedRow[]>([])
 const picked = ref<Set<string>>(new Set())
 const search = ref('')
 const loading = ref(false)
+const productInfo = ref(new Map<string, ProductSummary>())
+const failedProductImages = ref(new Set<string>())
 const selectionMode = ref<'inventory' | 'product'>('inventory')
 const productQuantity = ref(1)
 const pickingProduct = ref(false)
@@ -51,6 +54,7 @@ const price = computed(() => (props.mode === 'listing' ? props.listing?.price : 
 
 async function load() {
   loading.value = true
+  productInfo.value = new Map((await window.soroban.listProducts()).map(p => [p.model_code, p]))
   if (props.mode === 'listing') {
     const l = props.listing
     if (!l) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
@@ -105,7 +109,7 @@ const products = computed(() => {
   const groups = new Map<string, { code: string; name: string; available: number; names: string[] }>()
   for (const c of candidates.value) {
     if (!c.model_code || c.status !== 'in_stock' || c.listing || c.sold_to || picked.value.has(c.id)) continue
-    const group = groups.get(c.model_code) ?? { code: c.model_code, name: c.product_name ?? c.name, available: 0, names: [] }
+    const group = groups.get(c.model_code) ?? { code: c.model_code, name: productInfo.value.get(c.model_code)?.name ?? c.product_name ?? c.name, available: 0, names: [] }
     group.available++
     group.names.push(c.name, c.product_name ?? '')
     groups.set(c.model_code, group)
@@ -171,7 +175,7 @@ const confirmLabel = computed(() => {
 })
 
 const profitLabel = computed(() => {
-  if (props.mode !== 'listing') return '粗利'
+  if (props.mode !== 'listing') return props.sale && isRealized(props.sale) ? '粗利' : '見込み粗利'
   return props.listing?.shipping_method_id ? '見込み粗利（送料込み・梱包前）' : '見込み粗利（送料・梱包前）'
 })
 
@@ -363,8 +367,12 @@ function placeholderChar(): string {
         <label class="product-quantity">追加する点数 <input v-model.number="productQuantity" type="number" min="1" step="1" aria-label="追加する点数" /></label>
         <div class="candidates">
           <div v-for="p in products" :key="p.code" class="product-row">
+            <img v-if="productInfo.get(p.code)?.thumb_url && !failedProductImages.has(productInfo.get(p.code)!.thumb_url!)"
+              class="product-thumb" :src="productInfo.get(p.code)!.thumb_url!" alt="" loading="lazy"
+              @error="failedProductImages.add(productInfo.get(p.code)!.thumb_url!)" />
+            <span v-else class="product-thumb product-placeholder">{{ p.code.charAt(0) }}</span>
             <div class="grow name-cell">
-              <CodeChip kind="model" :code="p.code" />
+              <span><CodeChip kind="model" :code="p.code" /></span>
               <span :title="p.name">{{ p.name }}</span>
               <span class="faint">選べる在庫 {{ p.available }}点</span>
             </div>
@@ -485,6 +493,8 @@ function placeholderChar(): string {
 .product-quantity { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
 .product-quantity input { width: 76px; }
 .product-row { display: flex; gap: 12px; align-items: center; padding: 10px 8px; border-bottom: 1px solid var(--line-soft); }
+.product-thumb { width: 48px; height: 48px; flex: 0 0 48px; object-fit: cover; border-radius: var(--radius-sm); }
+.product-placeholder { display: grid; place-items: center; background: var(--accent-soft); color: var(--text-muted); }
 .picked-block { margin-bottom: 14px; padding: 8px; background: var(--accent-soft); border-radius: var(--radius-sm); }
 .picked-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 

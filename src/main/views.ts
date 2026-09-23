@@ -284,7 +284,7 @@ export function getMonthStatement(month: string): MonthStatement {
   const gross_rate = totals.revenue === 0 ? null : Math.round((totals.gross_profit / totals.revenue) * 100)
   const net_rate = totals.revenue === 0 ? null : Math.round((totals.net_profit / totals.revenue) * 100)
 
-  const awaiting_payout = detail.sales
+  const awaiting_payout = (detail.forecast_sales ?? [])
     .filter(s => s.status === 'shipped' || s.status === 'delivered')
     .reduce((s, sale) => s + (sale.price - sale.fee), 0)
 
@@ -310,6 +310,8 @@ export function getMonthStatement(month: string): MonthStatement {
   return {
     month,
     sales_count: totals.sales_count,
+    forecast: detail.forecast,
+    personal_forecast: detail.personal_forecast,
     revenue: totals.revenue,
     fee: totals.total_fee,
     shipping: totals.total_shipping,

@@ -9,6 +9,7 @@
 // src/main/db.ts・money.ts・docs/01-requirements.md の Phase 2 節に合わせる。
 // ============================================================
 
+import { isRealized, forecastTotals, realizedTotals } from '../../shared/recognition'
 import type {
   SorobanApi, ShopAccount, ShopAccountKind, ShopAccountStats, ShippingMethod, ShippingSource,
   SaleProfit, SaleInput, SalePatch, SaleKind, SaleSource, SaleFilter, SaleTotals, SaleStatus,
@@ -1059,6 +1060,12 @@ function monthlyFromSales(rows: SaleProfit[]): MonthlyBase[] {
       total_shipping: 0, total_packaging: 0, total_cost: 0, gross_profit: 0,
       unconfirmed_shipping: 0,
     }
+    if (!isRealized(s)) {
+      const f = cur.forecast ?? { count: 0, revenue: 0, gross_profit: 0 }
+      cur.forecast = { count: f.count + 1, revenue: f.revenue + s.price, gross_profit: f.gross_profit + s.gross_profit }
+      map.set(key, cur)
+      continue
+    }
     cur.sales_count += 1
     cur.revenue += s.price
     cur.total_fee += s.fee
@@ -1318,11 +1325,11 @@ function allocateExpenseFloor(weights: number[], pool: number): number[] {
 function buildMonthDetail(month: string, tagId: string | null): MonthDetail {
   const entry = monthBookEntry(month)
   const resaleSales = sales
-    .filter(s => s.kind === 'resale' && s.sold_at.slice(0, 7) === month)
+    .filter(s => isRealized(s) && s.kind === 'resale' && s.sold_at.slice(0, 7) === month)
     .slice()
     .sort((a, b) => (a.sold_at < b.sold_at ? 1 : a.sold_at > b.sold_at ? -1 : 0))
   const personalSales = sales
-    .filter(s => s.kind === 'personal' && s.sold_at.slice(0, 7) === month)
+    .filter(s => isRealized(s) && s.kind === 'personal' && s.sold_at.slice(0, 7) === month)
     .slice()
     .sort((a, b) => (a.sold_at < b.sold_at ? 1 : a.sold_at > b.sold_at ? -1 : 0))
   const expensesForMonth = expenses
@@ -1409,6 +1416,9 @@ function buildMonthDetail(month: string, tagId: string | null): MonthDetail {
     close,
     changed_since_close,
     sales: saleRows,
+    forecast_sales: sales.filter(s => !isRealized(s) && s.kind === 'resale' && s.sold_at.slice(0, 7) === month),
+    forecast: forecastTotals(sales.filter(s => s.kind === 'resale' && s.sold_at.slice(0, 7) === month)),
+    personal_forecast: forecastTotals(sales.filter(s => s.kind === 'personal' && s.sold_at.slice(0, 7) === month)),
     personal_sales: personalSales,
     expenses: expensesForMonth,
     expense_by_category,
@@ -1652,7 +1662,8 @@ function variantSummaryFor(model: string): VariantSummary {
   const items = inventory.filter(i => i.model_code === model)
   const soldItems = items.filter(i => i.status === 'sold')
   const inStockItems = items.filter(i => i.status === 'in_stock')
-  const relatedSales = sales.filter(s => s.model_codes.includes(model) && s.item_count > 0)
+  const modelSales = sales.filter(s => s.model_codes.includes(model) && s.item_count > 0)
+  const relatedSales = modelSales.filter(isRealized)
   const avgPrice = relatedSales.length
     ? Math.round(relatedSales.reduce((s, x) => s + x.price, 0) / relatedSales.length)
     : null
@@ -1679,6 +1690,7 @@ function variantSummaryFor(model: string): VariantSummary {
     avg_price: avgPrice,
     avg_profit: avgProfit,
     total_profit: relatedSales.reduce((s, x) => s + x.gross_profit, 0),
+    forecast_profit: forecastTotals(modelSales).gross_profit,
   }
 }
 
@@ -1705,7 +1717,7 @@ function buildProductSummary(model: string): ProductSummary {
     (max, s) => (!max || s.sold_at > max ? s.sold_at : max), null,
   )
   const isManual = productManualImage.has(model)
-  const thumbUrl = isManual ? (productManualImage.get(model) ?? null) : autoProductThumb(model)
+  const thumbUrl = isManual ? (productManualImage.get(model) ?? null) : (autoProductThumb(model) ?? (model === 'A035' ? '/mock/product.svg' : null))
 
   return {
     ...summary,
@@ -1771,8 +1783,14 @@ function buildProductMonths(model: string): ProductMonthPoint[] {
           const feeShare = Math.round(sale.fee / n)
           const shipShare = Math.round(sale.shipping_fee / n)
           const packShare = Math.round(sale.packaging_cost / n)
-          soldBucket.sales_amount += revenueShare
-          soldBucket.profit += revenueShare - feeShare - shipShare - packShare - item.landed_cost
+          const profit = revenueShare - feeShare - shipShare - packShare - item.landed_cost
+          if (isRealized(sale)) {
+            soldBucket.sales_amount += revenueShare
+            soldBucket.profit += profit
+          } else {
+            soldBucket.forecast_sales_amount = (soldBucket.forecast_sales_amount ?? 0) + revenueShare
+            soldBucket.forecast_profit = (soldBucket.forecast_profit ?? 0) + profit
+          }
         }
       }
     } else if (item.status === 'disposed' || item.status === 'personal_use' || item.status === 'split') {
@@ -1908,31 +1926,10 @@ function linkCandidate(sale: SaleProfit): InventoryItem | null {
   return takeOldestByModel(sale.model_codes[0]) ?? null
 }
 
-/** 有効な発送方法の料金の中央値（送料未入力の見込み計算に使う） */
-function shippingFeeMedian(): number {
-  const fees = shippingMethods.filter(m => m.is_active).map(m => m.fee).sort((a, b) => a - b)
-  if (fees.length === 0) return 0
-  const mid = Math.floor(fees.length / 2)
-  return fees.length % 2 ? fees[mid] : Math.round((fees[mid - 1] + fees[mid]) / 2)
-}
-
 function shippingFeeBounds(): { min: number; max: number } {
   const fees = shippingMethods.filter(m => m.is_active).map(m => m.fee)
   if (fees.length === 0) return { min: 0, max: 0 }
   return { min: Math.min(...fees), max: Math.max(...fees) }
-}
-
-/**
- * 送料未入力・未紐付けの販売 1 件の見込み粗利（ホームの利益ストリップ pending_profit_estimate 用）。
- * 送料は選択済みならそれ、無ければ発送方法の料金の中央値。原価は紐付け済みならそれ、
- * 無ければ型番一致の候補1点（無ければ0）
- */
-function estimateSalePendingProfit(sale: SaleProfit): number {
-  const shipping = sale.is_shipping_confirmed ? sale.shipping_fee : shippingFeeMedian()
-  const cost = sale.kind === 'resale' && sale.unmatched
-    ? (linkCandidate(sale)?.landed_cost ?? sale.cost)
-    : sale.cost
-  return sale.price - sale.fee - shipping - sale.packaging_cost - cost
 }
 
 /**
@@ -2031,7 +2028,7 @@ function buildInbox(): Inbox {
   const lastMonth = monthAgoStr(1)
   const lastMonthRow = monthly.find(m => m.month === lastMonth && m.kind === 'resale') ?? null
 
-  const pendingRows = sales.filter(s => !s.is_shipping_confirmed || (s.kind === 'resale' && s.unmatched === 1))
+  const pendingRows = sales.filter(s => !isRealized(s) && s.kind === 'resale' && s.sold_at.slice(0, 7) === month)
   const awaitingRows = sales.filter(s => s.status === 'shipped' || s.status === 'delivered')
 
   const strip: ProfitStrip = {
@@ -2040,7 +2037,7 @@ function buildInbox(): Inbox {
     net_profit: thisMonthRow?.net_profit ?? 0,
     revenue: thisMonthRow?.revenue ?? 0,
     sales_count: thisMonthRow?.sales_count ?? 0,
-    pending_profit_estimate: pendingRows.reduce((s, x) => s + estimateSalePendingProfit(x), 0),
+    pending_profit_estimate: pendingRows.reduce((s, x) => s + x.gross_profit, 0),
     pending_count: pendingRows.length,
     awaiting_payout: awaitingRows.reduce((s, x) => s + (x.price - x.fee), 0),
     awaiting_payout_count: awaitingRows.length,
@@ -2445,6 +2442,8 @@ const api: SorobanApi = {
     return wait({
       month,
       sales_count: detail.totals.sales_count,
+      forecast: detail.forecast,
+      personal_forecast: detail.personal_forecast,
       revenue,
       fee: detail.totals.total_fee,
       shipping: detail.totals.total_shipping,
@@ -2510,18 +2509,7 @@ const api: SorobanApi = {
   },
 
   async saleTotals(filter): Promise<SaleTotals> {
-    const rows = filterSales(filter)
-    const totals = rows.reduce((acc, s) => {
-      acc.count += 1
-      acc.revenue += s.price
-      acc.total_fee += s.fee
-      acc.total_shipping += s.shipping_fee
-      acc.total_packaging += s.packaging_cost
-      acc.total_cost += s.cost
-      acc.gross_profit += s.gross_profit
-      return acc
-    }, { count: 0, revenue: 0, total_fee: 0, total_shipping: 0, total_packaging: 0, total_cost: 0, gross_profit: 0 })
-    return wait(totals)
+    return wait(realizedTotals(filterSales(filter)))
   },
 
   async createSale(input: SaleInput) {

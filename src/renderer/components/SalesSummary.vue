@@ -66,6 +66,8 @@ interface ChartPoint {
   grossProfit: number
   netProfit: number
   salesCount: number
+  forecastRevenue: number
+  forecastProfit: number
 }
 
 const chartPoints = computed<ChartPoint[]>(() => {
@@ -79,6 +81,8 @@ const chartPoints = computed<ChartPoint[]>(() => {
       grossProfit: row?.gross_profit ?? 0,
       netProfit: row?.net_profit ?? 0,
       salesCount: row?.sales_count ?? 0,
+      forecastRevenue: row?.forecast?.revenue ?? 0,
+      forecastProfit: row?.forecast?.gross_profit ?? 0,
     }
   })
 })
@@ -93,10 +97,10 @@ const plotW = W - PAD_L - PAD_R
 const plotH = H - PAD_T - PAD_B
 // 上限は最大値、下限は min(0, 最小値)。赤字の月が無ければ 0 が一番下に来て、描画領域を無駄にしない
 const domainMax = computed(() =>
-  Math.max(1, ...chartPoints.value.flatMap(p => [p.revenue, p.grossProfit, p.netProfit])),
+  Math.max(1, ...chartPoints.value.flatMap(p => [p.revenue, p.grossProfit, p.netProfit, p.revenue + p.forecastRevenue, p.grossProfit + p.forecastProfit, p.netProfit + p.forecastProfit])),
 )
 const domainMin = computed(() =>
-  Math.min(0, ...chartPoints.value.flatMap(p => [p.grossProfit, p.netProfit])),
+  Math.min(0, ...chartPoints.value.flatMap(p => [p.grossProfit, p.netProfit, p.grossProfit + p.forecastProfit, p.netProfit + p.forecastProfit])),
 )
 const zeroY = computed(() => valueToY(0))
 
@@ -119,6 +123,8 @@ function barRectH(v: number): number {
 
 const grossLine = computed(() => chartPoints.value.map((p, i) => `${x(i)},${valueToY(p.grossProfit)}`).join(' '))
 const netLine = computed(() => chartPoints.value.map((p, i) => `${x(i)},${valueToY(p.netProfit)}`).join(' '))
+const forecastGrossLine = computed(() => chartPoints.value.map((p, i) => `${x(i)},${valueToY(p.grossProfit + p.forecastProfit)}`).join(' '))
+const forecastNetLine = computed(() => chartPoints.value.map((p, i) => `${x(i)},${valueToY(p.netProfit + p.forecastProfit)}`).join(' '))
 
 function monthLabel(month: string, i: number): string {
   const [y, m] = month.split('-')
@@ -218,6 +224,8 @@ const gridLines = computed(() => domainMin.value < 0
           />
 
           <g v-for="(p, i) in chartPoints" :key="p.month">
+            <rect :x="x(i) - barW / 2" :y="barRectY(p.revenue + p.forecastRevenue)"
+              :width="barW" :height="barRectH(p.revenue + p.forecastRevenue)" class="bar-revenue forecast" />
             <rect
               :x="x(i) - barW / 2" :y="barRectY(p.revenue)"
               :width="barW" :height="barRectH(p.revenue)"
@@ -226,6 +234,8 @@ const gridLines = computed(() => domainMin.value < 0
             <text :x="x(i)" :y="H - 3" class="axis-label">{{ monthLabel(p.month, i) }}</text>
           </g>
 
+          <polyline :points="forecastGrossLine" class="line-gross forecast" stroke-dasharray="5 4" />
+          <polyline :points="forecastNetLine" class="line-net forecast" stroke-dasharray="5 4" />
           <polyline :points="grossLine" class="line-gross" />
           <circle
             v-for="(p, i) in chartPoints" :key="'g' + p.month"
@@ -258,18 +268,20 @@ const gridLines = computed(() => domainMin.value < 0
           :style="{ left: tooltip.leftPct + '%', top: tooltip.topPct + '%' }"
         >
           <div class="chart-tooltip-month">{{ tooltip.p.month }}</div>
+          <div class="chart-tooltip-row">見込み分：売上 {{ yen(tooltip.p.forecastRevenue) }} ・ 粗利 {{ yen(tooltip.p.forecastProfit) }}</div>
           <div class="chart-tooltip-row">売上 {{ yen(tooltip.p.revenue) }}</div>
           <div class="chart-tooltip-row" :class="tooltip.p.grossProfit < 0 ? 'loss' : 'profit'">粗利 {{ yen(tooltip.p.grossProfit) }}</div>
           <div class="chart-tooltip-row">件数 {{ tooltip.p.salesCount }} 件</div>
           <div class="chart-tooltip-row" :class="tooltip.p.netProfit < 0 ? 'loss' : 'profit'">純利益 {{ yen(tooltip.p.netProfit) }}</div>
         </div>
       </div>
-      <p v-if="loaded && showChart" class="chart-hint">月をクリックすると、その月の販売を売上タブで表示します</p>
+      <p v-if="loaded && showChart" class="chart-hint">濃色：実績（取引完了・状態未設定の手入力） ／ 淡色・破線：見込みを含む合計。月をクリックすると販売を表示します</p>
     </div>
   </div>
 </template>
 
 <style scoped>
+.forecast { opacity: .3; }
 .sales-summary {
   display: flex;
   flex-direction: column;

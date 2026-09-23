@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 import * as db from '../../db'
+import { createCompletedSale } from '../completed-sale'
 
 describe('ペルソナ02：まとめ売りの人', () => {
   let shopId: string
@@ -34,7 +35,7 @@ describe('ペルソナ02：まとめ売りの人', () => {
     // Y001（最終行）：残り 300-150=150
     expect(yItems[0].landed_cost).toBe(2150)
 
-    const saleId = db.createSale({ title: 'まとめ売り', sold_at: '2026-03-10', price: 12000 })
+    const saleId = createCompletedSale({ title: 'まとめ売り', sold_at: '2026-03-10', price: 12000 })
     db.linkInventory(saleId, [xItems[0].id, xItems[1].id, yItems[0].id])
 
     const sale = db.listSales().find(s => s.id === saleId)!

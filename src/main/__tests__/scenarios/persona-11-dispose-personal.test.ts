@@ -1,3 +1,4 @@
+import { createCompletedSale } from '../completed-sale'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 import * as db from '../../db'
@@ -34,7 +35,7 @@ describe('ペルソナ11：捨てる人・自分で使う人', () => {
     expect(db.listInventory('personal_use')).toHaveLength(1)
 
     // 型番が在庫のmodel_codeと完全一致で自動紐付け（先入先出）。残っている在庫のうち1点だけが原価として乗る
-    const saleId = db.createSale({ title: 'テスト商品【E001-1】', sold_at: '2026-05-10', price: 2000 })
+    const saleId = createCompletedSale({ title: 'テスト商品【E001-1】', sold_at: '2026-05-10', price: 2000 })
     const sale = db.listSales().find(s => s.id === saleId)!
     expect(sale.unmatched).toBe(0)
     expect(sale.cost).toBe(1000) // 廃棄・自家消費分(合計2000)は混ざらない
@@ -54,7 +55,7 @@ describe('ペルソナ11：捨てる人・自分で使う人', () => {
     expect(personalTimeline.events.some(e => e.kind === 'personal_use' && e.title === '自家消費')).toBe(true)
 
     // 型番の無いタイトルで別の販売を作る（自動紐付けさせずにsuggest/linkの挙動だけ見る）
-    const manualSaleId = db.createSale({ title: '手動紐付け確認用', sold_at: '2026-05-11', price: 1000 })
+    const manualSaleId = createCompletedSale({ title: '手動紐付け確認用', sold_at: '2026-05-11', price: 1000 })
     expect(db.listSales().find(s => s.id === manualSaleId)!.unmatched).toBe(1)
 
     // 廃棄した在庫はsuggestInventoryの候補に出ない

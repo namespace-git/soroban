@@ -1,3 +1,4 @@
+import { createCompletedSale } from './completed-sale'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import BetterSqlite3 from 'better-sqlite3'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -1023,7 +1024,7 @@ describe('db（:memory:）', () => {
   })
 
   it('getDashboard().thisMonth：net_profit/expense_total/unconfirmed_shippingが入る（monthly_summaryビューを直読みすると無かった）', () => {
-    db.createSale({ title: '今月の転売', sold_at: todayLocal(), price: 1000 })
+    createCompletedSale({ title: '今月の転売', sold_at: todayLocal(), price: 1000 })
     // 手動の経費（計上月省略→occurred_atの月）がexpense_totalに乗る
     db.createExpense({ occurred_at: todayLocal(), category: 'packaging', amount: 200 })
 
@@ -1105,14 +1106,15 @@ describe('db（:memory:）', () => {
 
   it('saleTotals：タグ絞り込みの合計が手計算と一致する。0件なら全部0', () => {
     const tagId = db.createTag('集計用')
-    const s1 = db.createSale({ title: 'A', sold_at: '2026-01-01', price: 2000 }) // fee 200
-    const s2 = db.createSale({ title: 'B', sold_at: '2026-01-02', price: 3000 }) // fee 300
-    db.createSale({ title: 'C（タグなし）', sold_at: '2026-01-03', price: 5000 })
+    const s1 = createCompletedSale({ title: 'A', sold_at: '2026-01-01', price: 2000 }) // fee 200
+    const s2 = createCompletedSale({ title: 'B', sold_at: '2026-01-02', price: 3000 }) // fee 300
+    createCompletedSale({ title: 'C（タグなし）', sold_at: '2026-01-03', price: 5000 })
     db.setSaleTags(s1, [tagId])
     db.setSaleTags(s2, [tagId])
 
     const totals = db.saleTotals({ tagId })
     expect(totals).toEqual({
+      forecast: { count: 0, revenue: 0, gross_profit: 0 },
       count: 2,
       revenue: 2000 + 3000,
       total_fee: 200 + 300,
@@ -1124,6 +1126,7 @@ describe('db（:memory:）', () => {
 
     const empty = db.saleTotals({ tagId: 'no-such-tag' })
     expect(empty).toEqual({
+      forecast: { count: 0, revenue: 0, gross_profit: 0 },
       count: 0, revenue: 0, total_fee: 0, total_shipping: 0,
       total_packaging: 0, total_cost: 0, gross_profit: 0,
     })
@@ -1328,8 +1331,8 @@ describe('db（:memory:）', () => {
       shipping_fee: 150,
       lines: [{ name: 'クリームわん【Z080-1】', unit_price: 1000, quantity: 1 }],
     })
-    db.createSale({ title: 'クリームわん【Z080-1】', sold_at: '2026-09-15', price: 2000 })
-    db.createSale({ title: 'クリームわん【Z080-1】', sold_at: '2026-09-16', price: 2000 })
+    createCompletedSale({ title: 'クリームわん【Z080-1】', sold_at: '2026-09-15', price: 2000 })
+    createCompletedSale({ title: 'クリームわん【Z080-1】', sold_at: '2026-09-16', price: 2000 })
 
     const summary = db.listVariantSummary().find(v => v.model_code === 'Z080-1')!
     expect(summary.purchased).toBe(2)
@@ -1352,13 +1355,13 @@ describe('db（:memory:）', () => {
     const [whole, toSplit] = db.listInventory('in_stock')
 
     // 1点目はまるごと¥3,600で販売。手数料10%: fee=360 → 粗利 = 3600-360-3000 = 240
-    const saleWhole = db.createSale({ title: 'まるごと販売', sold_at: '2026-09-10', price: 3600 })
+    const saleWhole = createCompletedSale({ title: 'まるごと販売', sold_at: '2026-09-10', price: 3600 })
     db.linkInventory(saleWhole, [whole.id])
 
     // 2点目は4分割（750ずつ）。1個¥1,000で4個販売。手数料10%: fee=100 → 粗利 = 1000-100-750 = 150
     const childIds = db.splitInventory(toSplit.id, 4)
     childIds.forEach((childId, i) => {
-      const saleId = db.createSale({ title: `ばら売り${i + 1}`, sold_at: '2026-09-11', price: 1000 })
+      const saleId = createCompletedSale({ title: `ばら売り${i + 1}`, sold_at: '2026-09-11', price: 1000 })
       db.linkInventory(saleId, [childId])
     })
 
@@ -1383,7 +1386,7 @@ describe('db（:memory:）', () => {
     const grandchildren = db.splitInventory(children[0], 2) // 各100（重み1/8）
 
     // 孫2点をまとめて¥600で販売。手数料10%: fee=60 → 粗利 = 600-60-(100+100) = 340
-    const saleId = db.createSale({ title: 'まとめ売り', sold_at: '2026-09-12', price: 600 })
+    const saleId = createCompletedSale({ title: 'まとめ売り', sold_at: '2026-09-12', price: 600 })
     db.linkInventory(saleId, grandchildren)
 
     const summary = db.listVariantSummary().find(v => v.model_code === 'Y001')!
@@ -3631,9 +3634,9 @@ describe('db（:memory:）', () => {
       })
       const [itemA, itemB] = db.listInventory('in_stock')
 
-      const saleA = db.createSale({ title: '無料配布品A', sold_at: '2026-04-10', price: 0 })
+      const saleA = createCompletedSale({ title: '無料配布品A', sold_at: '2026-04-10', price: 0 })
       db.linkInventory(saleA, [itemA.id])
-      const saleB = db.createSale({ title: '無料配布品B', sold_at: '2026-04-12', price: 0 })
+      const saleB = createCompletedSale({ title: '無料配布品B', sold_at: '2026-04-12', price: 0 })
       db.linkInventory(saleB, [itemB.id])
 
       db.createExpense({ occurred_at: '2026-04-05', category: 'packaging', amount: 101 })

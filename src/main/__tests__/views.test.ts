@@ -1,3 +1,4 @@
+import { createCompletedSale } from './completed-sale'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 import * as db from '../db'
@@ -177,12 +178,12 @@ describe('views: 商品カルテ', () => {
     // 古い方の販売（30日前）：ゆうパケット
     // タイトルに型番っぽい文字列（英字1+数字3）を入れると自動紐付けが割り込むため、
     // ここでは含めず手動での紐付けだけを試す
-    const sale1 = db.createSale({ title: 'テスト商品の販売その1', sold_at: monthAgo, price: 2000, kind: 'resale' })
+    const sale1 = createCompletedSale({ title: 'テスト商品の販売その1', sold_at: monthAgo, price: 2000, kind: 'resale' })
     db.linkInventory(sale1, [items[0].id])
     db.updateSale(sale1, { shipping_method_id: method1.id })
 
     // 新しい方の販売（今日）：ネコポス
-    const sale2 = db.createSale({ title: 'テスト商品の販売その2', sold_at: today, price: 2500, kind: 'resale' })
+    const sale2 = createCompletedSale({ title: 'テスト商品の販売その2', sold_at: today, price: 2500, kind: 'resale' })
     db.linkInventory(sale2, [items[1].id])
     db.updateSale(sale2, { shipping_method_id: method2.id })
 
@@ -227,15 +228,15 @@ describe('views: 月次の計算書', () => {
     db.setInventoryTags(items[2].id, [tagB]) // sale3 に派生で付く
 
     // タイトルに型番っぽい文字列（英字1+数字3）を入れると自動紐付けが割り込むため含めない
-    const sale1 = db.createSale({ title: 'テスト商品の販売その1', sold_at: today, price: 1000, kind: 'resale' })
+    const sale1 = createCompletedSale({ title: 'テスト商品の販売その1', sold_at: today, price: 1000, kind: 'resale' })
     db.linkInventory(sale1, [items[0].id])
     db.setSaleTags(sale1, [tagA])
 
-    const sale2 = db.createSale({ title: 'テスト商品の販売その2', sold_at: today, price: 1500, kind: 'resale' })
+    const sale2 = createCompletedSale({ title: 'テスト商品の販売その2', sold_at: today, price: 1500, kind: 'resale' })
     db.linkInventory(sale2, [items[1].id])
     db.setSaleTags(sale2, [tagA, tagB])
 
-    const sale3 = db.createSale({ title: 'テスト商品の販売その3', sold_at: today, price: 2000, kind: 'resale' })
+    const sale3 = createCompletedSale({ title: 'テスト商品の販売その3', sold_at: today, price: 2000, kind: 'resale' })
     db.linkInventory(sale3, [items[2].id])
     // sale3 はタグを直接付けない（tagB は在庫からの派生）
 

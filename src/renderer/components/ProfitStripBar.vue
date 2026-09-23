@@ -11,12 +11,13 @@ const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleStr
 <template>
   <div class="profit-strip-bar">
     <span v-if="compact" class="profit-mini">
-      今月の粗利 {{ yen(strip?.gross_profit ?? 0) }} ／ 純利益 {{ yen(strip?.net_profit ?? 0) }}
+      今月の実績粗利 {{ yen(strip?.gross_profit ?? 0) }} ／ 純利益 {{ yen(strip?.net_profit ?? 0) }}
+      <span v-if="strip?.pending_count"> ／ 見込み粗利 {{ yen(strip.pending_profit_estimate) }}</span>
     </span>
 
     <div v-else class="profit-strip">
       <div class="p main">
-        <span class="p-label">今月の粗利</span>
+        <span class="p-label" title="取引完了分と、状態未設定の手入力販売">今月の粗利（実績）</span>
         <span class="p-value">{{ yen(strip?.gross_profit ?? 0) }}</span>
         <span class="p-sub">
           売上 {{ yen(strip?.revenue ?? 0) }} ・ {{ strip?.sales_count ?? 0 }} 件 ・ 純利益 {{ yen(strip?.net_profit ?? 0) }}
@@ -25,7 +26,7 @@ const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleStr
       <div class="p">
         <span class="p-label">確定待ちの粗利（見込み）</span>
         <span class="p-value dim">{{ yen(strip?.pending_profit_estimate ?? 0) }}</span>
-        <span class="p-sub">送料・紐付け待ち {{ strip?.pending_count ?? 0 }} 件。入れると確定します</span>
+        <span class="p-sub">取引未完了 {{ strip?.pending_count ?? 0 }} 件。受取評価完了後に実績へ（未入力の原価・送料は未反映）</span>
       </div>
       <div class="p">
         <span class="p-label">売上金の反映待ち</span>

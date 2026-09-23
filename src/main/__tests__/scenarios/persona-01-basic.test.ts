@@ -41,6 +41,7 @@ describe('ペルソナ01：基本の人', () => {
     // メルカリ取り込み：型番付き・送料実額
     const collected = db.insertCollected([{
       mercariItemId: 'm-persona01-1',
+      status: 'completed',
       title: '【Z001-1】ムースクリームわん',
       price: 8999,
       soldAt: today,

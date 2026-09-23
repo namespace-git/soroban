@@ -11,9 +11,9 @@ describe('ペルソナ14：キーワードで私物判定される人', () => {
     db.setSetting('mercari_keyword', 'Mellojoy, メロジョイ')
 
     db.insertCollected([
-      { mercariItemId: 'kw-1', title: 'Mellojoyの限定コラボ', price: 2000, soldAt: '2026-08-01' },
-      { mercariItemId: 'kw-2', title: 'メロジョイのおまけ付き', price: 1500, soldAt: '2026-08-02' },
-      { mercariItemId: 'kw-3', title: '普通の商品です', price: 1000, soldAt: '2026-08-03' },
+      { status: 'completed', mercariItemId: 'kw-1', title: 'Mellojoyの限定コラボ', price: 2000, soldAt: '2026-08-01' },
+      { status: 'completed', mercariItemId: 'kw-2', title: 'メロジョイのおまけ付き', price: 1500, soldAt: '2026-08-02' },
+      { status: 'completed', mercariItemId: 'kw-3', title: '普通の商品です', price: 1000, soldAt: '2026-08-03' },
     ])
     const sales = db.listSales()
     expect(sales.find(s => s.mercari_item_id === 'kw-1')!.kind).toBe('resale')
@@ -23,8 +23,8 @@ describe('ペルソナ14：キーワードで私物判定される人', () => {
     // キーワード未設定に戻す：型番の有無で判定
     db.setSetting('mercari_keyword', '')
     db.insertCollected([
-      { mercariItemId: 'kw-4', title: 'テスト商品【K001】', price: 1200, soldAt: '2026-08-04' },
-      { mercariItemId: 'kw-5', title: '型番の無い商品', price: 800, soldAt: '2026-08-05' },
+      { status: 'completed', mercariItemId: 'kw-4', title: 'テスト商品【K001】', price: 1200, soldAt: '2026-08-04' },
+      { status: 'completed', mercariItemId: 'kw-5', title: '型番の無い商品', price: 800, soldAt: '2026-08-05' },
     ])
     const sales2 = db.listSales()
     expect(sales2.find(s => s.mercari_item_id === 'kw-4')!.kind).toBe('resale')

@@ -1,3 +1,4 @@
+import { createCompletedSale } from '../completed-sale'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 import * as db from '../../db'
@@ -19,9 +20,9 @@ describe('ペルソナ26：月末に締める人（経費の按分・締め）',
   it('経費の金額按分・数量按分が端数を最後の行に寄せて手計算と一致し、タグ絞り込み・締め・再オープンが正しく動く', () => {
     // ---- 販売3件（転売）＋私物1件。2026-01 ----
     // A：未紐付け（item_count=0）、送料は未確定のまま（pending.unconfirmed_shippingを見る）
-    const saleA = db.createSale({ title: '月次A', sold_at: '2026-01-20', price: 1000 })
+    const saleA = createCompletedSale({ title: '月次A', sold_at: '2026-01-20', price: 1000 })
     // B：未紐付け（item_count=0）。送料だけ確定
-    const saleB = db.createSale({ title: '月次B', sold_at: '2026-01-15', price: 2000 })
+    const saleB = createCompletedSale({ title: '月次B', sold_at: '2026-01-15', price: 2000 })
     db.updateSale(saleB, { shipping_fee: 0 })
     // C：在庫2点をまとめて紐付け（item_count=2）
     db.createPurchase({
@@ -32,12 +33,12 @@ describe('ペルソナ26：月末に締める人（経費の按分・締め）',
     })
     const cItems = db.listInventory('in_stock')
     expect(cItems).toHaveLength(2)
-    const saleC = db.createSale({ title: '月次C', sold_at: '2026-01-10', price: 3000 })
+    const saleC = createCompletedSale({ title: '月次C', sold_at: '2026-01-10', price: 3000 })
     db.linkInventory(saleC, cItems.map(i => i.id))
     db.updateSale(saleC, { shipping_fee: 0 })
 
     // 私物1件（按分・集計の対象外）
-    const personalId = db.createSale({
+    const personalId = createCompletedSale({
       title: '私物・月次', sold_at: '2026-01-12', price: 5000, kind: 'personal',
     })
 

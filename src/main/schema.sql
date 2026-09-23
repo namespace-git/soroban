@@ -596,6 +596,7 @@ SELECT
   SUM(cost)                 AS total_cost,
   SUM(gross_profit)         AS gross_profit
 FROM sale_profit
+WHERE status = 'completed' OR (source = 'manual' AND status IS NULL)
 GROUP BY substr(sold_at, 1, 7), kind;
 
 -- 在庫（滞留日数つき）
@@ -704,9 +705,11 @@ linked AS (
     i.model_code,
     sls.price_share  AS price_share,
     sls.profit_share AS profit_share,
+    (s.status = 'completed' OR (s.source = 'manual' AND s.status IS NULL)) AS realized,
     iw.weight         AS weight
   FROM inventory_item i
   JOIN sale_line_share sls ON sls.inventory_item_id = i.id
+  JOIN sale s ON s.id = sls.sale_id
   JOIN item_weight iw ON iw.id = i.id
   WHERE i.model_code IS NOT NULL
 ),
@@ -715,9 +718,12 @@ agg AS (
   -- 従来どおり「点」で数える（このビューの下のSELECTを参照）
   SELECT
     model_code,
-    SUM(price_share)  / SUM(weight) AS avg_price,
-    SUM(profit_share) / SUM(weight) AS avg_profit,
-    SUM(profit_share)               AS total_profit
+    SUM(CASE WHEN realized THEN price_share ELSE 0 END)
+      / NULLIF(SUM(CASE WHEN realized THEN weight ELSE 0 END), 0) AS avg_price,
+    SUM(CASE WHEN realized THEN profit_share ELSE 0 END)
+      / NULLIF(SUM(CASE WHEN realized THEN weight ELSE 0 END), 0) AS avg_profit,
+    SUM(CASE WHEN realized THEN profit_share ELSE 0 END) AS total_profit,
+    SUM(CASE WHEN realized THEN 0 ELSE profit_share END) AS forecast_profit
   FROM linked
   GROUP BY model_code
   HAVING SUM(weight) > 0
@@ -750,6 +756,7 @@ SELECT
      WHERE i2.model_code = base.model_code AND i2.status = 'in_stock') AS stock_value,
   CAST(ROUND(agg.avg_price) AS INTEGER)                  AS avg_price,
   CAST(ROUND(agg.avg_profit) AS INTEGER)                 AS avg_profit,
-  CAST(ROUND(COALESCE(agg.total_profit, 0)) AS INTEGER)  AS total_profit
+  CAST(ROUND(COALESCE(agg.total_profit, 0)) AS INTEGER)  AS total_profit,
+  CAST(ROUND(COALESCE(agg.forecast_profit, 0)) AS INTEGER) AS forecast_profit
 FROM base
 LEFT JOIN agg ON agg.model_code = base.model_code;

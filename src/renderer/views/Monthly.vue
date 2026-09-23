@@ -151,12 +151,16 @@ async function doReopen() {
         >
           <span class="month-card-label">{{ m.month }}{{ m.month === thisMonth ? '（今月）' : '' }}</span>
           <strong class="month-card-value" :class="m.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(m.net_profit) }}</strong>
+          <span v-if="m.forecast?.count" class="faint">見込み粗利 {{ yen(m.forecast.gross_profit) }}</span>
           <StatusChip :tone="statusTone(m)" :label="statusLabel(m)" />
         </button>
       </div>
 
       <div v-if="selectedMonth" class="statement-layout">
         <div class="statement-main">
+          <p class="faint">実績は取引完了分と状態未設定の手入力販売。見込み分は分けて表示しています。</p>
+          <p v-if="statement?.forecast?.count" class="faint">未完了 {{ statement.forecast.count }}件：見込み売上 {{ yen(statement.forecast.revenue) }} ・ 見込み粗利 {{ yen(statement.forecast.gross_profit) }}</p>
+          <p v-if="statement?.personal_forecast?.count" class="faint">私物の見込み（別計）：売上 {{ yen(statement.personal_forecast.revenue) }} ・ 粗利 {{ yen(statement.personal_forecast.gross_profit) }}</p>
           <!-- 締める前に -->
           <div
             v-if="monthDetail && (monthDetail.pending.unconfirmed_shipping > 0 || monthDetail.pending.unmatched > 0)"

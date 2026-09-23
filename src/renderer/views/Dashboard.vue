@@ -310,7 +310,7 @@ function gotoTopModel() {
           </template>
 
           <p class="done-row faint">✓ 今日片付けたもの {{ inbox.done_today }} 件</p>
-          <p class="faint foot">送料と紐付けを入れると利益が確定します。1 件 10 秒。</p>
+          <p class="faint foot">送料と紐付けで原価・利益を確認できます。取引完了までは見込みとして表示します。</p>
         </section>
 
         <!-- 右：見直すもの -->

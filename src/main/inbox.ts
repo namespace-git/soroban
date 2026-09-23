@@ -122,13 +122,6 @@ function shippingFeeRange(): { min: number; max: number } {
   return { min: Math.min(...fees), max: Math.max(...fees) }
 }
 
-function medianShippingFee(): number {
-  const fees = [...activeShippingFees()].sort((a, b) => a - b)
-  if (fees.length === 0) return 0
-  const mid = Math.floor(fees.length / 2)
-  return fees.length % 2 === 1 ? fees[mid] : Math.floor((fees[mid - 1] + fees[mid]) / 2)
-}
-
 /** 送料が既に分かっていれば（出品時に決めた／選択済み）その額、まだなら null */
 function knownShippingFee(sale: SaleProfit): number | null {
   if (sale.is_shipping_confirmed) return sale.shipping_fee
@@ -443,19 +436,6 @@ export function getInbox(): Inbox {
   const thisMonthRow = monthly.find(r => r.month === month && r.kind === 'resale')
   const lastMonthRow = monthly.find(r => r.month === lastMonthStr && r.kind === 'resale')
 
-  const monthSalesResale = allSales.filter(s => s.kind === 'resale' && s.sold_at.slice(0, 7) === month)
-  let pendingProfitEstimate = 0
-  let pendingCount = 0
-  for (const s of monthSalesResale) {
-    if (s.is_shipping_confirmed === 0 || s.unmatched === 1) {
-      pendingCount += 1
-      const shippingFee = knownShippingFee(s) ?? medianShippingFee()
-      const cost = estimateCost(s)
-      const profit = s.price - s.fee - shippingFee - s.packaging_cost - cost
-      if (profit > 0) pendingProfitEstimate += profit
-    }
-  }
-
   const payoutRow = db.getDb().prepare(`
     SELECT COUNT(*) AS c, COALESCE(SUM(price - fee), 0) AS total
     FROM sale WHERE status IN ('shipped','delivered')
@@ -467,8 +447,8 @@ export function getInbox(): Inbox {
     net_profit: thisMonthRow?.net_profit ?? 0,
     revenue: thisMonthRow?.revenue ?? 0,
     sales_count: thisMonthRow?.sales_count ?? 0,
-    pending_profit_estimate: pendingProfitEstimate,
-    pending_count: pendingCount,
+    pending_profit_estimate: thisMonthRow?.forecast?.gross_profit ?? 0,
+    pending_count: thisMonthRow?.forecast?.count ?? 0,
     awaiting_payout: payoutRow.total,
     awaiting_payout_count: payoutRow.c,
     last_month: lastMonthRow

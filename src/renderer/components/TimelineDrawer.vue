@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { isRealized } from '../../shared/recognition'
 // 在庫 1 点の追跡（仕入→到着→出品→売れた→発送→受取→取引完了）を読むだけのドロワー。
 // 編集はしない。開くたびに getItemTimeline を呼び直す（購入元の詳細は「いっしょに買ったもの」用に別途取る）。
 import { ref, computed, inject, watch } from 'vue'
@@ -140,7 +141,7 @@ const saleCard = computed(() => {
       fee: `−${yen(sale.fee + sale.shipping_fee)}`,
       feeSub: `手数料 ${yen(sale.fee)}・送料 ${yen(sale.shipping_fee)}`,
       profit: sale.gross_profit,
-      profitSub: sale.item_count > 1 ? `まとめ売り ${sale.item_count}点の粗利` : 'この販売の粗利',
+      profitSub: (!isRealized(sale) ? '見込み・取引未完了 / ' : '実績 / ') + (sale.item_count > 1 ? `まとめ売り ${sale.item_count}点の粗利` : 'この販売の粗利'),
     }
   }
   if (item.listing) {

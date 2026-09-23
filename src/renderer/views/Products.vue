@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { isRealized } from '../../shared/recognition'
 import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { ProductSummary, ProductKarte, InventoryItem, ShippingMethod, Tag } from '../../shared/types'
 import StatusChip from '../components/StatusChip.vue'
@@ -361,6 +362,7 @@ const estimateCompare = computed(() => {
             <span class="prow-profit">
               <span class="faint">粗利計</span>
               <strong :class="p.total_profit >= 0 ? 'profit' : 'loss'">{{ yen(p.total_profit) }}</strong>
+              <span v-if="p.forecast_profit" class="faint">見込み {{ yen(p.forecast_profit) }}</span>
             </span>
           </button>
         </div>
@@ -549,7 +551,7 @@ const estimateCompare = computed(() => {
                     <StatusPill v-if="!s.is_shipping_confirmed" tone="warn" label="送料未入力" />
                   </td>
                   <td class="num">{{ yen(s.cost) }}</td>
-                  <td class="num" :class="s.gross_profit >= 0 ? 'profit' : 'loss'">{{ yen(s.gross_profit) }}</td>
+                  <td class="num" :class="s.gross_profit >= 0 ? 'profit' : 'loss'">{{ !isRealized(s) ? '見込み ' : '' }}{{ yen(s.gross_profit) }}</td>
                   <td class="faint">{{ s.buyer ?? '—' }}</td>
                 </tr>
               </tbody>
