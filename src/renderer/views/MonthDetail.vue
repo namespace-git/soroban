@@ -121,9 +121,6 @@ function expenseContent(e: Expense): string {
 </script>
 
 <template>
-  <p v-if="detail?.forecast?.count" class="faint">
-    取引未完了 {{ detail.forecast.count }}件：見込み売上 {{ yen(detail.forecast.revenue) }} ・ 見込み粗利 {{ yen(detail.forecast.gross_profit) }}（以下の実績・経費按分には含めません）
-  </p>
   <div class="sales-block">
     <Skeleton v-if="!loaded" :rows="6" />
 
@@ -191,7 +188,7 @@ function expenseContent(e: Expense): string {
             <tr v-for="s in filteredSales" :key="s.id">
               <td class="dim nowrap">{{ s.sold_at }}</td>
               <td class="title-cell">
-                <div class="item-name">{{ s.title }}</div>
+                <div class="row-title one-line" :title="s.title">{{ s.title }}</div>
                 <div class="chip-row">
                   <CodeChip v-for="mc in s.model_codes" :key="mc" kind="model" :code="mc" />
                   <StatusChip v-for="t in s.tags" :key="t.id" tone="info" :label="t.name" />
@@ -302,7 +299,6 @@ function expenseContent(e: Expense): string {
 .category-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 
 .title-cell { max-width: 320px; }
-.item-name { font-size: var(--fs-14); font-weight: 500; }
 
 .expenses-note { margin: 12px 20px 16px; }
 </style>

@@ -222,12 +222,12 @@ function gotoTopModel() {
                 </div>
 
                 <div class="row-main">
-                  <div v-if="group.kind === 'ship' || (group.kind === 'confirm' && item.purchase)" class="row-status">
+                  <div class="row-labels">
                     <StatusPill v-if="group.kind === 'ship'" tone="solid-info" label="発送してください" />
                     <StatusChip v-if="group.kind === 'confirm' && item.purchase" tone="neutral" :label="item.purchase.shop_account_name" />
                   </div>
-                  <div class="row-title"><span>{{ item.title }}</span></div>
-                  <div class="row-detail">
+                  <div class="row-title one-line" :title="item.title">{{ item.title }}</div>
+                  <div class="row-sub">
                     <span class="dim">{{ item.detail }}</span>
                     <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint" :class="profitHintClass(item.profit_hint)">
                       ・ {{ profitHintText(group.kind, item.profit_hint) }}
@@ -371,7 +371,6 @@ function gotoTopModel() {
 </template>
 
 <style scoped>
-.row-status { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; min-height: 24px; }
 /* --- 利益ストリップ（読み込み中はこのカード分割のまま。読み込み後は ProfitStripBar に置き換える） --- */
 .profit-strip-bar {
   margin-bottom: 18px;
@@ -470,18 +469,7 @@ function gotoTopModel() {
 .row-thumb-ph.warn { background: var(--warn-bg); color: var(--warn); }
 
 .row-main { min-width: 0; }
-.row-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-}
-.row-detail {
-  margin-top: 2px;
-  font-size: var(--fs-12);
-}
-/* 色は .profit / .loss（style.css）に委ねる。負の見込みを緑で出さない */
+/* .row-labels / .row-title / .row-sub は style.css の共通クラス。色は .profit / .loss に委ねる。負の見込みを緑で出さない */
 .profit-hint { font-weight: 700; }
 
 .row-act {

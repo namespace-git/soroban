@@ -552,6 +552,7 @@ async function editNote(item: InventoryItem) {
         <button type="button" :class="{ on: viewMode === 'group' }" @click="viewMode = 'group'">型番ごと</button>
         <button type="button" :class="{ on: viewMode === 'flat' }" @click="viewMode = 'flat'">1点ずつ</button>
       </span>
+      <SearchBox v-model="searchText" placeholder="名前・型番・素材・メモ・タグ・仕入先を検索" />
       <select v-model="statusSelectValue">
         <option v-for="o in statusOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
       </select>
@@ -567,13 +568,7 @@ async function editNote(item: InventoryItem) {
           <option v-for="t in productTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
         </optgroup>
       </select>
-      <SearchBox v-model="searchText" placeholder="名前・型番・素材・メモ・タグ・仕入先を検索" />
       <PeriodSelect v-model="period" />
-      <select v-if="viewMode === 'group'" v-model="groupSortKey">
-        <option value="aging">滞留が長い順</option>
-        <option value="acquired_at">仕入日</option>
-        <option value="cost">原価</option>
-      </select>
       <button
         v-if="agingMinFilter != null"
         type="button"
@@ -583,8 +578,13 @@ async function editNote(item: InventoryItem) {
       >
         <StatusChip tone="warn" :label="`滞留 ${agingMinFilter} 日以上 ×`" />
       </button>
+      <select v-if="viewMode === 'group'" v-model="groupSortKey">
+        <option value="aging">滞留が長い順</option>
+        <option value="acquired_at">仕入日</option>
+        <option value="cost">原価</option>
+      </select>
       <span class="grow" />
-      <span class="faint nowrap">{{ totalCount }}点 ／ 原価計 {{ yen(totalCost) }}</span>
+      <span class="toolbar-count">{{ totalCount }} 件 ・ 合計 {{ yen(totalCost) }}</span>
     </div>
     <p class="faint hint-row">
       在庫コード（S-0012）をクリックするとコピーできます。メルカリのタイトルに貼るとその1点が自動で引き当たります。2個セットは【S-0012】【S-0013】のように並べます
@@ -604,12 +604,12 @@ async function editNote(item: InventoryItem) {
               <span v-else class="gimg-ph">{{ groupPlaceholderChar(g) }}</span>
             </div>
             <div class="gmain">
-              <div class="gt">
-                <span class="gt-name">{{ g.name }}</span>
+              <div class="row-labels">
                 <CodeChip v-if="g.model_code" kind="model" :code="g.model_code" />
                 <StatusChip v-for="t in g.tags" :key="t.id" tone="info" :label="t.name" />
               </div>
-              <div class="gs">{{ groupSubLine(g) }}</div>
+              <div class="row-title one-line" :title="g.name">{{ g.name }}</div>
+              <div class="row-sub" :title="groupSubLine(g)">{{ groupSubLine(g) }}</div>
             </div>
             <div class="gnum">
               <span v-if="g.cost_per_item != null" class="gnum-item">
@@ -623,11 +623,11 @@ async function editNote(item: InventoryItem) {
                 </b>
               </span>
               <button
-                v-if="g.model_code" type="button" class="link-action"
+                v-if="g.model_code" type="button" class="sm ghost product-link"
                 @click="goto('products', { modelCode: g.model_code })"
               >
                 商品カルテ
-                <Icon name="arrow-right" :size="16" />
+                <Icon name="arrow-right" :size="14" />
               </button>
               <button v-else type="button" class="link-action" @click="assignGroupModelCode(g)">型番を付ける</button>
             </div>
@@ -645,7 +645,7 @@ async function editNote(item: InventoryItem) {
               </div>
               <div class="git-meta clickable" @click="openTimeline(i)">
                 <span>{{ i.shop_account_name ?? '—' }} ・ {{ i.acquired_at }} 仕入</span>
-                <div v-if="i.tags.length || i.inherited_tags.length" class="chip-row">
+                <div class="chip-row">
                   <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
                   <span
                     v-for="t in i.inherited_tags" :key="'inh-' + t.id"
@@ -933,16 +933,14 @@ async function editNote(item: InventoryItem) {
   font-size: var(--fs-16);
 }
 .gmain { min-width: 0; }
-.gt {
-  display: flex;
+
+/* 商品カルテへのリンク。矢印アイコンとの間隔を空けて読みやすくする（型番なしの
+   「型番を付ける」は文字だけのリンクのまま。他画面の矢印付きリンクボタンと同じ形） */
+.product-link {
+  display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: var(--fs-14);
-  font-weight: 600;
+  gap: 4px;
 }
-.gt-name { word-break: break-word; }
-.gs { margin-top: 4px; font-size: var(--fs-12); color: var(--text-dim); }
 
 .gnum {
   display: flex;
@@ -976,7 +974,8 @@ async function editNote(item: InventoryItem) {
 .git-code { grid-area: code; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .split-label { font-size: var(--fs-11); }
 .git-meta { grid-area: meta; min-width: 0; }
-.git-meta .chip-row { margin-top: 4px; }
+/* タグの段はタグが無い行でも高さを確保する。行ごとに高さが変わらないように */
+.git-meta .chip-row { margin-top: 4px; min-height: 22px; }
 .git-cost { grid-area: cost; text-align: right; font-variant-numeric: tabular-nums; }
 .git-aging { grid-area: aging; text-align: center; }
 .git-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; grid-area: state; text-align: left; }

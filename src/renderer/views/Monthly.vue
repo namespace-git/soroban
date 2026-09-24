@@ -158,9 +158,31 @@ async function doReopen() {
 
       <div v-if="selectedMonth" class="statement-layout">
         <div class="statement-main">
-          <p class="faint">実績は取引完了分と状態未設定の手入力販売。見込み分は分けて表示しています。</p>
-          <p v-if="statement?.forecast?.count" class="faint">未完了 {{ statement.forecast.count }}件：見込み売上 {{ yen(statement.forecast.revenue) }} ・ 見込み粗利 {{ yen(statement.forecast.gross_profit) }}</p>
-          <p v-if="statement?.personal_forecast?.count" class="faint">私物の見込み（別計）：売上 {{ yen(statement.personal_forecast.revenue) }} ・ 粗利 {{ yen(statement.personal_forecast.gross_profit) }}</p>
+          <p class="faint">実績＝取引完了分と、状態が取れていない手入力の販売。</p>
+
+          <div v-if="statement?.forecast?.count || statement?.personal_forecast?.count" class="panel forecast-panel">
+            <p class="panel-title">見込み（取引未完了）</p>
+            <div class="stats">
+              <div v-if="statement?.forecast?.count" class="stat">
+                <span class="stat-label">件数</span>
+                <span class="stat-value">{{ statement.forecast.count }}<span class="unit">件</span></span>
+              </div>
+              <div v-if="statement?.forecast?.count" class="stat">
+                <span class="stat-label">見込み売上</span>
+                <span class="stat-value">{{ yen(statement.forecast.revenue) }}</span>
+              </div>
+              <div v-if="statement?.forecast?.count" class="stat">
+                <span class="stat-label">見込み粗利</span>
+                <span class="stat-value">{{ yen(statement.forecast.gross_profit) }}</span>
+              </div>
+              <div v-if="statement?.personal_forecast?.count" class="stat">
+                <span class="stat-label">私物の見込み（別計）</span>
+                <span class="stat-value">{{ yen(statement.personal_forecast.gross_profit) }}</span>
+                <span class="stat-sub">売上 {{ yen(statement.personal_forecast.revenue) }}</span>
+              </div>
+            </div>
+          </div>
+
           <!-- 締める前に -->
           <div
             v-if="monthDetail && (monthDetail.pending.unconfirmed_shipping > 0 || monthDetail.pending.unmatched > 0)"
@@ -408,6 +430,10 @@ async function doReopen() {
 @media (max-width: 1099px) {
   .statement-layout { grid-template-columns: 1fr; }
 }
+
+/* --- 見込み（取引未完了） --- */
+.forecast-panel { margin-bottom: 16px; }
+.forecast-panel .panel-title { margin-bottom: 10px; }
 
 /* --- 締める前に --- */
 .pending-panel {

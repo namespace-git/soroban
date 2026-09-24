@@ -296,8 +296,8 @@ function openProduct() {
             <span v-if="i < timeline.events.length - 1" class="tl-line" />
           </div>
           <div class="tl-body">
-            <div class="tl-title">{{ e.title }}</div>
-            <div v-if="e.detail" class="tl-detail">{{ e.detail }}</div>
+            <div class="tl-title row-title one-line" :title="e.title">{{ e.title }}</div>
+            <div class="tl-detail row-sub" :title="e.detail ?? ''">{{ e.detail }}</div>
             <button
               v-if="e.kind === 'listed' && listingMercariId"
               type="button" class="tl-link" @click="openMercariLink('item', listingMercariId)"
@@ -464,9 +464,7 @@ h3 {
   min-width: 0;
   padding-bottom: 18px;
 }
-.tl-title { font-size: var(--fs-14); font-weight: 600; }
 .tl-row.pending .tl-title { color: var(--text-faint); font-weight: 500; }
-.tl-detail { margin-top: 2px; font-size: var(--fs-13); color: var(--text-dim); }
 .tl-amount {
   flex-shrink: 0;
   padding-top: 1px;

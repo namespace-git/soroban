@@ -15,7 +15,7 @@ import PurchaseCsvDrawer from '../components/PurchaseCsvDrawer.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import PeriodSelect, { inPeriod, periodRange, type Period } from '../components/PeriodSelect.vue'
 import SortTh from '../components/SortTh.vue'
-import { useSort } from '../composables/useSort'
+import { useSort, type SortDir } from '../composables/useSort'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import type { ConfirmChoice } from '../components/ConfirmDialog.vue'
 
@@ -69,6 +69,17 @@ function shortDate(d: string | null): string {
   return d ? d.slice(5) : ''
 }
 
+/** 行の .row-title：仕入先＋注文番号。名前の長さで位置が動かないよう、状態ラベルは別の段（.row-labels）に出す */
+function rowTitle(p: PurchaseSummary): string {
+  return p.order_no ? `${p.shop_account_name} ・ #${p.order_no}` : p.shop_account_name
+}
+
+/** 行の .row-sub：注文日・明細数・代表商品名 */
+function rowSub(p: PurchaseSummary): string {
+  const base = `${p.ordered_at} 注文 ・ 明細 ${p.line_count} ・ ${p.first_line_name ?? '—'}`
+  return p.line_count > 1 ? `${base} ほか${p.line_count - 1}点` : base
+}
+
 /**
  * 配送の進行：注文 › 発送 › 配送中 › 到着。fulfillment が 'delivered' または
  * null（手入力で分からない）は全段「到着」まで点灯（PurchaseDrawer と同じ扱い）
@@ -100,6 +111,16 @@ function sortValue(p: PurchaseSummary, key: SortKey): string | number | null {
   }
 }
 
+/** ツールバーの並び替えセレクト。列見出し（SortTh）と同じ sortKey/sortDir を共有する */
+const sortSelectValue = computed<string>({
+  get: () => `${sortKey.value}:${sortDir.value}`,
+  set: (v) => {
+    const [key, dir] = v.split(':') as [SortKey, SortDir]
+    sortKey.value = key
+    sortDir.value = dir
+  },
+})
+
 /** 下書きを一覧の先頭に（それぞれの中の順序は選んだ並び替えのまま） */
 const sortedPurchases = computed(() =>
   [...sortRows(purchases.value, sortValue)]
@@ -112,12 +133,22 @@ const searchText = ref('')
 const period = ref<Period>('all')
 /** 仕入先の絞り込み。空文字列なら「すべて」（上の仕入先カードと連動） */
 const shopAccountFilter = ref('')
+/** タグの絞り込み。空文字列なら「すべて」。仕入に直接付いたタグで絞る */
+const tagFilter = ref('')
 
-/** 検索語より前に、期間と仕入先だけで絞った行（明細検索の対象を決めるのに使う） */
+/** タグの絞り込み候補：今読み込んでいる仕入に付いているタグだけ（在庫タブの tagOptionsOf と同じ考え方） */
+const tagOptions = computed(() => {
+  const map = new Map<string, string>()
+  for (const p of purchases.value) for (const t of p.tags) map.set(t.id, t.name)
+  return [...map].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'ja'))
+})
+
+/** 検索語より前に、期間・仕入先・タグだけで絞った行（明細検索の対象を決めるのに使う） */
 const periodShopFiltered = computed(() =>
   sortedPurchases.value.filter(p =>
     inPeriod(p.ordered_at, period.value)
-    && (!shopAccountFilter.value || p.shop_account_id === shopAccountFilter.value),
+    && (!shopAccountFilter.value || p.shop_account_id === shopAccountFilter.value)
+    && (!tagFilter.value || p.tags.some(t => t.id === tagFilter.value)),
   ),
 )
 
@@ -633,13 +664,23 @@ async function remove(p: PurchaseSummary) {
     <div class="toolbar">
       <SearchBox v-model="searchText" placeholder="商品名・注文番号・仕入先・メモ・明細を検索" />
       <PeriodSelect v-model="period" />
+      <select v-model="tagFilter">
+        <option value="">すべてのタグ</option>
+        <option v-for="t in tagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+      </select>
+      <select v-model="sortSelectValue">
+        <option value="ordered_at:desc">注文日が新しい順</option>
+        <option value="ordered_at:asc">注文日が古い順</option>
+        <option value="total_cost:desc">総原価が高い順</option>
+        <option value="total_cost:asc">総原価が低い順</option>
+      </select>
       <span class="grow" />
-      <span v-if="shopAccountFilter" class="faint">
-        {{ filteredPurchases.length }}件 ／ 明細 {{ shopAccountSummary.lineCount }} ／
-        商品計 {{ yen(shopAccountSummary.subtotal) }} ／ 送料 {{ yen(shopAccountSummary.shippingFee) }} ／
-        支払合計 {{ yen(shopAccountSummary.totalCost) }}
+      <span class="toolbar-count">
+        {{ filteredPurchases.length }} 件 ・ 合計 {{ yen(periodTotalCost) }}
+        <template v-if="shopAccountFilter">
+          （明細 {{ shopAccountSummary.lineCount }} ・ 商品計 {{ yen(shopAccountSummary.subtotal) }} ・ 送料 {{ yen(shopAccountSummary.shippingFee) }}）
+        </template>
       </span>
-      <span v-else class="faint">{{ filteredPurchases.length }}件 ／ 総原価 {{ yen(periodTotalCost) }}</span>
     </div>
 
     <Skeleton v-if="!loaded" :rows="5" />
@@ -671,21 +712,14 @@ async function remove(p: PurchaseSummary) {
                 <span class="thumb-placeholder">{{ shopMarkChar(p) }}</span>
               </td>
               <td class="info-cell">
-                <div class="info-title">
-                  <span class="info-title-text">
-                    {{ p.shop_account_name }}<span v-if="p.order_no"> ・ #{{ p.order_no }}</span>
-                  </span>
-                  <span class="chip-row inline">
-                    <StatusChip v-if="p.status === 'draft'" tone="warn" label="価格未入力" />
-                    <StatusChip v-if="p.import_key" tone="neutral" label="自動取得" />
-                    <StatusChip v-else tone="neutral" label="手入力" />
-                    <StatusChip v-for="t in p.tags" :key="t.id" tone="info" :label="t.name" />
-                  </span>
+                <div class="row-labels">
+                  <StatusChip v-if="p.status === 'draft'" tone="warn" label="価格未入力" />
+                  <StatusChip v-if="p.import_key" tone="neutral" label="自動取得" />
+                  <StatusChip v-else tone="neutral" label="手入力" />
+                  <StatusChip v-for="t in p.tags" :key="t.id" tone="info" :label="t.name" />
                 </div>
-                <div class="info-sub faint">
-                  {{ p.ordered_at }} 注文 ・ 明細 {{ p.line_count }} ・ {{ p.first_line_name ?? '—' }}
-                  <span v-if="p.line_count > 1">ほか{{ p.line_count - 1 }}点</span>
-                </div>
+                <div class="row-title one-line" :title="rowTitle(p)">{{ rowTitle(p) }}</div>
+                <div class="row-sub" :title="rowSub(p)">{{ rowSub(p) }}</div>
                 <div v-if="p.note" class="note-row">
                   <Icon name="note" :size="14" class="icon-note" />
                   <span class="note-label">メモ</span>
@@ -857,25 +891,9 @@ tr.focused { background: var(--brand-soft); }
   font-size: var(--fs-14);
 }
 
-/* --- 行のヘッダ情報：仕入先・注文番号＋チップ／sub に注文日・明細・代表商品名 --- */
+/* --- 行のヘッダ情報：状態ラベル（.row-labels）／仕入先・注文番号（.row-title）／
+   注文日・明細・代表商品名（.row-sub）は共通規約（style.css）に揃える --- */
 .info-cell { overflow: hidden; }
-.info-title {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.info-title-text {
-  font-size: var(--fs-14);
-  font-weight: 500;
-  white-space: normal;
-  word-break: break-word;
-}
-.chip-row.inline { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-top: 0; }
-.info-sub {
-  margin-top: 2px;
-  font-size: var(--fs-13);
-}
 
 /* --- 配送の進行：注文 › 発送 › 配送 › 到着。1行に収める（折り返すと点灯が読み違えられる） --- */
 .ship-progress {

@@ -607,3 +607,72 @@ tr.total-row.loss > td {
   padding: 6px 14px;
   white-space: nowrap;
 }
+
+/* ============================================================
+   一覧の行と、一覧の上のツールバー（全画面で同じ形にする）
+
+   ■ 行は必ずこの順の 4 段で組む
+       ① .row-labels  状態ラベル（StatusPill / StatusChip）
+       ② .row-title   名前
+       ③ .row-sub     日付・仕入先・明細などの補助
+       ④ .chip-row（タグ・型番）／ .note-row（メモ）
+     状態ラベルを名前の「後ろ」に並べない。名前の長さでラベルの位置が
+     動いて、目で追えなくなるため（利用者の指摘）。
+     ラベルが無い行でも .row-labels の高さは確保して、行の頭を揃える。
+
+   ■ 行の高さは中身で変えない
+     名前は 2 行（.one-line なら 1 行）、補助は 1 行でクランプし、
+     その分の高さを min-height で先に確保する。全文は title 属性で読ませる。
+
+   ■ ツールバーは .toolbar だけを使い（画面ごとの別名を作らない）、
+     並びは 検索 → 絞り込み（状態・タグ・期間）→ 並び替え → .grow → .toolbar-count。
+     件数は「n 件 ・ 合計 ¥x」の形に揃える（「点」「総原価」等の言い換えをしない）。
+   ============================================================ */
+
+.row-labels {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 22px;
+  margin-bottom: 4px;
+}
+
+.row-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  min-height: calc(1.4em * 2);
+  font-weight: 600;
+}
+.row-title.one-line {
+  -webkit-line-clamp: 1;
+  min-height: 1.4em;
+}
+
+.row-sub {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  min-height: 1.4em;
+  margin-top: 2px;
+  font-size: var(--fs-13);
+  color: var(--text-dim);
+}
+.row-sub.two-lines {
+  -webkit-line-clamp: 2;
+  min-height: calc(1.4em * 2);
+}
+
+/* 一覧の右端の件数・合計 */
+.toolbar-count {
+  font-size: var(--fs-12);
+  color: var(--text-faint);
+  white-space: nowrap;
+}

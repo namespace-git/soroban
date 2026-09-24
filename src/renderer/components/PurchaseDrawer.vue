@@ -3,7 +3,7 @@
 // 何を何個買って、そこから生まれた在庫が今どうなっているかを1画面で見せる。
 // タグ・メモ・確定は Purchases.vue にある既存の処理をそのまま呼ぶ（ここでは持たない）。
 import { ref, watch, inject } from 'vue'
-import type { PurchaseDetail, PurchaseLineItem, Fulfillment } from '../../shared/types'
+import type { PurchaseDetail, PurchaseLine, PurchaseLineItem, Fulfillment } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import CodeChip from './CodeChip.vue'
@@ -98,6 +98,11 @@ function itemChip(it: PurchaseLineItem): ChipInfo {
 
 function itemClickable(it: PurchaseLineItem): boolean {
   return it.status === 'sold' && !!it.sale_id
+}
+
+/** 行の .row-sub：数量・単価・原価／点・小計をまとめて1行で見せる */
+function lineSubText(l: PurchaseLine): string {
+  return `数量 ${l.quantity} ・ 単価 ${yen(l.unit_price)} ・ 原価／点 ${yen(l.landed_unit_cost)} ・ 小計 ${yen(l.unit_price * l.quantity)}`
 }
 
 function openSale(it: PurchaseLineItem) {
@@ -197,50 +202,34 @@ async function onRefetchImages() {
         </template>
       </div>
 
-      <table class="compact lines-table">
-        <thead>
-          <tr>
-            <th>商品</th>
-            <th class="num">数量</th>
-            <th class="num">単価</th>
-            <th class="num">原価／点</th>
-            <th class="num">小計</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="l in detail.lines" :key="l.id">
-            <td class="line-cell">
-              <div class="line-name-row">
-                <img
-                  v-if="l.items[0]?.image_url" :key="l.items[0]!.image_url!" class="line-thumb"
-                  :src="l.items[0]!.image_url!" alt="" loading="lazy"
-                />
-                <div class="line-name">{{ l.name }}</div>
-              </div>
-              <div v-if="l.model_code" class="chip-row">
-                <StatusChip tone="neutral" :label="l.model_code" />
-              </div>
-              <div v-if="l.items.length" class="chip-row items-row">
-                <span v-for="it in l.items" :key="it.id" class="item-chip-group">
-                  <CodeChip kind="item" :code="it.item_code" />
-                  <button
-                    class="item-chip-btn" :class="{ clickable: itemClickable(it) }"
-                    :disabled="!itemClickable(it)"
-                    :title="itemClickable(it) ? '売上タブの該当行を見る' : undefined"
-                    @click="openSale(it)"
-                  >
-                    <StatusChip :tone="itemChip(it).tone" :label="itemChip(it).label" />
-                  </button>
-                </span>
-              </div>
-            </td>
-            <td class="num">{{ l.quantity }}</td>
-            <td class="num">{{ yen(l.unit_price) }}</td>
-            <td class="num dim">{{ yen(l.landed_unit_cost) }}</td>
-            <td class="num">{{ yen(l.unit_price * l.quantity) }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="lines-list">
+        <div v-for="l in detail.lines" :key="l.id" class="line-row">
+          <img
+            v-if="l.items[0]?.image_url" :key="l.items[0]!.image_url!" class="line-thumb"
+            :src="l.items[0]!.image_url!" alt="" loading="lazy"
+          />
+          <div class="line-main">
+            <div class="row-labels">
+              <StatusChip v-if="l.model_code" tone="neutral" :label="l.model_code" />
+            </div>
+            <div class="row-title one-line" :title="l.name">{{ l.name }}</div>
+            <div class="row-sub" :title="lineSubText(l)">{{ lineSubText(l) }}</div>
+            <div v-if="l.items.length" class="chip-row items-row">
+              <span v-for="it in l.items" :key="it.id" class="item-chip-group">
+                <CodeChip kind="item" :code="it.item_code" />
+                <button
+                  class="item-chip-btn" :class="{ clickable: itemClickable(it) }"
+                  :disabled="!itemClickable(it)"
+                  :title="itemClickable(it) ? '売上タブの該当行を見る' : undefined"
+                  @click="openSale(it)"
+                >
+                  <StatusChip :tone="itemChip(it).tone" :label="itemChip(it).label" />
+                </button>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
       <p v-if="detail.status === 'draft'" class="faint hint-row">確定すると在庫が生まれます</p>
 
       <div class="totals-block">
@@ -347,26 +336,26 @@ async function onRefetchImages() {
 .item-head-text { min-width: 0; }
 .item-name { font-size: var(--fs-14); font-weight: 600; }
 
-.lines-table { margin-top: 4px; }
-.line-cell { min-width: 0; }
-.line-name-row {
+/* --- 明細：品名（.row-title）・数量／単価など（.row-sub）・型番（.row-labels）は
+   共通規約（style.css）に揃える。行の高さが明細ごとにばらつかないようにする --- */
+.lines-list { margin-top: 4px; }
+.line-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
 }
+.line-row:first-child { border-top: 0; }
 .line-thumb {
   width: 32px;
   height: 32px;
+  margin-top: 2px;
   border-radius: var(--radius-sm);
   object-fit: cover;
   flex-shrink: 0;
 }
-.line-name {
-  font-size: var(--fs-14);
-  font-weight: 500;
-  white-space: normal;
-  word-break: break-word;
-}
+.line-main { min-width: 0; flex: 1; }
 .items-row { margin-top: 6px; }
 
 .item-chip-group {

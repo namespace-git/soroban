@@ -213,15 +213,66 @@ function passesFilters(r: Row): boolean {
   return true
 }
 
-// --- 既定の並び：未確定（粗利が出ていない行）が先、次に日付降順 ---
-const filteredRows = computed(() => rows.value.filter(passesFilters).sort((a, b) => {
-  const au = rowUnresolved(a) ? 0 : 1
-  const bu = rowUnresolved(b) ? 0 : 1
-  if (au !== bu) return au - bu
-  const ad = rowDateDisplay(a)
-  const bd = rowDateDisplay(b)
-  return ad === bd ? 0 : ad < bd ? 1 : -1
-}))
+// --- 並び替え（在庫タブと同じ形のセレクト）。既定は「未確定（粗利が出ていない行）が先、
+//     次に日付降順」で、今までの挙動のまま。それ以外を選んだときだけ単純な並びに切り替える ---
+type SortOption = 'default' | 'date_desc' | 'date_asc' | 'profit_desc' | 'profit_asc' | 'price_desc' | 'price_asc'
+const sortOption = ref<SortOption>('default')
+
+/** 粗利の並び替え用の値。私物・未確定（送料未入力／未紐付け）は値が無い扱いにして末尾へ送る */
+function rowProfitValue(r: Row): number | null {
+  if (r.kind === 'sale' && r.sale) {
+    if (r.sale.kind === 'personal' || rowUnresolved(r)) return null
+    return r.sale.gross_profit
+  }
+  if (r.kind === 'listing' && r.listing) return r.listing.expected_profit
+  return null
+}
+function rowPriceValue(r: Row): number {
+  return r.kind === 'sale' ? (r.sale?.price ?? 0) : (r.listing?.price ?? 0)
+}
+
+const filteredRows = computed(() => {
+  const list = rows.value.filter(passesFilters)
+  if (sortOption.value === 'date_desc' || sortOption.value === 'date_asc') {
+    const dir = sortOption.value === 'date_desc' ? -1 : 1
+    return list.sort((a, b) => {
+      const ad = rowDateDisplay(a)
+      const bd = rowDateDisplay(b)
+      return ad === bd ? 0 : (ad < bd ? -1 : 1) * dir
+    })
+  }
+  if (sortOption.value === 'profit_desc' || sortOption.value === 'profit_asc') {
+    const dir = sortOption.value === 'profit_desc' ? -1 : 1
+    return list.sort((a, b) => {
+      const ap = rowProfitValue(a)
+      const bp = rowProfitValue(b)
+      if (ap === null && bp === null) return 0
+      if (ap === null) return 1 // 値の無い行は常に末尾
+      if (bp === null) return -1
+      return (ap - bp) * dir
+    })
+  }
+  if (sortOption.value === 'price_desc' || sortOption.value === 'price_asc') {
+    const dir = sortOption.value === 'price_desc' ? -1 : 1
+    return list.sort((a, b) => (rowPriceValue(a) - rowPriceValue(b)) * dir)
+  }
+  // 既定：未確定（粗利が出ていない行）が先、次に日付降順
+  return list.sort((a, b) => {
+    const au = rowUnresolved(a) ? 0 : 1
+    const bu = rowUnresolved(b) ? 0 : 1
+    if (au !== bu) return au - bu
+    const ad = rowDateDisplay(a)
+    const bd = rowDateDisplay(b)
+    return ad === bd ? 0 : ad < bd ? 1 : -1
+  })
+})
+
+// --- ツールバー右端の合計。いま表の中に見えている販売の売上合計（実績・見込みを分けない）。
+//     見えている数と足し算が合わないと数え直したくなるため。出品中の段は成約前なので出さない ---
+const toolbarRevenue = computed<number | null>(() => {
+  if (stage.value === 'listed') return null
+  return filteredRows.value.reduce((sum, r) => sum + (r.sale?.price ?? 0), 0)
+})
 
 function matchesStage(st: Stage, s: SaleProfit): boolean {
   if (st === 'to_ship') return s.status === 'waiting_shipment'
@@ -824,10 +875,21 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
       >
         <StatusChip tone="brand" :label="`${monthFilter} ×`" />
       </button>
-      <span class="grow" />
       <button v-if="stage === 'listed'" class="sm" @click="autoReserveListings">型番で自動紐付け</button>
       <button v-if="stage !== 'listed'" class="sm" @click="autoLinkPending">型番で自動紐付け</button>
-      <span class="faint">{{ filteredRows.length }}件<template v-if="monthFilter">・{{ monthFilter }} の販売</template></span>
+      <select v-model="sortOption" title="並び替え">
+        <option value="default">既定（未確定が先）</option>
+        <option value="date_desc">日付が新しい順</option>
+        <option value="date_asc">日付が古い順</option>
+        <option value="profit_desc">粗利が高い順</option>
+        <option value="profit_asc">粗利が低い順</option>
+        <option value="price_desc">価格が高い順</option>
+        <option value="price_asc">価格が低い順</option>
+      </select>
+      <span class="grow" />
+      <span class="toolbar-count">
+        {{ filteredRows.length }} 件<template v-if="toolbarRevenue !== null"> ・ 合計 {{ yen(toolbarRevenue) }}</template><template v-if="monthFilter"> ・ {{ monthFilter }} の販売</template>
+      </span>
     </div>
 
     <div v-if="tagFilter && totals" class="panel totals-bar">
@@ -890,27 +952,25 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
           </div>
 
           <div class="cell-product">
-            <div class="product-status-row">
+            <div class="row-labels">
               <StatusPill v-if="r.kind === 'sale' && r.sale?.status && SALE_STATUS_PILL[r.sale.status]"
                 :tone="SALE_STATUS_PILL[r.sale.status].tone" :label="SALE_STATUS_PILL[r.sale.status].label" />
               <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="STATUS_LABEL[r.listing.status]" />
               <StatusChip v-if="r.sale && !r.sale.status" tone="neutral" :label="r.sale.source === 'manual' ? '手入力' : '状態未取得'" />
             </div>
-            <div class="title-line">
-              <span
-                class="title-name"
-                :class="{ clickable: rowClickable(r) }"
-                :title="rowTitle(r)"
-                :role="rowClickable(r) ? 'button' : undefined"
-                :tabindex="rowClickable(r) ? 0 : undefined"
-                @keydown.enter="onRowClick(r)"
-                @keydown.space.prevent="onRowClick(r)"
-                @click="onRowClick(r)"
-              >{{ rowTitle(r) }}</span>
-            </div>
+            <span
+              class="row-title"
+              :class="{ clickable: rowClickable(r) }"
+              :title="rowTitle(r)"
+              :role="rowClickable(r) ? 'button' : undefined"
+              :tabindex="rowClickable(r) ? 0 : undefined"
+              @keydown.enter="onRowClick(r)"
+              @keydown.space.prevent="onRowClick(r)"
+              @click="onRowClick(r)"
+            >{{ rowTitle(r) }}</span>
 
             <template v-if="r.kind === 'sale' && r.sale">
-              <div class="sub-text product-detail">{{ saleSubText(r.sale) }}</div>
+              <div class="row-sub">{{ saleSubText(r.sale) }}</div>
               <div class="chip-row">
                 <button
                   v-if="r.sale.kind === 'resale'"
@@ -941,7 +1001,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
             </template>
 
             <template v-else-if="r.listing">
-              <div class="sub-text product-detail" title="更新日から推定">{{ listingSubText(r.listing) }}</div>
+              <div class="row-sub" title="更新日から推定">{{ listingSubText(r.listing) }}</div>
               <div class="chip-row">
                 <CodeChip v-for="mc in r.listing.model_codes" :key="mc" kind="model" :code="mc" />
                 <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
@@ -1106,8 +1166,6 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 </template>
 
 <style scoped>
-.product-status-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px; margin-bottom: 4px; }
-.product-detail { display: block; margin: 4px 0; }
 .form {
   display: flex;
   flex-direction: column;
@@ -1249,25 +1307,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
   font-size: var(--fs-14);
 }
 
-.title-line {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.title-name {
-  font-size: var(--fs-14);
-  font-weight: 500;
-  white-space: normal;
-  word-break: break-word;
-}
-
 .clickable { cursor: pointer; }
-
-.sub-text {
-  font-size: var(--fs-12);
-  color: var(--text-dim);
-}
 
 .fee-line { font-size: var(--fs-12); margin-top: 2px; }
 

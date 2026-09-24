@@ -77,24 +77,45 @@ async function load() {
 onMounted(load)
 watch(revision, load)
 
-// --- 検索・期間・項目（一覧だけを絞る。上のサマリは常に今月／先月） ---
+// --- 検索・期間・項目・並び替え（一覧だけを絞る。上のサマリは常に今月／先月） ---
 
 const searchText = ref('')
 const period = ref<Period>('this_month')
 const categoryFilter = ref<ExpenseCategory | ''>('')
 
+type SortOrder = 'date_desc' | 'date_asc' | 'amount_desc' | 'amount_asc'
+const sortOrder = ref<SortOrder>('date_desc')
+/** 日付順のときだけ月で区切る。金額順は区切りの意味が無いのでフラットに出す */
+const isDateSort = computed(() => sortOrder.value === 'date_desc' || sortOrder.value === 'date_asc')
+
 const filteredExpenses = computed(() =>
   expenses.value.filter(e =>
     (categoryFilter.value === '' || e.category === categoryFilter.value || e.lines.some(l => l.category === categoryFilter.value)) &&
     matchesSearch([e.shop, e.note, ...e.lines.map(l => l.name)], searchText.value) &&
-    inPeriod(e.occurred_at, period.value),
+    // 経費は計上月（month）で数える。期間は日付前提なので月の初日を当てる
+    inPeriod(`${e.month}-01`, period.value),
   ),
 )
 const periodTotal = computed(() => filteredExpenses.value.reduce((s, e) => s + e.amount, 0))
 
-/** 一覧は購入日の月で区切る（計上月とは別。ずれている行は行内のピルで示す） */
-const groupedExpenses = computed(() => {
-  const sorted = [...filteredExpenses.value].sort((a, b) => b.occurred_at.localeCompare(a.occurred_at) || b.id.localeCompare(a.id))
+const sortedExpenses = computed(() => {
+  const list = [...filteredExpenses.value]
+  switch (sortOrder.value) {
+    case 'date_asc':
+      return list.sort((a, b) => a.occurred_at.localeCompare(b.occurred_at) || a.id.localeCompare(b.id))
+    case 'amount_desc':
+      return list.sort((a, b) => b.amount - a.amount)
+    case 'amount_asc':
+      return list.sort((a, b) => a.amount - b.amount)
+    default:
+      return list.sort((a, b) => b.occurred_at.localeCompare(a.occurred_at) || b.id.localeCompare(a.id))
+  }
+})
+
+/** 一覧は購入日の月で区切る（計上月とは別。ずれている行は行内のピルで示す）。金額順のときは区切らない */
+const displayGroups = computed(() => {
+  const sorted = sortedExpenses.value
+  if (!isDateSort.value) return [{ month: null as string | null, items: sorted }]
   const map = new Map<string, Expense[]>()
   for (const e of sorted) {
     const key = e.occurred_at.slice(0, 7)
@@ -102,7 +123,9 @@ const groupedExpenses = computed(() => {
     if (arr) arr.push(e)
     else map.set(key, [e])
   }
-  return [...map.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([month, items]) => ({ month, items }))
+  const entries = [...map.entries()]
+  entries.sort((a, b) => sortOrder.value === 'date_asc' ? a[0].localeCompare(b[0]) : b[0].localeCompare(a[0]))
+  return entries.map(([month, items]) => ({ month: month as string | null, items }))
 })
 
 function contentLabel(e: Expense): string {
@@ -128,6 +151,11 @@ function showThumb(e: Expense): boolean {
 }
 function onThumbError(id: string) {
   thumbFailed.value = new Set(thumbFailed.value).add(id)
+}
+/** レシート画像が無いときの頭文字（Products.vue の placeholderChar と同じ考え方） */
+function placeholderChar(shop: string | null): string {
+  const c = (shop ?? '').trim().charAt(0)
+  return (c || '?').toUpperCase()
 }
 
 // --- 上の項目別サマリ（今月・先月。一覧の絞り込みの影響を受けない） ---
@@ -590,20 +618,26 @@ async function deleteCurrent() {
       <!-- 左：一覧（月で区切り） -->
       <div class="panel list-panel">
         <div class="list-toolbar">
+          <SearchBox v-model="searchText" placeholder="購入店・品名・メモを検索" />
           <select v-model="categoryFilter">
             <option value="">すべての項目</option>
             <option v-for="o in CATEGORY_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
           </select>
           <PeriodSelect v-model="period" />
-          <SearchBox v-model="searchText" placeholder="購入店・品名・メモを検索" />
+          <select v-model="sortOrder">
+            <option value="date_desc">新しい順</option>
+            <option value="date_asc">古い順</option>
+            <option value="amount_desc">金額が大きい順</option>
+            <option value="amount_asc">金額が小さい順</option>
+          </select>
           <span class="grow" />
-          <span class="faint list-count">{{ filteredExpenses.length }}件 ／ {{ yen(periodTotal) }}</span>
+          <span class="toolbar-count">{{ filteredExpenses.length }} 件 ・ 合計 {{ yen(periodTotal) }}</span>
         </div>
 
         <Skeleton v-if="!loaded" :rows="6" />
-        <template v-else-if="groupedExpenses.length">
-          <template v-for="g in groupedExpenses" :key="g.month">
-            <div class="month-head">{{ g.month }}</div>
+        <template v-else-if="filteredExpenses.length">
+          <template v-for="g in displayGroups" :key="g.month ?? 'flat'">
+            <div v-if="g.month" class="month-head">{{ g.month }}</div>
             <button
               v-for="e in g.items" :key="e.id" type="button"
               class="expense-row" :class="{ on: e.id === editingId }"
@@ -614,18 +648,16 @@ async function deleteCurrent() {
                   v-if="showThumb(e)" :src="e.receipt_url!" alt=""
                   loading="lazy" @error="onThumbError(e.id)"
                 />
-                <span v-else class="row-thumb-empty">なし</span>
+                <span v-else class="row-thumb-empty">{{ placeholderChar(e.shop) }}</span>
               </span>
               <span class="row-main">
-                <span class="row-title">
-                  {{ e.shop || '—' }}
+                <span class="row-labels">
                   <StatusChip v-for="c in rowCategories(e)" :key="c" tone="neutral" :label="CATEGORY_LABEL[c]" />
-                </span>
-                <span class="row-sub faint">
-                  {{ e.occurred_at }} ・ {{ contentLabel(e) }}
-                  <StatusPill v-if="e.receipt_url" tone="ok" label="読み取り" />
                   <StatusPill v-if="monthDiffers(e)" tone="warn" :label="'計上 ' + e.month" />
+                  <StatusPill v-if="e.receipt_url" tone="ok" label="読み取り" />
                 </span>
+                <span class="row-title one-line" :title="e.shop || '—'">{{ e.shop || '—' }}</span>
+                <span class="row-sub" :title="`${e.occurred_at} ・ ${contentLabel(e)}`">{{ e.occurred_at }} ・ {{ contentLabel(e) }}</span>
               </span>
               <span class="row-amt num">{{ yen(e.amount) }}</span>
             </button>
@@ -704,8 +736,10 @@ async function deleteCurrent() {
 
         <div class="form-pane">
           <div class="form-head">
-            <h2 class="form-title">{{ form.shop || (editingId ? '経費を編集' : '経費を登録') }}</h2>
-            <StatusPill v-if="receiptShopLearned" tone="ok" label="登録番号で店名を確認" />
+            <span class="row-labels">
+              <StatusPill v-if="receiptShopLearned" tone="ok" label="登録番号で店名を確認" />
+            </span>
+            <h2 class="form-title row-title" :title="form.shop || (editingId ? '経費を編集' : '経費を登録')">{{ form.shop || (editingId ? '経費を編集' : '経費を登録') }}</h2>
           </div>
 
           <div class="fields">
@@ -908,7 +942,6 @@ async function deleteCurrent() {
   padding: 12px 14px;
   border-bottom: 1px solid var(--line-soft);
 }
-.list-count { white-space: nowrap; }
 
 .month-head {
   padding: 6px 14px;
@@ -951,29 +984,14 @@ async function deleteCurrent() {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px dashed var(--line);
   border-radius: var(--radius-sm);
-  font-size: var(--fs-11);
-  color: var(--text-faint);
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-weight: 700;
+  font-size: var(--fs-14);
 }
 
-.row-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.row-title {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: var(--fs-14);
-  font-weight: 500;
-  color: var(--text);
-}
-.row-sub {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: var(--fs-12);
-}
+.row-main { min-width: 0; display: flex; flex-direction: column; justify-content: center; }
 
 .row-amt {
   font-size: var(--fs-14);
@@ -1075,15 +1093,12 @@ async function deleteCurrent() {
 }
 .form-head {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
 }
 .form-title {
   margin: 0;
   font-size: var(--fs-16);
-  font-weight: 600;
   min-width: 0;
-  word-break: break-word;
 }
 
 .hint-row {

@@ -320,19 +320,17 @@ const estimateCompare = computed(() => {
     <div class="layout">
       <!-- 左：型番の一覧 -->
       <div class="panel list-panel">
-        <div class="list-toolbar">
+        <div class="toolbar">
           <SearchBox v-model="searchText" placeholder="型番・商品名・タグを検索" />
-          <select v-model="listSort" class="sort-select">
+          <PeriodSelect v-model="period" />
+          <select v-model="listSort">
             <option value="profit">粗利合計</option>
             <option value="sold">売れた数</option>
             <option value="stock">在庫が多い</option>
             <option value="aging">滞留が長い</option>
           </select>
-        </div>
-        <div class="list-toolbar list-toolbar-sub">
-          <PeriodSelect v-model="period" />
           <span class="grow" />
-          <span class="faint">{{ filteredProducts.length }}件</span>
+          <span class="toolbar-count">{{ filteredProducts.length }} 件</span>
         </div>
 
         <Skeleton v-if="!loaded" :rows="6" />
@@ -352,12 +350,12 @@ const estimateCompare = computed(() => {
               <span v-else class="thumb-placeholder">{{ placeholderChar(p.model_code, p.name) }}</span>
             </span>
             <span class="prow-body">
-              <span class="prow-name">{{ p.name }}</span>
-              <span class="prow-meta">
+              <span class="row-labels">
                 <CodeChip kind="model" :code="p.model_code" />
-                <span class="dim">在庫 {{ p.in_stock }} ・ 売れた {{ p.sold }}</span>
                 <StatusPill v-if="isStagnant(p)" tone="warn" :label="`滞留 ${agingDays(p)}日`" />
               </span>
+              <span class="row-title one-line" :title="p.name">{{ p.name }}</span>
+              <span class="row-sub">在庫 {{ p.in_stock }} ・ 売れた {{ p.sold }}</span>
             </span>
             <span class="prow-profit">
               <span class="faint">粗利計</span>
@@ -533,8 +531,8 @@ const estimateCompare = computed(() => {
               <thead>
                 <tr>
                   <th>販売日</th>
-                  <th>タイトル</th>
-                  <th class="num">売価</th>
+                  <th>商品</th>
+                  <th class="num">価格</th>
                   <th class="num">送料</th>
                   <th class="num">原価</th>
                   <th class="num">粗利</th>
@@ -593,10 +591,6 @@ const estimateCompare = computed(() => {
 /* --- 左：一覧 --- */
 
 .list-panel { display: flex; flex-direction: column; gap: 10px; }
-.list-toolbar { display: flex; align-items: center; gap: 8px; }
-.list-toolbar :deep(.search-box) { width: auto; flex: 1; }
-.list-toolbar-sub { font-size: var(--fs-12); }
-.sort-select { flex-shrink: 0; }
 
 .prow-list { display: flex; flex-direction: column; }
 .prow {
@@ -635,15 +629,8 @@ const estimateCompare = computed(() => {
   font-size: var(--fs-14);
 }
 
-.prow-body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.prow-name {
-  font-size: var(--fs-13);
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.prow-meta { display: flex; align-items: center; gap: 6px; font-size: var(--fs-12); flex-wrap: wrap; }
+.prow-body { min-width: 0; display: flex; flex-direction: column; }
+.prow-body .row-title { font-size: var(--fs-13); }
 
 .prow-profit { text-align: right; font-size: var(--fs-12); color: var(--text-dim); display: flex; flex-direction: column; gap: 2px; }
 .prow-profit strong { font-size: var(--fs-14); }
