@@ -11,6 +11,7 @@ import { thisMonthLocal, todayLocal } from '../shared/date'
 import { isRealized, forecastTotals, realizedTotals } from '../shared/recognition'
 import type {
   AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, ExportKind, Fulfillment,
+  HealthCheck,
   InventoryItem, InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus,
   Material, MonthClose, MonthDetail, MonthlySummary, MonthSaleRow, MonthTotals, ProductDetail,
   ProductMonthPoint, ProductSummary, PurchaseDetail,
@@ -4709,6 +4710,176 @@ export function getDashboard(): DashboardStats {
     lastRun: lastRun ?? null,
     recentRuns,
   }
+}
+
+// ============================================================
+// データの健康診断（読むだけ。直しはしない）
+//
+// 「この数字を信用してよいか」を自分で確かめられるように、合計の不一致や
+// 抜けを SQL で数える（重い全件走査はしない）。landed_cost・按分の再計算は
+// 一切行わない。直すのは常に人が画面から
+// ============================================================
+
+export function getHealthChecks(): HealthCheck[] {
+  const one = <T>(sql: string, ...v: unknown[]) => db.prepare(sql).get(...v) as T
+  const checks: HealthCheck[] = []
+
+  // 1. 確定した仕入ごとに Σpurchase_line.allocated_cost と配賦対象
+  //    （送料 + その他費用 − 割引）が一致しない注文の数
+  const allocMismatch = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM purchase p
+     WHERE p.status = 'confirmed'
+       AND (SELECT COALESCE(SUM(pl.allocated_cost), 0)
+              FROM purchase_line pl WHERE pl.purchase_id = p.id)
+           != (p.shipping_fee + p.other_cost - p.discount)
+  `).c
+  if (allocMismatch > 0) {
+    checks.push({
+      id: 'alloc-mismatch', level: 'warn', title: '仕入の按分が合っていない',
+      count: allocMismatch,
+      detail: '送料などの配賦後の合計が注文の金額と合いません。仕入を開いて保存し直すと直ります',
+    })
+  }
+
+  // 2. sale_line があって Σlanded_cost = 0 の販売（転売のみ）
+  const zeroCostLink = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM (
+      SELECT s.id
+        FROM sale s
+        JOIN sale_line sl ON sl.sale_id = s.id
+        JOIN inventory_item i ON i.id = sl.inventory_item_id
+       WHERE s.kind = 'resale'
+       GROUP BY s.id
+      HAVING SUM(i.landed_cost) = 0
+    )
+  `).c
+  if (zeroCostLink > 0) {
+    checks.push({
+      id: 'zero-cost-link', level: 'warn', title: '原価が0円のまま紐付いている販売',
+      count: zeroCostLink,
+      detail: '分割した在庫の原価が0のままかもしれません',
+      goto: { tab: 'sales', stage: 'all' },
+    })
+  }
+
+  // 3. sale_line があるのに status != 'sold'、または status = 'sold' なのに
+  //    sale_line が無い在庫（トリガーで起きないはずの食い違い）
+  const statusMismatch = one<{ c: number }>(`
+    SELECT
+      (SELECT COUNT(*) FROM inventory_item i
+        WHERE i.status != 'sold'
+          AND EXISTS (SELECT 1 FROM sale_line sl WHERE sl.inventory_item_id = i.id))
+      +
+      (SELECT COUNT(*) FROM inventory_item i
+        WHERE i.status = 'sold'
+          AND NOT EXISTS (SELECT 1 FROM sale_line sl WHERE sl.inventory_item_id = i.id))
+      AS c
+  `).c
+  if (statusMismatch > 0) {
+    checks.push({
+      id: 'status-mismatch', level: 'warn', title: '在庫の状態と紐付けが食い違っている',
+      count: statusMismatch,
+      detail: 'トリガーで起きないはずの食い違いです。バックアップを取ってから相談してください',
+    })
+  }
+
+  // 4. item_code が2件以上ある数（本来UNIQUE）
+  const dupItemCode = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM (
+      SELECT item_code FROM inventory_item GROUP BY item_code HAVING COUNT(*) > 1
+    )
+  `).c
+  if (dupItemCode > 0) {
+    checks.push({
+      id: 'dup-item-code', level: 'warn', title: '在庫コードが重複している',
+      count: dupItemCode,
+      detail: '本来重複しないはずの在庫コードが重複しています。手入力や取り込みの不具合の可能性があります',
+    })
+  }
+
+  // 5. is_shipping_confirmed = 0 かつ sold_at が30日以上前の販売
+  const shippingOld = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM sale
+     WHERE is_shipping_confirmed = 0
+       AND julianday('now') - julianday(sold_at) >= 30
+  `).c
+  if (shippingOld > 0) {
+    checks.push({
+      id: 'shipping-old', level: 'info', title: '送料が未入力のまま 30 日たった販売',
+      count: shippingOld,
+      detail: '送料が入っていないと粗利が実際より大きく出ます',
+      goto: { tab: 'sales', stage: 'all' },
+    })
+  }
+
+  // 6. kind='resale' で sale_line が無く sold_at が30日以上前の販売
+  const unmatchedOld = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM sale s
+     WHERE s.kind = 'resale'
+       AND julianday('now') - julianday(s.sold_at) >= 30
+       AND NOT EXISTS (SELECT 1 FROM sale_line sl WHERE sl.sale_id = s.id)
+  `).c
+  if (unmatchedOld > 0) {
+    checks.push({
+      id: 'unmatched-old', level: 'info', title: '紐付けないまま 30 日たった販売',
+      count: unmatchedOld,
+      detail: '原価が入らないため粗利が実際より大きく出ています',
+      goto: { tab: 'sales', stage: 'all' },
+    })
+  }
+
+  // 7. purchase.status = 'draft' で ordered_at が14日以上前
+  const draftOld = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM purchase
+     WHERE status = 'draft'
+       AND julianday('now') - julianday(ordered_at) >= 14
+  `).c
+  if (draftOld > 0) {
+    checks.push({
+      id: 'draft-old', level: 'info', title: '下書きのまま 14 日たった仕入',
+      count: draftOld,
+      detail: '確定するまで在庫が作られません',
+      goto: { tab: 'purchases' },
+    })
+  }
+
+  // 8. model_code IS NULL の in_stock 在庫
+  const noModelCode = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM inventory_item
+     WHERE model_code IS NULL AND status = 'in_stock'
+  `).c
+  if (noModelCode > 0) {
+    checks.push({
+      id: 'no-model-code', level: 'info', title: '型番が付いていない在庫',
+      count: noModelCode,
+      detail: '型番があると、売れたときに自動で紐付けの対象になります',
+      goto: { tab: 'inventory' },
+    })
+  }
+
+  // 9. collector_run の最新3件（sourceごと）が全部 empty の source の数
+  const collectEmpty = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM (
+      SELECT source FROM (
+        SELECT source, status,
+               ROW_NUMBER() OVER (PARTITION BY source ORDER BY started_at DESC, rowid DESC) AS rn
+          FROM collector_run
+      ) recent
+      WHERE rn <= 3
+      GROUP BY source
+      HAVING COUNT(*) = 3 AND SUM(CASE WHEN status = 'empty' THEN 1 ELSE 0 END) = 3
+    )
+  `).c
+  if (collectEmpty > 0) {
+    checks.push({
+      id: 'collect-empty', level: 'info', title: '取り込みが続けて0件',
+      count: collectEmpty,
+      detail: '画面構造が変わって取れなくなっているかもしれません',
+    })
+  }
+
+  return checks.sort((a, b) =>
+    (a.level === b.level ? 0 : a.level === 'warn' ? -1 : 1) || b.count - a.count)
 }
 
 // ============================================================

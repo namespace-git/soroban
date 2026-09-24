@@ -28,6 +28,7 @@ import type {
   SalesProgress, InventoryOverview, InventoryGroupFilter, InventoryGroup,
   ProductKarte, MonthStatement, PurchaseAccountCard,
   AutoBackupStatus, ExportKind,
+  HealthCheck,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 import { matchesSearch } from '../components/SearchBox.vue'
@@ -681,6 +682,12 @@ function buildInitialPurchasesAndInventory(): void {
     lines: [{ model: 'A012', qty: 2 }, { model: 'Z012-3', qty: 1 }],
     importKey: 'mellojoy:#271041',
   })
+  // 健康診断の見本（設定タブ）：確定し忘れたまま14日以上たった下書き（info）
+  addDraftPurchase({
+    shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(20)),
+    lines: [{ model: 'Z012-1', qty: 1 }],
+    importKey: 'mellojoy:#262004',
+  })
 
   // 仕入先の商品画像（メロジョイの注文詳細から）の見本：確定済みのメロジョイ仕入の最初の2〜3明細だけに入れる。
   // 同じ明細の items（在庫）は同じ URL を持つ（buildPurchaseLineItems 参照）
@@ -775,6 +782,8 @@ function buildSaleFixed(opts: {
   priceOverride?: number
   /** 取引の進み具合を明示指定する見本（省略時は saleStatusFor が経過日数から決める） */
   statusOverride?: SaleStatus
+  /** 計上日を明示指定する見本（省略時は soldAtFor が今月・先月の範囲に散らす） */
+  soldAtOverride?: string
 }): SaleProfit {
   const rateBp = Number(settings.fee_rate_bp)
   const price = opts.priceOverride ?? priceFor(opts.i)
@@ -784,7 +793,7 @@ function buildSaleFixed(opts: {
   const itemCount = opts.items.length
   // 取り込み風・手入力風を半々にする（実際の収集は行わない）
   const source: SaleSource = opts.i % 2 === 0 ? 'collector' : 'manual'
-  const soldAt = soldAtFor(opts.i)
+  const soldAt = opts.soldAtOverride ?? soldAtFor(opts.i)
   const statusInfo = opts.statusOverride ? statusInfoFor(opts.statusOverride, soldAt, opts.i) : saleStatusFor(source, soldAt)
 
   const sale: SaleProfit = {
@@ -937,6 +946,33 @@ function buildInitialSales(): void {
       packaging: packagingFor(i), note: k === 0 ? 'まとめて発送' : null, priceOverride: price,
     }))
   })
+
+  // --- 健康診断の見本（設定タブ）：原価0円のまま紐付いている販売（warn 1件） ---
+  {
+    const i = idx++
+    const model = 'Z080-1'
+    const item = takeOldestByModel(model)
+    // 見本用。実運用では landed_cost を生成後に書き換えない（分割の按分ミスを想定した壊れ方）
+    if (item) item.landed_cost = 0
+    const method = sm(i)
+    out.push(buildSaleFixed({
+      i, title: `【${model}】${displayName(variantOf(model))}`, kind: 'resale',
+      items: item ? [item] : [],
+      shipping: { id: method.id, fee: method.fee, confirmed: true, source: 'actual' },
+      packaging: packagingFor(i),
+    }))
+  }
+
+  // --- 健康診断の見本：送料未入力・未紐付けのまま30日以上たった販売（info 2件） ---
+  {
+    const i = idx++
+    const model = 'Z045-2'
+    out.push(buildSaleFixed({
+      i, title: `【${model}】${displayName(variantOf(model))}`, kind: 'resale', items: [],
+      shipping: { id: null, fee: 0, confirmed: false, source: null },
+      soldAtOverride: todayLocal(daysAgo(40)),
+    }))
+  }
 
   sales = out
 }
@@ -3832,6 +3868,122 @@ const api: SorobanApi = {
   async listRuns(limit?: number) {
     const rows = runs.slice(0, limit ?? runs.length)
     return wait(rows)
+  },
+
+  // データの健康診断（読むだけ）。main（db.ts の getHealthChecks）と同じ項目・同じ文言を、
+  // モックの配列から素直に数えて返す。直しはしない
+  async getHealthChecks(): Promise<HealthCheck[]> {
+    const checks: HealthCheck[] = []
+
+    // 1. 確定した仕入ごとに Σ明細の按分後送料と、配賦対象（送料+その他費用-割引）が一致しない数
+    const allocMismatch = purchases.filter(p =>
+      p.status === 'confirmed'
+      && p.lines.reduce((s, l) => s + l.allocated_cost, 0) !== (p.shipping_fee + p.other_cost - p.discount),
+    ).length
+    if (allocMismatch > 0) {
+      checks.push({
+        id: 'alloc-mismatch', level: 'warn', title: '仕入の按分が合っていない',
+        count: allocMismatch,
+        detail: '送料などの配賦後の合計が注文の金額と合いません。仕入を開いて保存し直すと直ります',
+      })
+    }
+
+    // 2. 紐付いた在庫の原価合計が0円の販売（転売のみ）
+    const zeroCostLink = sales.filter(s => s.kind === 'resale' && s.item_count > 0 && s.cost === 0).length
+    if (zeroCostLink > 0) {
+      checks.push({
+        id: 'zero-cost-link', level: 'warn', title: '原価が0円のまま紐付いている販売',
+        count: zeroCostLink,
+        detail: '分割した在庫の原価が0のままかもしれません',
+        goto: { tab: 'sales', stage: 'all' },
+      })
+    }
+
+    // 3. status='sold' と、販売に紐付いている（sold_to が入っている）が食い違っている在庫
+    const statusMismatch = inventory.filter(i => (i.status === 'sold') !== (i.sold_to !== null)).length
+    if (statusMismatch > 0) {
+      checks.push({
+        id: 'status-mismatch', level: 'warn', title: '在庫の状態と紐付けが食い違っている',
+        count: statusMismatch,
+        detail: '本来起きないはずの食い違いです。バックアップを取ってから相談してください',
+      })
+    }
+
+    // 4. item_code が2件以上ある数（本来UNIQUE）
+    const codeCount = new Map<string, number>()
+    for (const i of inventory) codeCount.set(i.item_code, (codeCount.get(i.item_code) ?? 0) + 1)
+    const dupItemCode = [...codeCount.values()].filter(c => c > 1).length
+    if (dupItemCode > 0) {
+      checks.push({
+        id: 'dup-item-code', level: 'warn', title: '在庫コードが重複している',
+        count: dupItemCode,
+        detail: '本来重複しないはずの在庫コードが重複しています。手入力や取り込みの不具合の可能性があります',
+      })
+    }
+
+    // 5. is_shipping_confirmed=0 かつ sold_at が30日以上前の販売
+    const shippingOld = sales.filter(s => !s.is_shipping_confirmed && diffDays(s.sold_at) >= 30).length
+    if (shippingOld > 0) {
+      checks.push({
+        id: 'shipping-old', level: 'info', title: '送料が未入力のまま30日たった販売',
+        count: shippingOld,
+        detail: '送料が入っていないと粗利が実際より大きく出ます',
+        goto: { tab: 'sales', stage: 'all' },
+      })
+    }
+
+    // 6. kind='resale' で未紐付け、かつ sold_at が30日以上前の販売
+    const unmatchedOld = sales.filter(s => s.kind === 'resale' && s.unmatched === 1 && diffDays(s.sold_at) >= 30).length
+    if (unmatchedOld > 0) {
+      checks.push({
+        id: 'unmatched-old', level: 'info', title: '紐付けないまま30日たった販売',
+        count: unmatchedOld,
+        detail: '原価が入らないため粗利が実際より大きく出ています',
+        goto: { tab: 'sales', stage: 'all' },
+      })
+    }
+
+    // 7. status='draft' で ordered_at が14日以上前の仕入
+    const draftOld = purchases.filter(p => p.status === 'draft' && diffDays(p.ordered_at) >= 14).length
+    if (draftOld > 0) {
+      checks.push({
+        id: 'draft-old', level: 'info', title: '下書きのまま14日たった仕入',
+        count: draftOld,
+        detail: '確定するまで在庫が作られません',
+        goto: { tab: 'purchases' },
+      })
+    }
+
+    // 8. model_code が無い在庫あり（在庫中のみ）
+    const noModelCode = inventory.filter(i => !i.model_code && i.status === 'in_stock').length
+    if (noModelCode > 0) {
+      checks.push({
+        id: 'no-model-code', level: 'info', title: '型番が付いていない在庫',
+        count: noModelCode,
+        detail: '型番があると、売れたときに自動で紐付けの対象になります',
+        goto: { tab: 'inventory' },
+      })
+    }
+
+    // 9. source ごとの直近3件が全部 empty（取得0件が続いている＝画面構造が変わったかもしれない）
+    const recentBySource = new Map<string, CollectorRun[]>()
+    for (const r of runs) {
+      const list = recentBySource.get(r.source) ?? []
+      if (list.length < 3) list.push(r)
+      recentBySource.set(r.source, list)
+    }
+    const collectEmpty = [...recentBySource.values()]
+      .filter(list => list.length === 3 && list.every(r => r.status === 'empty')).length
+    if (collectEmpty > 0) {
+      checks.push({
+        id: 'collect-empty', level: 'info', title: '取り込みが続けて0件',
+        count: collectEmpty,
+        detail: '画面構造が変わって取れなくなっているかもしれません',
+      })
+    }
+
+    return wait(checks.sort((a, b) =>
+      (a.level === b.level ? 0 : a.level === 'warn' ? -1 : 1) || b.count - a.count))
   },
 
   async exportCsv(kind: ExportKind = 'sales', month?: string) {

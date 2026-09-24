@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
-import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, AutoBackupStatus, ExportKind } from '../../shared/types'
+import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, AutoBackupStatus, ExportKind, HealthCheck } from '../../shared/types'
 
 type SaleExclusion = { mercari_item_id: string; title: string; excluded_at: string }
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
+import StatusPill from '../components/StatusPill.vue'
+import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
@@ -17,6 +19,7 @@ const choose = inject<(title: string, choices: ConfirmChoice[], opts?: { message
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
+const goto = inject<(t: string, payload?: { search?: string; status?: string; stage?: string; month?: string }) => void>('goto')!
 
 const methods = ref<ShippingMethod[]>([])
 const settings = ref<Record<string, string>>({})
@@ -39,6 +42,9 @@ const geminiModels = ref<Array<{ name: string; display_name: string; description
 const loadingModels = ref(false)
 const customModelInput = ref('')
 const autoBackup = ref<AutoBackupStatus | null>(null)
+const healthChecks = ref<HealthCheck[]>([])
+const checkingHealth = ref(false)
+const healthWarnCount = computed(() => healthChecks.value.filter(h => h.level === 'warn').length)
 
 /**
  * モデルのセレクトの選択肢。読み込み前は現在の値＋既定だけ、読み込み後は listGeminiModels の結果
@@ -61,7 +67,7 @@ const modelOptions = computed(() => {
 })
 
 async function load() {
-  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes, autoBackupRes] = await Promise.all([
+  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes, autoBackupRes, healthRes] = await Promise.all([
     window.soroban.listShippingMethods(),
     window.soroban.getSettings(),
     window.soroban.listRuns(10),
@@ -72,6 +78,7 @@ async function load() {
     window.soroban.listSaleExclusions(),
     window.soroban.getAiStatus(),
     window.soroban.getAutoBackupStatus(),
+    window.soroban.getHealthChecks(),
   ])
   methods.value = methodsRes
   settings.value = settingsRes
@@ -84,9 +91,24 @@ async function load() {
   aiStatus.value = aiStatusRes
   aiModel.value = aiStatusRes.model
   autoBackup.value = autoBackupRes
+  healthChecks.value = healthRes
   loaded.value = true
 }
 onMounted(load)
+
+async function recheckHealth() {
+  checkingHealth.value = true
+  try {
+    healthChecks.value = await window.soroban.getHealthChecks()
+  } finally {
+    checkingHealth.value = false
+  }
+}
+
+function openHealthGoto(h: HealthCheck) {
+  if (!h.goto) return
+  goto(h.goto.tab, { search: h.goto.search, status: h.goto.status, stage: h.goto.stage, month: h.goto.month })
+}
 
 function statsFor(accountId: string): ShopAccountStats | null {
   return shopStats.value.find(s => s.shop_account_id === accountId) ?? null
@@ -773,6 +795,28 @@ const runLabel: Record<string, string> = {
           不具合の報告はこのファイルを送ってください。別のパソコンへの引っ越しにも。
         </p>
 
+        <div class="health-head">
+          <p class="panel-title health-title">データの健康診断</p>
+          <StatusPill v-if="healthWarnCount" tone="solid-warn" :label="`要確認 ${healthWarnCount} 件`" />
+          <span class="grow" />
+          <button class="ghost sm" :disabled="checkingHealth" @click="recheckHealth">
+            <Icon name="refresh" :size="14" /> {{ checkingHealth ? '調べています…' : 'もう一度調べる' }}
+          </button>
+        </div>
+        <EmptyState v-if="!healthChecks.length" title="気になるところはありません" hint="数字が合っているか、抜けが無いかを調べます" />
+        <div v-else class="health-list">
+          <div v-for="h in healthChecks" :key="h.id" class="health-row">
+            <div class="row-main">
+              <div class="row-labels">
+                <StatusPill :tone="h.level === 'warn' ? 'warn' : 'neutral'" :label="`${h.count} 件`" />
+              </div>
+              <div class="row-title one-line" :title="h.title">{{ h.title }}</div>
+              <div class="row-sub" :title="h.detail">{{ h.detail }}</div>
+            </div>
+            <button v-if="h.goto" class="sm ghost" @click="openHealthGoto(h)">開く →</button>
+          </div>
+        </div>
+
         <p class="panel-title auto-backup-title">自動バックアップ</p>
         <label class="row hint">
           <input
@@ -998,6 +1042,21 @@ const runLabel: Record<string, string> = {
   align-items: center;
   gap: 6px;
 }
+
+.health-head { display: flex; align-items: center; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+.health-title { margin: 0; }
+.health-head button { flex-shrink: 0; }
+.health-list { margin-top: 4px; }
+.health-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.health-row:first-child { border-top: 0; }
+.health-row .row-main { min-width: 0; flex: 1; }
+.health-row > button { flex-shrink: 0; }
 
 .runs-title { margin-top: 16px; }
 .auto-backup-title { margin-top: 16px; }

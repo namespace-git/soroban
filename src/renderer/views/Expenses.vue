@@ -546,8 +546,15 @@ async function submit() {
     await window.soroban.createExpense(input)
   }
 
+  // 計上月がいまの期間の外だと、保存した経費が一覧から消えて「入れたのに無い」と見える。
+  // その月が見える期間（すべて）に切り替えてから読み直す
+  const savedMonth = input.month ?? thisMonthLocal()
   showForm.value = false
   resetForm()
+  if (!inPeriod(savedMonth + '-01', period.value)) {
+    period.value = 'all'
+    toast('計上月が今の期間の外なので、期間を「すべて」にしました', 'ok')
+  }
   await load()
   changed()
 }

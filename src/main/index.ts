@@ -125,7 +125,7 @@ async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
  */
 const UNLOGGED_HANDLERS = new Set<keyof SorobanApi>([
   'logClient', 'getDashboard', 'listSales', 'listListings', 'listInventory',
-  'getAutoBackupStatus',
+  'getAutoBackupStatus', 'getHealthChecks',
   'suggestProductInventory',
   'listPurchases', 'listMonthly', 'listExpenses', 'searchAll', 'getSettings',
   'getMonthDetail', 'listProducts', 'listTags', 'listShopAccounts', 'listShippingMethods',
@@ -274,6 +274,8 @@ function registerIpc(): void {
   const EXPORT_LABEL: Record<ExportKind, string> = {
     sales: '販売', purchases: '仕入', expenses: '経費', inventory: '在庫',
   }
+
+  handle('getHealthChecks', () => db.getHealthChecks())
 
   handle('exportCsv', async (kind = 'sales', month) => {
     const label = EXPORT_LABEL[kind] ?? EXPORT_LABEL.sales

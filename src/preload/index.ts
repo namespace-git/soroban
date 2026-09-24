@@ -117,6 +117,7 @@ const api: SorobanApi = {
   openShopLogin: invoke('openShopLogin'),
   listRuns: invoke('listRuns'),
 
+  getHealthChecks: invoke('getHealthChecks'),
   exportCsv: invoke('exportCsv'),
   getAutoBackupStatus: invoke('getAutoBackupStatus'),
   setAutoBackupEnabled: invoke('setAutoBackupEnabled'),

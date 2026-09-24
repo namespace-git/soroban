@@ -4390,6 +4390,116 @@ describe('db（:memory:）', () => {
     })
   })
 
+  describe('getHealthChecks：データの健康診断（読むだけ。直しはしない）', () => {
+    const daysAgo = (n: number): string =>
+      todayLocal(new Date(Date.now() - n * 24 * 60 * 60 * 1000))
+
+    it('きれいなDBでは空配列', () => {
+      expect(db.getHealthChecks()).toEqual([])
+    })
+
+    it('alloc-mismatch：allocated_costをわざと壊すと検出され、正常な注文では出ない', () => {
+      const purchaseId = db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 100,
+        lines: [{ name: '正常な仕入', unit_price: 1000, quantity: 1 }],
+      })
+      expect(db.getHealthChecks().find(c => c.id === 'alloc-mismatch')).toBeUndefined()
+
+      const line = db.getDb().prepare(
+        'SELECT id FROM purchase_line WHERE purchase_id = ?',
+      ).get(purchaseId) as { id: string }
+      db.getDb().prepare('UPDATE purchase_line SET allocated_cost = ? WHERE id = ?').run(9999, line.id)
+
+      const found = db.getHealthChecks().find(c => c.id === 'alloc-mismatch')
+      expect(found?.count).toBe(1)
+      expect(found?.level).toBe('warn')
+    })
+
+    it('zero-cost-link：原価0円の在庫を紐付けた転売の販売が1件になる', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '原価0円商品', unit_price: 0, quantity: 1 }],
+      })
+      const [item] = db.listInventory('in_stock')
+      const saleId = db.createSale({ title: '原価0円商品', sold_at: todayLocal(), price: 1000 })
+      db.linkInventory(saleId, [item.id])
+
+      const found = db.getHealthChecks().find(c => c.id === 'zero-cost-link')
+      expect(found?.count).toBe(1)
+      expect(found?.goto).toEqual({ tab: 'sales', stage: 'all' })
+    })
+
+    it('shipping-old：送料未入力のまま30日たった販売が1件になる（29日は出ない）', () => {
+      const oldSaleId = db.createSale({ title: '古い販売', sold_at: daysAgo(31), price: 1000 })
+      const recentSaleId = db.createSale({ title: '最近の販売', sold_at: daysAgo(29), price: 1000 })
+      expect(oldSaleId).toBeTruthy()
+      expect(recentSaleId).toBeTruthy()
+
+      const found = db.getHealthChecks().find(c => c.id === 'shipping-old')
+      expect(found?.count).toBe(1)
+      expect(found?.level).toBe('info')
+    })
+
+    it('unmatched-old：紐付けないまま30日たった転売の販売が1件になる（私物は数えない）', () => {
+      db.createSale({ title: '未紐付け・古い', sold_at: daysAgo(35), price: 1000 })
+      db.createSale({ title: '未紐付け・私物', sold_at: daysAgo(35), price: 1000, kind: 'personal' })
+
+      const found = db.getHealthChecks().find(c => c.id === 'unmatched-old')
+      expect(found?.count).toBe(1)
+    })
+
+    it('draft-old：下書きのまま14日たった仕入が1件になる', () => {
+      db.createPurchaseDraft({
+        import_key: 'draft-old-1', shop_account_id: shopId,
+        ordered_at: daysAgo(15), lines: [],
+      })
+      db.createPurchaseDraft({
+        import_key: 'draft-old-2', shop_account_id: shopId,
+        ordered_at: daysAgo(5), lines: [],
+      })
+
+      const found = db.getHealthChecks().find(c => c.id === 'draft-old')
+      expect(found?.count).toBe(1)
+      expect(found?.goto).toEqual({ tab: 'purchases' })
+    })
+
+    it('no-model-code：型番の無いin_stock在庫が1件になる', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '型番の無い商品', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '型番あり商品【M001】', unit_price: 1000, quantity: 1 }],
+      })
+
+      const found = db.getHealthChecks().find(c => c.id === 'no-model-code')
+      expect(found?.count).toBe(1)
+      expect(found?.goto).toEqual({ tab: 'inventory' })
+    })
+
+    it('warnがinfoより先に並ぶ', () => {
+      // info（no-model-code）
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '型番なし', unit_price: 1000, quantity: 1 }],
+      })
+      // warn（zero-cost-link）
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-02', shipping_fee: 0,
+        lines: [{ name: '原価0円【M002】', unit_price: 0, quantity: 1 }],
+      })
+      const [item] = db.listInventory('in_stock').filter(i => i.name === '原価0円【M002】')
+      const saleId = db.createSale({ title: '原価0円【M002】', sold_at: todayLocal(), price: 1000 })
+      db.linkInventory(saleId, [item.id])
+
+      const checks = db.getHealthChecks()
+      const firstInfoIndex = checks.findIndex(c => c.level === 'info')
+      const lastWarnIndex = checks.map(c => c.level).lastIndexOf('warn')
+      expect(firstInfoIndex).toBeGreaterThan(lastWarnIndex)
+    })
+  })
+
   describe('exportCsvRows：CSV書き出し（金額は円の整数のまま。main で組み立て、レンダラーで再計算しない）', () => {
     it('0件は空文字（保存ダイアログを出さない判定に使う）', () => {
       expect(db.exportCsvRows('sales')).toBe('')

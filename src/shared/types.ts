@@ -993,6 +993,25 @@ export interface AutoBackupStatus {
 /** CSV で書き出す対象。sales=販売（実績・見込みの区分つき）／purchases=仕入の明細／expenses=経費の明細／inventory=在庫 1 点ずつ */
 export type ExportKind = 'sales' | 'purchases' | 'expenses' | 'inventory'
 
+/**
+ * データの健康診断の 1 項目。**読むだけ**（直しはしない）。
+ * 帳簿として信用できるかを自分で確かめられるように、合計の不一致や
+ * 抜けを数えて見せる。level=warn は数字が狂っている可能性があるもの、
+ * info は「そのうち片付けたい」もの
+ */
+export interface HealthCheck {
+  id: string
+  level: 'warn' | 'info'
+  /** 見出し。例「原価が 0 円のまま紐付いている販売」 */
+  title: string
+  /** 該当の件数。0 のものは返さない */
+  count: number
+  /** どうすればよいかの 1 行。例「分割した在庫の原価が 0 のままかもしれません」 */
+  detail: string
+  /** 押したときに開く画面（App.vue の goto と同じ形）。無ければ押せない */
+  goto?: { tab: string; search?: string; status?: string; stage?: string; month?: string }
+}
+
 export interface SorobanApi {
   // ダッシュボード
   getDashboard(): Promise<DashboardStats>
@@ -1206,6 +1225,8 @@ export interface SorobanApi {
    * CSV で書き出す（確定申告・記録の持ち出し用）。
    * kind 省略時は販売。month（YYYY-MM）を渡すとその月だけ。保存先は人が選ぶ
    */
+  /** データの健康診断（読むだけ）。合わない数字・抜けを数えて返す。0 件の項目は返らない */
+  getHealthChecks(): Promise<HealthCheck[]>
   exportCsv(kind?: ExportKind, month?: string): Promise<string | null>
   /**
    * バックアップを zip で保存（保存先を選ぶ。キャンセルなら null）。中身：soroban.db（SQLite の backup API で整合したコピー）、
