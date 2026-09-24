@@ -1,4 +1,4 @@
-import { app, dialog, type BrowserWindow } from 'electron'
+import { app, dialog, shell, type BrowserWindow } from 'electron'
 import AdmZip from 'adm-zip'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -8,6 +8,7 @@ import {
 } from 'node:fs'
 import * as db from './db'
 import * as applog from './applog'
+import type { AutoBackupStatus } from '../shared/types'
 
 // ============================================================
 // バックアップ（zip）と復元
@@ -293,4 +294,138 @@ export async function restoreFromZip(win: BrowserWindow | null): Promise<{ resta
   app.relaunch()
   app.exit(0)
   return { restarting: true }
+}
+
+// ============================================================
+// 自動バックアップ（週1回）
+//
+// 手動の「バックアップを保存」（backupToZip）と中身は同じ（writeBackupZip を共有）。
+// 保存先は userData/backups 固定、ファイル名は日時から機械的に決め、5世代だけ残す。
+// 起動を止めない・失敗させないことを最優先にする（maybeRunAutoBackup を参照）。
+// ============================================================
+
+const AUTO_BACKUP_ENABLED_KEY = 'auto_backup'
+const AUTO_BACKUP_LAST_AT_KEY = 'auto_backup_last_at'
+const AUTO_BACKUP_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
+const AUTO_BACKUP_GENERATIONS = 5
+const AUTO_BACKUP_FILE_RE = /^soroban-backup-\d{8}-\d{4}\.zip$/
+
+function backupsDirPath(): string {
+  return join(app.getPath('userData'), 'backups')
+}
+
+/** 自動バックアップの既定ファイル名（例：soroban-backup-20260921-1530.zip） */
+function autoBackupFileName(d: Date = new Date()): string {
+  return `soroban-backup-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.zip`
+}
+
+function isAutoBackupEnabled(): boolean {
+  return (db.getSettings()[AUTO_BACKUP_ENABLED_KEY] ?? '1') !== '0'
+}
+
+/** 自動バックアップのファイルを新しい順（ファイル名の降順＝日時の降順）で返す。無ければ空配列 */
+function listAutoBackupFiles(dir: string): Array<{ name: string; size: number; created_at: string }> {
+  if (!existsSync(dir)) return []
+  const names = readdirSync(dir).filter(name => AUTO_BACKUP_FILE_RE.test(name))
+  const withStat = names.map((name) => {
+    const st = statSync(join(dir, name))
+    return { name, size: st.size, created_at: st.mtime.toISOString() }
+  })
+  withStat.sort((a, b) => b.name.localeCompare(a.name))
+  return withStat
+}
+
+/** 5世代を超えた古いファイルを消す。消せなくても失敗にしない */
+function pruneOldAutoBackups(dir: string): void {
+  const files = listAutoBackupFiles(dir)
+  for (const f of files.slice(AUTO_BACKUP_GENERATIONS)) {
+    try {
+      unlinkSync(join(dir, f.name))
+    } catch {
+      // 消せなくても続行する
+    }
+  }
+}
+
+/** 設定・最後に取った日時・保存先・直近5本を返す */
+export function getAutoBackupStatus(): AutoBackupStatus {
+  const dir = backupsDirPath()
+  return {
+    enabled: isAutoBackupEnabled(),
+    last_at: db.getSettings()[AUTO_BACKUP_LAST_AT_KEY] ?? null,
+    dir,
+    files: listAutoBackupFiles(dir).slice(0, AUTO_BACKUP_GENERATIONS),
+  }
+}
+
+export function setAutoBackupEnabled(enabled: boolean): void {
+  db.setSetting(AUTO_BACKUP_ENABLED_KEY, enabled ? '1' : '0')
+}
+
+/** バックアップの保存フォルダを OS のファイラで開く（無ければ作ってから） */
+export async function openBackupFolder(): Promise<void> {
+  const dir = backupsDirPath()
+  mkdirSync(dir, { recursive: true })
+  await shell.openPath(dir)
+}
+
+/**
+ * 自動バックアップを取る。force=false（起動時のスケジュール実行）は
+ * 「入」かつ前回から7日以上たっているときだけ取り、取らなかったときは '' を返す。
+ * force=true（「いま取る」）は条件を無視して必ず取り、取れたファイルのパスを返す。
+ * 取ったら auto_backup_last_at を更新し、5世代を超えた古いものを消す。
+ */
+export async function runAutoBackup(force: boolean): Promise<string> {
+  if (!force) {
+    if (!isAutoBackupEnabled()) return ''
+    const lastAt = db.getSettings()[AUTO_BACKUP_LAST_AT_KEY]
+    const elapsed = lastAt ? Date.now() - new Date(lastAt).getTime() : Infinity
+    if (elapsed < AUTO_BACKUP_INTERVAL_MS) return ''
+  }
+
+  const dir = backupsDirPath()
+  mkdirSync(dir, { recursive: true })
+  const outPath = join(dir, autoBackupFileName())
+
+  const tmpDbPath = join(app.getPath('temp'), `soroban-auto-backup-${randomUUID()}.db`)
+  try {
+    await db.getDb().backup(tmpDbPath)
+
+    const settings = db.getSettings()
+    const meta = {
+      app: 'soroban',
+      version: app.getVersion(),
+      schema_version: settings.schema_version ? Number(settings.schema_version) : null,
+      platform: process.platform,
+      created_at: new Date().toISOString(),
+    }
+
+    writeBackupZip(outPath, { dbPath: tmpDbPath, thumbsDir: thumbsDirPath(), meta })
+  } finally {
+    try {
+      unlinkSync(tmpDbPath)
+    } catch {
+      // 一時ファイルが無い・消せない場合は無視
+    }
+  }
+
+  db.setSetting(AUTO_BACKUP_LAST_AT_KEY, new Date().toISOString())
+  pruneOldAutoBackups(dir)
+  applog.log('main', 'backup', '自動バックアップを保存しました', { path: outPath })
+  return outPath
+}
+
+/**
+ * 起動時に呼ぶ用。失敗してもアプリの起動は止めない（console.error と app_log に残すだけ）。
+ * db.initDb() の後、他の起動処理をブロックしない場所から呼ぶこと（await しない）
+ */
+export async function maybeRunAutoBackup(): Promise<void> {
+  try {
+    await runAutoBackup(false)
+  } catch (e) {
+    console.error('自動バックアップに失敗しました', e)
+    applog.log('main', 'backup', '自動バックアップに失敗しました', undefined, {
+      error: e instanceof Error ? e.message : String(e),
+    })
+  }
 }

@@ -12,6 +12,7 @@ import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
 import { todayLocal } from '../../shared/date'
 import type { PromptOptions } from '../components/InputDialog.vue'
+import { yen, percent } from '../format'
 
 const revision = inject<Ref<number>>('revision')!
 // ダッシュボードの型番ランキングから goto('products', { modelCode }) で開かれたときに読む
@@ -20,8 +21,6 @@ const goto = inject<(t: string, payload?: { search?: string; focusId?: string })
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 // ------------------------------------------------------------
 // 左：型番の一覧
@@ -80,6 +79,8 @@ const filteredProducts = computed(() => {
     }
   })
 })
+/** 絞り込んだ商品の粗利計の合計。ツールバーの件数表示に添える（他画面と同じ形） */
+const filteredTotalProfit = computed(() => filteredProducts.value.reduce((s, p) => s + p.total_profit, 0))
 
 // --- サムネイル。同じURLの失敗だけを抑止し、取り込みでURLが変われば表示を再試行する ---
 
@@ -330,7 +331,7 @@ const estimateCompare = computed(() => {
             <option value="aging">滞留が長い</option>
           </select>
           <span class="grow" />
-          <span class="toolbar-count">{{ filteredProducts.length }} 件</span>
+          <span class="toolbar-count">{{ filteredProducts.length }} 件 ・ 合計 {{ yen(filteredTotalProfit) }}</span>
         </div>
 
         <Skeleton v-if="!loaded" :rows="6" />
@@ -451,7 +452,7 @@ const estimateCompare = computed(() => {
                 <span class="stat-card-value" :class="karte.summary.avg_profit != null ? (karte.summary.avg_profit >= 0 ? 'profit' : 'loss') : ''">
                   {{ karte.summary.avg_profit != null ? yen(karte.summary.avg_profit) : '—' }}
                 </span>
-                <span class="stat-card-sub">{{ karte.profit_rate != null ? `粗利率 ${karte.profit_rate}%` : '—' }}</span>
+                <span class="stat-card-sub">{{ karte.profit_rate != null ? `粗利率 ${percent(karte.profit_rate)}` : '—' }}</span>
               </div>
             </div>
           </div>
@@ -486,7 +487,7 @@ const estimateCompare = computed(() => {
                 <p class="faint calc-out-sub">
                   {{ yen(estimatePrice) }} − 手数料 {{ yen(estimate.fee) }} − 送料 {{ yen(estimate.shipping_fee) }}
                   <template v-if="estimate.cost > 0"> − 原価 {{ yen(estimate.cost) }}</template>
-                  <template v-if="estimateProfitRate != null"> ・ 粗利率 {{ estimateProfitRate }}%</template>
+                  <template v-if="estimateProfitRate != null"> ・ 粗利率 {{ percent(estimateProfitRate) }}</template>
                   <template v-if="estimateCompare"> ・ {{ estimateCompare }}</template>
                 </p>
               </div>
@@ -558,7 +559,7 @@ const estimateCompare = computed(() => {
             <p v-if="activeListings.length" class="dim listing-note">
               出品中：
               <template v-for="(l, i) in activeListings" :key="l.mercari_item_id">
-                <span v-if="i > 0"> ・ </span>{{ l.listed_at }} {{ yen(l.price) }}（{{ l.items.length ? '引き当て済み' : '未引き当て' }}）<span v-if="l.likes != null"> ・いいね {{ l.likes }}</span>
+                <span v-if="i > 0"> ・ </span>{{ l.listed_at }} {{ yen(l.price) }}（{{ l.items.length ? '紐付け済み' : '未紐付け' }}）<span v-if="l.likes != null"> ・いいね {{ l.likes }}</span>
               </template>
             </p>
           </div>

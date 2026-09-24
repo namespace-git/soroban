@@ -27,6 +27,7 @@ import type {
   Inbox, InboxGroup, InboxItem, InboxKind, ProfitStrip, ReminderType,
   SalesProgress, InventoryOverview, InventoryGroupFilter, InventoryGroup,
   ProductKarte, MonthStatement, PurchaseAccountCard,
+  AutoBackupStatus, ExportKind,
 } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 import { matchesSearch } from '../components/SearchBox.vue'
@@ -706,6 +707,14 @@ const saleLines = new Map<string, string[]>()
 /** 取り込んだ販売（source==='collector'）を削除したときの「もう取り込まない」記録。設定→データで見て解除できる */
 let saleExclusions: Array<{ mercari_item_id: string; title: string; excluded_at: string }> = []
 
+/** 自動バックアップ（週1回）の作り物の状態。runAutoBackupNow を押すと一覧の先頭に足される */
+let autoBackupEnabled = true
+let autoBackupLastAt: string | null = '2026-09-18T09:00'
+let autoBackupFiles: Array<{ name: string; size: number; created_at: string }> = [
+  { name: 'soroban-backup-20260918-0900.zip', size: 4_512_000, created_at: '2026-09-18T09:00' },
+  { name: 'soroban-backup-20260911-0900.zip', size: 4_488_000, created_at: '2026-09-11T09:00' },
+]
+
 /** ホームの「忘れていませんか」を snoozeReminder で 7 日隠すための記録。キー→隠す期限（YYYY-MM-DD） */
 const reminderSnoozes = new Map<string, string>()
 function reminderKey(type: ReminderType, id?: string | null): string {
@@ -1192,6 +1201,7 @@ function buildInitialExpenses(): void {
     note: null,
     auto: 0,
     receipt_url: '/mock/receipt.svg',
+    registration_no: 'T1234567890123',
     lines: [
       { id: uid(), name: 'ビニール袋 100枚', unit_price: 1200, amount: 1200, quantity: 1, category: 'packaging' },
       { id: uid(), name: '緩衝材', unit_price: 800, amount: 800, quantity: 1, category: 'packaging' },
@@ -1208,6 +1218,7 @@ function buildInitialExpenses(): void {
     note: null,
     auto: 0,
     receipt_url: null,
+    registration_no: null,
     lines: [],
   })
   // 送料
@@ -1221,6 +1232,7 @@ function buildInitialExpenses(): void {
     note: '梱包資材の発送',
     auto: 0,
     receipt_url: null,
+    registration_no: null,
     lines: [],
   })
   // 計上月を翌月に回した1件（購入は今月、計上は来月）
@@ -1234,6 +1246,7 @@ function buildInitialExpenses(): void {
     note: '来月分の梱包資材をまとめ買い',
     auto: 0,
     receipt_url: null,
+    registration_no: null,
     lines: [],
   })
 
@@ -1248,6 +1261,7 @@ function buildInitialExpenses(): void {
     note: null,
     auto: 0,
     receipt_url: null,
+    registration_no: null,
     lines: [{ id: uid(), name: '段ボール 10枚', unit_price: 150, amount: 1500, quantity: 10, category: 'packaging' }],
   })
   expenses.push({
@@ -1260,6 +1274,7 @@ function buildInitialExpenses(): void {
     note: null,
     auto: 0,
     receipt_url: null,
+    registration_no: null,
     lines: [],
   })
   expenses.push({
@@ -1272,6 +1287,7 @@ function buildInitialExpenses(): void {
     note: 'ラベルシール',
     auto: 0,
     receipt_url: null,
+    registration_no: null,
     lines: [],
   })
 
@@ -1286,6 +1302,7 @@ function buildInitialExpenses(): void {
     note: null,
     auto: 1,
     receipt_url: null,
+    registration_no: null,
     lines: [],
   })
 }
@@ -2229,6 +2246,96 @@ function buildInbox(): Inbox {
   }
 }
 
+// ------------------------------------------------------------
+// CSV書き出し（設定タブ・月次タブ）：main の exportCsvRows と同じ列で、
+// マッチした件数ぶんの行を組み立てる。モックからは実ファイルを作れないので、
+// 保存したことにするパス文字列を返す（0件のときだけ null）
+// ------------------------------------------------------------
+
+const EXPENSE_CATEGORY_LABEL_CSV: Record<ExpenseCategory, string> = {
+  packaging: '梱包費', supplies: '消耗品', shipping: '送料', fee: '手数料', transfer_fee: '振込手数料', other: 'その他',
+}
+const PURCHASE_STATUS_LABEL_CSV: Record<string, string> = { draft: '価格未入力', confirmed: '確定' }
+
+function csvField(v: string | number | null | undefined): string {
+  const s = v == null ? '' : String(v)
+  return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+function csvLine(fields: Array<string | number | null | undefined>): string {
+  return fields.map(csvField).join(',')
+}
+
+function buildSalesCsv(month?: string): string | null {
+  const rows = sales.filter(s => !month || s.sold_at.slice(0, 7) === month)
+  if (rows.length === 0) return null
+  const lines = [csvLine(['販売日', '集計区分', '商品名', '区分', '取得元', '販売価格', '販売手数料', '送料', '送料区分', '梱包材', '原価', '粗利', '紐付け点数', '型番', 'タグ', '取引ID'])]
+  for (const s of rows) {
+    lines.push(csvLine([
+      s.sold_at, s.kind === 'resale' ? '販売用' : '私物', s.title, s.kind, s.source,
+      s.price, s.fee, s.shipping_fee, s.shipping_source ?? '', s.packaging_cost, s.cost, s.gross_profit,
+      s.item_count, s.model_codes.join('/'), s.tags.map(t => t.name).join('/'), s.mercari_item_id,
+    ]))
+  }
+  return lines.join('\n')
+}
+
+function buildPurchasesCsv(month?: string): string | null {
+  const rows = purchases.filter(p => !month || p.ordered_at.slice(0, 7) === month)
+  if (rows.length === 0) return null
+  const lines = [csvLine(['注文日', '仕入先', '注文番号', '状態', '商品名', '型番', '数量', '単価', '按分後原価', '注文の送料', '注文のその他費用', '注文の割引', 'メモ'])]
+  for (const p of rows) {
+    for (const l of p.lines) {
+      lines.push(csvLine([
+        p.ordered_at, p.shop_account_name, p.order_no ?? '', PURCHASE_STATUS_LABEL_CSV[p.status] ?? p.status,
+        l.name, l.model_code ?? '', l.quantity, l.unit_price, l.allocated_cost,
+        p.shipping_fee, p.other_cost, p.discount, p.note ?? '',
+      ]))
+    }
+  }
+  return lines.join('\n')
+}
+
+function buildExpensesCsv(month?: string): string | null {
+  const rows = expenses.filter(e => !month || e.month === month)
+  if (rows.length === 0) return null
+  const lines = [csvLine(['計上月', '購入日', '購入店', '登録番号', '項目', '品名', '単価', '数量', '金額', 'メモ'])]
+  for (const e of rows) {
+    if (e.lines.length === 0) {
+      lines.push(csvLine([e.month, e.occurred_at, e.shop ?? '', e.registration_no ?? '', EXPENSE_CATEGORY_LABEL_CSV[e.category], '', '', '', e.amount, e.note ?? '']))
+      continue
+    }
+    for (const l of e.lines) {
+      lines.push(csvLine([e.month, e.occurred_at, e.shop ?? '', e.registration_no ?? '', EXPENSE_CATEGORY_LABEL_CSV[l.category], l.name, l.unit_price, l.quantity, l.amount, e.note ?? '']))
+    }
+  }
+  return lines.join('\n')
+}
+
+/** 在庫は今の姿をそのまま出す（月フィルタは適用しない） */
+function buildInventoryCsv(): string | null {
+  if (inventory.length === 0) return null
+  const lines = [csvLine(['在庫コード', '商品名', '型番', '素材', '状態', '仕入先', '注文番号', '仕入日', '滞留日数', '按分後原価', '出品価格', '販売日', '販売価格', '1点あたりの粗利'])]
+  for (const i of inventory) {
+    const sale = i.sold_to ? sales.find(s => s.id === i.sold_to!.sale_id) : undefined
+    const profitPerItem = sale ? Math.round(sale.gross_profit / sale.item_count) : ''
+    lines.push(csvLine([
+      i.item_code, i.name, i.model_code ?? '', i.material ?? '', inventorySearchStatusLabel(i),
+      i.shop_account_name ?? '', i.order_no ?? '', i.acquired_at, i.aging_days, i.landed_cost,
+      i.listing?.price ?? '', i.sold_to?.sold_at ?? '', i.sold_to?.price ?? '', profitPerItem,
+    ]))
+  }
+  return lines.join('\n')
+}
+
+function buildExportCsv(kind: ExportKind, month?: string): string | null {
+  switch (kind) {
+    case 'sales': return buildSalesCsv(month)
+    case 'purchases': return buildPurchasesCsv(month)
+    case 'expenses': return buildExpensesCsv(month)
+    case 'inventory': return buildInventoryCsv()
+  }
+}
+
 const api: SorobanApi = {
   async getDashboard(): Promise<DashboardStats> {
     const needsShipment = sales.filter(s => s.status === 'waiting_shipment').length
@@ -3083,6 +3190,7 @@ const api: SorobanApi = {
       note: input.note?.trim() || null,
       auto: 0,
       receipt_url: input.receipt_temp_file ? '/mock/receipt.svg' : null,
+      registration_no: input.receipt_registration_no ?? null,
       lines,
     })
     return wait(id)
@@ -3102,6 +3210,7 @@ const api: SorobanApi = {
     e.note = input.note?.trim() || null
     e.lines = lines
     if (input.receipt_temp_file) e.receipt_url = '/mock/receipt.svg'
+    if (input.receipt_registration_no !== undefined) e.registration_no = input.receipt_registration_no ?? null
     return wait(undefined)
   },
 
@@ -3725,8 +3834,37 @@ const api: SorobanApi = {
     return wait(rows)
   },
 
-  async exportCsv() {
-    return wait('~/Desktop/soroban-export.csv')
+  async exportCsv(kind: ExportKind = 'sales', month?: string) {
+    const csv = buildExportCsv(kind, month)
+    if (!csv) return wait(null)
+    return wait(`~/Desktop/soroban-${kind}-${month ?? todayLocal()}.csv`)
+  },
+
+  async getAutoBackupStatus() {
+    return wait<AutoBackupStatus>({
+      enabled: autoBackupEnabled,
+      last_at: autoBackupLastAt,
+      dir: '~/Library/Application Support/soroban/backups',
+      files: autoBackupFiles.slice(0, 5),
+    })
+  },
+
+  async setAutoBackupEnabled(enabled: boolean) {
+    autoBackupEnabled = enabled
+    return wait(undefined)
+  },
+
+  async runAutoBackupNow() {
+    const now = new Date()
+    const name = `soroban-backup-${now.toISOString().slice(0, 10).replace(/-/g, '')}-`
+      + `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}.zip`
+    autoBackupLastAt = now.toISOString().slice(0, 16)
+    autoBackupFiles = [{ name, size: 4_500_000, created_at: autoBackupLastAt }, ...autoBackupFiles].slice(0, 5)
+    return wait(`~/Library/Application Support/soroban/backups/${name}`)
+  },
+
+  async openBackupFolder() {
+    return wait(undefined)
   },
 
   async backupDb() {

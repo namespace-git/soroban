@@ -13,6 +13,43 @@ vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 import * as db from '../db'
 import * as views from '../views'
 
+/**
+ * exportCsvRows() の CSV（先頭にBOM、CRLF区切り）をパースする。
+ * persona-18 の parseCsv と違い、値に含まれるカンマ・"" のクォートも展開する
+ */
+function parseCsvLine(line: string): string[] {
+  const cells: string[] = []
+  let cur = ''
+  let inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (inQuotes) {
+      if (c === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++ } else { inQuotes = false }
+      } else {
+        cur += c
+      }
+    } else if (c === '"') {
+      inQuotes = true
+    } else if (c === ',') {
+      cells.push(cur)
+      cur = ''
+    } else {
+      cur += c
+    }
+  }
+  cells.push(cur)
+  return cells
+}
+
+function parseCsv(csv: string): { headers: string[]; rows: string[][] } {
+  const clean = csv.replace(/^﻿/, '')
+  if (!clean) return { headers: [], rows: [] }
+  const lines = clean.split('\r\n').filter(l => l.length > 0)
+  const [headerLine, ...rest] = lines
+  return { headers: parseCsvLine(headerLine), rows: rest.map(parseCsvLine) }
+}
+
 // ============================================================
 // Phase 1 の実物スキーマ（`git show 64f69fd:src/main/schema.sql`）。
 // migrate() のテストは、実機で実際に使われていた形そのままの DB を
@@ -1307,7 +1344,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('25')
+      expect(db.getSettings().schema_version).toBe('26')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1465,8 +1502,8 @@ describe('db（:memory:）', () => {
     expect(other.last_ordered_at).toBeNull()
   })
 
-  it('migrate：schema_versionが25になる', () => {
-    expect(db.getSettings().schema_version).toBe('25')
+  it('migrate：schema_versionが26になる', () => {
+    expect(db.getSettings().schema_version).toBe('26')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1552,7 +1589,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('25')
+      expect(db.getSettings().schema_version).toBe('26')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1586,7 +1623,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('25')
+      expect(db.getSettings().schema_version).toBe('26')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -1594,6 +1631,28 @@ describe('db（:memory:）', () => {
       expect(remainder).toMatchObject({ unit_price: 1000, quantity: 1, amount: 1000 })
       // amount自体は動かさない（合計をずらさない）
       expect(expense.amount).toBe(2200)
+    } finally {
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('migrate：version25相当（expense.registration_noが無い）→26で列が足され、既存行はnullになる', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-expense-regno-migrate-'))
+    const path = join(dir, 'v25.db')
+    try {
+      db.closeDb()
+      db.initDb(path) // 一旦フルスキーマで作り、v25相当（registration_no列が無い）まで剥がす
+      const expenseId = db.createExpense({ occurred_at: '2026-01-01', category: 'packaging', amount: 500 })
+      db.getDb().exec('ALTER TABLE expense DROP COLUMN registration_no')
+      db.getDb().prepare(`UPDATE setting SET value = '25' WHERE key = 'schema_version'`).run()
+      db.closeDb()
+
+      expect(() => db.initDb(path)).not.toThrow()
+
+      expect(db.getSettings().schema_version).toBe('26')
+      const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
+      expect(expense.registration_no).toBeNull()
     } finally {
       try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
       rmSync(dir, { recursive: true, force: true })
@@ -3359,6 +3418,46 @@ describe('db（:memory:）', () => {
       expect(db.lookupShopAlias('T4200001013662')).toBe('セリア 小倉貫店')
     })
 
+    it('createExpense：receipt_registration_noを渡すとexpense.registration_noに保存され、listExpensesで返る', () => {
+      const id = db.createExpense({
+        occurred_at: '2026-04-01',
+        category: 'supplies',
+        amount: 300,
+        shop: 'セリア 小倉貫店',
+        receipt_registration_no: 'T4200001013662',
+      })
+      expect(db.listExpenses('2026-04').find(e => e.id === id)!.registration_no).toBe('T4200001013662')
+    })
+
+    it('createExpense：receipt_registration_noが空文字ならnullで保存される', () => {
+      const id = db.createExpense({
+        occurred_at: '2026-04-01', category: 'supplies', amount: 300, receipt_registration_no: '',
+      })
+      expect(db.listExpenses('2026-04').find(e => e.id === id)!.registration_no).toBeNull()
+    })
+
+    it('updateExpense：receipt_registration_noを省略すると今の値を消さない。nullを渡すと消える', () => {
+      const id = db.createExpense({
+        occurred_at: '2026-04-01', category: 'supplies', amount: 300, receipt_registration_no: 'T4200001013662',
+      })
+
+      // 省略：値は消えない
+      db.updateExpense(id, { occurred_at: '2026-04-02', category: 'supplies', amount: 500 })
+      expect(db.listExpenses('2026-04').find(e => e.id === id)!.registration_no).toBe('T4200001013662')
+
+      // null明示：消える
+      db.updateExpense(id, {
+        occurred_at: '2026-04-02', category: 'supplies', amount: 500, receipt_registration_no: null,
+      })
+      expect(db.listExpenses('2026-04').find(e => e.id === id)!.registration_no).toBeNull()
+
+      // 別の番号を渡すと差し替わる
+      db.updateExpense(id, {
+        occurred_at: '2026-04-02', category: 'supplies', amount: 500, receipt_registration_no: 'T9999999999999',
+      })
+      expect(db.listExpenses('2026-04').find(e => e.id === id)!.registration_no).toBe('T9999999999999')
+    })
+
     it('振込手数料の自動計上は撤去：販売を作ってもexpenseは増えず、expense_auto_monthテーブルも存在しない', () => {
       db.createSale({ title: '経費テスト', sold_at: '2026-06-10', price: 2000 })
       expect(db.listExpenses('2026-06')).toHaveLength(0)
@@ -4288,6 +4387,127 @@ describe('db（:memory:）', () => {
       expect(p400Split?.items).toHaveLength(1)
       expect(p400Split?.items[0].status).toBe('split')
       expect(p400Split?.items[0].id).toBe(item.id)
+    })
+  })
+
+  describe('exportCsvRows：CSV書き出し（金額は円の整数のまま。main で組み立て、レンダラーで再計算しない）', () => {
+    it('0件は空文字（保存ダイアログを出さない判定に使う）', () => {
+      expect(db.exportCsvRows('sales')).toBe('')
+      expect(db.exportCsvRows('purchases')).toBe('')
+      expect(db.exportCsvRows('expenses')).toBe('')
+      expect(db.exportCsvRows('inventory')).toBe('')
+    })
+
+    it('sales：見出しと1行目の列数が一致し、monthでsold_at（計上日）を絞れる。金額はカンマ区切りにならない整数', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '商品A', unit_price: 1000, quantity: 2 }],
+      })
+      const [item1, item2] = db.listInventory('in_stock')
+      const sale1 = db.createSale({ title: '商品A', sold_at: '2026-01-05', price: 123456 })
+      db.linkInventory(sale1, [item1.id])
+      const sale2 = db.createSale({ title: '商品A', sold_at: '2026-02-05', price: 20000 })
+      db.linkInventory(sale2, [item2.id])
+
+      const all = parseCsv(db.exportCsvRows('sales'))
+      expect(all.rows).toHaveLength(2)
+      expect(all.rows[0]).toHaveLength(all.headers.length)
+
+      const jan = parseCsv(db.exportCsvRows('sales', '2026-01'))
+      expect(jan.rows).toHaveLength(1)
+      const priceIdx = jan.headers.indexOf('販売価格')
+      expect(jan.rows[0][priceIdx]).toBe('123456')
+      expect(jan.rows[0][priceIdx]).not.toContain(',')
+    })
+
+    it('purchases：1行=仕入の1明細。見出しと列数が一致し、monthでordered_at（注文日）を絞れる', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-10', shipping_fee: 100,
+        lines: [{ name: '仕入品A【Q001】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-02-10', shipping_fee: 50,
+        lines: [{ name: '仕入品B【Q002】', unit_price: 2000, quantity: 1 }],
+      })
+
+      const all = parseCsv(db.exportCsvRows('purchases'))
+      expect(all.rows).toHaveLength(2)
+      expect(all.rows[0]).toHaveLength(all.headers.length)
+      expect(all.headers).toEqual([
+        '注文日', '仕入先', '注文番号', '状態', '商品名', '型番', '数量', '単価',
+        '按分後原価', '注文の送料', '注文のその他費用', '注文の割引', 'メモ',
+      ])
+
+      const jan = parseCsv(db.exportCsvRows('purchases', '2026-01'))
+      expect(jan.rows).toHaveLength(1)
+      expect(jan.rows[0][jan.headers.indexOf('商品名')]).toBe('仕入品A【Q001】')
+      expect(jan.rows[0][jan.headers.indexOf('型番')]).toBe('Q001')
+      expect(jan.rows[0][jan.headers.indexOf('状態')]).toBe('確定')
+    })
+
+    it('expenses：1行=経費の1明細。見出しと列数が一致し、monthは計上月（occurred_atではない）で絞る。明細の無い経費も落とさない', () => {
+      // 12月末に買ったが計上月は1月（月をまたぐケース）。明細なし＝合計だけ入力
+      db.createExpense({ occurred_at: '2025-12-30', month: '2026-01', category: 'packaging', amount: 700 })
+      db.createExpense({ occurred_at: '2026-02-01', category: 'other', amount: 300 })
+
+      const all = parseCsv(db.exportCsvRows('expenses'))
+      expect(all.rows).toHaveLength(2)
+      expect(all.rows[0]).toHaveLength(all.headers.length)
+      expect(all.headers).toEqual([
+        '計上月', '購入日', '購入店', '登録番号', '項目', '品名', '単価', '数量', '金額', 'メモ',
+      ])
+
+      const jan = parseCsv(db.exportCsvRows('expenses', '2026-01'))
+      expect(jan.rows).toHaveLength(1)
+      expect(jan.rows[0][jan.headers.indexOf('購入日')]).toBe('2025-12-30')
+      expect(jan.rows[0][jan.headers.indexOf('金額')]).toBe('700')
+      expect(jan.rows[0][jan.headers.indexOf('項目')]).toBe('梱包費')
+    })
+
+    it('expenses：registration_noを保存した経費はCSVの登録番号列に出る。無い経費は空文字', () => {
+      db.createExpense({
+        occurred_at: '2026-03-01', category: 'supplies', amount: 300,
+        shop: 'セリア 小倉貫店', receipt_registration_no: 'T4200001013662',
+      })
+      db.createExpense({ occurred_at: '2026-03-02', category: 'other', amount: 100 })
+
+      const rows = parseCsv(db.exportCsvRows('expenses', '2026-03'))
+      const regIdx = rows.headers.indexOf('登録番号')
+      const values = rows.rows.map(r => r[regIdx]).sort()
+      expect(values).toEqual(['', 'T4200001013662'])
+    })
+
+    it('inventory：monthを渡しても全件（在庫は「今」の姿なので月で切らない）', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '在庫品【R001】', unit_price: 1000, quantity: 2 }],
+      })
+
+      const withoutMonth = parseCsv(db.exportCsvRows('inventory'))
+      expect(withoutMonth.rows).toHaveLength(2)
+      expect(withoutMonth.rows[0]).toHaveLength(withoutMonth.headers.length)
+      expect(withoutMonth.headers).toEqual([
+        '在庫コード', '商品名', '型番', '素材', '状態', '仕入先', '注文番号', '仕入日',
+        '滞留日数', '按分後原価', '出品価格', '販売日', '販売価格', '1点あたりの粗利',
+      ])
+
+      const withMonth = parseCsv(db.exportCsvRows('inventory', '2099-01'))
+      expect(withMonth.rows).toHaveLength(2)
+    })
+
+    it('値にカンマを含む商品名は"で囲まれる', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '商品,カンマ入り', unit_price: 1000, quantity: 1 }],
+      })
+      const [item] = db.listInventory('in_stock')
+      const saleId = db.createSale({ title: '商品,カンマ入り', sold_at: '2026-01-05', price: 2000 })
+      db.linkInventory(saleId, [item.id])
+
+      const csv = db.exportCsvRows('sales')
+      expect(csv).toContain('"商品,カンマ入り"')
+      const parsed = parseCsv(csv)
+      expect(parsed.rows[0][parsed.headers.indexOf('商品名')]).toBe('商品,カンマ入り')
     })
   })
 })

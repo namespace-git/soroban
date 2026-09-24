@@ -10,7 +10,7 @@ import { extractCode, extractCodeQuantities, extractCodes, extractItemCodes, ext
 import { thisMonthLocal, todayLocal } from '../shared/date'
 import { isRealized, forecastTotals, realizedTotals } from '../shared/recognition'
 import type {
-  AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, Fulfillment,
+  AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, ExportKind, Fulfillment,
   InventoryItem, InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus,
   Material, MonthClose, MonthDetail, MonthlySummary, MonthSaleRow, MonthTotals, ProductDetail,
   ProductMonthPoint, ProductSummary, PurchaseDetail,
@@ -1093,6 +1093,16 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '25')
          ON CONFLICT(key) DO UPDATE SET value = '25'`,
+    ).run()
+  }
+
+  if (version < 26) {
+    // 店の登録番号（T＋13桁）。レシートから読めたときだけ。CSVに出す（インボイスの控え）
+    addColumnIfMissing('expense', 'registration_no', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '26')
+         ON CONFLICT(key) DO UPDATE SET value = '26'`,
     ).run()
   }
 
@@ -3561,10 +3571,12 @@ type ExpenseRow = {
   note: string | null
   auto: number
   receipt_file: string | null
+  registration_no: string | null
 }
 
 const EXPENSE_SELECT = `
-  SELECT id, occurred_at, month, shop, category, amount, note, auto, receipt_file FROM expense
+  SELECT id, occurred_at, month, shop, category, amount, note, auto, receipt_file, registration_no
+  FROM expense
 `
 
 function loadExpenseLinesFor(expenseIds: string[]): Map<string, ExpenseLine[]> {
@@ -3728,9 +3740,12 @@ export function createExpense(input: ExpenseInput): string {
   const id = randomUUID()
   const tx = db.transaction(() => {
     db.prepare(`
-      INSERT INTO expense (id, occurred_at, month, shop, category, amount, note, auto)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-    `).run(id, input.occurred_at, month, input.shop ?? null, category, amount, input.note ?? null)
+      INSERT INTO expense (id, occurred_at, month, shop, category, amount, note, auto, registration_no)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+    `).run(
+      id, input.occurred_at, month, input.shop ?? null, category, amount, input.note ?? null,
+      input.receipt_registration_no ? input.receipt_registration_no : null,
+    )
     insertExpenseLines(id, lines)
     if (input.receipt_registration_no && input.shop) {
       learnShopAlias(input.receipt_registration_no, input.shop)
@@ -3741,18 +3756,32 @@ export function createExpense(input: ExpenseInput): string {
   return id
 }
 
-/** 明細は全部入れ替える */
+/**
+ * 明細は全部入れ替える。receipt_registration_no は省略（undefined）なら今の値を消さない、
+ * null／空文字を渡すと消える（COALESCE的な扱い）
+ */
 export function updateExpense(id: string, input: ExpenseInput): void {
   const exists = db.prepare('SELECT id FROM expense WHERE id = ?').get(id)
   if (!exists) throw new Error('経費が見つかりません')
 
   const { month, category, amount, lines } = validateExpenseInput(input)
   const tx = db.transaction(() => {
-    db.prepare(`
-      UPDATE expense
-         SET occurred_at = ?, month = ?, shop = ?, category = ?, amount = ?, note = ?
-       WHERE id = ?
-    `).run(input.occurred_at, month, input.shop ?? null, category, amount, input.note ?? null, id)
+    if (input.receipt_registration_no === undefined) {
+      db.prepare(`
+        UPDATE expense
+           SET occurred_at = ?, month = ?, shop = ?, category = ?, amount = ?, note = ?
+         WHERE id = ?
+      `).run(input.occurred_at, month, input.shop ?? null, category, amount, input.note ?? null, id)
+    } else {
+      db.prepare(`
+        UPDATE expense
+           SET occurred_at = ?, month = ?, shop = ?, category = ?, amount = ?, note = ?, registration_no = ?
+         WHERE id = ?
+      `).run(
+        input.occurred_at, month, input.shop ?? null, category, amount, input.note ?? null,
+        input.receipt_registration_no ? input.receipt_registration_no : null, id,
+      )
+    }
     db.prepare('DELETE FROM expense_line WHERE expense_id = ?').run(id)
     insertExpenseLines(id, lines)
     if (input.receipt_registration_no && input.shop) {
@@ -5203,9 +5232,29 @@ export function setSaleThumb(saleId: string, file: string, src: string | null = 
 
 // ============================================================
 // エクスポート
+//
+// レンダラーでは利益を再計算しない（CLAUDE.md）ので、CSV もここ（main）で組み立てる。
 // ============================================================
 
-export function exportRows(): string {
+/** 行の配列をCSV文字列にする。0件は空文字（呼び出し元はこれを「対象なし」として扱う） */
+function rowsToCsv(rows: Array<Record<string, unknown>>): string {
+  if (rows.length === 0) return ''
+  const headers = Object.keys(rows[0])
+  const esc = (v: unknown) => {
+    const s = v === null || v === undefined ? '' : String(v)
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const lines = [
+    headers.join(','),
+    ...rows.map(r => headers.map(h => esc(r[h])).join(',')),
+  ]
+  // Excel で文字化けしないよう BOM を付ける
+  return '﻿' + lines.join('\r\n')
+}
+
+/** 販売（sale_profit）のCSV行。month（YYYY-MM）を渡すと計上日（sold_at）で絞る */
+export function exportRows(month?: string): string {
+  const where = month ? 'WHERE substr(sp.sold_at, 1, 7) = ?' : ''
   const rows = db.prepare(`
     SELECT
       sp.sold_at         AS 販売日,
@@ -5227,8 +5276,9 @@ export function exportRows(): string {
         WHERE st.sale_id = sp.id)  AS タグ,
       sp.mercari_item_id AS 取引ID
     FROM sale_profit sp
+    ${where}
     ORDER BY sp.sold_at
-  `).all() as Array<Record<string, unknown>>
+  `).all(...(month ? [month] : [])) as Array<Record<string, unknown>>
 
   if (rows.length === 0) return ''
 
@@ -5244,17 +5294,115 @@ export function exportRows(): string {
     }
   }
 
-  const headers = Object.keys(rows[0])
-  const esc = (v: unknown) => {
-    const s = v === null || v === undefined ? '' : String(v)
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  return rowsToCsv(rows)
+}
+
+/** 仕入（1行＝仕入の1明細）のCSV行。month（YYYY-MM）を渡すと注文日（ordered_at）で絞る */
+function exportPurchaseRows(month?: string): string {
+  const where = month ? 'WHERE substr(p.ordered_at, 1, 7) = ?' : ''
+  const rows = db.prepare(`
+    SELECT
+      p.ordered_at                                       AS 注文日,
+      sa.name                                             AS 仕入先,
+      p.order_no                                          AS 注文番号,
+      CASE p.status WHEN 'draft' THEN '下書き' ELSE '確定' END AS 状態,
+      pl.name                                             AS 商品名,
+      pl.model_code                                       AS 型番,
+      pl.quantity                                         AS 数量,
+      pl.unit_price                                       AS 単価,
+      pl.landed_unit_cost                                 AS 按分後原価,
+      p.shipping_fee                                      AS 注文の送料,
+      p.other_cost                                        AS 注文のその他費用,
+      p.discount                                          AS 注文の割引,
+      p.note                                              AS メモ
+    FROM purchase_line pl
+    JOIN purchase p ON p.id = pl.purchase_id
+    LEFT JOIN shop_account sa ON sa.id = p.shop_account_id
+    ${where}
+    ORDER BY p.ordered_at, pl.sort_order
+  `).all(...(month ? [month] : [])) as Array<Record<string, unknown>>
+  return rowsToCsv(rows)
+}
+
+/**
+ * 経費（1行＝経費の1明細）のCSV行。month（YYYY-MM）を渡すと計上月（expense.month。
+ * occurred_at ではない）で絞る。明細（expense_line）が無い経費（合計だけ入力）は
+ * 経費本体の値を1行として出す（INNER JOINで落とさない）。
+ * 登録番号はレシートから読めた経費だけ（インボイスの控え）
+ */
+function exportExpenseRows(month?: string): string {
+  const where = month ? 'WHERE e.month = ?' : ''
+  const rows = db.prepare(`
+    SELECT
+      e.month                                 AS 計上月,
+      e.occurred_at                           AS 購入日,
+      e.shop                                  AS 購入店,
+      COALESCE(e.registration_no, '')          AS 登録番号,
+      CASE COALESCE(el.category, e.category)
+        WHEN 'packaging'     THEN '梱包費'
+        WHEN 'supplies'      THEN '消耗品'
+        WHEN 'shipping'      THEN '送料'
+        WHEN 'fee'           THEN '手数料'
+        WHEN 'transfer_fee'  THEN '振込手数料'
+        ELSE 'その他'
+      END                                      AS 項目,
+      COALESCE(el.name, '')                     AS 品名,
+      COALESCE(el.unit_price, e.amount)          AS 単価,
+      COALESCE(el.quantity, 1)                    AS 数量,
+      COALESCE(el.amount, e.amount)                AS 金額,
+      e.note                                        AS メモ
+    FROM expense e
+    LEFT JOIN expense_line el ON el.expense_id = e.id
+    ${where}
+    ORDER BY e.month, e.occurred_at, el.sort_order
+  `).all(...(month ? [month] : [])) as Array<Record<string, unknown>>
+  return rowsToCsv(rows)
+}
+
+/**
+ * 在庫（1行＝在庫1点）のCSV行。在庫は「今」の姿なので month が来ても無視して全件出す。
+ * 状態はInventory.vue のピル/チップ表示と同じ優先順位（status !== 'in_stock' を先に見る）で決める
+ */
+function exportInventoryRows(): string {
+  const rows = db.prepare(`
+    SELECT
+      iv.item_code             AS 在庫コード,
+      iv.name                  AS 商品名,
+      iv.model_code             AS 型番,
+      iv.material                AS 素材,
+      CASE
+        WHEN iv.status = 'sold'         THEN '販売済'
+        WHEN iv.status = 'disposed'     THEN '廃棄'
+        WHEN iv.status = 'personal_use' THEN '自家消費'
+        WHEN iv.status = 'split'        THEN '分割前の親'
+        WHEN iv.fulfillment = 'pending' OR iv.fulfillment = 'shipped' THEN '未着'
+        WHEN iv.listing_id IS NOT NULL  THEN '出品中'
+        ELSE '届いていて未出品'
+      END                       AS 状態,
+      iv.shop_account_name      AS 仕入先,
+      iv.order_no               AS 注文番号,
+      iv.acquired_at            AS 仕入日,
+      iv.aging_days             AS 滞留日数,
+      iv.landed_cost            AS 按分後原価,
+      iv.listing_price          AS 出品価格,
+      iv.sold_sold_at           AS 販売日,
+      iv.sold_price             AS 販売価格,
+      sls.profit_share          AS "1点あたりの粗利"
+    FROM inventory_view iv
+    LEFT JOIN sale_line_share sls ON sls.inventory_item_id = iv.id
+    ORDER BY iv.acquired_at
+  `).all() as Array<Record<string, unknown>>
+  return rowsToCsv(rows)
+}
+
+/** 設定・ホームから呼ぶCSV書き出しの入口。kind ごとに列が違う（main で組み立て、レンダラーは再計算しない） */
+export function exportCsvRows(kind: ExportKind = 'sales', month?: string): string {
+  switch (kind) {
+    case 'sales': return exportRows(month)
+    case 'purchases': return exportPurchaseRows(month)
+    case 'expenses': return exportExpenseRows(month)
+    case 'inventory': return exportInventoryRows()
   }
-  const lines = [
-    headers.join(','),
-    ...rows.map(r => headers.map(h => esc(r[h])).join(',')),
-  ]
-  // Excel で文字化けしないよう BOM を付ける
-  return '﻿' + lines.join('\r\n')
 }
 
 /** その販売に紐付いている在庫（解除・付け替え用） */

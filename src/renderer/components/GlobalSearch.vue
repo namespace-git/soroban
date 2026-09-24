@@ -6,6 +6,7 @@ import type { SearchHit } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import EmptyState from './EmptyState.vue'
+import { yen } from '../format'
 
 const props = defineProps<{
   open: boolean
@@ -14,8 +15,6 @@ const props = defineProps<{
   loading: boolean
 }>()
 const emit = defineEmits<{ close: []; select: [hit: SearchHit] }>()
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 const KIND_LABEL: Record<SearchHit['kind'], string> = {
   inventory: '在庫', listing: '出品', sale: '売上', purchase: '仕入',

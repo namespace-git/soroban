@@ -2,10 +2,9 @@
 // ホーム上部の利益ストリップ。トップバーでは compact（1つのピル）で使う。
 // 数字はすべて main が計算した ProfitStrip をそのまま出すだけ（ここで再計算しない）。
 import type { ProfitStrip } from '../../shared/types'
+import { yen } from '../format'
 
 defineProps<{ strip: ProfitStrip | null; compact?: boolean }>()
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 </script>
 
 <template>

@@ -17,7 +17,8 @@ import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.
 import SortTh from '../components/SortTh.vue'
 import StageStrip from '../components/StageStrip.vue'
 import type { StageStripStage } from '../components/StageStrip.vue'
-import { useSort } from '../composables/useSort'
+import { useSort, type SortDir } from '../composables/useSort'
+import { yen } from '../format'
 
 const MODEL_CODE_RE = /^[A-Z]\d{3}(-\d+)?$/
 
@@ -52,8 +53,6 @@ const gotoPayload = inject<Ref<{
   inventoryStatus?: InventoryGroupFilter
   agingMin?: number
 } | null>>('gotoPayload', ref(null))
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 // --- 状態カード ---
 const stages = computed<StageStripStage[]>(() => {
@@ -240,6 +239,15 @@ const { sortKey, sortDir, toggle, sortRows } = useSort<SortKey>('aging_days', 'd
 function onSort(key: string) {
   toggle(key as SortKey)
 }
+/** ツールバーの並び替えセレクト。列見出し（SortTh）と同じ sortKey/sortDir を共有する（仕入タブと同じ作り） */
+const sortSelectValue = computed<string>({
+  get: () => `${sortKey.value}:${sortDir.value}`,
+  set: (v) => {
+    const [key, dir] = v.split(':') as [SortKey, SortDir]
+    sortKey.value = key
+    sortDir.value = dir
+  },
+})
 function sortValue(i: InventoryItem, key: SortKey): string | number | null {
   switch (key) {
     case 'name': return i.name
@@ -324,7 +332,7 @@ function soldPart(g: InventoryGroup): string | null {
 function groupSubLine(g: InventoryGroup): string {
   const parts = [unlistedPart(g), listedPart(g), soldPart(g)].filter((s): s is string => !!s)
   if (g.model_code === null) {
-    return `${parts.length ? parts.join('・') : '在庫なし'}。型番を付けると自動引き当ての対象になります`
+    return `${parts.length ? parts.join('・') : '在庫なし'}。型番を付けると自動で紐付けの対象になります`
   }
   return parts.join('・') || '—'
 }
@@ -583,11 +591,19 @@ async function editNote(item: InventoryItem) {
         <option value="acquired_at">仕入日</option>
         <option value="cost">原価</option>
       </select>
+      <select v-if="viewMode === 'flat'" v-model="sortSelectValue">
+        <option value="aging_days:desc">滞留が長い順</option>
+        <option value="aging_days:asc">滞留が短い順</option>
+        <option value="acquired_at:desc">仕入日が新しい順</option>
+        <option value="acquired_at:asc">仕入日が古い順</option>
+        <option value="landed_cost:desc">原価が高い順</option>
+        <option value="landed_cost:asc">原価が低い順</option>
+      </select>
       <span class="grow" />
       <span class="toolbar-count">{{ totalCount }} 件 ・ 合計 {{ yen(totalCost) }}</span>
     </div>
     <p class="faint hint-row">
-      在庫コード（S-0012）をクリックするとコピーできます。メルカリのタイトルに貼るとその1点が自動で引き当たります。2個セットは【S-0012】【S-0013】のように並べます
+      在庫コード（S-0012）をクリックするとコピーできます。メルカリのタイトルに貼るとその1点が自動で紐付きます。2個セットは【S-0012】【S-0013】のように並べます
     </p>
 
     <!-- 型番ごと -->

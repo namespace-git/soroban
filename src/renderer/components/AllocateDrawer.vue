@@ -11,6 +11,7 @@ import EmptyState from './EmptyState.vue'
 import Icon from './Icon.vue'
 import { matchesSearch } from './SearchBox.vue'
 import type { ConfirmChoice } from './ConfirmDialog.vue'
+import { yen, shortDate } from '../format'
 
 type MatchedRow = { id: string; item_code: string; name: string; model_code?: string | null; product_name?: string | null; landed_cost: number; aging_days?: number }
 type ProfitEstimate = { fee: number; shipping_fee: number; packaging_cost: number; cost: number; gross_profit: number }
@@ -39,8 +40,6 @@ const pickingProduct = ref(false)
 let productPickRequest = 0
 // メンテ用：販売済み（他の販売に紐付いた）在庫も候補に出す。ドロワーを開き直すたびに off に戻す
 const includeSold = ref(false)
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 const STATUS_LABEL: Record<ListingStatus, string> = {
   active: '出品中', suspended: '公開停止中', sold: '売れた', ended: '取り下げ',
@@ -233,10 +232,6 @@ const previewProfit = computed(() => estimate.value?.gross_profit ?? 0)
 function truncate(text: string, n: number): string {
   return text.length > n ? text.slice(0, n) + '…' : text
 }
-function soldDate(d: string): string {
-  const [, m, day] = d.split('-')
-  return m && day ? `${m}/${day}` : d
-}
 function soldToLabel(sold: { title: string; price: number }): string {
   return `販売「${truncate(sold.title, 12)}」${yen(sold.price)} に紐付け済み`
 }
@@ -250,7 +245,7 @@ async function confirmPick() {
   if (soldPicks.length > 0) {
     const lines = soldPicks.slice(0, 5).map(c => {
       const s = c.sold_to!
-      return `${c.item_code}「${truncate(c.product_name ?? c.name, 12)}」は販売「${truncate(s.title, 12)}」（${yen(s.price)}・${soldDate(s.sold_at)}）に紐付いています。`
+      return `${c.item_code}「${truncate(c.product_name ?? c.name, 12)}」は販売「${truncate(s.title, 12)}」（${yen(s.price)}・${shortDate(s.sold_at)}）に紐付いています。`
     })
     if (soldPicks.length > 5) lines.push(`ほか${soldPicks.length - 5}点`)
     lines.push('外してこちらに付け替えると、元の販売は未紐付けに戻り、その粗利が変わります（ホームの要対応に出ます）。')
@@ -362,7 +357,7 @@ function placeholderChar(): string {
       </div>
       <label class="search-field">
         <Icon name="search" :size="16" />
-        <input v-model="search" :placeholder="selectionMode === 'inventory' ? '商品名・型番・在庫コード・注文番号・仕入先で検索' : '商品名・商品コードで検索'" />
+        <input v-model="search" :placeholder="selectionMode === 'inventory' ? '商品名・型番・在庫コード・注文番号・仕入先で検索' : '商品名・型番で検索'" />
       </label>
 
       <div v-if="pickedItems.length" class="picked-block">
@@ -376,7 +371,7 @@ function placeholderChar(): string {
       </div>
 
       <template v-if="selectionMode === 'product'">
-        <p class="faint product-help">商品コードが一致する未紐付け在庫を、仕入日の古い順に選びます。</p>
+        <p class="faint product-help">型番が一致する未紐付け在庫を、仕入日の古い順に選びます。</p>
         <label class="product-quantity">追加する点数 <input v-model.number="productQuantity" type="number" min="1" step="1" aria-label="追加する点数" /></label>
         <div class="candidates">
           <div v-for="p in products" :key="p.code" class="product-row">
@@ -393,7 +388,7 @@ function placeholderChar(): string {
           </div>
           <EmptyState v-if="!loading && !products.length" title="選べる商品がありません" />
         </div>
-        <p class="faint product-help">商品コードのない在庫や、紐付け済みの在庫は「在庫から選ぶ」で指定できます。</p>
+        <p class="faint product-help">型番のない在庫や、紐付け済みの在庫は「在庫から選ぶ」で指定できます。</p>
       </template>
 
       <div v-else class="candidates">

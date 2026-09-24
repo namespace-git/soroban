@@ -416,6 +416,8 @@ CREATE TABLE IF NOT EXISTS expense (
   auto        INTEGER NOT NULL DEFAULT 0,
   -- レシート画像のファイル名（userData/thumbs）。無ければ NULL
   receipt_file TEXT,
+  -- 店の登録番号（T＋13桁）。レシートから読めたときだけ。CSVに出す（インボイスの控え）
+  registration_no TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

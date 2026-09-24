@@ -2,10 +2,10 @@
 import CodeChip from './CodeChip.vue'
 import StatusChip from './StatusChip.vue'
 import Icon from './Icon.vue'
+import { yen } from '../format'
 
 defineProps<{ linked: boolean; cost: number; codes: string[]; automatic?: boolean; hint?: string | null; readonly?: boolean }>()
 defineEmits<{ open: [] }>()
-const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
 </script>
 
 <template>

@@ -3,13 +3,14 @@
 // 計算書とタグ別の集計は getMonthStatement、販売ごとの表・締め・片付けるもの・仕入先への支払いは
 // MonthDetail.vue（getMonthDetail）から。どちらも main が計算した値をそのまま出すだけで、ここでは再計算しない。
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { MonthlySummary, MonthStatement, MonthDetail as MonthDetailInfo, ExpenseCategory } from '../../shared/types'
+import type { MonthlySummary, MonthStatement, MonthDetail as MonthDetailInfo, ExpenseCategory, ExportKind } from '../../shared/types'
 import { thisMonthLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import StatusChip from '../components/StatusChip.vue'
 import MonthDetail from './MonthDetail.vue'
+import { yen, percent, dateTime } from '../format'
 
 const revision = inject<Ref<number>>('revision')!
 // ホーム等から goto('monthly', { month }) で開かれたときに読む
@@ -18,8 +19,6 @@ const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const goto = inject<(t: string, payload?: { stage?: 'listed' | 'pending' | 'done' | 'all'; month?: string }) => void>('goto')!
 const changed = inject<() => void>('changed', () => {})
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 const CATEGORY_LABEL: Record<ExpenseCategory, string> = {
   packaging: '梱包費',
@@ -90,6 +89,19 @@ function onAllocChanged() {
   loadStatement()
 }
 
+// --- この月をCSVで書き出す（クリック数を増やさないよう、選択肢はセレクトでなく小さなボタン3つ） ---
+
+const EXPORT_KIND_LABEL: Record<ExportKind, string> = {
+  sales: '販売', purchases: '仕入', expenses: '経費', inventory: '在庫',
+}
+
+async function exportMonthCsv(kind: ExportKind) {
+  if (!selectedMonth.value) return
+  const p = await window.soroban.exportCsv(kind, selectedMonth.value)
+  if (p) toast('書き出しました', 'ok')
+  else toast('書き出すものがありません', 'warn')
+}
+
 // --- 販売ごとの表（MonthDetail.vue）：締め・片付けるもの・仕入先への支払いもここから受け取る ---
 
 const monthDetail = ref<MonthDetailInfo | null>(null)
@@ -102,12 +114,6 @@ function onDetailLoaded(d: MonthDetailInfo) {
 // --- 締め ---
 
 const isEnded = computed(() => !!selectedMonth.value && selectedMonth.value < thisMonth)
-
-function formatDateTime(iso: string): string {
-  const d = new Date(iso)
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
 
 async function doClose() {
   if (!selectedMonth.value) return
@@ -205,6 +211,13 @@ async function doReopen() {
                 <h2>{{ statement.month }} の計算書</h2>
                 <StatusChip tone="brand" :label="`販売用 ${statement.sales_count} 件`" />
                 <StatusChip tone="neutral" label="私物は含まない" />
+                <span class="grow" />
+                <span class="csv-export">
+                  <span class="faint csv-export-label">この月をCSVで：</span>
+                  <button class="sm ghost" @click="exportMonthCsv('sales')">{{ EXPORT_KIND_LABEL.sales }}</button>
+                  <button class="sm ghost" @click="exportMonthCsv('purchases')">{{ EXPORT_KIND_LABEL.purchases }}</button>
+                  <button class="sm ghost" @click="exportMonthCsv('expenses')">{{ EXPORT_KIND_LABEL.expenses }}</button>
+                </span>
               </div>
               <div class="statement-body">
                 <table class="statement-table">
@@ -237,7 +250,7 @@ async function doReopen() {
                     <tr class="sum">
                       <td>粗利</td>
                       <td class="num"><strong :class="statement.gross_profit >= 0 ? 'profit' : 'loss'">{{ yen(statement.gross_profit) }}</strong></td>
-                      <td class="hint">{{ statement.gross_rate != null ? `粗利率 ${statement.gross_rate}%` : '—' }}</td>
+                      <td class="hint">{{ statement.gross_rate != null ? `粗利率 ${percent(statement.gross_rate)}` : '—' }}</td>
                     </tr>
                     <tr class="sub">
                       <td class="k">
@@ -250,7 +263,7 @@ async function doReopen() {
                     <tr class="sum">
                       <td>純利益</td>
                       <td class="num"><strong :class="statement.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(statement.net_profit) }}</strong></td>
-                      <td class="hint">{{ statement.net_rate != null ? `純利益率 ${statement.net_rate}%` : '—' }}</td>
+                      <td class="hint">{{ statement.net_rate != null ? `純利益率 ${percent(statement.net_rate)}` : '—' }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -291,7 +304,7 @@ async function doReopen() {
         <aside class="statement-side">
           <div class="panel close-card">
             <template v-if="monthDetail?.close">
-              <StatusChip tone="ok" :label="'締め済み ' + formatDateTime(monthDetail.close.closed_at)" />
+              <StatusChip tone="ok" :label="'締め済み ' + dateTime(monthDetail.close.closed_at)" />
               <p v-if="monthDetail.changed_since_close" class="changed-note">
                 締めた後に数字が変わっています（締め時：純利益 {{ yen(monthDetail.close.net_profit) }} → 今：{{ yen(monthDetail.totals.net_profit) }}）
               </p>
@@ -464,6 +477,13 @@ async function doReopen() {
   font-weight: 700;
   color: var(--text);
 }
+.csv-export {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.csv-export-label { white-space: nowrap; font-size: var(--fs-12); }
 .statement-body { padding: 8px 24px 20px; }
 
 .statement-table { width: 100%; border-collapse: collapse; font-size: var(--fs-14); }

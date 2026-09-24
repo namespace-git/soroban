@@ -9,6 +9,7 @@ import StatusChip from '../components/StatusChip.vue'
 import CodeChip from '../components/CodeChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+import { yen } from '../format'
 
 const props = defineProps<{ month: string }>()
 // loaded：親（Monthly.vue）が締め・片付けるもの・仕入先への支払いの表示に使う
@@ -17,8 +18,6 @@ const emit = defineEmits<{ loaded: [detail: MonthDetail]; allocChanged: [] }>()
 
 const goto = inject<(t: string, payload?: { stage?: 'listed' | 'pending' | 'done' | 'all'; month?: string }) => void>('goto')!
 const revision = inject<Ref<number>>('revision')!
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 const CATEGORY_LABEL: Record<ExpenseCategory, string> = {
   packaging: '梱包費',

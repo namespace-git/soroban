@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // 横一列の段階カード（売上タブの進捗など）。docs/mocks/mock-sales.html の .progress。
 // レイアウト（列数・間隔）は style.css の .stage-strip、カードの見た目はここのスコープ。
+import { yen } from '../format'
+
 export interface StageStripStage {
   key: string
   label: string
@@ -14,8 +16,6 @@ export interface StageStripStage {
 
 defineProps<{ stages: StageStripStage[]; active: string | null }>()
 const emit = defineEmits<{ select: [string] }>()
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 </script>
 
 <template>

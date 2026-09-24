@@ -19,6 +19,7 @@ import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
+import { yen } from '../format'
 
 const CATEGORY_LABEL: Record<ExpenseCategory, string> = {
   packaging: '梱包費',
@@ -66,8 +67,6 @@ const form = ref({
   /** readReceiptImage で読んだ一時ファイル名。登録・保存時にそのまま渡す */
   receipt_temp_file: null as string | null,
 })
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 async function load() {
   expenses.value = await window.soroban.listExpenses()

@@ -616,6 +616,8 @@ export interface Expense {
   auto: number
   /** レシート画像。soroban-thumb://receipt-<id>.<ext>。無ければ null */
   receipt_url: string | null
+  /** 店の登録番号（T＋13 桁）。レシートから読めたときだけ。CSV に出す（インボイスの控え） */
+  registration_no: string | null
   lines: ExpenseLine[]
 }
 
@@ -977,6 +979,20 @@ export interface CollectorRun {
 // IPC
 // ------------------------------------------------------------
 
+/** 自動バックアップの状態。週 1 回、起動時に前回から 7 日以上たっていれば取る */
+export interface AutoBackupStatus {
+  enabled: boolean
+  /** 最後に自動バックアップを取った日時（ISO）。まだ無ければ null */
+  last_at: string | null
+  /** 保存先フォルダ（userData/backups） */
+  dir: string
+  /** 新しい順。5 世代まで残して古いものから消す */
+  files: Array<{ name: string; size: number; created_at: string }>
+}
+
+/** CSV で書き出す対象。sales=販売（実績・見込みの区分つき）／purchases=仕入の明細／expenses=経費の明細／inventory=在庫 1 点ずつ */
+export type ExportKind = 'sales' | 'purchases' | 'expenses' | 'inventory'
+
 export interface SorobanApi {
   // ダッシュボード
   getDashboard(): Promise<DashboardStats>
@@ -1186,11 +1202,23 @@ export interface SorobanApi {
   listRuns(limit?: number): Promise<CollectorRun[]>
 
   // バックアップ
-  exportCsv(): Promise<string | null>
+  /**
+   * CSV で書き出す（確定申告・記録の持ち出し用）。
+   * kind 省略時は販売。month（YYYY-MM）を渡すとその月だけ。保存先は人が選ぶ
+   */
+  exportCsv(kind?: ExportKind, month?: string): Promise<string | null>
   /**
    * バックアップを zip で保存（保存先を選ぶ。キャンセルなら null）。中身：soroban.db（SQLite の backup API で整合したコピー）、
    * thumbs/（レシート画像・サムネ）、meta.json（バージョン・OS・日時）。不具合報告もこのファイル 1 本
    */
+  /** 自動バックアップの状態（週 1 回、起動時に古ければ取る。userData/backups に 5 世代まで） */
+  getAutoBackupStatus(): Promise<AutoBackupStatus>
+  /** 自動バックアップの入切。切ると次の起動から取らない（取り済みのファイルは消さない） */
+  setAutoBackupEnabled(enabled: boolean): Promise<void>
+  /** いま 1 本取る（自動と同じ場所・同じ世代管理）。取れたファイルのパス */
+  runAutoBackupNow(): Promise<string>
+  /** バックアップの入っているフォルダを OS のファイラで開く */
+  openBackupFolder(): Promise<void>
   backupDb(): Promise<string | null>
   /**
    * zip から復元。復元前に今の DB と画像を userData/backup-before-restore-<日時>/ に退避してから入れ替え、アプリを再起動する。

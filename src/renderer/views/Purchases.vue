@@ -18,6 +18,7 @@ import SortTh from '../components/SortTh.vue'
 import { useSort, type SortDir } from '../composables/useSort'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import type { ConfirmChoice } from '../components/ConfirmDialog.vue'
+import { yen, shortDate } from '../format'
 
 type SortKey = 'ordered_at' | 'subtotal' | 'shipping_fee' | 'total_cost'
 type ShipStageState = 'done' | 'now' | 'pending'
@@ -56,17 +57,10 @@ const form = ref({
   lines: [{ name: '', unit_price: 0, quantity: 1 }] as PurchaseLineInput[],
 })
 
-const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
-
 // --- サムネイル。仕入は画像を持たないためプレースホルダのみ（仕入先名の頭文字） ---
 function shopMarkChar(p: PurchaseSummary): string {
   const name = p.shop_account_name?.trim()
   return name ? name.charAt(0) : '—'
-}
-
-/** MM-DD だけ（年をまたぐ表示は他画面でも省いている） */
-function shortDate(d: string | null): string {
-  return d ? d.slice(5) : ''
 }
 
 /** 行の .row-title：仕入先＋注文番号。名前の長さで位置が動かないよう、状態ラベルは別の段（.row-labels）に出す */

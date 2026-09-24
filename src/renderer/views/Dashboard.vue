@@ -10,6 +10,7 @@ import StatusPill from '../components/StatusPill.vue'
 import ProfitStripBar from '../components/ProfitStripBar.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+import { yen } from '../format'
 
 // グループ見出しの表示名。InboxGroup.label は main が返すが、文言はここで固定する
 // （main 側のラベル変更に画面が引きずられないように）
@@ -37,8 +38,6 @@ const goto = inject<(t: string, payload?: {
 // App.vue のヘッダの「取り込む」があればそれに任せる（通知・件数更新まで面倒を見てくれる）。
 // 無ければ window.soroban.collect() を直接呼ぶ（Dashboard 単体表示など）
 const injectedCollect = inject<(() => Promise<void>) | undefined>('collect', undefined)
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 const inbox = ref<Inbox | null>(null)
 // 「見直すもの」の在庫カード（点数・原価）は getInbox に無いので getDashboard から補う

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
-import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus } from '../../shared/types'
+import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, AutoBackupStatus, ExportKind } from '../../shared/types'
 
 type SaleExclusion = { mercari_item_id: string; title: string; excluded_at: string }
 import Icon from '../components/Icon.vue'
@@ -9,6 +9,7 @@ import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import type { ConfirmChoice } from '../components/ConfirmDialog.vue'
+import { yen, dateTime } from '../format'
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
@@ -16,8 +17,6 @@ const choose = inject<(title: string, choices: ConfirmChoice[], opts?: { message
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
-
-const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
 
 const methods = ref<ShippingMethod[]>([])
 const settings = ref<Record<string, string>>({})
@@ -39,6 +38,7 @@ const testingAi = ref(false)
 const geminiModels = ref<Array<{ name: string; display_name: string; description: string }>>([])
 const loadingModels = ref(false)
 const customModelInput = ref('')
+const autoBackup = ref<AutoBackupStatus | null>(null)
 
 /**
  * モデルのセレクトの選択肢。読み込み前は現在の値＋既定だけ、読み込み後は listGeminiModels の結果
@@ -61,7 +61,7 @@ const modelOptions = computed(() => {
 })
 
 async function load() {
-  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes] = await Promise.all([
+  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes, autoBackupRes] = await Promise.all([
     window.soroban.listShippingMethods(),
     window.soroban.getSettings(),
     window.soroban.listRuns(10),
@@ -71,6 +71,7 @@ async function load() {
     window.soroban.listShopAccountStats(),
     window.soroban.listSaleExclusions(),
     window.soroban.getAiStatus(),
+    window.soroban.getAutoBackupStatus(),
   ])
   methods.value = methodsRes
   settings.value = settingsRes
@@ -82,6 +83,7 @@ async function load() {
   saleExclusions.value = exclusionsRes
   aiStatus.value = aiStatusRes
   aiModel.value = aiStatusRes.model
+  autoBackup.value = autoBackupRes
   loaded.value = true
 }
 onMounted(load)
@@ -241,9 +243,15 @@ async function removeMethod(m: ShippingMethod) {
   await load()
 }
 
-async function exportCsv() {
-  const p = await window.soroban.exportCsv()
-  flash(p ? `書き出しました：${p}` : '中止しました')
+const EXPORT_KIND_LABEL: Record<ExportKind, string> = {
+  sales: '販売', purchases: '仕入', expenses: '経費', inventory: '在庫',
+}
+const exportKinds: ExportKind[] = ['sales', 'purchases', 'expenses', 'inventory']
+
+async function exportCsv(kind: ExportKind) {
+  const p = await window.soroban.exportCsv(kind)
+  if (p) toast('書き出しました', 'ok')
+  else toast('書き出すものがありません', 'warn')
 }
 
 async function backup() {
@@ -255,6 +263,29 @@ async function restore() {
   const result = await window.soroban.restoreBackup()
   // restarting: true ならアプリがそのまま再起動する。null はダイアログのキャンセル（選択・確認どちらも）
   if (!result) flash('中止しました')
+}
+
+async function toggleAutoBackup(checked: boolean) {
+  await window.soroban.setAutoBackupEnabled(checked)
+  autoBackup.value = await window.soroban.getAutoBackupStatus()
+}
+
+async function runAutoBackupNow() {
+  await window.soroban.runAutoBackupNow()
+  autoBackup.value = await window.soroban.getAutoBackupStatus()
+  toast('バックアップを取りました', 'ok')
+}
+
+function openBackupFolder() {
+  return window.soroban.openBackupFolder()
+}
+
+/** 「4.3MB」のように出す。バックアップ一覧の表示専用（他画面には無いのでここだけ持つ） */
+function fileSizeText(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`
+  const kb = bytes / 1024
+  if (kb < 1024) return `${Math.round(kb)}KB`
+  return `${(kb / 1024).toFixed(1)}MB`
 }
 
 // テンプレートから window は参照できないので包む
@@ -562,7 +593,7 @@ const runLabel: Record<string, string> = {
           </thead>
           <tbody>
             <tr v-for="r in runs" :key="r.id">
-              <td class="faint">{{ new Date(r.started_at).toLocaleString('ja-JP') }}</td>
+              <td class="faint">{{ dateTime(r.started_at) }}</td>
               <td class="faint col-target">{{ r.source === 'mercari' ? 'メルカリ' : (r.shop_account_name ?? 'メロジョイ') }}</td>
               <td>
                 <StatusChip
@@ -735,14 +766,53 @@ const runLabel: Record<string, string> = {
         </div>
         <p class="faint hint">
           データはこのPCの中だけにあります。壊れたら戻せないので、
-          月に1回はバックアップを取ってください。
+          週に1回、自動でバックアップを取ります（下で切れます）。大事な作業の前は手動でも取ってください。
         </p>
         <p class="faint hint">
           データベース・レシート画像・サムネ・操作ログ（14 日分）が 1 つの zip に入ります。
           不具合の報告はこのファイルを送ってください。別のパソコンへの引っ越しにも。
         </p>
+
+        <p class="panel-title auto-backup-title">自動バックアップ</p>
+        <label class="row hint">
+          <input
+            type="checkbox"
+            :checked="autoBackup?.enabled ?? true"
+            @change="toggleAutoBackup(($event.target as HTMLInputElement).checked)"
+          />
+          週に1回、自動でバックアップを取る
+        </label>
+        <p class="faint hint">
+          最後の自動バックアップ：{{ autoBackup?.last_at ? dateTime(autoBackup.last_at) : 'まだ取っていません' }}
+        </p>
         <div class="row">
-          <button @click="exportCsv"><Icon name="download" :size="16" /> 売上をCSVで書き出す</button>
+          <button class="ghost sm" @click="runAutoBackupNow"><Icon name="download" :size="14" /> いま取る</button>
+          <button class="ghost sm" @click="openBackupFolder"><Icon name="folder" :size="14" /> フォルダを開く</button>
+        </div>
+        <table class="compact">
+          <thead>
+            <tr><th>ファイル名</th><th class="num">サイズ</th><th>日時</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="f in autoBackup?.files ?? []" :key="f.name">
+              <td class="faint">{{ f.name }}</td>
+              <td class="num faint">{{ fileSizeText(f.size) }}</td>
+              <td class="faint nowrap">{{ dateTime(f.created_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="!autoBackup?.files.length" class="dim">まだ自動バックアップはありません</p>
+
+        <p class="panel-title csv-title">CSVで書き出す</p>
+        <div class="row">
+          <button v-for="k in exportKinds" :key="k" class="ghost" @click="exportCsv(k)">
+            <Icon name="download" :size="16" /> {{ EXPORT_KIND_LABEL[k] }}
+          </button>
+        </div>
+        <p class="faint hint">在庫は今の姿をそのまま出します（月では切れません）。</p>
+
+        <p class="panel-title manual-backup-title">手動バックアップ</p>
+        <div class="row">
           <button @click="backup"><Icon name="download" :size="16" /> バックアップを保存（zip）</button>
           <button class="ghost" @click="revealFolder"><Icon name="folder" :size="16" /> 保存フォルダを開く</button>
         </div>
@@ -930,6 +1000,8 @@ const runLabel: Record<string, string> = {
 }
 
 .runs-title { margin-top: 16px; }
+.auto-backup-title { margin-top: 16px; }
+.manual-backup-title { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .small { font-size: var(--fs-12); }
 .col-target { width: 96px; }
 

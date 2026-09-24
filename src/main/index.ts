@@ -13,7 +13,7 @@ import * as backup from './backup'
 import * as inbox from './inbox'
 import * as views from './views'
 import * as applog from './applog'
-import type { CollectorRun, SorobanApi } from '../shared/types'
+import type { CollectorRun, ExportKind, SorobanApi } from '../shared/types'
 
 // ============================================================
 // そろばん — メインプロセス
@@ -125,6 +125,7 @@ async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
  */
 const UNLOGGED_HANDLERS = new Set<keyof SorobanApi>([
   'logClient', 'getDashboard', 'listSales', 'listListings', 'listInventory',
+  'getAutoBackupStatus',
   'suggestProductInventory',
   'listPurchases', 'listMonthly', 'listExpenses', 'searchAll', 'getSettings',
   'getMonthDetail', 'listProducts', 'listTags', 'listShopAccounts', 'listShippingMethods',
@@ -270,12 +271,17 @@ function registerIpc(): void {
   // --- バックアップ ---
   // DBがローカル1ファイルなので、退避手段は必ず用意しておく
 
-  handle('exportCsv', async () => {
-    const csv = db.exportRows()
+  const EXPORT_LABEL: Record<ExportKind, string> = {
+    sales: '販売', purchases: '仕入', expenses: '経費', inventory: '在庫',
+  }
+
+  handle('exportCsv', async (kind = 'sales', month) => {
+    const label = EXPORT_LABEL[kind] ?? EXPORT_LABEL.sales
+    const csv = db.exportCsvRows(kind, month)
     if (!csv) return null
     const { filePath, canceled } = await dialog.showSaveDialog({
-      title: '売上をCSVで書き出す',
-      defaultPath: `soroban-${new Date().toISOString().slice(0, 10)}.csv`,
+      title: `${label}をCSVで書き出す`,
+      defaultPath: `soroban-${kind}-${month ?? new Date().toISOString().slice(0, 10)}.csv`,
       filters: [{ name: 'CSV', extensions: ['csv'] }],
     })
     if (canceled || !filePath) return null
@@ -283,6 +289,10 @@ function registerIpc(): void {
     return filePath
   })
 
+  handle('getAutoBackupStatus', () => backup.getAutoBackupStatus())
+  handle('setAutoBackupEnabled', (enabled) => backup.setAutoBackupEnabled(enabled))
+  handle('runAutoBackupNow', () => backup.runAutoBackup(true))
+  handle('openBackupFolder', () => backup.openBackupFolder())
   handle('backupDb', () => backup.backupToZip(mainWindow))
   handle('restoreBackup', () => backup.restoreFromZip(mainWindow))
 
@@ -357,6 +367,9 @@ app.whenReady().then(async () => {
   // 起動時に、前回から間隔が空いていれば裏で収集する。
   // OSのスケジューラは使わない（アプリを開いたときに追いつけばよい）
   collectInBackground()
+
+  // 週に1回、前回から7日空いていれば裏でバックアップを取る（失敗しても起動は止めない）
+  backup.maybeRunAutoBackup()
 
   // 起動10秒後・以後6時間ごとにアプリの更新を裏で確認する（dev では走らない）
   updater.scheduleAutoCheck(() => mainWindow)

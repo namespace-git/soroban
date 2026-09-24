@@ -9,6 +9,7 @@ import StatusChip from './StatusChip.vue'
 import StatusPill from './StatusPill.vue'
 import CodeChip from './CodeChip.vue'
 import Icon from './Icon.vue'
+import { yen, smartDate, dateTimeWithYear } from '../format'
 
 const props = defineProps<{
   open: boolean
@@ -33,8 +34,6 @@ const SALE_STATUS_CHIP: Record<SaleStatus, { tone: 'warn' | 'info' | 'ok'; label
   completed: { tone: 'ok', label: '取引完了' },
 }
 
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
-
 async function load() {
   if (!props.inventoryItemId) {
     timeline.value = null
@@ -54,21 +53,9 @@ watch(() => [props.open, props.inventoryItemId], ([isOpen]) => {
 }, { immediate: true })
 
 // 今年でなければ年も出す。date が null（まだ起きていない予定の段）は「予定」と薄く出す
-function formatDate(d: string | null): string {
-  if (!d) return '予定'
-  const [y, m, day] = d.split('-')
-  return Number(y) === new Date().getFullYear() ? `${m}/${day}` : `${y}/${m}/${day}`
-}
+const formatDate = (d: string | null) => smartDate(d, '予定')
 
-// 購入日時（取引画面の「購入日時」）。分まで取れていれば時刻も出す。日付だけなら日付だけ
-function formatPurchasedAt(d: string | null): string {
-  if (!d) return '—'
-  const [datePart, timePart] = d.split('T')
-  const [y, m, day] = datePart.split('-')
-  const dateStr = `${y}/${m}/${day}`
-  return timePart ? `${dateStr} ${timePart}` : dateStr
-}
-const purchasedAtLabel = computed(() => formatPurchasedAt(timeline.value?.sale?.purchased_at ?? null))
+const purchasedAtLabel = computed(() => dateTimeWithYear(timeline.value?.sale?.purchased_at ?? null))
 
 async function refetchPurchasedAt() {
   const sale = timeline.value?.sale
@@ -170,7 +157,7 @@ async function openMercariLink(kind: 'item' | 'transaction', id: string | null) 
 // --- いっしょに買ったもの（同じ注文の他の在庫） ---
 function siblingState(it: PurchaseLineItem): string {
   if (it.status === 'sold') return `販売済 ${yen(it.sale_price ?? 0)}`
-  if (it.status === 'in_stock') return it.listing_price != null ? `出品中 ${yen(it.listing_price)}（引き当て済み）` : '未出品'
+  if (it.status === 'in_stock') return it.listing_price != null ? `出品中 ${yen(it.listing_price)}（紐付け済み）` : '未出品'
   if (it.status === 'disposed') return '廃棄'
   if (it.status === 'personal_use') return '自家消費'
   return '分割済'

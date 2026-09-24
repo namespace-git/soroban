@@ -8,6 +8,7 @@ import Drawer from './Drawer.vue'
 import Icon from './Icon.vue'
 import StatusChip from './StatusChip.vue'
 import { parseCsv, toCsv } from '../utils/csv'
+import { yen } from '../format'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: []; imported: [created: number, skipped: number] }>()
@@ -273,7 +274,6 @@ function parseFile(text: string) {
 
 const registerableOrders = computed(() => orders.value.filter(o => o.input))
 const problemCount = computed(() => orders.value.length - registerableOrders.value.length)
-const yen = (n: number) => '¥' + n.toLocaleString('ja-JP')
 
 // --- 登録 ---
 

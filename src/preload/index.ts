@@ -118,6 +118,10 @@ const api: SorobanApi = {
   listRuns: invoke('listRuns'),
 
   exportCsv: invoke('exportCsv'),
+  getAutoBackupStatus: invoke('getAutoBackupStatus'),
+  setAutoBackupEnabled: invoke('setAutoBackupEnabled'),
+  runAutoBackupNow: invoke('runAutoBackupNow'),
+  openBackupFolder: invoke('openBackupFolder'),
   backupDb: invoke('backupDb'),
   restoreBackup: invoke('restoreBackup'),
   revealDbFolder: invoke('revealDbFolder'),

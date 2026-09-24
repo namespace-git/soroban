@@ -24,6 +24,7 @@ import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
 import StageStrip, { type StageStripStage } from '../components/StageStrip.vue'
 import type { PromptOptions } from '../components/InputDialog.vue'
+import { yen, shortDate, dateTime } from '../format'
 
 /** 進捗ストリップの段階（メルカリ側の状態）。旧「未処理／完了」の段階タブは廃止し、
     利益の入力（送料未入力／未紐付け）は下の inputs バンドで別軸として扱う */
@@ -148,8 +149,6 @@ const tagPickerAnchor = ref<HTMLElement | null>(null)
 
 // 履歴ドロワー
 const timelineItemId = ref<string | null>(null)
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 // --- 粗利が出ていない販売の判定（sale_profit ビューの is_shipping_confirmed / unmatched をそのまま見るだけ。
 //     金額の再計算はしていない）。私物は常に対象外（「利益の計算に入れない」） ---
@@ -452,17 +451,17 @@ function placeholderChar(r: Row): string {
 /** 日付＋買い手（＋私物の注記）の1行テキスト。MM/DD 表記でメルカリのタイトルに寄せる */
 function saleSubText(s: SaleProfit): string {
   const parts = s.purchased_at
-    ? [`購入 ${s.purchased_at.slice(5, 10).replace('-', '/')}`]
-    : [`${s.sold_at.slice(5, 10).replace('-', '/')} に売れた`]
+    ? [`購入 ${shortDate(s.purchased_at)}`]
+    : [`${shortDate(s.sold_at)} に売れた`]
   if (s.status === 'completed' && s.completed_at) {
-    parts.push(`完了 ${s.completed_at.slice(5).replace('-', '/')}`)
+    parts.push(`完了 ${shortDate(s.completed_at)}`)
   }
   if (s.buyer) parts.push(`買い手 ${s.buyer}`)
   if (s.kind === 'personal') parts.push('利益の計算に入れない')
   return parts.join(' ・ ')
 }
 function listingSubText(l: Listing): string {
-  return `出品 ${l.listed_at.slice(5).replace('-', '/')} ・ 確認 ${formatSeen(l.last_seen_at)}`
+  return `出品 ${shortDate(l.listed_at)} ・ 確認 ${dateTime(l.last_seen_at)}`
 }
 
 // --- 履歴ドロワー。紐付いていれば最初の在庫を開く。未紐付けは開けない ---
@@ -498,12 +497,6 @@ function seenStale(l: Listing): boolean {
   const finishedAt = lastMercariRun.value?.finished_at
   if (!finishedAt) return false
   return new Date(l.last_seen_at).getTime() < new Date(finishedAt).getTime()
-}
-
-function formatSeen(iso: string): string {
-  const d = new Date(iso)
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 const STAGE_EMPTY: Record<Stage, { title: string; hint?: string }> = {

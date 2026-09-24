@@ -8,6 +8,7 @@ import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import CodeChip from './CodeChip.vue'
 import Icon from './Icon.vue'
+import { yen, shortDate } from '../format'
 
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 
@@ -28,8 +29,6 @@ const goto = inject<(t: string, payload?: { stage?: 'listed' | 'pending' | 'done
 
 const detail = ref<PurchaseDetail | null>(null)
 const loading = ref(false)
-
-const yen = (n: number) => (n < 0 ? '−' : '') + '¥' + Math.abs(n).toLocaleString('ja-JP')
 
 async function load() {
   if (!props.purchaseId) {
@@ -61,11 +60,6 @@ function fulfillmentChip(f: Fulfillment | null): ChipInfo {
   if (f === 'shipped') return { tone: 'info', label: '配送中' }
   // delivered、または分からない（手入力など）は到着扱い
   return { tone: 'ok', label: '到着済' }
-}
-
-/** MM-DD だけ（年をまたぐ表示は他画面でも省いている） */
-function shortDate(d: string | null): string {
-  return d ? d.slice(5) : ''
 }
 
 type ShipStageState = 'done' | 'now' | 'pending'
