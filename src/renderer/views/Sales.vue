@@ -18,6 +18,7 @@ import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
 import TimelineDrawer from '../components/TimelineDrawer.vue'
 import AllocateDrawer from '../components/AllocateDrawer.vue'
+import AllocationCell from '../components/AllocationCell.vue'
 import SalesSummary from '../components/SalesSummary.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
 import PeriodSelect, { inPeriod, type Period } from '../components/PeriodSelect.vue'
@@ -103,7 +104,7 @@ async function loadProgress() { progress.value = await window.soroban.getSalesPr
 const stageCards = computed<StageStripStage[]>(() => {
   const p = progress.value
   return [
-    { key: 'listed', label: '出品中', count: p?.listed.count ?? 0, money: p ? p.listed.expected_profit : null, sub: `未引き当て ${p?.listed.unallocated ?? 0}` },
+    { key: 'listed', label: '出品中', count: p?.listed.count ?? 0, money: p ? p.listed.expected_profit : null, sub: `未紐付け ${p?.listed.unallocated ?? 0}` },
     { key: 'to_ship', label: '売れた・発送する', count: p?.to_ship.count ?? 0, money: p ? p.to_ship.revenue : null, sub: '見込み売上・発送待ち' },
     { key: 'in_transit', label: '配送中・受取待ち', count: p?.in_transit.count ?? 0, money: p ? p.in_transit.revenue : null, sub: '見込み売上・取引完了待ち' },
     { key: 'done', label: '取引完了', count: p?.completed_this_month.count ?? 0, money: p ? p.completed_this_month.revenue : null, sub: '今月・反映済み' },
@@ -112,9 +113,9 @@ const stageCards = computed<StageStripStage[]>(() => {
 })
 function onSelectStage(key: string) { stage.value = key as Stage }
 
-// --- 見出し行のラベル。出品中（stage==='listed'）は「引き当て」「見込み」の言い回しに変える。
+// --- 紐付けの入口は全ステップ共通。利益だけ実績／見込みを区別する。
 //     出品と販売が混ざる「すべて」はどちらの行にも通じる既定の言い回しのまま ---
-const costHeaderLabel = computed(() => stage.value === 'listed' ? '引き当てた在庫' : '原価（紐付け）')
+const costHeaderLabel = '在庫の紐付け・原価'
 const profitHeaderLabel = computed(() => stage.value === 'listed' ? '見込み粗利' : '粗利')
 
 /** 利益の入力バンドのピルをクリック：「すべて」に開いて絞る（もう一度押すと解除） */
@@ -424,10 +425,10 @@ async function openTimelineForSale(s: SaleProfit) {
 }
 function onRowClick(r: Row) {
   if (r.kind === 'listing' && r.listing) openListingAlloc(r.listing)
-  else if (r.kind === 'sale' && r.sale) openTimelineForSale(r.sale)
+  else if (r.kind === 'sale' && r.sale && r.sale.kind !== 'personal') openSaleAlloc(r.sale)
 }
 function rowClickable(r: Row): boolean {
-  return r.kind === 'listing' || (r.kind === 'sale' && !!r.sale && canOpenTimeline(r.sale))
+  return r.kind === 'listing' || (r.kind === 'sale' && !!r.sale && r.sale.kind !== 'personal')
 }
 
 // --- 最終取り込み時刻（メルカリ・成功のみ）。この時刻より last_seen_at が古い出品は
@@ -594,9 +595,9 @@ async function autoLinkPending() {
 async function autoReserveListings() {
   const n = await window.soroban.autoReserveListings()
   if (n > 0) {
-    toast(`${n}件を引き当てました`, 'ok')
+    toast(`${n}件を紐付けました`, 'ok')
   } else {
-    toast('引き当てられる出品はありません', 'warn')
+    toast('紐付けられる出品はありません', 'warn')
   }
   await load()
   await loadProgress()
@@ -784,10 +785,10 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
     </p>
 
     <div class="toolbar">
-      <select v-if="stage === 'listed'" v-model="listedFilter" title="引き当ての状態で絞り込む">
+      <select v-if="stage === 'listed'" v-model="listedFilter" title="紐付けの状態で絞り込む">
         <option value="all">すべて</option>
-        <option value="unallocated">未引き当て</option>
-        <option value="allocated">引き当て済み</option>
+        <option value="unallocated">未紐付け</option>
+        <option value="allocated">紐付け済み</option>
       </select>
       <select v-else v-model="statusFilter" title="取引の進み具合で絞り込む">
         <option value="">すべての状態</option>
@@ -824,7 +825,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
         <StatusChip tone="brand" :label="`${monthFilter} ×`" />
       </button>
       <span class="grow" />
-      <button v-if="stage === 'listed'" class="sm" @click="autoReserveListings">型番で自動引き当て</button>
+      <button v-if="stage === 'listed'" class="sm" @click="autoReserveListings">型番で自動紐付け</button>
       <button v-if="stage !== 'listed'" class="sm" @click="autoLinkPending">型番で自動紐付け</button>
       <span class="faint">{{ filteredRows.length }}件<template v-if="monthFilter">・{{ monthFilter }} の販売</template></span>
     </div>
@@ -870,7 +871,11 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
           <div
             class="cell-thumb"
             :class="{ clickable: rowClickable(r) }"
-            :title="r.kind === 'listing' ? '引き当てを編集' : (r.sale && canOpenTimeline(r.sale) ? '履歴を見る' : undefined)"
+            :title="rowClickable(r) ? '在庫の紐付けを開く' : undefined"
+            :role="rowClickable(r) ? 'button' : undefined"
+            :tabindex="rowClickable(r) ? 0 : undefined"
+            @keydown.enter="onRowClick(r)"
+            @keydown.space.prevent="onRowClick(r)"
             @click="onRowClick(r)"
           >
             <img
@@ -885,24 +890,28 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
           </div>
 
           <div class="cell-product">
+            <div class="product-status-row">
+              <StatusPill v-if="r.kind === 'sale' && r.sale?.status && SALE_STATUS_PILL[r.sale.status]"
+                :tone="SALE_STATUS_PILL[r.sale.status].tone" :label="SALE_STATUS_PILL[r.sale.status].label" />
+              <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="STATUS_LABEL[r.listing.status]" />
+              <StatusChip v-if="r.sale && !r.sale.status" tone="neutral" :label="r.sale.source === 'manual' ? '手入力' : '状態未取得'" />
+            </div>
             <div class="title-line">
               <span
                 class="title-name"
                 :class="{ clickable: rowClickable(r) }"
                 :title="rowTitle(r)"
+                :role="rowClickable(r) ? 'button' : undefined"
+                :tabindex="rowClickable(r) ? 0 : undefined"
+                @keydown.enter="onRowClick(r)"
+                @keydown.space.prevent="onRowClick(r)"
                 @click="onRowClick(r)"
               >{{ rowTitle(r) }}</span>
-              <StatusPill
-                v-if="r.kind === 'sale' && r.sale?.status && SALE_STATUS_PILL[r.sale.status]"
-                :tone="SALE_STATUS_PILL[r.sale.status].tone"
-                :label="SALE_STATUS_PILL[r.sale.status].label"
-              />
-              <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="STATUS_LABEL[r.listing.status]" />
             </div>
 
             <template v-if="r.kind === 'sale' && r.sale">
+              <div class="sub-text product-detail">{{ saleSubText(r.sale) }}</div>
               <div class="chip-row">
-                <span class="sub-text" :title="r.sale.note ? undefined : undefined">{{ saleSubText(r.sale) }}</span>
                 <button
                   v-if="r.sale.kind === 'resale'"
                   class="kind-toggle"
@@ -931,17 +940,19 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
               </div>
             </template>
 
-            <div v-else-if="r.listing" class="chip-row">
-              <span class="sub-text" :title="'更新日から推定'">{{ listingSubText(r.listing) }}</span>
-              <CodeChip v-for="mc in r.listing.model_codes" :key="mc" kind="model" :code="mc" />
-              <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
-              <StatusChip
-                v-if="seenStale(r.listing)"
-                tone="neutral"
-                label="前回の取り込みで見えず"
-                title="1ページ目に無かっただけかもしれません。売れていれば売上に出ます"
-              />
-            </div>
+            <template v-else-if="r.listing">
+              <div class="sub-text product-detail" title="更新日から推定">{{ listingSubText(r.listing) }}</div>
+              <div class="chip-row">
+                <CodeChip v-for="mc in r.listing.model_codes" :key="mc" kind="model" :code="mc" />
+                <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
+                <StatusChip
+                  v-if="seenStale(r.listing)"
+                  tone="neutral"
+                  label="前回の取り込みで見えず"
+                  title="1ページ目に無かっただけかもしれません。売れていれば売上に出ます"
+                />
+              </div>
+            </template>
           </div>
 
           <div class="cell-meta">
@@ -986,40 +997,17 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
             </div>
 
             <div class="cell-cost">
-              <template v-if="r.kind === 'sale' && r.sale">
-                <span v-if="r.sale.kind === 'personal'" class="faint">—</span>
-                <template v-else-if="r.sale.item_count">
-                  <button class="cost-btn" @click="r.sale && openSaleAlloc(r.sale)" title="クリックで紐付けを編集">
-                    {{ yen(r.sale.cost) }}
-                  </button>
-                  <div class="chip-row cost-codes">
-                    <CodeChip v-for="code in saleItemCodes.get(r.sale.id) ?? []" :key="code" kind="item" :code="code" />
-                    <StatusChip v-if="r.sale.auto_linked" tone="neutral" label="自動紐付け" />
-                  </div>
-                </template>
-                <template v-else>
-                  <button class="sm link-btn" @click="r.sale && openSaleAlloc(r.sale)">
-                    <Icon name="link" :size="14" /> 紐付ける
-                  </button>
-                  <span v-if="costCandidateText(r.sale)" class="faint candidate-hint">{{ costCandidateText(r.sale) }}</span>
-                </template>
-              </template>
-              <template v-else-if="r.kind === 'listing' && r.listing">
-                <template v-if="r.listing.items.length">
-                  <div class="chip-row">
-                    <CodeChip v-for="it in r.listing.items" :key="it.id" kind="item" :code="it.item_code" />
-                  </div>
-                  <span class="num faint">{{ yen(r.listing.reserved_cost) }}</span>
-                </template>
-                <template v-else>
-                  <div class="unalloc-row">
-                    <StatusPill tone="solid-warn" label="未引き当て" class="unalloc-pill" />
-                    <button class="sm link-btn" @click="r.listing && openListingAlloc(r.listing)">
-                      <Icon name="link" :size="14" /> 引き当てる
-                    </button>
-                  </div>
-                </template>
-              </template>
+              <span v-if="r.sale?.kind === 'personal'" class="faint">対象外（私物）</span>
+              <AllocationCell v-else-if="r.sale"
+                :linked="r.sale.item_count > 0" :cost="r.sale.cost"
+                :codes="saleItemCodes.get(r.sale.id) ?? []" :automatic="!!r.sale.auto_linked"
+                :hint="!r.sale.item_count ? costCandidateText(r.sale) : null"
+                @open="openSaleAlloc(r.sale)" />
+              <AllocationCell v-else-if="r.listing"
+                :linked="r.listing.items.length > 0" :cost="r.listing.reserved_cost"
+                :codes="r.listing.items.map(it => it.item_code)"
+                :readonly="!['active', 'suspended'].includes(r.listing.status)"
+                @open="openListingAlloc(r.listing)" />
             </div>
 
             <div class="cell-profit num">
@@ -1056,6 +1044,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
                 <Icon name="external" :size="14" />
               </button>
               <button class="sm ghost fade-btn" @click="r.sale && openTagPicker(r.sale, $event)" title="タグを編集する">タグ</button>
+              <button v-if="canOpenTimeline(r.sale)" class="sm ghost" @click="openTimelineForSale(r.sale)">履歴</button>
               <button class="sm ghost fade-btn" @click="r.sale && editNote(r.sale)" title="メモを編集する">メモ</button>
               <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editPackaging(r.sale)" title="梱包材費を編集する">梱包</button>
               <button v-if="r.sale.kind === 'personal'" class="sm ghost fade-btn" @click="r.sale && setKind(r.sale, 'resale')">転売にする</button>
@@ -1071,10 +1060,6 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
                 @click.stop="r.listing && openMercariExternal('item', r.listing.mercari_item_id)"
               >
                 <Icon name="external" :size="14" />
-              </button>
-              <!-- 未引き当ては原価の欄に「引き当てる」があるので、ここは引き当て済みの「追加」だけ -->
-              <button v-if="r.listing.items.length" class="sm ghost" @click="r.listing && openListingAlloc(r.listing)">
-                <Icon name="link" :size="14" /> 追加
               </button>
               <button class="sm ghost" @click="r.listing && endListing(r.listing)">取り下げ</button>
             </template>
@@ -1121,6 +1106,8 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 </template>
 
 <style scoped>
+.product-status-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px; margin-bottom: 4px; }
+.product-detail { display: block; margin: 4px 0; }
 .form {
   display: flex;
   flex-direction: column;
@@ -1176,10 +1163,10 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 .work-panel { padding: 6px 8px; overflow: hidden; }
 .work-row {
   display: grid;
-  grid-template-columns: 56px minmax(180px, 1fr) 96px 200px 200px 110px auto;
+  grid-template-columns: 48px minmax(180px, 1fr) 80px 160px 170px 110px 200px;
   grid-template-areas: "thumb product price ship cost profit ops";
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 10px 10px;
   border-top: 1px solid var(--line-soft);
 }
@@ -1212,14 +1199,16 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 .cell-ops {
   grid-area: ops;
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  row-gap: 4px;
   white-space: nowrap;
 }
 .cell-ops button { white-space: nowrap; }
 
-@media (max-width: 1099px) {
+@media (max-width: 1199px) {
   .work-row {
     grid-template-columns: 48px minmax(0, 1fr);
     grid-template-areas:
@@ -1320,38 +1309,6 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
   text-overflow: ellipsis;
 }
 
-.cost-btn {
-  background: transparent;
-  border-color: transparent;
-  padding: 0;
-  height: auto;
-  font: inherit;
-  color: var(--text);
-}
-.cost-btn:hover:not(:disabled) {
-  background: transparent;
-  text-decoration: underline;
-}
-.cost-codes { justify-content: flex-start; }
-.candidate-hint { font-size: var(--fs-12); }
-
-/* 出品行・未引き当て：ピル＋ボタンを横並びに。列幅が足りなければピルを縮めて省略する
-   （ボタンは常に flex-shrink:0 で全文表示を優先） */
-.unalloc-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: nowrap;
-  width: 100%;
-  min-width: 0;
-}
-.unalloc-pill {
-  min-width: 0;
-  flex-shrink: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.unalloc-row .link-btn { flex-shrink: 0; }
 
 .shipping-actual {
   display: inline-flex;

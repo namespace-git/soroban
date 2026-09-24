@@ -1085,6 +1085,17 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 25) {
+    // 注文詳細を開いて商品画像URLを確認した日時。NULL = 未確認。
+    // 既取込注文の画像巡回（purchaseImageRefreshCandidates）が終わりなく回り続けないための印
+    addColumnIfMissing('purchase', 'image_checked_at', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '25')
+         ON CONFLICT(key) DO UPDATE SET value = '25'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -1623,7 +1634,14 @@ export function purchaseLinesNeedingImage(purchaseId: string, keywords: string[]
     .map(({ id, image_url }) => ({ id, image_url }))
 }
 
-/** 一覧にある既取込注文のうち、自動画像を使う商品を含むもの。口座とキーワードも照合する。 */
+/**
+ * 一覧にある既取込注文のうち、自動画像を使う商品を含み、かつまだ画像の確認が済んでいないもの。
+ * 口座とキーワードも照合する。
+ *
+ * 「済んでいない」＝ 注文詳細を一度も開いていない（image_checked_at IS NULL）か、
+ * URL は分かっているのにダウンロードが済んでいない明細がある（前回の保存失敗）場合だけ。
+ * これが無いと、画像を取り終えた後も毎回この注文を候補として詳細を開き続けてしまう
+ */
 export function purchaseImageRefreshCandidates(
   shopAccountId: string, importKeys: string[], keywords: string[],
 ): Array<{ id: string; import_key: string }> {
@@ -1633,6 +1651,13 @@ export function purchaseImageRefreshCandidates(
       FROM purchase p JOIN purchase_line pl ON pl.purchase_id = p.id
      WHERE p.shop_account_id = ? AND p.import_key IN (${importKeys.map(() => '?').join(',')})
        AND NOT EXISTS (SELECT 1 FROM product_image pi WHERE pi.model_code = pl.model_code)
+       AND (
+         p.image_checked_at IS NULL
+         OR EXISTS (
+           SELECT 1 FROM purchase_line pl2
+            WHERE pl2.purchase_id = p.id AND pl2.image_url IS NOT NULL AND pl2.image_file IS NULL
+         )
+       )
      ORDER BY p.ordered_at DESC, p.id
   `).all(shopAccountId, ...importKeys) as Array<{ id: string; import_key: string; name: string }>
   const candidates = new Map<string, { id: string; import_key: string }>()
@@ -1642,6 +1667,14 @@ export function purchaseImageRefreshCandidates(
     }
   }
   return [...candidates.values()]
+}
+
+/**
+ * 注文詳細を開いて画像URLを確認したことを刻む（collector が巡回で詳細を読めたときだけ呼ぶ）。
+ * 読めなかった（例外・shouldSkipDetail）ときは呼ばない＝次回また候補に残る。updated_at は触らない
+ */
+export function setPurchaseImageChecked(purchaseId: string): void {
+  db.prepare(`UPDATE purchase SET image_checked_at = datetime('now') WHERE id = ?`).run(purchaseId)
 }
 
 /** ダウンロードした画像のファイル名を明細に保存する（collector が呼ぶ） */

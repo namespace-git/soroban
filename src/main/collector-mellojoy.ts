@@ -795,9 +795,12 @@ export async function refetchPurchaseImages(purchaseId: string): Promise<{ saved
     if (shouldSkipDetail(detail)) throw new Error('注文詳細の商品明細が読めませんでした')
     const keywords = db.parseKeywords(db.getShopAccount(shopAccountId)?.import_keywords ?? '')
     updatePurchaseImageUrls(purchaseId, detail, keywords)
+    db.setPurchaseImageChecked(purchaseId)
     const imageBudget: ImageBudget = { remaining: MAX_IMAGES_PER_ORDER, failures: [] }
     const saved = await savePurchaseImages(shopAccountId, purchaseId, imageBudget, keywords)
-    if (imageBudget.failures.length > 0) throw new Error(imageBudget.failures.join('、'))
+    // 1枚でも保存できていれば成功として扱う（一部失敗は saved の枚数で分かる）。
+    // 1枚も保存できず、かつ失敗があったときだけ例外にする
+    if (saved === 0 && imageBudget.failures.length > 0) throw new Error(imageBudget.failures.join('、'))
     return { saved }
   } finally {
     if (!keepWindowOpen && !win.isDestroyed()) win.destroy()
@@ -945,6 +948,8 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           }
           const purchaseId = db.createPurchase(filtered)
           confirmedCount++
+          // 取り込みでこの注文の詳細は読み終えている（あとで画像巡回に拾わせない）
+          db.setPurchaseImageChecked(purchaseId)
           imagesSaved += await savePurchaseImages(shopAccountId, purchaseId, imageBudget, importKeywords)
         } else {
           const filteredDraft = filterPurchaseDraftByKeywords(result.input, importKeywords)
@@ -957,6 +962,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           draftCount++
           if (purchaseId) {
             updatePurchaseImageUrls(purchaseId, detail, importKeywords)
+            db.setPurchaseImageChecked(purchaseId)
             imagesSaved += await savePurchaseImages(shopAccountId, purchaseId, imageBudget, importKeywords)
           }
         }
@@ -985,6 +991,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
         const detail = parseOrderDetailHtml(await win.webContents.executeJavaScript('document.documentElement.outerHTML') as string)
         if (shouldSkipDetail(detail)) throw new Error('商品画像の明細が読めませんでした')
         updatePurchaseImageUrls(purchase.id, detail, importKeywords)
+        db.setPurchaseImageChecked(purchase.id)
         imagesSaved += await savePurchaseImages(shopAccountId, purchase.id, imageBudget, importKeywords)
       } catch (e) {
         failures.push(`${order.orderNo}：${e instanceof Error ? e.message : String(e)}`)
@@ -993,7 +1000,6 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     }
 
     const detailFailures = failures.length
-    failures.push(...imageBudget.failures)
     const parts = [
       `確定 ${confirmedCount}・下書き ${draftCount}・既取込 ${alreadyImported}・キャンセル ${cancelledCount}`,
     ]
@@ -1006,13 +1012,16 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
       parts.push(`残り ${freshNotExcluded.length - targets.length} 件は次回`)
     }
     if (failures.length > 0) parts.push(`失敗：${failures.join('、')}`)
+    // 画像は補助データ。1枚落ちただけで収集全体を failed にはしない（本当の失敗が埋もれる）。
+    // 件数だけ message に出す（次回に image_file が NULL のまま残るので自然に再試行される）
+    if (imageBudget.failures.length > 0) parts.push(`画像の取得に失敗 ${imageBudget.failures.length} 件`)
 
     // 詳細取得の対象があり、その全件が例外・解析失敗（failures）なら failed とする。
     // 「既取込のみ」「不一致のみ（skippedByKeyword）」「正常な差分0件」は ok のまま
     // （message で区別できる）
     const detailCount = targets.length + imagesChecked
     const allDetailsFailed = detailCount > 0 && detailFailures === detailCount
-    const status: RunStatus = allDetailsFailed || imageBudget.failures.length > 0 ? 'failed' : 'ok'
+    const status: RunStatus = allDetailsFailed ? 'failed' : 'ok'
     if (allDetailsFailed) parts.unshift(`詳細の取得に全て失敗しました（${detailCount} 件）`)
 
     return db.finishRun(runId, status, list.length, confirmedCount + draftCount, parts.join('。'))

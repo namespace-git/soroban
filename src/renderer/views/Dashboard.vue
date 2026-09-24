@@ -222,11 +222,11 @@ function gotoTopModel() {
                 </div>
 
                 <div class="row-main">
-                  <div class="row-title">
-                    <span>{{ item.title }}</span>
+                  <div v-if="group.kind === 'ship' || (group.kind === 'confirm' && item.purchase)" class="row-status">
                     <StatusPill v-if="group.kind === 'ship'" tone="solid-info" label="発送してください" />
                     <StatusChip v-if="group.kind === 'confirm' && item.purchase" tone="neutral" :label="item.purchase.shop_account_name" />
                   </div>
+                  <div class="row-title"><span>{{ item.title }}</span></div>
                   <div class="row-detail">
                     <span class="dim">{{ item.detail }}</span>
                     <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint" :class="profitHintClass(item.profit_hint)">
@@ -270,7 +270,7 @@ function gotoTopModel() {
                       <button class="sm" :disabled="busy.has(item.id)" @click="linkCandidate(item)">
                         {{ item.candidate.item_code }} を紐付ける
                       </button>
-                      <button class="link-action" @click="gotoSaleAll(item)">他の在庫</button>
+                      <button class="sm link-btn" @click="gotoSaleAll(item)"><Icon name="link" :size="14" /> 在庫を選ぶ</button>
                     </template>
                     <template v-else>
                       <button class="sm" :disabled="busy.has(item.id)" @click="gotoSaleAll(item)">在庫を選ぶ</button>
@@ -328,7 +328,7 @@ function gotoTopModel() {
               <b>{{ inbox.review.aging_count }} 点 →</b>
             </button>
             <button class="review-row" @click="gotoUnallocated">
-              <span>未引き当ての出品</span>
+              <span>未紐付けの出品</span>
               <b>{{ inbox.review.unallocated_listings }} 件 →</b>
             </button>
             <button class="review-row" @click="gotoMonth">
@@ -371,6 +371,7 @@ function gotoTopModel() {
 </template>
 
 <style scoped>
+.row-status { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; min-height: 24px; }
 /* --- 利益ストリップ（読み込み中はこのカード分割のまま。読み込み後は ProfitStripBar に置き換える） --- */
 .profit-strip-bar {
   margin-bottom: 18px;

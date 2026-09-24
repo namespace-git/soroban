@@ -122,6 +122,7 @@ vi.mock('../db', () => ({
   setPurchaseLineImageUrls: vi.fn(() => 0),
   getPurchase: vi.fn(),
   purchaseImageRefreshCandidates: vi.fn(() => []),
+  setPurchaseImageChecked: vi.fn(),
   getSettings: vi.fn(() => ({})),
   setSetting: vi.fn(),
 }))
@@ -740,6 +741,20 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
     expect(db.createPurchase).not.toHaveBeenCalled()
     expect(db.createPurchaseDraft).not.toHaveBeenCalled()
     expect(run.message).toContain('画像 1 枚')
+    // 詳細を読めたので image_checked_at を刻む（次回以降この注文を候補から外すため）
+    expect(db.setPurchaseImageChecked).toHaveBeenCalledWith('existing')
+  })
+
+  it('既取込の画像巡回で詳細が読めなかったときは image_checked_at を刻まない（次回また候補に残る）', async () => {
+    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/order/300001' }])
+    // detailHtmlByUrl に何も積まない → outerHTML が空文字 → shouldSkipDetail で読めなかった扱い
+    vi.mocked(db.existingImportKeys).mockReturnValue(new Set(['mellojoy:#300001']))
+    vi.mocked(db.purchaseImageRefreshCandidates).mockReturnValue([{ id: 'existing', import_key: 'mellojoy:#300001' }])
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(db.setPurchaseImageChecked).not.toHaveBeenCalled()
+    expect(run.message).toContain('失敗')
   })
 
   it('既存画像の確認は新規の残り枠で巡回し、一覧1＋詳細5ページまで', async () => {
@@ -758,14 +773,15 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
     expect(db.setSetting).toHaveBeenLastCalledWith('mellojoy_image_cursor:shop-1', 'p1')
   })
 
-  it('画像のダウンロード失敗を取り込み結果に記録する', async () => {
+  it('画像のダウンロード失敗は件数だけ結果に記録し、収集全体は failed にしない（画像は補助データ）', async () => {
     state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/order/300001' }])
     state.opts.detailHtmlByUrl = { 'https://shop.example.com/order/300001': buildDetailHtml('#300001', 1000) }
     vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue([{ id: 'line-1', image_url: 'https://cdn.example.com/a.jpg' }])
     state.opts.fetchImpl = async () => ({ ok: false, arrayBuffer: async () => new ArrayBuffer(0) })
     const run = await collectShopOrders('shop-1', true)
-    expect(run.status).toBe('failed')
-    expect(run.message).toContain('商品画像の取得に失敗')
+    expect(run.status).toBe('ok')
+    expect(run.message).toContain('画像の取得に失敗 1 件')
+    expect(run.message).not.toContain('商品画像の取得に失敗')
   })
 
   it('下書き取り込みでもバリアント付きの商品名で画像URLを保存する', async () => {
@@ -988,6 +1004,78 @@ describe('refetchPurchaseImages()', () => {
     ])
     expect(db.setPurchaseLineImage).toHaveBeenCalledWith('line-1', expect.any(String))
     expect(result.saved).toBe(1)
+    // 詳細を読めたので image_checked_at を刻む
+    expect(db.setPurchaseImageChecked).toHaveBeenCalledWith('purchase-1')
+  })
+
+  it('1枚でも保存できれば、他が失敗していても throw しない', async () => {
+    vi.mocked(db.getPurchase).mockReturnValue(
+      { import_key: 'mellojoy:#270882', shop_account_id: 'shop-1' } as never,
+    )
+    state.opts.listHtml = `
+      <article aria-labelledby="order-#270882">
+        <a aria-label="注文を表示するテスト" href="https://shop.example.com/order/270882">link</a>
+        <h2 role="presentation">確認済み</h2>
+        <span>￥1,000 JPY</span>
+      </article>
+    `
+    state.opts.detailHtmlByUrl = {
+      'https://shop.example.com/order/270882': `
+        <h1>注文 (#270882)</h1>
+        <div role="table" aria-labelledby="ResourceList1">
+          <div role="row">
+            <div role="cell"><div><img src="https://cdn.example.com/a_128x128.jpg?v=1"><div><div><span>数量</span>1</div></div></div></div>
+            <div role="cell"><span>テスト商品</span><small>【A001-2】青</small></div>
+            <div role="cell"><span>￥1,000</span></div>
+          </div>
+        </div>
+      `,
+    }
+    vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue([
+      { id: 'line-1', image_url: 'https://cdn.example.com/a_400x400.jpg?v=1' },
+      { id: 'line-2', image_url: 'https://cdn.example.com/b_400x400.jpg?v=1' },
+    ])
+    let calls = 0
+    state.opts.fetchImpl = async () => {
+      calls++
+      if (calls === 1) return { ok: true, arrayBuffer: async () => new ArrayBuffer(0) }
+      return { ok: false, arrayBuffer: async () => new ArrayBuffer(0) }
+    }
+
+    const result = await refetchPurchaseImages('purchase-1')
+
+    expect(result.saved).toBe(1)
+  })
+
+  it('1枚も保存できなければ throw する', async () => {
+    vi.mocked(db.getPurchase).mockReturnValue(
+      { import_key: 'mellojoy:#270882', shop_account_id: 'shop-1' } as never,
+    )
+    state.opts.listHtml = `
+      <article aria-labelledby="order-#270882">
+        <a aria-label="注文を表示するテスト" href="https://shop.example.com/order/270882">link</a>
+        <h2 role="presentation">確認済み</h2>
+        <span>￥1,000 JPY</span>
+      </article>
+    `
+    state.opts.detailHtmlByUrl = {
+      'https://shop.example.com/order/270882': `
+        <h1>注文 (#270882)</h1>
+        <div role="table" aria-labelledby="ResourceList1">
+          <div role="row">
+            <div role="cell"><div><img src="https://cdn.example.com/a_128x128.jpg?v=1"><div><div><span>数量</span>1</div></div></div></div>
+            <div role="cell"><span>テスト商品</span><small>【A001-2】青</small></div>
+            <div role="cell"><span>￥1,000</span></div>
+          </div>
+        </div>
+      `,
+    }
+    vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue(
+      [{ id: 'line-1', image_url: 'https://cdn.example.com/a_400x400.jpg?v=1' }],
+    )
+    state.opts.fetchImpl = async () => ({ ok: false, arrayBuffer: async () => new ArrayBuffer(0) })
+
+    await expect(refetchPurchaseImages('purchase-1')).rejects.toThrow()
   })
 
   it('一覧に注文が見つからなければ例外', async () => {

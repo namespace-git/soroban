@@ -151,6 +151,9 @@ CREATE TABLE IF NOT EXISTS purchase (
   shipped_at           TEXT,
   delivered_at         TEXT,
 
+  -- 注文詳細を開いて商品画像URLを確認した日時。NULL = 未確認。既取込注文の画像巡回の対象判定に使う
+  image_checked_at     TEXT,
+
   note            TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now')),

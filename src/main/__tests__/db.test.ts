@@ -1307,7 +1307,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('24')
+      expect(db.getSettings().schema_version).toBe('25')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1465,8 +1465,8 @@ describe('db（:memory:）', () => {
     expect(other.last_ordered_at).toBeNull()
   })
 
-  it('migrate：schema_versionが24になる', () => {
-    expect(db.getSettings().schema_version).toBe('24')
+  it('migrate：schema_versionが25になる', () => {
+    expect(db.getSettings().schema_version).toBe('25')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1552,7 +1552,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('24')
+      expect(db.getSettings().schema_version).toBe('25')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1586,7 +1586,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('24')
+      expect(db.getSettings().schema_version).toBe('25')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -4145,6 +4145,25 @@ describe('db（:memory:）', () => {
       expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toEqual([])
       db.deleteProductImage('A001-2')
       expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toHaveLength(1)
+    })
+
+    it('image_checked_atで画像巡回の終わりを判定する（取り終えたら候補から外れ、失敗が残れば対象のまま）', () => {
+      const id = db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-04-01', import_key: 'mellojoy:#checked',
+        lines: [{ name: 'テスト【A002】', unit_price: 1000, quantity: 1, image_url: 'https://cdn.example/a002.jpg' }],
+      })
+      const keys = ['mellojoy:#checked']
+      // (a) 未確認（image_checked_at が NULL）：候補に出る
+      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toHaveLength(1)
+
+      db.setPurchaseImageChecked(id)
+      const line = db.getPurchase(id).lines[0]
+      // (c) 確認済みだが、URLはあるのにダウンロードが済んでいない（前回失敗）：候補のまま
+      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toHaveLength(1)
+
+      db.setPurchaseLineImage(line.id, 'a002.jpg')
+      // (b) 確認済み・全明細の画像を保存済み：候補から外れる＝巡回が終わる
+      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toEqual([])
     })
 
     it('バリアントを取り違えず更新し、自動OFFの画像は固定、ONなら公式画像を優先する', () => {

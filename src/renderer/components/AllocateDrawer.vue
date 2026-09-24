@@ -52,32 +52,39 @@ const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = 
 const title = computed(() => (props.mode === 'listing' ? props.listing?.title : props.sale?.title) ?? '')
 const price = computed(() => (props.mode === 'listing' ? props.listing?.price : props.sale?.price) ?? 0)
 
+let loadRequest = 0
 async function load() {
+  const request = ++loadRequest
+  const mode = props.mode, listing = props.listing, sale = props.sale
+  const opts = { includeSold: includeSold.value }
   loading.value = true
-  productInfo.value = new Map((await window.soroban.listProducts()).map(p => [p.model_code, p]))
-  if (props.mode === 'listing') {
-    const l = props.listing
-    if (!l) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
-    // 注文番号で候補順位の低い在庫も探せるよう、検索前に件数を切らない。
-    const sugg = await window.soroban.suggestForListing(l.mercari_item_id, Number.MAX_SAFE_INTEGER, { includeSold: includeSold.value })
-    candidates.value = sugg
-    matchedItems.value = l.items.map(it => ({ id: it.id, item_code: it.item_code, name: it.name, model_code: it.model_code, product_name: it.product_name, landed_cost: it.landed_cost }))
-  } else {
-    const s = props.sale
-    if (!s) { candidates.value = []; matchedItems.value = []; loading.value = false; return }
-    const [linked, sugg] = await Promise.all([
-      window.soroban.listSaleLines(s.id),
-      window.soroban.suggestInventory(s.id, Number.MAX_SAFE_INTEGER, { includeSold: includeSold.value }),
+  candidates.value = []
+  matchedItems.value = []
+  try {
+    if ((mode === 'listing' && !listing) || (mode === 'sale' && !sale)) return
+    // 検索前に件数を切らず、どの注文の在庫も検索できるようにする。
+    const [products, suggestions, linked] = await Promise.all([
+      window.soroban.listProducts(),
+      mode === 'listing'
+        ? window.soroban.suggestForListing(listing!.mercari_item_id, Number.MAX_SAFE_INTEGER, opts)
+        : window.soroban.suggestInventory(sale!.id, Number.MAX_SAFE_INTEGER, opts),
+      mode === 'listing' ? Promise.resolve(listing!.items) : window.soroban.listSaleLines(sale!.id),
     ])
+    if (request !== loadRequest || !props.open) return
+    productInfo.value = new Map(products.map(p => [p.model_code, p]))
+    candidates.value = suggestions
     matchedItems.value = linked
-    candidates.value = sugg
+  } catch (e) {
+    if (request === loadRequest) toast(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    if (request === loadRequest) loading.value = false
   }
-  loading.value = false
 }
 
 watch(
   () => [props.open, props.mode, props.listing?.mercari_item_id, props.sale?.id],
   ([isOpen]) => {
+    loadRequest++
     picked.value = new Set()
     search.value = ''
     selectionMode.value = 'inventory'
@@ -170,8 +177,7 @@ const movingCount = computed(() =>
     : 0,
 )
 const confirmLabel = computed(() => {
-  if (props.mode === 'sale') return '紐付ける'
-  return movingCount.value > 0 ? `引き当てる（${movingCount.value}点を移す）` : '引き当てる'
+  return movingCount.value > 0 ? `紐付けを確定（${movingCount.value}点を移す）` : '紐付けを確定'
 })
 
 const profitLabel = computed(() => {
@@ -265,8 +271,8 @@ async function confirmPick() {
       await load()
       toast(
         moved > 0
-          ? `${ids.length}点を引き当てました（${moved}点は別の出品から移しました）`
-          : `${ids.length}点を引き当てました`,
+          ? `${ids.length}点を紐付けました（${moved}点は別の出品から移しました）`
+          : `${ids.length}点を紐付けました`,
         'ok',
       )
     } else if (props.mode === 'sale' && props.sale) {
@@ -322,14 +328,21 @@ function placeholderChar(): string {
         <span v-if="listing.shipping_method_name" class="faint">{{ listing.shipping_method_name }}</span>
         <StatusChip :tone="STATUS_TONE[listing.status]" :label="STATUS_LABEL[listing.status]" />
       </div>
-      <span v-else-if="mode === 'sale'" class="faint">販売 {{ yen(price) }}</span>
+      <div v-else-if="mode === 'sale'" class="head-sub">
+        <img v-if="sale?.thumb_url && !thumbFailed" class="thumb" :src="sale.thumb_url" alt="" @error="thumbFailed = true" />
+        <span v-else class="thumb-placeholder">{{ placeholderChar() }}</span>
+        <span class="faint">販売価格 {{ yen(price) }}</span>
+      </div>
     </template>
 
+    <p class="panel-title">在庫の紐付け</p>
+    <p class="faint allocation-help">{{ mode === 'listing' ? '出品中は在庫を予約します。売れたら、その在庫を販売に引き継ぎます。' : 'この販売の原価に使う在庫を選びます。' }}</p>
+    <p v-if="loading" class="faint" role="status">在庫を読み込んでいます…</p>
     <div v-if="matchedItems.length" class="matched-block">
-      <p class="panel-title">{{ mode === 'listing' ? '引き当て済み' : '紐付け済み' }}</p>
+      <p class="panel-title">紐付け済み</p>
       <div v-for="m in matchedItems" :key="m.id" class="item matched-item">
         <CodeChip kind="item" :code="m.item_code" />
-        <StatusChip v-if="m.model_code" tone="neutral" :label="m.model_code" />
+        <CodeChip v-if="m.model_code" kind="model" :code="m.model_code" />
         <span class="grow name-cell">
           <span class="name-main" :title="m.product_name ?? m.name">{{ m.product_name ?? m.name }}</span>
           <span class="name-sub" :title="m.product_name ? m.name : ''">{{ m.product_name ? m.name : '' }}</span>
@@ -340,7 +353,7 @@ function placeholderChar(): string {
       </div>
     </div>
 
-    <p v-if="!canReserve" class="dim ended-note">この出品は終了しています（引き当てできません）</p>
+    <p v-if="!canReserve" class="dim ended-note">この出品は終了しています（追加できません）</p>
 
     <template v-else>
       <div class="selection-modes" role="group" aria-label="在庫の選び方">
@@ -363,7 +376,7 @@ function placeholderChar(): string {
       </div>
 
       <template v-if="selectionMode === 'product'">
-        <p class="faint product-help">商品コードが一致する未引き当て在庫を、仕入日の古い順に選びます。</p>
+        <p class="faint product-help">商品コードが一致する未紐付け在庫を、仕入日の古い順に選びます。</p>
         <label class="product-quantity">追加する点数 <input v-model.number="productQuantity" type="number" min="1" step="1" aria-label="追加する点数" /></label>
         <div class="candidates">
           <div v-for="p in products" :key="p.code" class="product-row">
@@ -380,7 +393,7 @@ function placeholderChar(): string {
           </div>
           <EmptyState v-if="!loading && !products.length" title="選べる商品がありません" />
         </div>
-        <p class="faint product-help">商品コードのない在庫や、引き当て済みの在庫は「在庫から選ぶ」で指定できます。</p>
+        <p class="faint product-help">商品コードのない在庫や、紐付け済みの在庫は「在庫から選ぶ」で指定できます。</p>
       </template>
 
       <div v-else class="candidates">
@@ -394,11 +407,11 @@ function placeholderChar(): string {
             @change="toggle(c.id)"
           />
           <CodeChip kind="item" :code="c.item_code" />
-          <StatusChip v-if="c.model_code" tone="neutral" :label="c.model_code" />
+          <CodeChip v-if="c.model_code" kind="model" :code="c.model_code" />
           <StatusChip
             v-if="mode === 'listing' && c.listing && c.listing.mercari_item_id !== listing?.mercari_item_id"
             tone="neutral"
-            :label="`出品 ${yen(c.listing.price)} に引き当て済み`"
+            :label="`出品 ${yen(c.listing.price)} に紐付け済み`"
           />
           <StatusChip v-if="c.sold_to" tone="warn" :label="soldToLabel(c.sold_to)" />
           <span class="grow name-cell">
@@ -426,7 +439,7 @@ function placeholderChar(): string {
             {{ profitLabel }} {{ yen(previewProfit) }}
           </strong>
         </div>
-        <button v-if="canReserve" class="primary" :disabled="!picked.size || pickingProduct" @click="confirmPick">
+        <button v-if="canReserve" class="primary" :disabled="!picked.size || pickingProduct || loading" @click="confirmPick">
           {{ confirmLabel }}
         </button>
       </div>
@@ -435,6 +448,7 @@ function placeholderChar(): string {
 </template>
 
 <style scoped>
+.allocation-help { margin: 4px 0 16px; font-size: var(--fs-12); }
 /* 出品／販売タイトル（Drawer.vue の見出し）は切れずに折り返して全文を見せる */
 :deep(.drawer-title) {
   white-space: normal;
