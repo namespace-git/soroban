@@ -540,6 +540,7 @@ async function submit() {
     lines: lines.length ? lines : undefined,
   }
 
+  const savedLabel = editingId.value ? '経費を保存しました' : '経費を登録しました'
   if (editingId.value) {
     await window.soroban.updateExpense(editingId.value, input)
   } else {
@@ -547,13 +548,16 @@ async function submit() {
   }
 
   // 計上月がいまの期間の外だと、保存した経費が一覧から消えて「入れたのに無い」と見える。
-  // その月が見える期間（すべて）に切り替えてから読み直す
+  // その月が見える期間（すべて）に切り替えてから読み直す（トーストは1つにまとめる。
+  // 2つ出すと showNotice が上書きして最初のほうが読めなくなる）
   const savedMonth = input.month ?? thisMonthLocal()
   showForm.value = false
   resetForm()
   if (!inPeriod(savedMonth + '-01', period.value)) {
     period.value = 'all'
-    toast('計上月が今の期間の外なので、期間を「すべて」にしました', 'ok')
+    toast(`${savedLabel}。計上月が今の期間の外なので、期間を「すべて」にしました`, 'ok')
+  } else {
+    toast(savedLabel, 'ok')
   }
   await load()
   changed()

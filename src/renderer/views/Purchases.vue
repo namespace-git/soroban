@@ -317,8 +317,10 @@ async function submit() {
 
   if (editingId.value) {
     await window.soroban.confirmPurchase(editingId.value, input)
+    toast('仕入を保存しました', 'ok')
   } else {
     await window.soroban.createPurchase(input)
+    toast('仕入を登録しました', 'ok')
   }
 
   editingId.value = null

@@ -98,8 +98,9 @@ const EXPORT_KIND_LABEL: Record<ExportKind, string> = {
 async function exportMonthCsv(kind: ExportKind) {
   if (!selectedMonth.value) return
   const p = await window.soroban.exportCsv(kind, selectedMonth.value)
-  if (p) toast('書き出しました', 'ok')
-  else toast('書き出すものがありません', 'warn')
+  const label = EXPORT_KIND_LABEL[kind]
+  if (p) toast(`〈${selectedMonth.value}〉の〈${label}〉を書き出しました`, 'ok')
+  else toast(`〈${selectedMonth.value}〉の〈${label}〉は書き出すものがありません`, 'warn')
 }
 
 // --- 販売ごとの表（MonthDetail.vue）：締め・片付けるもの・仕入先への支払いもここから受け取る ---

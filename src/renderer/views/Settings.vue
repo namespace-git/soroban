@@ -272,8 +272,9 @@ const exportKinds: ExportKind[] = ['sales', 'purchases', 'expenses', 'inventory'
 
 async function exportCsv(kind: ExportKind) {
   const p = await window.soroban.exportCsv(kind)
-  if (p) toast('書き出しました', 'ok')
-  else toast('書き出すものがありません', 'warn')
+  const label = EXPORT_KIND_LABEL[kind]
+  if (p) toast(`全期間の〈${label}〉を書き出しました`, 'ok')
+  else toast(`全期間の〈${label}〉は書き出すものがありません`, 'warn')
 }
 
 async function backup() {
@@ -847,7 +848,7 @@ const runLabel: Record<string, string> = {
         </table>
         <p v-if="!autoBackup?.files.length" class="dim">まだ自動バックアップはありません</p>
 
-        <p class="panel-title csv-title">CSVで書き出す</p>
+        <p class="panel-title csv-title">CSVで書き出す（全期間）</p>
         <div class="row">
           <button v-for="k in exportKinds" :key="k" class="ghost" @click="exportCsv(k)">
             <Icon name="download" :size="16" /> {{ EXPORT_KIND_LABEL[k] }}

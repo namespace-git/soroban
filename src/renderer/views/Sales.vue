@@ -68,12 +68,12 @@ const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = 
 
 // --- 販売の状態ピル（StatusPill）。発送してください＝solid-info、受取評価待ち＝info、
 //     取引完了＝solid-ok（意味の強い状態は塗り）。それ以外は薄いまま ---
-const SALE_STATUS_PILL: Record<SaleStatus, { tone: 'solid-info' | 'info' | 'solid-ok' | 'warn'; label: string }> = {
+const SALE_STATUS_PILL: Record<SaleStatus, { tone: 'solid-info' | 'info' | 'solid-ok' | 'warn'; label: string; title?: string }> = {
   waiting_payment: { tone: 'warn', label: '支払い待ち' },
   waiting_shipment: { tone: 'solid-info', label: '発送してください' },
-  shipped: { tone: 'info', label: '受取評価待ち' },
-  delivered: { tone: 'info', label: '評価してください' },
-  completed: { tone: 'solid-ok', label: '取引完了' },
+  shipped: { tone: 'info', label: '受取評価待ち', title: '発送済み。買い手の受取待ち' },
+  delivered: { tone: 'info', label: '評価してください', title: '買い手が受け取りました。こちらの評価待ち' },
+  completed: { tone: 'solid-ok', label: '取引完了', title: '受取評価が終わり、売上金が入りました' },
 }
 
 const stage = ref<Stage>('to_ship')
@@ -473,12 +473,23 @@ async function openTimelineForSale(s: SaleProfit) {
   const items = await window.soroban.listSaleLines(s.id)
   if (items[0]) timelineItemId.value = items[0].id
 }
+// --- 行クリックで開くもの：紐付いている販売はその足あと（履歴）、紐付いていない販売・出品は紐付け。
+//     「その行について分かるもの」を出す、という他画面（仕入＝明細、在庫＝足あと、商品＝カルテ）の約束に揃える ---
 function onRowClick(r: Row) {
-  if (r.kind === 'listing' && r.listing) openListingAlloc(r.listing)
-  else if (r.kind === 'sale' && r.sale && r.sale.kind !== 'personal') openSaleAlloc(r.sale)
+  if (r.kind === 'listing' && r.listing) { openListingAlloc(r.listing); return }
+  if (r.kind === 'sale' && r.sale && r.sale.kind !== 'personal') {
+    if (canOpenTimeline(r.sale)) openTimelineForSale(r.sale)
+    else openSaleAlloc(r.sale)
+  }
 }
 function rowClickable(r: Row): boolean {
   return r.kind === 'listing' || (r.kind === 'sale' && !!r.sale && r.sale.kind !== 'personal')
+}
+/** 行クリックのツールチップ。紐付いている販売＝足あと、それ以外＝紐付けの案内 */
+function rowClickTitle(r: Row): string | undefined {
+  if (!rowClickable(r)) return undefined
+  if (r.kind === 'sale' && r.sale && canOpenTimeline(r.sale)) return 'この販売の足あとを開く'
+  return '在庫の紐付けを開く'
 }
 
 // --- 最終取り込み時刻（メルカリ・成功のみ）。この時刻より last_seen_at が古い出品は
@@ -576,6 +587,7 @@ async function submit() {
   await load()
   await loadProgress()
   changed()
+  toast('販売を登録しました', 'ok')
 }
 
 // --- 送料・梱包材費 ---
@@ -932,7 +944,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
           <div
             class="cell-thumb"
             :class="{ clickable: rowClickable(r) }"
-            :title="rowClickable(r) ? '在庫の紐付けを開く' : undefined"
+            :title="rowClickTitle(r)"
             :role="rowClickable(r) ? 'button' : undefined"
             :tabindex="rowClickable(r) ? 0 : undefined"
             @keydown.enter="onRowClick(r)"
@@ -953,7 +965,8 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
           <div class="cell-product">
             <div class="row-labels">
               <StatusPill v-if="r.kind === 'sale' && r.sale?.status && SALE_STATUS_PILL[r.sale.status]"
-                :tone="SALE_STATUS_PILL[r.sale.status].tone" :label="SALE_STATUS_PILL[r.sale.status].label" />
+                :tone="SALE_STATUS_PILL[r.sale.status].tone" :label="SALE_STATUS_PILL[r.sale.status].label"
+                :title="SALE_STATUS_PILL[r.sale.status].title" />
               <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="STATUS_LABEL[r.listing.status]" />
               <StatusChip v-if="r.sale && !r.sale.status" tone="neutral" :label="r.sale.source === 'manual' ? '手入力' : '状態未取得'" />
             </div>
@@ -1107,7 +1120,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
               <button class="sm ghost fade-btn" @click="r.sale && editNote(r.sale)" title="メモを編集する">メモ</button>
               <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editPackaging(r.sale)" title="梱包材費を編集する">梱包</button>
               <button v-if="r.sale.kind === 'personal'" class="sm ghost fade-btn" @click="r.sale && setKind(r.sale, 'resale')">転売にする</button>
-              <button v-if="stage !== 'all'" class="icon ghost" aria-label="削除" @click="r.sale && remove(r.sale)">
+              <button class="icon ghost" aria-label="削除" @click="r.sale && remove(r.sale)">
                 <Icon name="trash" :size="16" />
               </button>
             </template>

@@ -358,6 +358,7 @@ const estimateCompare = computed(() => {
             v-for="p in filteredProducts" :key="p.model_code"
             type="button"
             class="prow" :class="{ selected: karte?.summary.model_code === p.model_code }"
+            title="この型番のカルテを開く"
             @click="selectProduct(p.model_code)"
           >
             <span class="prow-thumb">

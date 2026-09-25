@@ -391,7 +391,7 @@ function itemPillState(i: InventoryItem): { tone: PillTone; label: string } | nu
   if (i.fulfillment === 'pending' || i.fulfillment === 'shipped') return { tone: 'solid-warn', label: '未着' }
   if (i.listing) {
     return {
-      tone: i.listing.status === 'suspended' ? 'neutral' : 'brand',
+      tone: i.listing.status === 'suspended' ? 'neutral' : 'info',
       label: `${i.listing.status === 'suspended' ? '公開停止中' : '出品中'} ${yen(i.listing.price)}`,
     }
   }
@@ -413,12 +413,14 @@ function openTimeline(item: InventoryItem) {
   timelineItemId.value = item.id
 }
 
-// --- 未着の在庫を「仕入の伝票」から到着済にする（在庫は purchase_id を持たないため、
-//     一度履歴を読んで仕入の id を取り、仕入タブへ渡す） ---
+// --- 未着の在庫の到着状態は注文（仕入）単位でしか持てないため、在庫1点だけを
+//     ここで到着済にはできない。仕入タブの伝票を開いて、そこで到着済にしてもらう
+//     （在庫は purchase_id を持たないため、一度履歴を読んで仕入の id を取る） ---
 async function openArrivalPurchase(item: InventoryItem) {
   const t = await window.soroban.getItemTimeline(item.id)
   if (t?.purchase) {
     goto('purchases', { focusId: t.purchase.id })
+    toast('仕入の伝票を開きました。配送の欄で到着済にできます', 'ok')
   } else {
     toast('仕入の情報が見つかりませんでした', 'warn')
   }
@@ -629,7 +631,7 @@ async function editNote(item: InventoryItem) {
         <option value="landed_cost:asc">原価が低い順</option>
       </select>
       <span class="grow" />
-      <span class="toolbar-count">{{ totalCount }} 件 ・ 合計 {{ yen(totalCost) }}</span>
+      <span class="toolbar-count">{{ totalCount }} 点 ・ 合計 {{ yen(totalCost) }}</span>
     </div>
     <p class="faint hint-row">
       在庫コード（S-0012）をクリックするとコピーできます。メルカリのタイトルに貼るとその1点が自動で紐付きます。2個セットは【S-0012】【S-0013】のように並べます
@@ -734,8 +736,9 @@ async function editNote(item: InventoryItem) {
                 <template v-if="i.status === 'in_stock'">
                   <button
                     v-if="i.fulfillment === 'pending' || i.fulfillment === 'shipped'"
-                    class="sm ghost" @click="openArrivalPurchase(i)" title="仕入の伝票で到着済にする"
-                  >到着済にする</button>
+                    class="sm ghost" @click="openArrivalPurchase(i)"
+                    title="この在庫の注文を仕入タブで開きます。そこで到着済にできます"
+                  >仕入を開く</button>
                   <button
                     class="sm ghost" @click="editModelCode(i)"
                     :title="i.model_code ? '型番を編集する' : '型番を設定する'"
@@ -865,8 +868,9 @@ async function editNote(item: InventoryItem) {
               <template v-if="i.status === 'in_stock'">
                 <button
                   v-if="i.fulfillment === 'pending' || i.fulfillment === 'shipped'"
-                  class="sm ghost" @click="openArrivalPurchase(i)" title="仕入の伝票で到着済にする"
-                >到着済にする</button>
+                  class="sm ghost" @click="openArrivalPurchase(i)"
+                  title="この在庫の注文を仕入タブで開きます。そこで到着済にできます"
+                >仕入を開く</button>
                 <button class="sm ghost" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
                 <button class="sm ghost" @click="split(i)" title="この在庫を複数点に分ける">分割</button>
                 <button
