@@ -63,6 +63,10 @@ export function getInventoryOverview(): InventoryOverview {
   const items = db.listInventory('in_stock')
   const warnDays = Number(db.getSettings()['aging_warn_days'] ?? 60)
 
+  // 記録の上での在庫の総数（分割前の親・廃棄・自家消費・販売済みも含む）。
+  // 空状態（まだ1点も無い）の判定にだけ使う
+  const total = (db.getDb().prepare('SELECT COUNT(*) AS c FROM inventory_item').get() as { c: number }).c
+
   const unlisted_arrived = { count: 0, cost: 0 }
   const not_arrived = { count: 0, cost: 0 }
   const aging = { count: 0, cost: 0, days: warnDays }
@@ -89,7 +93,7 @@ export function getInventoryOverview(): InventoryOverview {
     expected_profit: reserved.reduce((s, l) => s + (l.expected_profit ?? 0), 0),
   }
 
-  return { unlisted_arrived, not_arrived, listed, aging }
+  return { total, unlisted_arrived, not_arrived, listed, aging }
 }
 
 type Bucket = 'unlisted_arrived' | 'not_arrived' | 'listed' | 'sold' | 'other' | 'split'

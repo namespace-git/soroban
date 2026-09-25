@@ -306,6 +306,10 @@ const filteredGroups = computed(() => {
   return list
 })
 
+// --- 空状態の文言：検索・絞り込みで0件になったのか、そもそも何も無いのかを分ける。
+// 近似（状態セレクトが既定かどうか）ではなく、記録の上での在庫の総数（overview.total）で判定する ---
+const isReallyEmpty = computed(() => overview.value?.total === 0)
+
 const totalCount = computed(() => viewMode.value === 'group'
   ? filteredGroups.value.reduce((s, g) => s + g.items.length, 0)
   : filteredItems.value.length)
@@ -453,6 +457,7 @@ async function onTagsChange(tagIds: string[]) {
   if (!tagPickerForId.value) return
   await window.soroban.setInventoryTags(tagPickerForId.value, tagIds)
   await load()
+  changed()
 }
 
 async function onTagCreate(name: string) {
@@ -461,14 +466,33 @@ async function onTagCreate(name: string) {
   if (!tagPickerForId.value) return
   await window.soroban.setInventoryTags(tagPickerForId.value, [...tagPickerSelected.value, id])
   await load()
+  changed()
 }
 
 async function dispose(item: InventoryItem, target: 'disposed' | 'personal_use') {
   const label = target === 'personal_use' ? '自家消費' : '廃棄'
-  if (!await confirmDialog(`「${item.name}」を${label}として在庫から外しますか？`, { okLabel: `${label}にする` })) return
+  // 戻す操作が無いため危険（danger）扱い
+  if (!await confirmDialog(`「${item.name}」を${label}として在庫から外しますか？`, {
+    message: `原価 ${yen(item.landed_cost)}・${item.acquired_at} 仕入。在庫の原価集計から外れます`,
+    okLabel: `${label}にする`,
+    danger: true,
+  })) return
   await window.soroban.disposeInventory(item.id, label, target)
   await load()
   changed()
+}
+
+// --- 廃棄・自家消費を取り消して在庫に戻す（押し間違いの救済。restoreInventory は再計算しない） ---
+async function restore(item: InventoryItem) {
+  const label = item.status === 'personal_use' ? '自家消費' : '廃棄'
+  if (!await confirmDialog(`「${item.name}」を在庫に戻しますか？`, {
+    message: `原価 ${yen(item.landed_cost)} ・ ${item.acquired_at} ${label}\n出品への引き当ては戻りません`,
+    okLabel: '在庫に戻す',
+  })) return
+  await window.soroban.restoreInventory(item.id)
+  await load()
+  changed()
+  toast('在庫に戻しました', 'ok')
 }
 
 async function split(item: InventoryItem) {
@@ -506,7 +530,8 @@ function mergeMessage(item: InventoryItem, siblings: InventoryItem[]): string {
 async function mergeSplit(item: InventoryItem) {
   const parentId = item.parent_id ?? item.id
   const siblings = items.value.length ? items.value : groups.value.flatMap(g => g.items)
-  if (!await confirmDialog('分割を戻しますか？', { message: mergeMessage(item, siblings), okLabel: '戻す' })) return
+  // 分割し直せば元に戻せるので危険（danger）扱いにしない
+  if (!await confirmDialog(`「${item.name}」の分割を戻しますか？`, { message: mergeMessage(item, siblings), okLabel: '戻す' })) return
   try {
     await window.soroban.mergeSplitInventory(parentId)
     await load()
@@ -518,9 +543,10 @@ async function mergeSplit(item: InventoryItem) {
 }
 
 async function editModelCode(item: InventoryItem) {
+  // 型番は後からいつでも変え直せるので危険（danger）扱いにしない
   if (item.status === 'sold' && !await confirmDialog(
-    '型番を変更しますか？',
-    { message: '販売済みの在庫の型番を変えると、その販売の利益は新しい型番の集計に移ります' },
+    `「${item.name}」の型番を変更しますか？`,
+    { message: `現在の型番 ${item.model_code ?? 'なし'}。販売済みの在庫の型番を変えると、その販売の利益は新しい型番の集計に移ります` },
   )) return
   const input = await ask('型番', { initial: item.model_code ?? '', placeholder: '例：Z078-2' })
   if (input === null) return
@@ -528,6 +554,7 @@ async function editModelCode(item: InventoryItem) {
   if (trimmed === '') {
     await window.soroban.updateInventory(item.id, { model_code: null, series_code: null })
     await load()
+    changed()
     return
   }
   if (!MODEL_CODE_RE.test(trimmed)) {
@@ -536,6 +563,7 @@ async function editModelCode(item: InventoryItem) {
   }
   await window.soroban.updateInventory(item.id, { model_code: trimmed, series_code: trimmed.split('-')[0] })
   await load()
+  changed()
 }
 
 async function editNote(item: InventoryItem) {
@@ -543,6 +571,7 @@ async function editNote(item: InventoryItem) {
   if (input === null) return
   await window.soroban.updateInventory(item.id, { note: input })
   await load()
+  changed()
 }
 </script>
 
@@ -655,11 +684,23 @@ async function editNote(item: InventoryItem) {
               :data-row-id="i.id"
               class="git" :class="{ focused: focusedId === i.id }"
             >
-              <div class="git-code clickable" @click="openTimeline(i)">
+              <div
+                class="git-code clickable" role="button" tabindex="0"
+                title="この1点の足あとを開く"
+                @click="openTimeline(i)"
+                @keydown.enter="openTimeline(i)"
+                @keydown.space.prevent="openTimeline(i)"
+              >
                 <CodeChip kind="item" :code="i.item_code" />
                 <span v-if="splitLabel(i, g.items)" class="dim split-label">{{ splitLabel(i, g.items) }}</span>
               </div>
-              <div class="git-meta clickable" @click="openTimeline(i)">
+              <div
+                class="git-meta clickable" role="button" tabindex="0"
+                title="この1点の足あとを開く"
+                @click="openTimeline(i)"
+                @keydown.enter="openTimeline(i)"
+                @keydown.space.prevent="openTimeline(i)"
+              >
                 <span>{{ i.shop_account_name ?? '—' }} ・ {{ i.acquired_at }} 仕入</span>
                 <div class="chip-row">
                   <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
@@ -723,12 +764,16 @@ async function editNote(item: InventoryItem) {
                     title="同じ親から分けた在庫を全部まとめて、分割前の1点に戻します"
                   >戻す</button>
                 </template>
+                <template v-else-if="i.status === 'disposed' || i.status === 'personal_use'">
+                  <button class="sm ghost" @click="restore(i)" title="在庫に戻す">在庫に戻す</button>
+                </template>
               </div>
             </div>
           </div>
         </div>
       </template>
-      <EmptyState v-else title="該当する在庫がありません" />
+      <EmptyState v-else-if="isReallyEmpty" title="在庫がまだありません" hint="仕入を確定すると在庫ができます" />
+      <EmptyState v-else title="検索条件に一致する在庫がありません" />
     </template>
 
     <!-- 1点ずつ -->
@@ -752,7 +797,13 @@ async function editNote(item: InventoryItem) {
             :data-row-id="i.id"
             :class="{ focused: focusedId === i.id }"
           >
-            <td class="thumb-cell clickable" @click="openTimeline(i)" title="履歴を見る">
+            <td
+              class="thumb-cell clickable" role="button" tabindex="0"
+              title="この1点の足あとを開く"
+              @click="openTimeline(i)"
+              @keydown.enter="openTimeline(i)"
+              @keydown.space.prevent="openTimeline(i)"
+            >
               <img
                 v-if="showThumb(i)"
                 class="thumb"
@@ -764,7 +815,13 @@ async function editNote(item: InventoryItem) {
               <span v-else class="thumb-placeholder">{{ placeholderChar(i) }}</span>
             </td>
             <td class="item-cell">
-              <div class="item-name clickable" :title="i.name" @click="openTimeline(i)">{{ i.name }}</div>
+              <div
+                class="item-name clickable" role="button" tabindex="0"
+                title="この1点の足あとを開く"
+                @click="openTimeline(i)"
+                @keydown.enter="openTimeline(i)"
+                @keydown.space.prevent="openTimeline(i)"
+              >{{ i.name }}</div>
               <div class="chip-row">
                 <CodeChip kind="item" :code="i.item_code" />
                 <CodeChip v-if="i.model_code" kind="model" :code="i.model_code" />
@@ -830,11 +887,15 @@ async function editNote(item: InventoryItem) {
                   title="同じ親から分けた在庫を全部まとめて、分割前の1点に戻します"
                 >戻す</button>
               </template>
+              <template v-else-if="i.status === 'disposed' || i.status === 'personal_use'">
+                <button class="sm ghost" @click="restore(i)" title="在庫に戻す">在庫に戻す</button>
+              </template>
             </td>
           </tr>
         </tbody>
       </table>
-      <EmptyState v-else title="該当する在庫がありません" />
+      <EmptyState v-else-if="isReallyEmpty" title="在庫がまだありません" hint="仕入を確定すると在庫ができます" />
+      <EmptyState v-else title="検索条件に一致する在庫がありません" />
     </div>
 
     <TagPicker

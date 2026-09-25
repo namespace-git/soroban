@@ -508,6 +508,8 @@ export interface ProductDetail extends ProductSummary {
 }
 
 export interface VariantSummary {
+  /** 商品（型番）のメモ（setProductNote）。無ければ null */
+  note: string | null
   forecast_profit?: number
   model_code: string
   series_code: string | null
@@ -870,6 +872,8 @@ export interface SalesProgress {
 
 /** 在庫タブの上の状態カード */
 export interface InventoryOverview {
+  /** 廃棄・自家消費・分割前の親も含めた、記録の上での在庫の総数。0 なら「まだ 1 点も無い」 */
+  total: number
   unlisted_arrived: { count: number; cost: number }
   not_arrived: { count: number; cost: number }
   listed: { count: number; expected_profit: number }
@@ -1092,6 +1096,11 @@ export interface SorobanApi {
   mergeSplitInventory(parentId: string): Promise<void>
   /** 在庫から外す。廃棄（disposed）か自家消費（personal_use）。既定は disposed */
   disposeInventory(id: string, note: string, status?: 'disposed' | 'personal_use'): Promise<void>
+  /**
+   * 廃棄・自家消費にした在庫を、手元の在庫（in_stock）に戻す。押し間違いの取り消し用。
+   * 原価（landed_cost）は生成時のまま触らない。出品への引き当ては戻らない（人がやり直す）
+   */
+  restoreInventory(id: string): Promise<void>
 
   // 集計
   listMonthly(): Promise<MonthlySummary[]>
@@ -1143,6 +1152,8 @@ export interface SorobanApi {
   setProductTags(modelCode: string, tagIds: string[]): Promise<void>
   /** 型番の表示名を付ける／外す（null）。仕入明細・在庫の元の名前は変えない。商品タブ・ランキング・在庫・売上の表示に使う */
   setProductName(modelCode: string, name: string | null): Promise<void>
+  /** 商品（型番）のメモ。空文字・null で消す。在庫・販売のメモとは別で、型番そのものに付く */
+  setProductNote(modelCode: string, note: string | null): Promise<void>
   /** 商品画像を人がセットする（main でファイル選択ダイアログを開く）。選んだら true、キャンセルは false。以後は取り込みで上書きしない */
   setProductImage(modelCode: string): Promise<boolean>
   /** auto=true：人がセットした画像を捨てて自動（出品・販売の最新画像）に戻す。auto=false：今の自動画像をコピーして固定する */

@@ -195,7 +195,7 @@ function gotoTopModel() {
             <span class="dim">{{ totalItems }} 件 ・ 上から順に片付ければ終わり</span>
           </div>
 
-          <EmptyState v-if="totalItems === 0" title="今日やることはありません" />
+          <EmptyState v-if="totalItems === 0" title="今日やることはありません" hint="「取り込む」で新しい動きがあれば表示されます" />
 
           <template v-else>
             <div v-for="group in inbox.groups" :key="group.kind" v-show="group.items.length" class="group">

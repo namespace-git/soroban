@@ -194,6 +194,7 @@ function registerIpc(): void {
   handle('splitInventory', (id, count) => db.splitInventory(id, count))
   handle('mergeSplitInventory', (id) => db.mergeSplitInventory(id))
   handle('disposeInventory', (id, note, status) => db.disposeInventory(id, note, status))
+  handle('restoreInventory', (id) => db.restoreInventory(id))
 
   handle('listMonthly', () => db.listMonthly())
 
@@ -224,6 +225,7 @@ function registerIpc(): void {
   handle('setPurchaseTags', (purchaseId, tagIds) => db.setPurchaseTags(purchaseId, tagIds))
   handle('setProductTags', (modelCode, tagIds) => db.setProductTags(modelCode, tagIds))
   handle('setProductName', (code, name) => db.setProductName(code, name))
+  handle('setProductNote', (code, note) => db.setProductNote(code, note))
   handle('setProductImage', (code) => productImage.setProductImage(code, mainWindow))
   handle('setProductImageAuto', (code, auto) => productImage.setProductImageAuto(code, auto))
   handle('refetchSaleDates', (saleId) => collector.refetchSaleDates(saleId))

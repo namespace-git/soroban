@@ -2,6 +2,7 @@
 import { isRealized } from '../../shared/recognition'
 import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { ProductSummary, ProductKarte, InventoryItem, ShippingMethod, Tag } from '../../shared/types'
+import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import StatusPill from '../components/StatusPill.vue'
 import CodeChip from '../components/CodeChip.vue'
@@ -15,6 +16,7 @@ import type { PromptOptions } from '../components/InputDialog.vue'
 import { yen, percent } from '../format'
 
 const revision = inject<Ref<number>>('revision')!
+const changed = inject<() => void>('changed', () => {})
 // ダッシュボードの型番ランキングから goto('products', { modelCode }) で開かれたときに読む
 const gotoPayload = inject<Ref<{ modelCode?: string } | null>>('gotoPayload', ref(null))
 const goto = inject<(t: string, payload?: { search?: string; focusId?: string }) => void>('goto')!
@@ -195,6 +197,7 @@ async function onProductTagChange(tagIds: string[]) {
   await window.soroban.setProductTags(tagPickerModelCode.value, tagIds)
   await load()
   if (karte.value?.summary.model_code === tagPickerModelCode.value) await refreshKarte()
+  changed()
 }
 async function onProductTagCreate(name: string) {
   if (!tagPickerModelCode.value) return
@@ -203,6 +206,7 @@ async function onProductTagCreate(name: string) {
   await window.soroban.setProductTags(tagPickerModelCode.value, [...tagPickerSelected.value, newTagId])
   await load()
   if (karte.value?.summary.model_code === tagPickerModelCode.value) await refreshKarte()
+  changed()
 }
 
 // --- 表示名：仕入明細・在庫の元の名前とは別に、商品タブでの見た目だけ変える ---
@@ -213,6 +217,18 @@ async function renameProduct(modelCode: string, currentName: string | null): Pro
   await window.soroban.setProductName(modelCode, input.trim() || null)
   await load()
   if (karte.value?.summary.model_code === modelCode) await refreshKarte()
+  changed()
+}
+
+// --- 商品（型番）のメモ：在庫・売上・仕入と同じダイアログ・同じ流れ ---
+
+async function editProductNote(modelCode: string, currentNote: string | null): Promise<void> {
+  const input = await ask('メモ', { initial: currentNote ?? '', multiline: true })
+  if (input === null) return
+  await window.soroban.setProductNote(modelCode, input.trim() || null)
+  await load()
+  if (karte.value?.summary.model_code === modelCode) await refreshKarte()
+  changed()
 }
 
 // --- 商品画像：人がセット（取り込みで上書きしない）／取り込みの自動更新に戻す ---
@@ -222,6 +238,7 @@ async function changeProductImage(modelCode: string) {
   if (!ok) return
   await load()
   if (karte.value?.summary.model_code === modelCode) await refreshKarte()
+  changed()
   toast('画像をセットしました（取り込みで上書きしません）', 'ok')
 }
 
@@ -238,6 +255,7 @@ async function onToggleAutoImage(modelCode: string, e: Event) {
   await window.soroban.setProductImageAuto(modelCode, auto)
   await load()
   if (karte.value?.summary.model_code === modelCode) await refreshKarte()
+  changed()
 }
 
 // --- 手元の在庫：状態ピル・「追跡」で在庫タブへ ---
@@ -353,6 +371,7 @@ const estimateCompare = computed(() => {
             <span class="prow-body">
               <span class="row-labels">
                 <CodeChip kind="model" :code="p.model_code" />
+                <Icon v-if="p.note" name="note" :size="12" class="prow-note-icon" title="メモあり" />
                 <StatusPill v-if="isStagnant(p)" tone="warn" :label="`滞留 ${agingDays(p)}日`" />
               </span>
               <span class="row-title one-line" :title="p.name">{{ p.name }}</span>
@@ -371,7 +390,7 @@ const estimateCompare = computed(() => {
         />
         <EmptyState
           v-else
-          title="型番付きの在庫がありません"
+          title="商品がまだありません"
           hint="仕入を登録すると、ここに商品ごとの実績が並びます"
         />
       </div>
@@ -418,10 +437,16 @@ const estimateCompare = computed(() => {
               <h2 class="karte-name">{{ karte.summary.name }}</h2>
               <p v-if="headerSourceName" class="faint karte-sub karte-sub-line">{{ headerSourceName }}</p>
               <p v-if="headerMetaParts.length" class="faint karte-sub karte-sub-line">{{ headerMetaParts.join(' ・ ') }}</p>
+              <div v-if="karte.summary.note" class="note-row">
+                <Icon name="note" :size="14" class="icon-note" />
+                <span class="note-label">メモ</span>
+                <span class="note-text">{{ karte.summary.note }}</span>
+              </div>
             </div>
             <div class="karte-head-actions">
               <button class="sm ghost" @click="openProductTagPicker(karte.summary.model_code, $event)">タグ</button>
               <button class="sm ghost" @click="renameProduct(karte.summary.model_code, karte.summary.custom_name ?? karte.summary.name)">名前</button>
+              <button class="sm ghost" @click="editProductNote(karte.summary.model_code, karte.summary.note)">メモ</button>
             </div>
           </div>
 
@@ -632,6 +657,7 @@ const estimateCompare = computed(() => {
 
 .prow-body { min-width: 0; display: flex; flex-direction: column; }
 .prow-body .row-title { font-size: var(--fs-13); }
+.prow-note-icon { flex-shrink: 0; color: var(--text-faint); }
 
 .prow-profit { text-align: right; font-size: var(--fs-12); color: var(--text-dim); display: flex; flex-direction: column; gap: 2px; }
 .prow-profit strong { font-size: var(--fs-14); }

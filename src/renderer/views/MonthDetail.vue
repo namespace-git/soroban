@@ -218,7 +218,7 @@ function expenseContent(e: Expense): string {
             </tr>
           </tfoot>
         </table>
-        <EmptyState v-else title="この月の販売はありません" />
+        <EmptyState v-else title="この月の販売はありません" hint="売上タブで登録すると、ここに集計されます" />
       </div>
 
       <!-- 経費の表 -->
@@ -255,7 +255,7 @@ function expenseContent(e: Expense): string {
             </tr>
           </tbody>
         </table>
-        <EmptyState v-else title="この月の経費はまだありません" />
+        <EmptyState v-else title="この月の経費はありません" />
         <p class="faint expenses-note">経費はこの画面では登録できません。経費タブで登録してください</p>
       </div>
     </template>

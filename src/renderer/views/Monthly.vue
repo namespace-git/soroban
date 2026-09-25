@@ -164,10 +164,9 @@ async function doReopen() {
 
       <div v-if="selectedMonth" class="statement-layout">
         <div class="statement-main">
-          <p class="faint">実績＝取引完了分と、状態が取れていない手入力の販売。</p>
-
           <div v-if="statement?.forecast?.count || statement?.personal_forecast?.count" class="panel forecast-panel">
             <p class="panel-title">見込み（取引未完了）</p>
+            <p class="faint forecast-note">実績＝取引完了分と、状態が取れていない手入力の販売。</p>
             <div class="stats">
               <div v-if="statement?.forecast?.count" class="stat">
                 <span class="stat-label">件数</span>
@@ -352,7 +351,7 @@ async function doReopen() {
                 {{ statement.multi_tag_count }} 件に複数のタグが付いています
               </p>
             </template>
-            <EmptyState v-else-if="statement" title="タグの付いた販売はまだありません" />
+            <EmptyState v-else-if="statement" title="この月にタグの付いた販売はありません" hint="売上タブでタグを付けると、ここに集計されます" />
           </div>
 
           <div class="panel table-panel">
@@ -376,7 +375,7 @@ async function doReopen() {
                 </tr>
               </tbody>
             </table>
-            <EmptyState v-else title="この月に注文した仕入はありません" />
+            <EmptyState v-else title="この月に注文した仕入はありません" hint="仕入タブで登録すると、ここに集計されます" />
             <p class="faint purchases-note">確定した仕入の総原価（商品計＋送料＋その他−割引）</p>
           </div>
         </aside>
@@ -446,7 +445,8 @@ async function doReopen() {
 
 /* --- 見込み（取引未完了） --- */
 .forecast-panel { margin-bottom: 16px; }
-.forecast-panel .panel-title { margin-bottom: 10px; }
+.forecast-panel .panel-title { margin-bottom: 4px; }
+.forecast-note { margin: 0 0 10px; }
 
 /* --- 締める前に --- */
 .pending-panel {

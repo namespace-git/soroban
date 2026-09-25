@@ -1107,6 +1107,40 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 27) {
+    // 型番のメモ（setProductNote）。メモだけ付けて表示名は付けない運用もあるため、
+    // product_name.name の NOT NULL を外す（新規テーブルを増やさず、name の隣に note を足す）。
+    // SQLite は列の NOT NULL 制約を直接外せないので、テーブルを作り直す。
+    // ビュー（inventory_view・variant_summary）が product_name をサブクエリで参照しており、
+    // 残したまま DROP TABLE / RENAME すると「no such table」で失敗するため、先にビューを落とす
+    // （rebuildInventoryItemForSplit と同じ流儀。ビューは migrate() の後に viewsSql が作り直す）
+    if (!columnExists('product_name', 'note')) {
+      db.exec(`
+        DROP VIEW IF EXISTS sale_line_share;
+        DROP VIEW IF EXISTS sale_profit;
+        DROP VIEW IF EXISTS monthly_summary;
+        DROP VIEW IF EXISTS inventory_view;
+        DROP VIEW IF EXISTS variant_summary;
+
+        CREATE TABLE product_name_new (
+          model_code TEXT PRIMARY KEY,
+          name       TEXT,
+          note       TEXT,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO product_name_new (model_code, name, updated_at)
+          SELECT model_code, name, updated_at FROM product_name;
+        DROP TABLE product_name;
+        ALTER TABLE product_name_new RENAME TO product_name;
+      `)
+    }
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '27')
+         ON CONFLICT(key) DO UPDATE SET value = '27'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -3480,6 +3514,27 @@ export function disposeInventory(
   tx()
 }
 
+/**
+ * 廃棄・自家消費にした在庫を、手元の在庫（in_stock）に戻す。押し間違いの取り消し用。
+ * landed_cost はここでも一切書き換えない（生成時のまま）。
+ * 出品への引き当ては戻らない（廃棄のときに外れているので、人が出品からやり直す）
+ */
+export function restoreInventory(id: string): void {
+  const item = db.prepare('SELECT status FROM inventory_item WHERE id = ?').get(id) as
+    | { status: InventoryStatus } | undefined
+  if (!item) throw new Error('在庫が見つかりません')
+  if (item.status !== 'disposed' && item.status !== 'personal_use') {
+    throw new Error('この在庫は戻せません')
+  }
+
+  db.prepare(
+    `UPDATE inventory_item
+        SET status = 'in_stock', disposed_at = NULL,
+            disposed_note = NULL, updated_at = datetime('now')
+      WHERE id = ?`,
+  ).run(id)
+}
+
 // ============================================================
 // 集計
 // ============================================================
@@ -4615,18 +4670,52 @@ export function setProductTags(modelCode: string, tagIds: string[]): void {
 /**
  * 型番の表示名を人が上書きする（商品ページ）。trim して空/null なら消し、
  * variant_summary.name は最新の在庫名に戻る。modelCode は在庫に無くても保存してよい
- * （型番の入力ミスは画面側で防ぐ）。resetData() では消さない（shop_alias と同じ扱い）
+ * （型番の入力ミスは画面側で防ぐ）。resetData() では消さない（shop_alias と同じ扱い）。
+ * メモ（note）が付いていれば消さない（名前だけ外れて行は残る）
  */
 export function setProductName(modelCode: string, name: string | null): void {
   const trimmed = name?.trim()
   if (!trimmed) {
-    db.prepare('DELETE FROM product_name WHERE model_code = ?').run(modelCode)
+    // メモが無ければ行ごと消す。メモが残っていれば name だけ null にして行を残す
+    const row = db.prepare('SELECT note FROM product_name WHERE model_code = ?').get(modelCode) as
+      | { note: string | null } | undefined
+    if (!row?.note) {
+      db.prepare('DELETE FROM product_name WHERE model_code = ?').run(modelCode)
+    } else {
+      db.prepare(`UPDATE product_name SET name = NULL, updated_at = datetime('now') WHERE model_code = ?`)
+        .run(modelCode)
+    }
     return
   }
   db.prepare(`
     INSERT INTO product_name (model_code, name, updated_at)
     VALUES (?, ?, datetime('now'))
     ON CONFLICT(model_code) DO UPDATE SET name = excluded.name, updated_at = datetime('now')
+  `).run(modelCode, trimmed)
+}
+
+/**
+ * 型番のメモ（商品カルテ）。trim して空/null なら消す。在庫・販売のメモとは別で型番そのものに付く。
+ * 表示名（name）が無くてもメモだけの行を持てる。表示名を消さない（UPSERT は note だけ更新）
+ */
+export function setProductNote(modelCode: string, note: string | null): void {
+  const trimmed = note?.trim()
+  if (!trimmed) {
+    // 表示名が無ければ行ごと消す。表示名が残っていれば note だけ null にして行を残す
+    const row = db.prepare('SELECT name FROM product_name WHERE model_code = ?').get(modelCode) as
+      | { name: string | null } | undefined
+    if (!row?.name) {
+      db.prepare('DELETE FROM product_name WHERE model_code = ?').run(modelCode)
+    } else {
+      db.prepare(`UPDATE product_name SET note = NULL, updated_at = datetime('now') WHERE model_code = ?`)
+        .run(modelCode)
+    }
+    return
+  }
+  db.prepare(`
+    INSERT INTO product_name (model_code, note, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(model_code) DO UPDATE SET note = excluded.note, updated_at = datetime('now')
   `).run(modelCode, trimmed)
 }
 

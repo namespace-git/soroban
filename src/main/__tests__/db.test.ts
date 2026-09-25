@@ -487,6 +487,45 @@ describe('db（:memory:）', () => {
     expect(() => db.disposeInventory(item2.id, 'テスト')).toThrow()
   })
 
+  it('restoreInventory：廃棄・自家消費を手元の在庫に戻す。原価は変わらない／売却済み・未廃棄は戻せない', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-01-01',
+      shipping_fee: 0,
+      lines: [{ name: '在庫Y', unit_price: 500, quantity: 3 }],
+    })
+    const [item1, item2, item3] = db.listInventory('in_stock')
+    const cost1 = item1.landed_cost
+
+    db.disposeInventory(item1.id, '間違えて廃棄', 'disposed')
+    db.restoreInventory(item1.id)
+    const restored = db.listInventory('in_stock').find(i => i.id === item1.id)!
+    expect(restored.landed_cost).toBe(cost1) // landed_cost は生成時のまま
+    expect(restored.note ?? null).toBeNull()
+
+    // disposed_at・disposed_note が消えている（restoreInventory 経由のUPDATEで確認）
+    const raw = db.getDb().prepare('SELECT disposed_at, disposed_note FROM inventory_item WHERE id = ?')
+      .get(item1.id) as { disposed_at: string | null; disposed_note: string | null }
+    expect(raw.disposed_at).toBeNull()
+    expect(raw.disposed_note).toBeNull()
+
+    // 自家消費からも戻せる
+    db.disposeInventory(item2.id, '自分用に使った', 'personal_use')
+    db.restoreInventory(item2.id)
+    expect(db.listInventory('in_stock').some(i => i.id === item2.id)).toBe(true)
+
+    // 未廃棄（in_stock）は戻せない
+    expect(() => db.restoreInventory(item3.id)).toThrow('この在庫は戻せません')
+
+    // 売却済みは戻せない
+    const saleId = db.createSale({ title: '在庫Y', sold_at: '2026-01-06', price: 1000 })
+    db.linkInventory(saleId, [item3.id])
+    expect(() => db.restoreInventory(item3.id)).toThrow('この在庫は戻せません')
+
+    // 存在しないIDはエラー
+    expect(() => db.restoreInventory('no-such-id')).toThrow('在庫が見つかりません')
+  })
+
   it('splitInventory：landed_cost 1000 を3分割 → 333/333/334、親はsplitでin_stockから消える', () => {
     db.createPurchase({
       shop_account_id: shopId,
@@ -1344,7 +1383,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('26')
+      expect(db.getSettings().schema_version).toBe('27')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1459,6 +1498,42 @@ describe('db（:memory:）', () => {
     expect(after.custom_name).toBeNull()
   })
 
+  it('setProductNote：型番のメモを付ける／消す。表示名とは独立に残る', () => {
+    db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      shipping_fee: 0,
+      lines: [{ name: 'ムースクリーム（箱）【Z078-2】', unit_price: 1000, quantity: 1 }],
+    })
+
+    // メモだけ付ける（表示名は付けない）
+    db.setProductNote('Z078-2', '型崩れしやすいので注意')
+    let p = db.listProducts().find(x => x.model_code === 'Z078-2')!
+    expect(p.note).toBe('型崩れしやすいので注意')
+    expect(p.custom_name).toBeNull()
+
+    const karte = views.getProductKarte('Z078-2')
+    expect(karte.summary.note).toBe('型崩れしやすいので注意')
+
+    // 表示名を付けてもメモは残る
+    db.setProductName('Z078-2', 'ムースクリーム（箱）')
+    p = db.listProducts().find(x => x.model_code === 'Z078-2')!
+    expect(p.custom_name).toBe('ムースクリーム（箱）')
+    expect(p.note).toBe('型崩れしやすいので注意')
+
+    // メモを消しても表示名は残る
+    db.setProductNote('Z078-2', null)
+    p = db.listProducts().find(x => x.model_code === 'Z078-2')!
+    expect(p.note).toBeNull()
+    expect(p.custom_name).toBe('ムースクリーム（箱）')
+
+    // 空文字も null 扱いで消える
+    db.setProductNote('Z078-2', '追記メモ')
+    db.setProductNote('Z078-2', '   ')
+    p = db.listProducts().find(x => x.model_code === 'Z078-2')!
+    expect(p.note).toBeNull()
+  })
+
   it('listShopAccountStats：確定済みの仕入だけ集計、下書きは含めない。仕入0件は0で返す', () => {
     const otherShopId = db.createShopAccount('仕入なしアカウント')
 
@@ -1502,8 +1577,8 @@ describe('db（:memory:）', () => {
     expect(other.last_ordered_at).toBeNull()
   })
 
-  it('migrate：schema_versionが26になる', () => {
-    expect(db.getSettings().schema_version).toBe('26')
+  it('migrate：schema_versionが27になる', () => {
+    expect(db.getSettings().schema_version).toBe('27')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1589,7 +1664,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('26')
+      expect(db.getSettings().schema_version).toBe('27')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1623,7 +1698,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('26')
+      expect(db.getSettings().schema_version).toBe('27')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -1650,9 +1725,61 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('26')
+      expect(db.getSettings().schema_version).toBe('27')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       expect(expense.registration_no).toBeNull()
+    } finally {
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('migrate：version26相当（product_name.nameがNOT NULL・note列が無い）→27で既存の表示名を保ったままnoteが使えるようになる', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-product-note-migrate-'))
+    const path = join(dir, 'v26.db')
+    try {
+      db.closeDb()
+      db.initDb(path) // 一旦フルスキーマで作り、v26相当（name NOT NULL・note列なし）まで剥がす
+      const migrateShopId = db.createShopAccount('メロジョイA')
+      db.createPurchase({
+        shop_account_id: migrateShopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'ムースクリーム（箱）旧名【Z078-2】', unit_price: 1000, quantity: 1 }],
+      })
+      db.getDb().exec(`
+        DROP VIEW IF EXISTS sale_line_share;
+        DROP VIEW IF EXISTS sale_profit;
+        DROP VIEW IF EXISTS monthly_summary;
+        DROP VIEW IF EXISTS inventory_view;
+        DROP VIEW IF EXISTS variant_summary;
+
+        CREATE TABLE product_name_old (
+          model_code TEXT PRIMARY KEY,
+          name       TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO product_name_old (model_code, name, updated_at)
+          VALUES ('Z078-2', '旧表示名', '2026-01-01T00:00:00.000Z');
+        DROP TABLE product_name;
+        ALTER TABLE product_name_old RENAME TO product_name;
+      `)
+      db.getDb().prepare(`UPDATE setting SET value = '26' WHERE key = 'schema_version'`).run()
+      db.closeDb()
+
+      expect(() => db.initDb(path)).not.toThrow()
+
+      expect(db.getSettings().schema_version).toBe('27')
+      // 既存の表示名はそのまま残る
+      const p = db.listProducts().find(x => x.model_code === 'Z078-2')
+      expect(p?.custom_name).toBe('旧表示名')
+      expect(p?.note ?? null).toBeNull()
+
+      // 移行後にメモも付けられる（name NOT NULLが外れている）
+      db.setProductNote('Z078-2', '移行後のメモ')
+      const after = db.listProducts().find(x => x.model_code === 'Z078-2')
+      expect(after?.custom_name).toBe('旧表示名')
+      expect(after?.note).toBe('移行後のメモ')
     } finally {
       try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
       rmSync(dir, { recursive: true, force: true })
@@ -4387,6 +4514,22 @@ describe('db（:memory:）', () => {
       expect(p400Split?.items).toHaveLength(1)
       expect(p400Split?.items[0].status).toBe('split')
       expect(p400Split?.items[0].id).toBe(item.id)
+    })
+  })
+
+  describe('getInventoryOverview().total：記録の上での在庫の総数', () => {
+    it('在庫を作ると増える。廃棄・自家消費にしても（記録は残るので）減らない', () => {
+      expect(views.getInventoryOverview().total).toBe(0)
+
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-06-01', shipping_fee: 0,
+        lines: [{ name: '総数テスト', unit_price: 1000, quantity: 2 }],
+      })
+      expect(views.getInventoryOverview().total).toBe(2)
+
+      const [item1] = db.listInventory('in_stock')
+      db.disposeInventory(item1.id, '廃棄テスト', 'disposed')
+      expect(views.getInventoryOverview().total).toBe(2)
     })
   })
 

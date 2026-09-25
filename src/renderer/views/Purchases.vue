@@ -387,6 +387,7 @@ async function editNote(p: PurchaseSummary) {
   await window.soroban.updatePurchaseNote(p.id, input.trim() || null)
   await load()
   await purchaseDrawerRef.value?.reload()
+  changed()
 }
 
 // --- 取引詳細ドロワー：行のサムネ・商品名・注文番号をクリックで開く ---
@@ -456,6 +457,7 @@ async function onPurchaseTagChange(tagIds: string[]) {
   await load()
   tagPickerPurchase.value = purchases.value.find(p => p.id === id) ?? null
   await purchaseDrawerRef.value?.reload()
+  changed()
 }
 
 async function onPurchaseTagCreate(name: string) {
@@ -468,6 +470,7 @@ async function onPurchaseTagCreate(name: string) {
   await load()
   tagPickerPurchase.value = purchases.value.find(p => p.id === id) ?? null
   await purchaseDrawerRef.value?.reload()
+  changed()
 }
 
 /** ドロワーの「タグ」ボタンから：既存の openPurchaseTagPicker をそのまま使う */
@@ -492,8 +495,11 @@ async function onCsvImported(created: number, skipped: number) {
 }
 
 async function remove(p: PurchaseSummary) {
-  if (!await confirmDialog(`${p.ordered_at} の仕入を削除しますか？`, {
-    message: '生成された在庫も消えます。',
+  const detail = p.status === 'draft'
+    ? `${p.ordered_at} 注文 ・ 明細 ${p.line_count} ・ 価格未入力`
+    : `${p.ordered_at} 注文 ・ 明細 ${p.line_count} ・ 総原価 ${yen(p.total_cost)}`
+  if (!await confirmDialog(`「${rowTitle(p)}」を削除しますか？`, {
+    message: `${detail}\n生成された在庫も消えます。`,
     okLabel: '削除する',
     danger: true,
   })) return
@@ -699,8 +705,12 @@ async function remove(p: PurchaseSummary) {
               :data-row-id="p.id"
               class="clickable"
               :class="{ focused: focusedId === p.id }"
-              title="取引詳細を見る"
+              role="button"
+              tabindex="0"
+              title="仕入の明細を開く"
               @click="openPurchaseDrawer(p.id)"
+              @keydown.enter="openPurchaseDrawer(p.id)"
+              @keydown.space.prevent="openPurchaseDrawer(p.id)"
             >
               <td class="thumb-cell">
                 <span class="thumb-placeholder">{{ shopMarkChar(p) }}</span>
@@ -742,7 +752,7 @@ async function remove(p: PurchaseSummary) {
                 <strong v-if="p.status !== 'draft'">{{ yen(p.total_cost) }}</strong>
                 <span v-else class="faint">—</span>
               </td>
-              <td class="actions" @click.stop>
+              <td class="actions" @click.stop @keydown.stop>
                 <button v-if="p.status === 'draft'" class="sm primary" @click="confirmDraft(p)">確定</button>
                 <button class="sm ghost" :title="fulfillmentAutoTitle(p) ?? '配送状態を変える'" @click="editFulfillment(p)">配送</button>
                 <button class="sm ghost" @click="openPurchaseTagPicker(p, $event)" title="タグを編集する">タグ</button>
@@ -757,14 +767,14 @@ async function remove(p: PurchaseSummary) {
       </div>
 
       <EmptyState
-        v-else-if="searchText"
+        v-else-if="searchText || tagFilter || shopAccountFilter || period !== 'all'"
         title="検索条件に一致する仕入がありません"
       />
 
       <EmptyState
         v-else-if="!showForm"
-        title="仕入がまだありません。"
-        hint="「仕入を登録」から追加してください。"
+        title="仕入がまだありません"
+        hint="右上の『仕入を登録』から入れられます"
       >
         <template #action>
           <button class="primary" @click="showForm = true">仕入を登録</button>

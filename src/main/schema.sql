@@ -71,11 +71,13 @@ CREATE TABLE IF NOT EXISTS shop_alias (
   updated_at TEXT NOT NULL
 );
 
--- 型番ごとの表示名（人が上書き）。無ければ variant_summary.name は最新の在庫名になる。
--- resetData() では消さない（shop_alias と同じ扱い）
+-- 型番ごとの表示名（人が上書き）とメモ（setProductNote）。表示名が無ければ
+-- variant_summary.name は最新の在庫名になる。メモだけ付けて表示名は付けない運用もあるため
+-- name は NULL を許す。resetData() では消さない（shop_alias と同じ扱い）
 CREATE TABLE IF NOT EXISTS product_name (
   model_code TEXT PRIMARY KEY,
-  name       TEXT NOT NULL,
+  name       TEXT,
+  note       TEXT,
   updated_at TEXT NOT NULL
 );
 
@@ -751,6 +753,7 @@ SELECT
        ORDER BY i2.acquired_at DESC, i2.created_at DESC LIMIT 1)
   ) AS name,
   (SELECT name FROM product_name WHERE model_code = base.model_code) AS custom_name,
+  (SELECT note FROM product_name WHERE model_code = base.model_code) AS note,
   (SELECT COUNT(*) FROM inventory_item i2
      WHERE i2.model_code = base.model_code AND i2.status != 'split') AS purchased,
   (SELECT COUNT(*) FROM inventory_item i2

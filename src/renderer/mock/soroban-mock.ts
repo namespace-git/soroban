@@ -272,6 +272,9 @@ const productTags = new Map<string, Tag[]>()
 /** 商品（型番）の表示名。型番 → 表示名（setProductName で置き換える。無い型番は最新の在庫名を使う） */
 const productCustomName = new Map<string, string>()
 
+/** 商品（型番）のメモ。型番 → メモ（setProductNote で置き換える。無ければ null） */
+const productNote = new Map<string, string>()
+
 /**
  * 人が固定した商品画像。型番 → サムネURL（setProductImage / setProductImageAuto(code, false) で入る。
  * 取り込みで上書きしない）。キーが無ければ自動判定（①出品の最新画像 ②販売の最新画像）
@@ -627,6 +630,10 @@ function buildInitialPurchasesAndInventory(): void {
   // 型番の表示名（setProductName で付けたものの見本。1〜2件だけ入れ、残りは無し（name をそのまま使う見た目を確認するため）
   productCustomName.set('Z080-1', 'ジェラート ピケ ルームウェア')
   productCustomName.set('A035', 'ミニランド定番セット')
+
+  // 型番のメモ（setProductNote で付けたものの見本。1〜2件だけ入れ、残りは無し）
+  productNote.set('A035', '箱が大きいので送料に注意')
+  productNote.set('Z056-1', '色移りしやすいので単体で梱包する')
 
   addConfirmedPurchase({
     shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(170)), shippingFee: 900,
@@ -1732,6 +1739,7 @@ function variantSummaryFor(model: string): VariantSummary {
 
   return {
     model_code: model,
+    note: productNote.get(model) ?? null,
     series_code: sample?.series_code ?? null,
     material: sample?.material ?? null,
     name: customName ?? latest?.name ?? model,
@@ -2443,6 +2451,7 @@ const api: SorobanApi = {
     const agingItems = inventory.filter(i => i.status === 'in_stock' && i.aging_days > warnDays)
 
     return wait({
+      total: inventory.length,
       unlisted_arrived: { count: unlistedArrived.length, cost: unlistedArrived.reduce((s, i) => s + i.landed_cost, 0) },
       not_arrived: { count: notArrived.length, cost: notArrived.reduce((s, i) => s + i.landed_cost, 0) },
       listed: { count: listedCount, expected_profit: listedProfit },
@@ -3198,6 +3207,21 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
+  /**
+   * 廃棄・自家消費にした在庫を、手元の在庫（in_stock）に戻す。押し間違いの取り消し用。
+   * landed_cost は一切書き換えない（生成時のまま）。出品への引き当ては戻らない
+   */
+  async restoreInventory(id: string) {
+    const item = inventory.find(i => i.id === id)
+    if (!item) throw new Error('在庫が見つかりません')
+    if (item.status !== 'disposed' && item.status !== 'personal_use') {
+      throw new Error('この在庫は戻せません')
+    }
+    item.status = 'in_stock'
+    itemDisposedAt.delete(item.id)
+    return wait(undefined)
+  },
+
   async listMonthly() {
     const rows = withExpenses([...monthlyFromSales(sales), ...extraOlderMonths()])
     rows.sort((a, b) => (a.month !== b.month ? (a.month < b.month ? 1 : -1) : a.kind.localeCompare(b.kind)))
@@ -3431,6 +3455,14 @@ const api: SorobanApi = {
   async setProductName(modelCode: string, name: string | null) {
     if (name) productCustomName.set(modelCode, name)
     else productCustomName.delete(modelCode)
+    return wait(undefined)
+  },
+
+  /** 商品（型番）のメモ。空文字・null で消す。在庫・販売のメモとは別で、型番そのものに付く */
+  async setProductNote(modelCode: string, note: string | null) {
+    const trimmed = note?.trim()
+    if (trimmed) productNote.set(modelCode, trimmed)
+    else productNote.delete(modelCode)
     return wait(undefined)
   },
 

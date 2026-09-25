@@ -501,13 +501,17 @@ function seenStale(l: Listing): boolean {
 
 const STAGE_EMPTY: Record<Stage, { title: string; hint?: string }> = {
   listed: { title: '出品がありません', hint: 'メルカリの取り込みで出品中タブから見つかると、ここに並びます' },
-  to_ship: { title: '発送待ちの販売はありません' },
-  in_transit: { title: '配送中・受取待ちの販売はありません' },
-  done: { title: '完了した販売はありません' },
-  all: { title: '出品も販売もまだありません' },
+  to_ship: { title: '発送待ちの販売はありません', hint: '売れると、ここに並びます' },
+  in_transit: { title: '配送中・受取待ちの販売はありません', hint: '発送すると、ここに並びます' },
+  done: { title: '完了した販売はありません', hint: '受取評価が終わると、ここに並びます' },
+  all: { title: '出品も販売もまだありません', hint: '右上の『販売を登録』から入れられます。メルカリの取り込みでも増えます' },
 }
 const emptyTitle = computed(() => STAGE_EMPTY[stage.value].title)
 const emptyHint = computed(() => STAGE_EMPTY[stage.value].hint)
+/** 絞り込みの結果が0件のときの文言。出品中の段は「出品」、それ以外は「販売」 */
+const filteredEmptyTitle = computed(() =>
+  stage.value === 'listed' ? '検索条件に一致する出品がありません' : '検索条件に一致する販売がありません',
+)
 
 // --- 横断検索・ホームからの遷移：段階を合わせ、検索語を引き継ぎ、該当行を一時的にハイライトする ---
 const focusedId = ref<string | null>(null)
@@ -692,6 +696,7 @@ async function onTagChange(tagIds: string[]) {
   await window.soroban.setSaleTags(id, tagIds)
   await load()
   tagPickerSale.value = sales.value.find(s => s.id === id) ?? null
+  changed()
 }
 
 async function onTagCreate(name: string) {
@@ -703,6 +708,7 @@ async function onTagCreate(name: string) {
   await window.soroban.setSaleTags(id, tagIds)
   await load()
   tagPickerSale.value = sales.value.find(s => s.id === id) ?? null
+  changed()
 }
 
 // --- 引き当て／紐付けドロワーの後始末。他の出品へ移した／段階を跨いで消えた場合も
@@ -1122,7 +1128,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 
       <EmptyState
         v-else-if="searchText || monthFilter || statusFilter || inputFilter || period !== 'all'"
-        title="検索条件に一致する行がありません"
+        :title="filteredEmptyTitle"
       />
       <EmptyState
         v-else

@@ -560,8 +560,9 @@ async function submit() {
 }
 
 async function remove(e: Expense) {
-  if (!await confirmDialog(`${e.occurred_at} の経費を削除しますか？`, {
-    message: e.shop ? `${e.shop}` : undefined,
+  const name = e.shop?.trim() || contentLabel(e)
+  if (!await confirmDialog(`「${name}」を削除しますか？`, {
+    message: `${e.occurred_at} ・ ${yen(e.amount)}`,
     okLabel: '削除する',
     danger: true,
   })) return
