@@ -5,6 +5,7 @@ import { writeFileSync } from 'node:fs'
 import * as db from './db'
 import * as collector from './collector'
 import * as collectorMellojoy from './collector-mellojoy'
+import * as collectorTracking from './collector-tracking'
 import * as updater from './updater'
 import * as receipts from './receipts'
 import * as productImage from './product-image'
@@ -18,7 +19,9 @@ import type { CollectorRun, ExportKind, SorobanApi } from '../shared/types'
 // ============================================================
 // そろばん — メインプロセス
 //
-// 単一Electronアプリ。DBはローカルSQLite、外部サービスなし。
+// 単一Electronアプリ。DBはローカルSQLite。外部に出るのは3つだけ：
+// メルカリ・メロジョイ（読み取り）、レシート読み取り（利用者自身の Gemini キー）、
+// 追跡番号の配送状況（17TRACK。メロジョイが「配達済み」を出さないため。設定で切れる）。
 // 収集は起動時（間隔が空いていれば）と手動ボタンで走る。
 // ============================================================
 
@@ -60,8 +63,9 @@ function createMainWindow(): void {
 }
 
 // ------------------------------------------------------------
-// 収集：メルカリ→有効な仕入先アカウント（メロジョイ）の順に直列で走る。
-// 1つが失敗しても次へ進む（例外は畳んで返す設計だが、念のためここでも囲う）。
+// 収集：別サイト（メルカリ／メロジョイ／17TRACK）は同時に走らせる。
+// 同じサイトへの頻度は変えない＝メロジョイの口座同士は直列のチェーンのまま。
+// どの関数も絶対に reject しない（例外はここで畳んで applog に残す）。
 // ------------------------------------------------------------
 
 // 起動時収集（collectInBackground）と手動収集（IPC 'collect'）が同時に走ると、メルカリ・
@@ -74,27 +78,33 @@ export function collectAll(silent: boolean): Promise<CollectorRun[]> {
   return collectAllRunning
 }
 
-async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
-  const runs: CollectorRun[] = []
-  applog.log('collector', 'collect_start', `収集を開始（silent=${silent}）`)
-
+/** メルカリを1回収集する。失敗しても reject しない（[] を返す） */
+async function collectMercari(silent: boolean): Promise<CollectorRun[]> {
   try {
     const run = await collector.collect(silent)
-    runs.push(run)
     applog.log('collector', 'mercari', `メルカリ: ${run.status}`, {
       fetched: run.fetched, inserted: run.inserted, message: run.message,
     })
+    return [run]
   } catch (e) {
     console.error('メルカリの収集に失敗しました', e)
     applog.log('collector', 'mercari', 'メルカリの収集に失敗しました', undefined, {
       error: e instanceof Error ? e.message : String(e),
     })
+    return []
   }
+}
 
-  const shopAccounts = db.listShopAccounts()
-    .filter(a => a.is_active && a.kind === 'mellojoy')
-
-  for (const account of shopAccounts) {
+/**
+ * 有効な仕入先アカウント（メロジョイ）を順に直列で収集する。同じサイトを2窓で
+ * 叩くと頻度が倍になるため、口座同士は並列にしない。1件失敗しても次へ進む。
+ */
+async function collectShopAccountsSerially(
+  accounts: ReturnType<typeof db.listShopAccounts>,
+  silent: boolean,
+): Promise<CollectorRun[]> {
+  const runs: CollectorRun[] = []
+  for (const account of accounts) {
     try {
       const run = await collectorMellojoy.collectShopOrders(account.id, silent)
       runs.push(run)
@@ -108,8 +118,48 @@ async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
       })
     }
   }
-
   return runs
+}
+
+/**
+ * 到着の確認。メロジョイの注文詳細は「発送準備中 → 配達中」までしか出さないので、
+ * 到着済にできるのは追跡番号（17TRACK）を見たときだけ。1回に数件だけ見る。
+ * collector_run は作らない（メロジョイ自体は成功しているのに失敗として出さないため）。
+ * 設定で切られていれば何もしない。失敗しても reject しない。
+ */
+async function checkShippingIfEnabled(): Promise<void> {
+  try {
+    // getSettings も try の中に置く。ここで投げると Promise.all が reject して、
+    // 並行して成功していたメルカリ・メロジョイの結果まで捨ててしまう
+    if (db.getSettings().track_shipping === '0') return
+    const t = await collectorTracking.checkTrackingBatch()
+    if (t.checked > 0 || t.failed > 0 || t.blocked) {
+      applog.log('collector', 'tracking', '配送状況を確認しました', t)
+    }
+    if (t.blocked) console.warn(collectorTracking.TRACKING_BLOCKED_MESSAGE)
+  } catch (e) {
+    console.error('配送状況の確認に失敗しました', e)
+    applog.log('collector', 'tracking', '配送状況の確認に失敗しました', undefined, {
+      error: e instanceof Error ? e.message : String(e),
+    })
+  }
+}
+
+async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
+  applog.log('collector', 'collect_start', `収集を開始（silent=${silent}）`)
+
+  const shopAccounts = db.listShopAccounts()
+    .filter(a => a.is_active && a.kind === 'mellojoy')
+
+  // 別サイトの3グループを同時に走らせる。同じサイト（メロジョイの口座同士）は直列。
+  // どのグループも内側で例外を畳むので reject しない（Promise.all で安全に待てる）
+  const [mercariRuns, shopRuns] = await Promise.all([
+    collectMercari(silent),
+    collectShopAccountsSerially(shopAccounts, silent),
+    checkShippingIfEnabled(),
+  ])
+
+  return [...mercariRuns, ...shopRuns]
 }
 
 // ------------------------------------------------------------
@@ -194,6 +244,15 @@ function registerIpc(): void {
   handle('splitInventory', (id, count) => db.splitInventory(id, count))
   handle('mergeSplitInventory', (id) => db.mergeSplitInventory(id))
   handle('disposeInventory', (id, note, status) => db.disposeInventory(id, note, status))
+  // 追跡番号を 17TRACK で開く。URL は main で組み立てる（画面から任意の URL を開かせない）
+  // 1件だけ今すぐ 17TRACK を見る（画面のメンテナンス用ボタン）
+  handle('checkTracking', (purchaseId) => collectorTracking.checkTracking(purchaseId))
+
+  handle('openTracking', async (purchaseId) => {
+    const num = db.getPurchaseTrackingNumber(purchaseId)
+    if (!num) return
+    await shell.openExternal(`https://t.17track.net/#nums=${encodeURIComponent(num)}`)
+  })
   handle('restoreInventory', (id) => db.restoreInventory(id))
 
   handle('listMonthly', () => db.listMonthly())

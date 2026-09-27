@@ -11,6 +11,8 @@ import Icon from './Icon.vue'
 import { yen, shortDate } from '../format'
 
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+// 到着状態が変わりうる操作（配送状況の確認）は一覧（Purchases.vue）にも効かせる
+const changed = inject<() => void>('changed', () => {})
 
 const props = defineProps<{
   open: boolean
@@ -56,7 +58,7 @@ function placeholderChar(): string {
 type ChipInfo = { tone: 'neutral' | 'ok' | 'warn' | 'info'; label: string }
 
 function fulfillmentChip(f: Fulfillment | null): ChipInfo {
-  if (f === 'pending') return { tone: 'neutral', label: '未発送' }
+  if (f === 'pending') return { tone: 'neutral', label: '発送準備中' }
   if (f === 'shipped') return { tone: 'info', label: '配送中' }
   // delivered、または分からない（手入力など）は到着扱い
   return { tone: 'ok', label: '到着済' }
@@ -119,6 +121,47 @@ function onEditFulfillment() {
 
 function fulfillmentAutoTitle(): string | undefined {
   return detail.value?.import_key ? '取り込みで自動更新されます（手で変えても次の取り込みで戻ります）' : undefined
+}
+
+// --- 追跡番号（メロジョイの注文詳細から）。無ければ何も出さない ---
+async function onOpenTracking() {
+  if (!detail.value) return
+  try {
+    await window.soroban.openTracking(detail.value.id)
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  }
+}
+
+/** 17TRACK で最後に見た配送状況。メロジョイは配達済みを教えてくれないので、到着はここでしか分からない */
+function trackingStatusText(): string {
+  if (!detail.value?.tracking_status) return 'まだ確認していません'
+  return `${detail.value.tracking_status} ・ ${shortDate(detail.value.tracking_checked_at)} に確認`
+}
+
+// --- 配送状況を17TRACKで確認（メンテ用）：onRefetchImages と同じ型（busy ref・try/catch/finally・toast） ---
+const checkingTracking = ref(false)
+async function onCheckTracking() {
+  if (!detail.value || checkingTracking.value) return
+  checkingTracking.value = true
+  try {
+    const result = await window.soroban.checkTracking(detail.value.id)
+    if (!result) {
+      toast('追跡番号が無いので確認できません。仕入の詳細で追跡番号を入力してください', 'warn')
+    } else if (!result.status_text) {
+      toast('17TRACK で配送状況を読み取れませんでした', 'warn')
+    } else if (result.delivered_at) {
+      toast(`配送状況を確認しました（${result.status_text} ・ ${shortDate(result.delivered_at)} 到着）`, 'ok')
+    } else {
+      toast(`いまは「${result.status_text}」です`, 'warn')
+    }
+    await load()
+    changed()
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    checkingTracking.value = false
+  }
 }
 
 /**
@@ -194,6 +237,25 @@ async function onRefetchImages() {
           </span>
           <span v-if="i < 3" class="ship-bar" :class="{ done: s.state === 'done' }"></span>
         </template>
+      </div>
+
+      <div v-if="detail.tracking_number" class="tracking-block">
+        <div class="tracking-row">
+          <Icon name="truck" :size="14" class="icon-note" />
+          <span class="tracking-text" :title="`${detail.tracking_carrier ?? ''} ・ ${detail.tracking_number}`">
+            {{ detail.tracking_carrier }} ・ {{ detail.tracking_number }}
+          </span>
+          <span class="grow" />
+          <button class="sm ghost" title="17TRACK で追跡する" @click="onOpenTracking">
+            追跡 <Icon name="external" :size="12" />
+          </button>
+          <button
+            class="sm ghost" :disabled="checkingTracking"
+            title="メロジョイは配達済みを教えてくれないので、17TRACK を今すぐ 1 件だけ確認します"
+            @click="onCheckTracking"
+          >{{ checkingTracking ? '確認中…' : '配送状況を確認' }}</button>
+        </div>
+        <p class="tracking-status faint" :title="trackingStatusText()">{{ trackingStatusText() }}</p>
       </div>
 
       <div class="lines-list">
@@ -369,6 +431,33 @@ async function onRefetchImages() {
 .item-chip-btn:disabled { opacity: 1; }
 
 .hint-row { margin: 8px 0 0; }
+
+/* --- 追跡番号：あるときだけ2行（番号＋17TRACKで見た配送状況）。長い番号は折り返さず省略し、全文は title で読ませる --- */
+.tracking-block {
+  margin: 0 0 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.tracking-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-13);
+  color: var(--text-dim);
+}
+.tracking-row .icon-note { flex-shrink: 0; color: var(--text-faint); }
+.tracking-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.tracking-status {
+  margin: 4px 0 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 
 .totals-block {
   margin-top: 16px;

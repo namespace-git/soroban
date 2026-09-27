@@ -463,12 +463,15 @@ export function parsePurchasedAt(text: string): string | null {
   return null
 }
 
-function createWindow(show: boolean): BrowserWindow {
+/** 取り込み中の窓のタイトルの型。他サイト（メロジョイ・17TRACK）と並んだときに見分けるための接頭辞 */
+const WINDOW_TITLE = 'そろばん — メルカリ'
+
+function createWindow(show: boolean, title: string = WINDOW_TITLE): BrowserWindow {
   return new BrowserWindow({
     width: 1280,
     height: 800,
     show,
-    title: 'メルカリ',
+    title,
     webPreferences: {
       partition: PARTITION,
       // メルカリのページを読むだけ。Node統合は切る
@@ -485,7 +488,7 @@ function createWindow(show: boolean): BrowserWindow {
  */
 export function openLoginWindow(): Promise<void> {
   return new Promise((resolve) => {
-    const win = createWindow(true)
+    const win = createWindow(true, `${WINDOW_TITLE}（ログイン）`)
     win.loadURL(LOGIN_URL)
     win.on('closed', () => resolve())
   })
@@ -510,9 +513,15 @@ async function isLoggedIn(win: BrowserWindow): Promise<boolean> {
  * タイトルを差し替えて「これは何のウィンドウか」を分かるようにする。
  * 呼び出し側は、これを呼んだら finally での `destroy()` をスキップしてウィンドウを
  * 残すこと（人が完了して自分で閉じる。閉じたら何もしない）。
+ *
+ * @param label どのサイトの取り込みかを示す文言（例：'メルカリ'、'メロジョイ「口座名」'）。
+ *   省略時は従来どおりサイト名なしの文言にする（後方互換）。取り込みが並行で複数窓
+ *   同時に走るようになったため、家族が見ても何のウィンドウか分かるように付ける
  */
-export function revealForChallenge(win: BrowserWindow): void {
-  win.setTitle('そろばん — 本人確認を完了してください')
+export function revealForChallenge(win: BrowserWindow, label?: string): void {
+  win.setTitle(
+    label ? `そろばん — ${label}の本人確認を完了してください` : 'そろばん — 本人確認を完了してください',
+  )
   if (!win.isVisible()) win.show()
 }
 
@@ -787,7 +796,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
 
     if (await isChallenge(win)) {
       keepWindowOpen = true
-      revealForChallenge(win)
+      revealForChallenge(win, 'メルカリ')
       return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
     }
 
@@ -868,7 +877,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
 
       if (await isChallenge(win)) {
         keepWindowOpen = true
-        revealForChallenge(win)
+        revealForChallenge(win, 'メルカリ')
         return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
@@ -937,7 +946,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
 
       if (await isChallenge(win)) {
         keepWindowOpen = true
-        revealForChallenge(win)
+        revealForChallenge(win, 'メルカリ')
         return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
@@ -1018,7 +1027,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
 
       if (await isChallenge(win)) {
         keepWindowOpen = true
-        revealForChallenge(win)
+        revealForChallenge(win, 'メルカリ')
         return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
@@ -1049,7 +1058,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
 
       if (await isChallenge(win)) {
         keepWindowOpen = true
-        revealForChallenge(win)
+        revealForChallenge(win, 'メルカリ')
         return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
@@ -1125,7 +1134,7 @@ export async function refetchSaleDates(saleId: string): Promise<{ purchased_at: 
 
     if (await isChallenge(win)) {
       keepWindowOpen = true
-      revealForChallenge(win)
+      revealForChallenge(win, 'メルカリ')
       throw new Error(CHALLENGE_MESSAGE)
     }
 

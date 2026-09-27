@@ -35,6 +35,10 @@ import type {
 
 let db: Database.Database
 
+// 17TRACK（追跡番号のサイト）を見る間隔。短すぎると「追跡が頻繁すぎます」で止められ、
+// 配送会社側の更新も1日数回しかないため、これより短く見ても意味が薄い
+const TRACKING_RECHECK_HOURS = 6
+
 const VIEW_MARKER = '-- __VIEWS__'
 const viewMarkerIndex = schemaSql.indexOf(VIEW_MARKER)
 const tablesSql = viewMarkerIndex === -1 ? schemaSql : schemaSql.slice(0, viewMarkerIndex)
@@ -1141,6 +1145,29 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 28) {
+    // 配送業者・追跡番号（メロジョイの注文詳細から読めたときだけ）
+    addColumnIfMissing('purchase', 'tracking_carrier', 'TEXT')
+    addColumnIfMissing('purchase', 'tracking_number', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '28')
+         ON CONFLICT(key) DO UPDATE SET value = '28'`,
+    ).run()
+  }
+
+  if (version < 29) {
+    // 17TRACK（追跡番号のサイト）で最後に見た配送状況。メロジョイの注文詳細は
+    // 「配達中」までしか出さず「配達済み」が分からないため、別途 17TRACK を見て埋める
+    addColumnIfMissing('purchase', 'tracking_status', 'TEXT')
+    addColumnIfMissing('purchase', 'tracking_checked_at', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '29')
+         ON CONFLICT(key) DO UPDATE SET value = '29'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -1537,6 +1564,10 @@ export function getPurchase(id: string): PurchaseDetail {
     fulfillment: p.fulfillment,
     shipped_at: p.shipped_at,
     delivered_at: p.delivered_at,
+    tracking_carrier: p.tracking_carrier,
+    tracking_number: p.tracking_number,
+    tracking_status: p.tracking_status,
+    tracking_checked_at: p.tracking_checked_at,
     line_count: lines.length,
     first_line_name: lines[0]?.name ?? null,
     first_model_code: lines[0]?.model_code ?? null,
@@ -1656,6 +1687,109 @@ export function updatePurchaseFulfillment(
 }
 
 /**
+ * 仕入先の注文詳細から読めた配送の情報を反映する（collector が呼ぶ）。
+ * 状態は updatePurchaseFulfillment と同じ規則（前に進む方向だけ。今より低い状態や null には戻さない）。
+ * 日付（shipped_at / delivered_at）は状態と切り離して扱う：渡された値があればお店の日付でそのまま
+ * 上書きする（今までは「気づいた日」を刻んでいたので、注文詳細から読めた実際の日の方が正しい）。
+ * null が渡された（読めなかった）ときは既存の値を消さない。
+ * 追跡番号・配送業者も読めたときだけ書き、null では消さない。
+ * 戻り値は状態・日付・追跡番号のいずれかが変わったら true
+ */
+export function applyFulfillmentFromShop(purchaseId: string, f: {
+  status: Fulfillment | null
+  shipped_at: string | null
+  delivered_at: string | null
+  carrier: string | null
+  tracking_number: string | null
+}): boolean {
+  const statusChanged = applyFulfillment('id', purchaseId, f.status, { noDowngrade: true })
+
+  const cur = db.prepare(
+    `SELECT shipped_at, delivered_at, tracking_carrier, tracking_number FROM purchase WHERE id = ?`,
+  ).get(purchaseId) as
+    | { shipped_at: string | null; delivered_at: string | null; tracking_carrier: string | null; tracking_number: string | null }
+    | undefined
+  if (!cur) return statusChanged
+
+  const nextShippedAt = f.shipped_at !== null ? f.shipped_at : cur.shipped_at
+  const nextDeliveredAt = f.delivered_at !== null ? f.delivered_at : cur.delivered_at
+  const nextCarrier = f.carrier !== null ? f.carrier : cur.tracking_carrier
+  const nextTracking = f.tracking_number !== null ? f.tracking_number : cur.tracking_number
+
+  const fieldsChanged =
+    nextShippedAt !== cur.shipped_at || nextDeliveredAt !== cur.delivered_at ||
+    nextCarrier !== cur.tracking_carrier || nextTracking !== cur.tracking_number
+  if (!fieldsChanged) return statusChanged
+
+  db.prepare(
+    `UPDATE purchase
+        SET shipped_at = ?, delivered_at = ?, tracking_carrier = ?, tracking_number = ?,
+            updated_at = datetime('now')
+      WHERE id = ?`,
+  ).run(nextShippedAt, nextDeliveredAt, nextCarrier, nextTracking, purchaseId)
+  return true
+}
+
+/**
+ * 17TRACK を見るべき仕入。追跡番号があり、まだ到着済でなく、最後に見てから
+ * TRACKING_RECHECK_HOURS 時間以上経ったもの。未確認が先、次に古い順。
+ * 収集頻度を上げないため呼び出し側が limit で絞る
+ */
+export function trackingCheckCandidates(limit: number): Array<{ id: string; tracking_number: string }> {
+  return db.prepare(
+    `SELECT id, tracking_number
+       FROM purchase
+      WHERE tracking_number IS NOT NULL AND trim(tracking_number) <> ''
+        AND (fulfillment IS NULL OR fulfillment <> 'delivered')
+        AND (tracking_checked_at IS NULL OR tracking_checked_at < datetime('now', '-${TRACKING_RECHECK_HOURS} hours'))
+      ORDER BY (tracking_checked_at IS NULL) DESC, tracking_checked_at ASC, ordered_at DESC
+      LIMIT ?`,
+  ).all(limit) as Array<{ id: string; tracking_number: string }>
+}
+
+/**
+ * 17TRACK で見た結果を仕入に反映する（collector-tracking が呼ぶ）。
+ * tracking_status / tracking_checked_at は必ず更新する（読めなかったときも進めて、
+ * 次の収集で同じものばかり引かないようにする）。
+ * 到着状態は前に進む方向だけ（noDowngrade。updatePurchaseFulfillment と同じ規則）。
+ * 到着日は渡されたら上書きする（気づいた日ではなく配送会社の実際の日の方が正しいため）。
+ * 到着状態か到着日が変わったら true
+ */
+export function applyTrackingResult(purchaseId: string, r: {
+  status_text: string | null
+  fulfillment: Fulfillment | null
+  delivered_at: string | null
+}): boolean {
+  const statusChanged = r.fulfillment !== null
+    ? applyFulfillment('id', purchaseId, r.fulfillment, { noDowngrade: true })
+    : false
+
+  const cur = db.prepare(
+    `SELECT delivered_at FROM purchase WHERE id = ?`,
+  ).get(purchaseId) as { delivered_at: string | null } | undefined
+  if (!cur) return false
+
+  const nextDeliveredAt = r.delivered_at !== null ? r.delivered_at : cur.delivered_at
+  const deliveredAtChanged = nextDeliveredAt !== cur.delivered_at
+
+  db.prepare(
+    `UPDATE purchase
+        SET tracking_status = ?, tracking_checked_at = datetime('now'),
+            delivered_at = ?, updated_at = datetime('now')
+      WHERE id = ?`,
+  ).run(r.status_text, nextDeliveredAt, purchaseId)
+
+  return statusChanged || deliveredAtChanged
+}
+
+/** 追跡番号（openTracking が URL を組み立てるのに使う）。無ければ null */
+export function getPurchaseTrackingNumber(purchaseId: string): string | null {
+  const row = db.prepare('SELECT tracking_number FROM purchase WHERE id = ?').get(purchaseId) as
+    | { tracking_number: string | null } | undefined
+  return row?.tracking_number ?? null
+}
+
+/**
  * 到着状態を手で変える（TikTok Shop など自動取得しない仕入先向け）。
  * shipped / delivered に初めて到達した日を shipped_at / delivered_at に刻む（既に入っていれば触らない）。
  * メロジョイの自動取得がある仕入は次の取り込みで注文一覧の状態に戻る
@@ -1762,7 +1896,8 @@ const PURCHASE_SUMMARY_SELECT = `
   SELECT
     p.id, p.status, p.ordered_at, p.order_no, p.shop_account_id,
     p.shipping_fee, p.discount, p.note, p.import_key, p.fulfillment,
-    p.shipped_at, p.delivered_at,
+    p.shipped_at, p.delivered_at, p.tracking_carrier, p.tracking_number,
+    p.tracking_status, p.tracking_checked_at,
     sa.name AS shop_account_name,
     COUNT(pl.id) AS line_count,
     COALESCE(SUM(pl.unit_price * pl.quantity), 0) AS subtotal,

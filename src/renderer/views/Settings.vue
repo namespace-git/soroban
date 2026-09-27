@@ -239,6 +239,12 @@ async function toggleShowWindow(checked: boolean) {
   await saveSetting('collect_show_window', value)
 }
 
+async function toggleTrackShipping(checked: boolean) {
+  const value = checked ? '1' : '0'
+  settings.value = { ...settings.value, track_shipping: value }
+  await saveSetting('track_shipping', value)
+}
+
 async function saveMethod(m: ShippingMethod) {
   await window.soroban.saveShippingMethod(m)
   flash('保存しました')
@@ -599,6 +605,18 @@ const runLabel: Record<string, string> = {
           />
           取り込み中にブラウザのウィンドウを表示する（動きを確認したいときだけ）
         </label>
+        <label class="row hint">
+          <input
+            type="checkbox"
+            :checked="settings.track_shipping !== '0'"
+            @change="toggleTrackShipping(($event.target as HTMLInputElement).checked)"
+          />
+          配送状況を 17TRACK で自動確認して到着済にする（メロジョイの注文詳細は配達中までしか教えてくれません）
+        </label>
+        <p class="faint hint">
+          1 回に数件だけ、1 日 1 回程度しか確認しに行きません。17TRACK 側に止められたときは
+          自動では突破せず、仕入の詳細から手で確認してください。
+        </p>
         <p class="faint hint">
           アプリ起動時、前回から指定時間が空いていれば裏で取り込みます。
           頻度を上げすぎないでください。

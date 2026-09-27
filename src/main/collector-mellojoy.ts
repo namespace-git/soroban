@@ -61,12 +61,22 @@ export function ensureShopSession(shopAccountId: string): void {
   s.setUserAgent(ua, 'ja,en-US;q=0.9,en;q=0.8')
 }
 
-function createShopWindow(shopAccountId: string, show: boolean): BrowserWindow {
+/**
+ * ウィンドウのタイトルに使う「どの口座か」の文言。取り込みが他サイトと並行で走るようになり、
+ * 複数の口座を持つ人には2枚目・3枚目の窓がどれか分からなくなるため、口座名を必ず入れる。
+ * 口座名が引けない（削除済み等）ときだけ、口座 id の先頭8文字で代える。
+ */
+function shopLabel(shopAccountId: string): string {
+  const name = db.getShopAccount(shopAccountId)?.name
+  return name ? `メロジョイ「${name}」` : `メロジョイ（${shopAccountId.slice(0, 8)}）`
+}
+
+function createShopWindow(shopAccountId: string, show: boolean, titleSuffix = ''): BrowserWindow {
   return new BrowserWindow({
     width: 1280,
     height: 800,
     show,
-    title: 'メロジョイ',
+    title: `そろばん — ${shopLabel(shopAccountId)}${titleSuffix}`,
     webPreferences: {
       partition: partitionFor(shopAccountId),
       nodeIntegration: false,
@@ -84,18 +94,7 @@ export function openShopLoginWindow(shopAccountId: string): Promise<void> {
   ensureShopSession(shopAccountId)
 
   return new Promise((resolve) => {
-    const win = new BrowserWindow({
-      width: 1280,
-      height: 800,
-      show: true,
-      title: 'メロジョイ',
-      webPreferences: {
-        partition: partitionFor(shopAccountId),
-        nodeIntegration: false,
-        contextIsolation: true,
-        sandbox: true,
-      },
-    })
+    const win = createShopWindow(shopAccountId, true, '（ログイン）')
     win.loadURL(LOGIN_URL)
     win.on('closed', () => resolve())
   })
@@ -155,6 +154,102 @@ function findRoleDivStarts(html: string, role: string): number[] {
   let m: RegExpExecArray | null
   while ((m = re.exec(html))) starts.push(m.index)
   return starts
+}
+
+/** `html` 内で aria-label が「フルフィルメント状況：…」の `<section>` の開始位置をすべて返す */
+function findFulfillmentSectionStarts(html: string): number[] {
+  const re = /<section[^>]*aria-label="フルフィルメント状況[^"]*"[^>]*>/g
+  const starts: number[] = []
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) starts.push(m.index)
+  return starts
+}
+
+/** `extractDivBlock` と同じ考え方で、section の入れ子を数えて対応する閉じタグまで切り出す */
+function extractSectionBlock(html: string, startIndex: number): string | null {
+  const openTagEnd = html.indexOf('>', startIndex)
+  if (openTagEnd === -1) return null
+
+  const tagRe = /<section[\s>]|<\/section>/g
+  tagRe.lastIndex = openTagEnd + 1
+  let depth = 1
+  let m: RegExpExecArray | null
+  while ((m = tagRe.exec(html))) {
+    if (m[0].startsWith('<section')) depth++
+    else depth--
+    if (depth === 0) return html.slice(startIndex, m.index + m[0].length)
+  }
+  return null
+}
+
+/** ブロック内で最初に出てくる `<time>` の中身を日付に直す。読めなければ null */
+function extractTimeDate(html: string, now: Date): string | null {
+  const timeMatch = /<time\b[^>]*>([\s\S]*?)<\/time>/.exec(html)
+  return timeMatch ? inferOrderDate(stripTags(timeMatch[1]), now) : null
+}
+
+/**
+ * 配送の1段（`<section aria-label="フルフィルメント状況：…">`）を解析する。
+ * `<h3>` が「いまの状態」、その直後に現れる最初の `<time>` が「その状態になった日」。
+ * `<ol role="list">` の各 `<li>` が前の段の履歴（状態＋日、ページの並びのまま）。
+ * 追跡番号は t.17track.net へのリンクの文字列、業者名はその手前（同じ `<p>` 内）の `<span>`。
+ * 読めない部分は null にして例外にしない。
+ */
+function parseFulfillmentSection(block: string, now: Date): OrderFulfillment {
+  const h3Match = /<h3\b[^>]*>([\s\S]*?)<\/h3>/.exec(block)
+  const statusText = h3Match ? stripTags(h3Match[1]) : ''
+  const status = statusText ? fulfillmentFromStatus(statusText) : null
+  const date = h3Match ? extractTimeDate(block.slice(h3Match.index + h3Match[0].length), now) : null
+
+  let carrier: string | null = null
+  let trackingNumber: string | null = null
+  const trackingPMatch =
+    /<p\b[^>]*>([\s\S]*?<a\b[^>]*href="[^"]*17track\.net[^"]*"[^>]*>[^<]*<\/a>[\s\S]*?)<\/p>/.exec(block)
+  if (trackingPMatch) {
+    const pBlock = trackingPMatch[1]
+    const aMatch = /<a\b[^>]*href="[^"]*17track\.net[^"]*"[^>]*>([^<]*)<\/a>/.exec(pBlock)
+    trackingNumber = aMatch ? decodeEntities(aMatch[1]).trim() || null : null
+    const spanMatch = /<span[^>]*>([^<]*)<\/span>/.exec(pBlock)
+    carrier = spanMatch ? decodeEntities(spanMatch[1]).trim() || null : null
+  }
+
+  const history: OrderFulfillment['history'] = []
+  const olMatch = /<ol\b[^>]*role="list"[^>]*>([\s\S]*?)<\/ol>/.exec(block)
+  if (olMatch) {
+    const liRe = /<li\b[^>]*>([\s\S]*?)<\/li>/g
+    let li: RegExpExecArray | null
+    while ((li = liRe.exec(olMatch[1]))) {
+      const liBlock = li[1]
+      const spanMatch = /<span[^>]*>([^<]*)<\/span>/.exec(liBlock)
+      const hStatusText = spanMatch ? decodeEntities(spanMatch[1]).trim() : ''
+      history.push({
+        statusText: hStatusText,
+        status: hStatusText ? fulfillmentFromStatus(hStatusText) : null,
+        date: extractTimeDate(liBlock, now),
+      })
+    }
+  }
+
+  return { statusText, status, date, history, carrier, trackingNumber }
+}
+
+const FULFILLMENT_RANK: Record<Fulfillment, number> = { pending: 0, shipped: 1, delivered: 2 }
+
+/**
+ * 配送の段が複数あるとき、いちばん進んだもの（delivered > shipped > pending）を選ぶ。
+ * 未知（null）はいちばん低い扱い。進み具合が同じなら後に出てきた方（ページの並びで後段）を採る
+ */
+function pickMostAdvancedFulfillment(sections: OrderFulfillment[]): OrderFulfillment | null {
+  let best: OrderFulfillment | null = null
+  let bestRank = -1
+  for (const s of sections) {
+    const rank = s.status ? FULFILLMENT_RANK[s.status] : -1
+    if (best === null || rank >= bestRank) {
+      best = s
+      bestRank = rank
+    }
+  }
+  return best
 }
 
 /**
@@ -244,6 +339,19 @@ export interface OrderDetailLine {
   imageUrl: string | null
 }
 
+export interface OrderFulfillment {
+  /** お店の言葉そのまま（「確認済み」「配達中」「配達済み」など） */
+  statusText: string
+  /** fulfillmentFromStatus で解釈した状態。未知なら null */
+  status: Fulfillment | null
+  /** その状態になった日（YYYY-MM-DD）。読めなければ null */
+  date: string | null
+  /** 前の段（ページの並びのまま） */
+  history: Array<{ statusText: string; status: Fulfillment | null; date: string | null }>
+  carrier: string | null
+  trackingNumber: string | null
+}
+
 export interface OrderDetail {
   orderNo: string | null
   confirmedAtText: string | null
@@ -254,6 +362,8 @@ export interface OrderDetail {
   total: number | null
   /** 小計・配送・合計・割引以外の未知の行（label や label=金額）。confirmed の妨げ */
   unknownRows: string[]
+  /** 配送の段（複数あれば、いちばん進んだものを1つ）。読めなければ null */
+  fulfillment: OrderFulfillment | null
 }
 
 /** 注文アイテム表の1行（role="cell" 3つ）を組み立てる */
@@ -298,8 +408,9 @@ export function toDetailImageUrl(url: string): string {
 /**
  * 注文詳細ページの HTML から明細・注文合計表を抜く。
  * クラス名（ハッシュ）には依存せず、role 属性と見出し文言だけで境界を決める。
+ * `now`：フルフィルメント履歴の日付（「9月23日」等）の年推定に使う。省略時は現在時刻
  */
-export function parseOrderDetailHtml(html: string): OrderDetail {
+export function parseOrderDetailHtml(html: string, now: Date = new Date()): OrderDetail {
   const orderNoMatch = /<h1\b[^>]*>\s*注文\s*\(#(\d+)\)\s*<\/h1>/.exec(html)
   const orderNo = orderNoMatch ? `#${orderNoMatch[1]}` : null
 
@@ -358,7 +469,13 @@ export function parseOrderDetailHtml(html: string): OrderDetail {
     }
   }
 
-  return { orderNo, confirmedAtText, lines, subtotal, shipping, discount, total, unknownRows }
+  const fulfillmentSections = findFulfillmentSectionStarts(html)
+    .map(i => extractSectionBlock(html, i))
+    .filter((b): b is string => b !== null)
+    .map(b => parseFulfillmentSection(b, now))
+  const fulfillment = pickMostAdvancedFulfillment(fulfillmentSections)
+
+  return { orderNo, confirmedAtText, lines, subtotal, shipping, discount, total, unknownRows, fulfillment }
 }
 
 /**
@@ -382,6 +499,45 @@ export function inferOrderDate(text: string, now: Date): string | null {
   const mm = String(month).padStart(2, '0')
   const dd = String(day).padStart(2, '0')
   return `${year}-${mm}-${dd}`
+}
+
+/**
+ * detail.fulfillment から db.applyFulfillmentFromShop の入力を組み立てる。読めなければ null。
+ *
+ * shipped_at / delivered_at の決め方（推測で埋めない。履歴から拾えない分は null）：
+ *   - いまが「配達中」→ shipped_at はその日。delivered_at は null（配達中の前段に配達済みは無い）
+ *   - いまが「配達済み」→ delivered_at はその日。履歴に「配達中」があればその日を shipped_at
+ *   - いまが「確認済み」・未知 → どちらも null
+ */
+function fulfillmentUpdateFromDetail(detail: OrderDetail): {
+  status: Fulfillment | null
+  shipped_at: string | null
+  delivered_at: string | null
+  carrier: string | null
+  tracking_number: string | null
+} | null {
+  const f = detail.fulfillment
+  if (!f) return null
+
+  let shipped_at: string | null = null
+  let delivered_at: string | null = null
+  if (f.status === 'shipped') {
+    shipped_at = f.date
+  } else if (f.status === 'delivered') {
+    delivered_at = f.date
+    shipped_at = f.history.find(h => h.status === 'shipped')?.date ?? null
+  }
+
+  return { status: f.status, shipped_at, delivered_at, carrier: f.carrier, tracking_number: f.trackingNumber }
+}
+
+/**
+ * detail から配送の更新を db に反映する。読めなければ何もせず false（呼び出し側の件数集計に使う）
+ */
+function applyFulfillmentFromDetail(purchaseId: string, detail: OrderDetail): boolean {
+  const update = fulfillmentUpdateFromDetail(detail)
+  if (!update) return false
+  return db.applyFulfillmentFromShop(purchaseId, update)
 }
 
 // ------------------------------------------------------------
@@ -768,7 +924,7 @@ export async function refetchPurchaseImages(purchaseId: string): Promise<{ saved
     if (isShopLoginUrl(win.webContents.getURL())) throw new Error(AUTH_MESSAGE)
     if (await isChallenge(win)) {
       keepWindowOpen = true
-      revealForChallenge(win)
+      revealForChallenge(win, shopLabel(shopAccountId))
       throw new Error(CHALLENGE_MESSAGE)
     }
 
@@ -785,7 +941,7 @@ export async function refetchPurchaseImages(purchaseId: string): Promise<{ saved
     if (isShopLoginUrl(win.webContents.getURL())) throw new Error(AUTH_MESSAGE)
     if (await isChallenge(win)) {
       keepWindowOpen = true
-      revealForChallenge(win)
+      revealForChallenge(win, shopLabel(shopAccountId))
       throw new Error(CHALLENGE_MESSAGE)
     }
 
@@ -796,6 +952,7 @@ export async function refetchPurchaseImages(purchaseId: string): Promise<{ saved
     const keywords = db.parseKeywords(db.getShopAccount(shopAccountId)?.import_keywords ?? '')
     updatePurchaseImageUrls(purchaseId, detail, keywords)
     db.setPurchaseImageChecked(purchaseId)
+    applyFulfillmentFromDetail(purchaseId, detail)
     const imageBudget: ImageBudget = { remaining: MAX_IMAGES_PER_ORDER, failures: [] }
     const saved = await savePurchaseImages(shopAccountId, purchaseId, imageBudget, keywords)
     // 1枚でも保存できていれば成功として扱う（一部失敗は saved の枚数で分かる）。
@@ -832,7 +989,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     }
     if (await isChallenge(win)) {
       keepWindowOpen = true
-      revealForChallenge(win)
+      revealForChallenge(win, shopLabel(shopAccountId))
       return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
     }
 
@@ -894,6 +1051,9 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     const failures: string[] = []
     const imageBudget: ImageBudget = { remaining: 30, failures: [] }
     let imagesChecked = 0
+    // 一覧の状態表示（fulfillmentUpdated）とは別に、詳細ページの配送セクションから
+    // 状態になった日・業者・追跡番号まで反映できた件数
+    let fulfillmentDetailUpdated = 0
 
     for (const order of targets) {
       if (pagesOpened >= MAX_PAGES_PER_RUN) break
@@ -912,7 +1072,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
         }
         if (await isChallenge(win)) {
           keepWindowOpen = true
-          revealForChallenge(win)
+          revealForChallenge(win, shopLabel(shopAccountId))
           return db.finishRun(
             runId, 'auth_required', list.length, confirmedCount + draftCount, CHALLENGE_MESSAGE,
           )
@@ -950,6 +1110,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           confirmedCount++
           // 取り込みでこの注文の詳細は読み終えている（あとで画像巡回に拾わせない）
           db.setPurchaseImageChecked(purchaseId)
+          if (applyFulfillmentFromDetail(purchaseId, detail)) fulfillmentDetailUpdated++
           imagesSaved += await savePurchaseImages(shopAccountId, purchaseId, imageBudget, importKeywords)
         } else {
           const filteredDraft = filterPurchaseDraftByKeywords(result.input, importKeywords)
@@ -963,6 +1124,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           if (purchaseId) {
             updatePurchaseImageUrls(purchaseId, detail, importKeywords)
             db.setPurchaseImageChecked(purchaseId)
+            if (applyFulfillmentFromDetail(purchaseId, detail)) fulfillmentDetailUpdated++
             imagesSaved += await savePurchaseImages(shopAccountId, purchaseId, imageBudget, importKeywords)
           }
         }
@@ -985,13 +1147,14 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
         }
         if (await isChallenge(win)) {
           keepWindowOpen = true
-          revealForChallenge(win)
+          revealForChallenge(win, shopLabel(shopAccountId))
           return db.finishRun(runId, 'auth_required', list.length, confirmedCount + draftCount, CHALLENGE_MESSAGE)
         }
         const detail = parseOrderDetailHtml(await win.webContents.executeJavaScript('document.documentElement.outerHTML') as string)
         if (shouldSkipDetail(detail)) throw new Error('商品画像の明細が読めませんでした')
         updatePurchaseImageUrls(purchase.id, detail, importKeywords)
         db.setPurchaseImageChecked(purchase.id)
+        if (applyFulfillmentFromDetail(purchase.id, detail)) fulfillmentDetailUpdated++
         imagesSaved += await savePurchaseImages(shopAccountId, purchase.id, imageBudget, importKeywords)
       } catch (e) {
         failures.push(`${order.orderNo}：${e instanceof Error ? e.message : String(e)}`)
@@ -1004,6 +1167,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
       `確定 ${confirmedCount}・下書き ${draftCount}・既取込 ${alreadyImported}・キャンセル ${cancelledCount}`,
     ]
     if (fulfillmentUpdated > 0) parts.push(`到着状態の更新 ${fulfillmentUpdated}`)
+    if (fulfillmentDetailUpdated > 0) parts.push(`配送の更新 ${fulfillmentDetailUpdated} 件`)
     if (imagesChecked > 0) parts.push(`既取込の画像確認 ${imagesChecked} 注文`)
     if (imagesSaved > 0) parts.push(`画像 ${imagesSaved} 枚`)
     if (skippedByKeyword > 0) parts.push(`キーワード不一致で除外 ${skippedByKeyword} 件`)

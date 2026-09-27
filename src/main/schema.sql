@@ -156,6 +156,15 @@ CREATE TABLE IF NOT EXISTS purchase (
   -- 注文詳細を開いて商品画像URLを確認した日時。NULL = 未確認。既取込注文の画像巡回の対象判定に使う
   image_checked_at     TEXT,
 
+  -- 配送業者・追跡番号。注文詳細から読めたときだけ書く（openTrackingがURLを組み立てる）
+  tracking_carrier     TEXT,
+  tracking_number      TEXT,
+
+  -- 17TRACK で最後に見た配送状況の言葉そのまま（「配達完了」「輸送中」等）。表示用。
+  -- メロジョイの注文詳細は「配達中」までしか出さないため、別途 17TRACK を見て埋める
+  tracking_status      TEXT,
+  tracking_checked_at  TEXT,
+
   note            TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now')),

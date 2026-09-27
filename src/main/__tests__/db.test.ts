@@ -1383,7 +1383,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('27')
+      expect(db.getSettings().schema_version).toBe('29')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1577,8 +1577,8 @@ describe('db（:memory:）', () => {
     expect(other.last_ordered_at).toBeNull()
   })
 
-  it('migrate：schema_versionが27になる', () => {
-    expect(db.getSettings().schema_version).toBe('27')
+  it('migrate：schema_versionが28になる', () => {
+    expect(db.getSettings().schema_version).toBe('29')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1664,7 +1664,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('27')
+      expect(db.getSettings().schema_version).toBe('29')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1698,7 +1698,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('27')
+      expect(db.getSettings().schema_version).toBe('29')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -1725,7 +1725,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('27')
+      expect(db.getSettings().schema_version).toBe('29')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       expect(expense.registration_no).toBeNull()
     } finally {
@@ -1769,7 +1769,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('27')
+      expect(db.getSettings().schema_version).toBe('29')
       // 既存の表示名はそのまま残る
       const p = db.listProducts().find(x => x.model_code === 'Z078-2')
       expect(p?.custom_name).toBe('旧表示名')
@@ -2191,6 +2191,252 @@ describe('db（:memory:）', () => {
     const delivered = db.listPurchases().find(p => p.first_line_name === '生成時delivered')!
     expect(delivered.shipped_at).not.toBeNull()
     expect(delivered.delivered_at).not.toBeNull()
+  })
+
+  it('applyFulfillmentFromShop：状態はupdatePurchaseFulfillmentと同じ規則で前に進み、日付はお店の日付でそのまま入る', () => {
+    const id = db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      fulfillment: 'pending',
+      lines: [{ name: 'お店の日付テスト', unit_price: 1000, quantity: 1 }],
+    })
+
+    const changed = db.applyFulfillmentFromShop(id, {
+      status: 'shipped',
+      shipped_at: '2026-09-23',
+      delivered_at: null,
+      carrier: null,
+      tracking_number: null,
+    })
+    expect(changed).toBe(true)
+    const after = db.getPurchase(id)
+    expect(after.fulfillment).toBe('shipped')
+    expect(after.shipped_at).toBe('2026-09-23')
+    expect(after.delivered_at).toBeNull()
+  })
+
+  it('applyFulfillmentFromShop：今より低い状態には巻き戻さないが、日付はお店の日付で上書きされる（気づいた日より正確なため）', () => {
+    const id = db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      fulfillment: 'delivered',
+      lines: [{ name: '降格しないテスト', unit_price: 1000, quantity: 1 }],
+    })
+    const before = db.getPurchase(id)
+    expect(before.fulfillment).toBe('delivered')
+
+    const changed = db.applyFulfillmentFromShop(id, {
+      status: 'shipped',
+      shipped_at: '2026-09-10',
+      delivered_at: null,
+      carrier: null,
+      tracking_number: null,
+    })
+    expect(changed).toBe(true) // 状態は変わらないが日付が変わったのでtrue
+    const after = db.getPurchase(id)
+    // 状態はdeliveredのまま（一覧が「配送中」を指していても巻き戻さない）
+    expect(after.fulfillment).toBe('delivered')
+    // 日付はお店から読めた実際の日で上書きされる
+    expect(after.shipped_at).toBe('2026-09-10')
+  })
+
+  it('applyFulfillmentFromShop：日付・追跡番号・業者がnullのときは既存の値を消さない', () => {
+    const id = db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      fulfillment: 'pending',
+      lines: [{ name: 'null温存テスト', unit_price: 1000, quantity: 1 }],
+    })
+    db.applyFulfillmentFromShop(id, {
+      status: 'shipped',
+      shipped_at: '2026-09-05',
+      delivered_at: null,
+      carrier: 'SF Express',
+      tracking_number: 'SF1234567890',
+    })
+    expect(db.getPurchaseTrackingNumber(id)).toBe('SF1234567890')
+
+    // 次の収集で追跡番号・業者・日付が読めなかった（null）→ 消えない
+    const changed = db.applyFulfillmentFromShop(id, {
+      status: 'shipped',
+      shipped_at: null,
+      delivered_at: null,
+      carrier: null,
+      tracking_number: null,
+    })
+    expect(changed).toBe(false) // 何も変わっていない
+    const after = db.getPurchase(id)
+    expect(after.shipped_at).toBe('2026-09-05')
+    expect(after.tracking_carrier).toBe('SF Express')
+    expect(after.tracking_number).toBe('SF1234567890')
+    expect(db.getPurchaseTrackingNumber(id)).toBe('SF1234567890')
+  })
+
+  it('applyFulfillmentFromShop：存在しない仕入idはfalse', () => {
+    expect(db.applyFulfillmentFromShop('no-such-id', {
+      status: 'shipped', shipped_at: '2026-09-05', delivered_at: null, carrier: null, tracking_number: null,
+    })).toBe(false)
+  })
+
+  it('getPurchaseTrackingNumber：追跡番号を登録していない仕入はnull', () => {
+    const id = db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      lines: [{ name: '追跡番号なし', unit_price: 1000, quantity: 1 }],
+    })
+    expect(db.getPurchaseTrackingNumber(id)).toBeNull()
+    expect(db.getPurchaseTrackingNumber('no-such-id')).toBeNull()
+  })
+
+  describe('trackingCheckCandidates / applyTrackingResult：17TRACK（追跡番号のサイト）を見るべき仕入と結果の反映', () => {
+    function makeTrackedPurchase(
+      name: string, trackingNumber: string | null,
+      fulfillment: 'pending' | 'shipped' | 'delivered' | null = 'shipped',
+    ) {
+      const id = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-09-01',
+        fulfillment,
+        lines: [{ name, unit_price: 1000, quantity: 1 }],
+      })
+      if (trackingNumber !== null) {
+        db.applyFulfillmentFromShop(id, {
+          status: null, shipped_at: null, delivered_at: null, carrier: null, tracking_number: trackingNumber,
+        })
+      }
+      return id
+    }
+
+    it('追跡番号が無い仕入は候補に出ない', () => {
+      makeTrackedPurchase('番号なし', null)
+      expect(db.trackingCheckCandidates(10)).toEqual([])
+    })
+
+    it('到着済み（delivered）は候補に出ない', () => {
+      const id = makeTrackedPurchase('到着済', 'TRK-DELIVERED', 'delivered')
+      expect(db.trackingCheckCandidates(10).some(c => c.id === id)).toBe(false)
+    })
+
+    it('未確認（tracking_checked_atがnull）が先、次に古い順。6時間以内に確認済みのものは候補に出ない', () => {
+      const idUnchecked = makeTrackedPurchase('未確認', 'TRK-A')
+      const idOldChecked = makeTrackedPurchase('6時間より前に確認済み', 'TRK-B')
+      const idRecentChecked = makeTrackedPurchase('直近に確認済み', 'TRK-C')
+
+      db.getDb().prepare(
+        `UPDATE purchase SET tracking_checked_at = datetime('now', '-25 hours') WHERE id = ?`,
+      ).run(idOldChecked)
+      db.getDb().prepare(
+        `UPDATE purchase SET tracking_checked_at = datetime('now', '-1 hours') WHERE id = ?`,
+      ).run(idRecentChecked)
+
+      const ids = db.trackingCheckCandidates(10).map(c => c.id)
+      expect(ids).toEqual([idUnchecked, idOldChecked])
+    })
+
+    it('境界：5時間前に確認したものは出ない、7時間前に確認したものは出る', () => {
+      const id5h = makeTrackedPurchase('5時間前に確認', 'TRK-5H')
+      const id7h = makeTrackedPurchase('7時間前に確認', 'TRK-7H')
+
+      db.getDb().prepare(
+        `UPDATE purchase SET tracking_checked_at = datetime('now', '-5 hours') WHERE id = ?`,
+      ).run(id5h)
+      db.getDb().prepare(
+        `UPDATE purchase SET tracking_checked_at = datetime('now', '-7 hours') WHERE id = ?`,
+      ).run(id7h)
+
+      const ids = db.trackingCheckCandidates(10).map(c => c.id)
+      expect(ids).not.toContain(id5h)
+      expect(ids).toContain(id7h)
+    })
+
+    it('limitで絞られる', () => {
+      makeTrackedPurchase('limit-a', 'TRK-L1')
+      makeTrackedPurchase('limit-b', 'TRK-L2')
+      expect(db.trackingCheckCandidates(1)).toHaveLength(1)
+      expect(db.trackingCheckCandidates(10)).toHaveLength(2)
+    })
+
+    it('applyTrackingResult：配送中→delivered＋到着日で、fulfillmentとdelivered_atが入りtrue', () => {
+      const id = makeTrackedPurchase('配達完了', 'TRK-D1', 'shipped')
+
+      const changed = db.applyTrackingResult(id, {
+        status_text: '配達完了', fulfillment: 'delivered', delivered_at: '2026-09-20',
+      })
+      expect(changed).toBe(true)
+
+      const after = db.getPurchase(id)
+      expect(after.fulfillment).toBe('delivered')
+      expect(after.delivered_at).toBe('2026-09-20')
+      expect(after.tracking_status).toBe('配達完了')
+      expect(after.tracking_checked_at).not.toBeNull()
+    })
+
+    it('applyTrackingResult：すでに人が到着済にしている仕入にshippedを渡しても戻らない', () => {
+      const id = makeTrackedPurchase('到着済み・人の手で確定', 'TRK-D2', 'delivered')
+
+      db.applyTrackingResult(id, { status_text: '輸送中', fulfillment: 'shipped', delivered_at: null })
+
+      const after = db.getPurchase(id)
+      expect(after.fulfillment).toBe('delivered') // 前に進む方向だけなので戻らない
+    })
+
+    it('applyTrackingResult：status_textだけ（fulfillment: null）でもtracking_status/tracking_checked_atは進み、到着状態は変わらずfalse', () => {
+      const id = makeTrackedPurchase('情報不明', 'TRK-D3', 'shipped')
+
+      const changed = db.applyTrackingResult(id, {
+        status_text: '情報が見つかりません', fulfillment: null, delivered_at: null,
+      })
+      expect(changed).toBe(false)
+
+      const after = db.getPurchase(id)
+      expect(after.fulfillment).toBe('shipped') // 変わらない
+      expect(after.tracking_status).toBe('情報が見つかりません') // 表示用の言葉は進む
+      expect(after.tracking_checked_at).not.toBeNull() // 次の収集で同じものばかり引かないよう進む
+    })
+
+    it('applyTrackingResult：存在しない仕入idはfalse（例外を投げない）', () => {
+      expect(db.applyTrackingResult('no-such-id', {
+        status_text: '配達完了', fulfillment: 'delivered', delivered_at: '2026-09-20',
+      })).toBe(false)
+    })
+  })
+
+  it('migrate：version27相当（purchase.tracking_carrier/tracking_numberが無い）→28で列が足され、既存行はnullになる', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-tracking-migrate-'))
+    const path = join(dir, 'v27.db')
+    try {
+      db.closeDb()
+      db.initDb(path) // 一旦フルスキーマで作り、v27相当（tracking列が無い）まで剥がす
+      const migrateShopId = db.createShopAccount('メロジョイB')
+      const purchaseId = db.createPurchase({
+        shop_account_id: migrateShopId,
+        ordered_at: '2026-01-01',
+        lines: [{ name: '移行前の仕入', unit_price: 1000, quantity: 1 }],
+      })
+      db.getDb().exec(`
+        ALTER TABLE purchase DROP COLUMN tracking_carrier;
+        ALTER TABLE purchase DROP COLUMN tracking_number;
+      `)
+      db.getDb().prepare(`UPDATE setting SET value = '27' WHERE key = 'schema_version'`).run()
+      db.closeDb()
+
+      expect(() => db.initDb(path)).not.toThrow()
+
+      expect(db.getSettings().schema_version).toBe('29')
+      const p = db.getPurchase(purchaseId)
+      expect(p.tracking_carrier).toBeNull()
+      expect(p.tracking_number).toBeNull()
+
+      // 移行後は普通に書ける
+      db.applyFulfillmentFromShop(purchaseId, {
+        status: null, shipped_at: null, delivered_at: null,
+        carrier: 'ヤマト運輸', tracking_number: '1234-5678-9012',
+      })
+      expect(db.getPurchaseTrackingNumber(purchaseId)).toBe('1234-5678-9012')
+    } finally {
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('getItemTimeline：仕入（送料按分あり）→販売（まとめ売り2点）でeventsの順・detailの数字が合う', () => {

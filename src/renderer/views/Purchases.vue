@@ -415,7 +415,7 @@ function fulfillmentAutoTitle(p: PurchaseSummary): string | undefined {
 async function editFulfillment(p: PurchaseSummary) {
   const value = await choose('配送状態', [
     { label: '到着済', value: 'delivered', tone: 'ghost' },
-    { label: '未発送', value: 'pending', tone: 'ghost' },
+    { label: '発送準備中', value: 'pending', tone: 'ghost' },
     { label: '配送中', value: 'shipped', tone: 'ghost' },
   ])
   if (!value) return
@@ -580,7 +580,7 @@ async function remove(p: PurchaseSummary) {
           <span>配送状態</span>
           <select v-model="form.fulfillment">
             <option :value="null">到着済</option>
-            <option value="pending">未発送</option>
+            <option value="pending">発送準備中</option>
             <option value="shipped">配送中</option>
           </select>
           <span class="faint">メロジョイは取り込みで自動更新</span>
@@ -740,6 +740,7 @@ async function remove(p: PurchaseSummary) {
                     </span>
                     <span v-if="i < 3" class="ship-bar" :class="{ done: s.state === 'done' }"></span>
                   </template>
+                  <Icon v-if="p.tracking_number" name="truck" :size="12" class="ship-tracking-icon" title="追跡番号あり" />
                 </div>
               </td>
               <td class="num">
@@ -925,6 +926,7 @@ tr.focused { background: var(--brand-soft); }
 .ship-stage.now .ship-dot { background: var(--info); }
 .ship-bar { width: 14px; height: 2px; background: var(--line); flex-shrink: 0; }
 .ship-bar.done { background: var(--profit); }
+.ship-tracking-icon { flex-shrink: 0; margin-left: 2px; color: var(--text-faint); }
 
 /* --- 上の仕入先カード --- */
 .acc-row {

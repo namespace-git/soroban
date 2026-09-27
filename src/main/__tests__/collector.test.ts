@@ -159,10 +159,11 @@ vi.mock('../db', () => ({
   appendModelCodes: vi.fn(() => false),
 }))
 
+import { BrowserWindow } from 'electron'
 import {
   buildUserAgent, collect, extractInProgressTotal, extractListingTotal, extractTotalCount,
   isChallengeText, parseInProgressHtml, parseListingsHtml, parsePurchasedAt, parseSoldHtml, parseSoldRow,
-  randomWaitMs, thumbFileName,
+  randomWaitMs, revealForChallenge, thumbFileName,
 } from '../collector'
 import * as db from '../db'
 
@@ -505,6 +506,27 @@ describe('collector（electronに依存しない部分）', () => {
     it('mercariItemId-hash8.jpg の形になる', () => {
       expect(thumbFileName('m12345', 'https://static.mercdn.net/img.jpg'))
         .toMatch(/^m12345-[0-9a-f]{8}\.jpg$/)
+    })
+  })
+
+  describe('revealForChallenge（どのサイトの本人確認かをタイトルに出す）', () => {
+    it('ラベル省略時は従来どおりの文言（後方互換）', () => {
+      const win = new BrowserWindow({ show: false })
+      revealForChallenge(win)
+      expect(win.title).toBe('そろばん — 本人確認を完了してください')
+      expect(win.isVisible()).toBe(true)
+    })
+
+    it('ラベルを渡すと、どのサイトの取り込みかが分かる文言になる', () => {
+      const win = new BrowserWindow({ show: false })
+      revealForChallenge(win, 'メルカリ')
+      expect(win.title).toBe('そろばん — メルカリの本人確認を完了してください')
+    })
+
+    it('メロジョイの口座名入りラベルもそのまま文言に入る', () => {
+      const win = new BrowserWindow({ show: false })
+      revealForChallenge(win, 'メロジョイ「サブ垢」')
+      expect(win.title).toBe('そろばん — メロジョイ「サブ垢」の本人確認を完了してください')
     })
   })
 })

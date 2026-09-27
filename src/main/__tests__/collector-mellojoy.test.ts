@@ -113,6 +113,7 @@ vi.mock('../db', () => ({
     keywords.some(k => text.toLowerCase().includes(k.toLowerCase()))),
   existingImportKeys: vi.fn(() => new Set<string>()),
   updatePurchaseFulfillment: vi.fn(() => false),
+  applyFulfillmentFromShop: vi.fn(() => false),
   isMellojoyOrderExcluded: vi.fn(() => false),
   markMellojoyOrderExcluded: vi.fn(),
   createPurchase: vi.fn(),
@@ -239,6 +240,115 @@ describe('collector-mellojoy（electronに依存しない部分）', () => {
       expect(detail.discount).toBe(0)
       expect(detail.total).toBe(5397)
       expect(detail.unknownRows).toEqual([])
+    })
+
+    it('fixtureの配送セクション（確認済み・9月19日）が読める', () => {
+      const withNow = parseOrderDetailHtml(orderDetailHtml, new Date('2026-09-20'))
+      expect(withNow.fulfillment).toEqual({
+        statusText: '確認済み',
+        status: 'pending',
+        date: '2026-09-19',
+        history: [],
+        carrier: null,
+        trackingNumber: null,
+      })
+    })
+  })
+
+  describe('parseOrderDetailHtml（フルフィルメント状況：実DOM抜粋。2026-09-27に確認した2例）', () => {
+    const now = new Date('2026-09-27')
+
+    // 例1：注文 #279749（発送準備中・確認済み）。追跡番号・履歴なし
+    const pendingHtml = `
+      <h1>注文 (#279749)</h1>
+      <section aria-label="フルフィルメント状況：確認済み">
+        <h2>フルフィルメント状況：確認済み</h2>
+        <div>
+          <h3>確認済み</h3>
+          <span>これらのアイテムの発送準備をしています。</span>
+          <time><span>9月27日</span></time>
+        </div>
+      </section>
+    `
+
+    // 例2：注文 #270882（配達中）。追跡番号あり、履歴に「確認済み」1件
+    const shippedHtml = `
+      <h1>注文 (#270882)</h1>
+      <section aria-label="フルフィルメント状況：配達中">
+        <h2>フルフィルメント状況：配達中</h2>
+        <p><span>SF Express</span> <a href="https://t.17track.net/#nums=SF6047878426775">SF6047878426775</a></p>
+        <div>
+          <h3>配達中</h3>
+          <time><span>9月23日</span></time>
+        </div>
+        <ol role="list">
+          <li><span>確認済み</span><time><span>9月21日</span></time></li>
+        </ol>
+      </section>
+    `
+
+    it('例1（確認済み）：statusText・status・date が取れ、追跡番号・履歴は無い', () => {
+      const detail = parseOrderDetailHtml(pendingHtml, now)
+      expect(detail.fulfillment).toEqual({
+        statusText: '確認済み',
+        status: 'pending',
+        date: '2026-09-27',
+        history: [],
+        carrier: null,
+        trackingNumber: null,
+      })
+    })
+
+    it('例2（配達中）：業者・追跡番号・履歴（確認済み）が取れる', () => {
+      const detail = parseOrderDetailHtml(shippedHtml, now)
+      expect(detail.fulfillment).toEqual({
+        statusText: '配達中',
+        status: 'shipped',
+        date: '2026-09-23',
+        history: [{ statusText: '確認済み', status: 'pending', date: '2026-09-21' }],
+        carrier: 'SF Express',
+        trackingNumber: 'SF6047878426775',
+      })
+    })
+
+    it('配送のsectionが無い注文は fulfillment: null', () => {
+      const detail = parseOrderDetailHtml('<h1>注文 (#1)</h1><p>本文</p>', now)
+      expect(detail.fulfillment).toBeNull()
+    })
+
+    it('sectionが2つ（確認済みと配達済み）あるときは、いちばん進んだ方（配達済み）を採る', () => {
+      const html = `
+        <h1>注文 (#2)</h1>
+        <section aria-label="フルフィルメント状況：確認済み">
+          <div><h3>確認済み</h3><time><span>9月20日</span></time></div>
+        </section>
+        <section aria-label="フルフィルメント状況：配達済み">
+          <div><h3>配達済み</h3><time><span>9月25日</span></time></div>
+          <ol role="list">
+            <li><span>配達中</span><time><span>9月23日</span></time></li>
+            <li><span>確認済み</span><time><span>9月21日</span></time></li>
+          </ol>
+        </section>
+      `
+      const detail = parseOrderDetailHtml(html, now)
+      expect(detail.fulfillment?.status).toBe('delivered')
+      expect(detail.fulfillment?.date).toBe('2026-09-25')
+      expect(detail.fulfillment?.history).toEqual([
+        { statusText: '配達中', status: 'shipped', date: '2026-09-23' },
+        { statusText: '確認済み', status: 'pending', date: '2026-09-21' },
+      ])
+    })
+
+    it('年をまたぐ日付でも inferOrderDate と同じ結果になる（12月の注文を1月に見る想定）', () => {
+      const html = `
+        <h1>注文 (#3)</h1>
+        <section aria-label="フルフィルメント状況：確認済み">
+          <div><h3>確認済み</h3><time><span>12月30日</span></time></div>
+        </section>
+      `
+      // 「今」が3月なら、年無し「12月30日」は未来すぎるので前年と推定される
+      const detail = parseOrderDetailHtml(html, new Date('2026-03-01'))
+      expect(detail.fulfillment?.date).toBe('2025-12-30')
     })
   })
 
@@ -880,6 +990,44 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
 
     expect(db.setPurchaseLineImage).toHaveBeenCalledWith('line-1', expect.any(String))
     expect(run.message).toContain('画像 1 枚')
+  })
+
+  it('詳細に配送のsectionがあれば db.applyFulfillmentFromShop を呼び、messageに件数が出る', async () => {
+    state.opts.listHtml = buildListHtml([{ orderNo: '#600002', href: 'https://shop.example.com/order/600002' }])
+    state.opts.detailHtmlByUrl = {
+      'https://shop.example.com/order/600002': buildDetailHtml('#600002', 1000) + `
+        <section aria-label="フルフィルメント状況：配達中">
+          <p><span>SF Express</span> <a href="https://t.17track.net/#nums=SF6047878426775">SF6047878426775</a></p>
+          <div><h3>配達中</h3><time><span>9月23日</span></time></div>
+        </section>
+      `,
+    }
+    vi.mocked(db.createPurchase).mockReturnValue('purchase-600002')
+    vi.mocked(db.applyFulfillmentFromShop).mockReturnValue(true)
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(db.applyFulfillmentFromShop).toHaveBeenCalledWith('purchase-600002', {
+      status: 'shipped',
+      shipped_at: expect.any(String),
+      delivered_at: null,
+      carrier: 'SF Express',
+      tracking_number: 'SF6047878426775',
+    })
+    expect(run.message).toContain('配送の更新 1 件')
+  })
+
+  it('配送のsectionが無ければ db.applyFulfillmentFromShop を呼ばない', async () => {
+    state.opts.listHtml = buildListHtml([{ orderNo: '#600003', href: 'https://shop.example.com/order/600003' }])
+    state.opts.detailHtmlByUrl = {
+      'https://shop.example.com/order/600003': buildDetailHtml('#600003', 1000),
+    }
+    vi.mocked(db.createPurchase).mockReturnValue('purchase-600003')
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(db.applyFulfillmentFromShop).not.toHaveBeenCalled()
+    expect(run.message).not.toContain('配送の更新')
   })
 })
 

@@ -74,7 +74,7 @@ function downloadTemplate() {
   const rows = [
     HEADERS,
     ['メロジョイ', '2026-09-21', '264129', '【Z078-2】ムースクリーム S', 'Z078-2', '2699', '2', '499', '', '', '到着済', ''],
-    ['TikTok Shop', '2026/9/20', '', 'クリーミークリーム ポーチ', '', '1500', '1', '', '', '', '未発送', '手入力の仕入'],
+    ['TikTok Shop', '2026/9/20', '', 'クリーミークリーム ポーチ', '', '1500', '1', '', '', '', '発送準備中', '手入力の仕入'],
   ]
   const csv = toCsv(rows)
   const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' })
@@ -146,7 +146,7 @@ function parseDate(raw: string): string | null {
 
 function parseFulfillment(raw: string): Fulfillment | null {
   const s = raw.trim()
-  if (s === '未発送') return 'pending'
+  if (s === '未発送' || s === '発送準備中') return 'pending'
   if (s === '配送中') return 'shipped'
   return null // 「到着済」・空・不明は到着扱い
 }

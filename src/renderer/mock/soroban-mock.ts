@@ -298,6 +298,7 @@ let settings: Record<string, string> = {
   collect_interval_h: '1',
   aging_warn_days: '90',
   mercari_keyword: '【',
+  track_shipping: '1',
 }
 
 // --- AI 読み取り（Gemini）。キー本体は返さない。安全な保存は常に使える体で動かす ---
@@ -380,6 +381,12 @@ function addConfirmedPurchase(opts: {
   note?: string | null
   importKey?: string | null
   fulfillment?: Fulfillment | null
+  /** 見本用。メロジョイの注文詳細から読めたとき。省略時は両方 null */
+  trackingCarrier?: string | null
+  trackingNumber?: string | null
+  /** 見本用。17TRACK を最後に見た結果（checkTracking / 取り込み）。省略時は両方 null（未確認） */
+  trackingStatus?: string | null
+  trackingCheckedAt?: string | null
 }): void {
   const purchaseId = uid()
   const orderNo = `MJ-${opts.orderedAt.replace(/-/g, '').slice(0, 6)}-${pad(purchases.length + 1)}`
@@ -461,6 +468,10 @@ function addConfirmedPurchase(opts: {
     fulfillment,
     shipped_at,
     delivered_at,
+    tracking_carrier: opts.trackingCarrier ?? null,
+    tracking_number: opts.trackingNumber ?? null,
+    tracking_status: opts.trackingStatus ?? null,
+    tracking_checked_at: opts.trackingCheckedAt ?? null,
     line_count: lines.length,
     first_line_name: lines[0]?.name ?? null,
     first_model_code: lines[0]?.model_code ?? null,
@@ -562,6 +573,10 @@ function addTiktokPurchase(opts: {
     fulfillment,
     shipped_at,
     delivered_at,
+    tracking_carrier: null,
+    tracking_number: null,
+    tracking_status: null,
+    tracking_checked_at: null,
     line_count: lines.length,
     first_line_name: lines[0]?.name ?? null,
     first_model_code: lines[0]?.model_code ?? null,
@@ -612,6 +627,10 @@ function addDraftPurchase(opts: {
     fulfillment: null,
     shipped_at: null,
     delivered_at: null,
+    tracking_carrier: null,
+    tracking_number: null,
+    tracking_status: null,
+    tracking_checked_at: null,
     line_count: lines.length,
     first_line_name: lines[0]?.name ?? null,
     first_model_code: lines[0]?.model_code ?? null,
@@ -646,11 +665,19 @@ function buildInitialPurchasesAndInventory(): void {
     lines: [{ model: 'Z080-1', qty: 3 }, { model: 'Z056-1', qty: 3 }, { model: 'Z056-2', qty: 3 }],
     importKey: 'mellojoy:#256112',
     fulfillment: 'shipped',
+    // 配送業者・追跡番号の見本（メロジョイの注文詳細から読めたもの）
+    trackingCarrier: 'SF Express',
+    trackingNumber: 'SF6047878426775',
+    // 17TRACK で確認済みの見本（配達完了。checkTracking を押さなくても見えている状態）
+    trackingStatus: '配達完了',
+    trackingCheckedAt: new Date(Date.now() - 5 * 3600 * 1000).toISOString(),
   })
   addConfirmedPurchase({
     shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(125)), shippingFee: 950,
     lines: [{ model: 'Z088-2', qty: 4 }, { model: 'Z012-1', qty: 3 }, { model: 'Z012-3', qty: 3 }],
     note: '福袋つき',
+    trackingCarrier: 'YANWEN',
+    trackingNumber: 'YT2503061122334',
   })
   addConfirmedPurchase({
     shopId: mB.id, shopName: mB.name, orderedAt: todayLocal(daysAgo(100)), shippingFee: 800,
@@ -2955,6 +2982,11 @@ const api: SorobanApi = {
       import_key: input.import_key ?? null,
       fulfillment: input.fulfillment ?? null,
       ...fulfillmentDates(input.ordered_at, input.fulfillment ?? null),
+      // 手入力の登録では追跡番号は取れない（メロジョイの注文詳細からの取り込みだけ）
+      tracking_carrier: null,
+      tracking_number: null,
+      tracking_status: null,
+      tracking_checked_at: null,
       line_count: lines.length,
       first_line_name: lines[0]?.name ?? null,
       first_model_code: lines[0]?.model_code ?? null,
@@ -3205,6 +3237,29 @@ const api: SorobanApi = {
     item.status = status
     itemDisposedAt.set(item.id, todayLocal())
     return wait(undefined)
+  },
+
+  // 仕入の追跡番号を 17TRACK で開く。モックにはブラウザ制御が無いので開けない（例外は投げない）
+  async openTracking(purchaseId: string) {
+    const p = purchases.find(x => x.id === purchaseId)
+    if (!p?.tracking_number) return wait(undefined)
+    console.debug('[soroban:openTracking]', p.tracking_carrier, p.tracking_number)
+    return wait(undefined)
+  },
+
+  // 17TRACK を今すぐ 1 件だけ確認する見本。追跡番号が無ければ null。あれば常に「配達完了」で
+  // 到着済にする（前に進む方向だけ。既に到着済ならそのまま）。例外は投げない
+  async checkTracking(purchaseId: string) {
+    const p = purchases.find(x => x.id === purchaseId)
+    if (!p?.tracking_number) return wait(null)
+    const now = new Date().toISOString()
+    p.tracking_status = '配達完了'
+    p.tracking_checked_at = now
+    if (p.fulfillment !== 'delivered') {
+      p.fulfillment = 'delivered'
+      p.delivered_at = p.delivered_at ?? todayLocal()
+    }
+    return wait({ status_text: p.tracking_status, delivered_at: p.delivered_at })
   },
 
   /**

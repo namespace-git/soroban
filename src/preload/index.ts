@@ -48,6 +48,8 @@ const api: SorobanApi = {
   splitInventory: invoke('splitInventory'),
   mergeSplitInventory: invoke('mergeSplitInventory'),
   disposeInventory: invoke('disposeInventory'),
+  openTracking: invoke('openTracking'),
+  checkTracking: invoke('checkTracking'),
   restoreInventory: invoke('restoreInventory'),
 
   listMonthly: invoke('listMonthly'),

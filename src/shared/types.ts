@@ -18,7 +18,10 @@ export type CollectorSource = 'mercari' | 'mellojoy'
 export type PurchaseStatus = 'draft' | 'confirmed'
 /**
  * 注文の到着状態（メロジョイの注文一覧から毎回更新）。
- * pending = 確認済み（未発送） / shipped = 配達中 / delivered = 配達済み。
+ * pending = お店の「確認済み」＝**発送準備中**（画面の言葉もこれに揃える） /
+ * shipped = 配達中 / delivered = 配達済み。
+ * **delivered はメロジョイからは来ない**（注文詳細も「配達中」で止まる）。
+ * 到着になるのは 17TRACK を見たときと、人が手で変えたときだけ。
  * null = 分からない（手入力の仕入など）。到着扱い。
  * 在庫は確定時に作り、delivered 以外は「未着」として見せる（紐付けは可）
  */
@@ -243,6 +246,17 @@ export interface PurchaseInput {
 }
 
 export interface PurchaseSummary {
+  /** 配送業者（メロジョイの注文詳細から。例「SF Express」）。無ければ null */
+  tracking_carrier: string | null
+  /** 追跡番号。無ければ null。開くのは openTracking（URL は main が組み立てる） */
+  tracking_number: string | null
+  /**
+   * 17TRACK で最後に見た配送状況の言葉そのまま（「配達完了」「輸送中」「情報が見つかりません」など）。
+   * 見ていなければ null。**表示用**で、到着の判定は fulfillment / delivered_at を見る
+   */
+  tracking_status: string | null
+  /** 17TRACK を最後に見た日時（ISO）。見ていなければ null */
+  tracking_checked_at: string | null
   id: string
   status: PurchaseStatus
   ordered_at: string
@@ -1101,6 +1115,19 @@ export interface SorobanApi {
    * 原価（landed_cost）は生成時のまま触らない。出品への引き当ては戻らない（人がやり直す）
    */
   restoreInventory(id: string): Promise<void>
+  /**
+   * 仕入の追跡番号を 17TRACK で開く。**URL は main が組み立てる**（画面から任意の URL は開かせない）。
+   * 追跡番号が無ければ何もしない
+   */
+  openTracking(purchaseId: string): Promise<void>
+  /**
+   * この仕入の配送状況を 17TRACK で今すぐ 1 件だけ確認する（メンテナンス的な立ち位置）。
+   * メロジョイは「配達済み」を出さないので、到着は 17TRACK 側でしか分からない。
+   * 「配達完了」なら到着済＋到着日を入れる（前に進む方向だけ。人が入れた到着済は戻さない）。
+   * 追跡番号が無ければ null を返して何もしない。番号が見つからない・読めないときは
+   * status_text にその言葉を入れて delivered_at は null。頻繁に押しても連打しない
+   */
+  checkTracking(purchaseId: string): Promise<{ status_text: string | null; delivered_at: string | null } | null>
 
   // 集計
   listMonthly(): Promise<MonthlySummary[]>
