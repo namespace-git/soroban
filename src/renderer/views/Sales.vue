@@ -6,8 +6,9 @@ import { isRealized, realizedTotals } from '../../shared/recognition'
 import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue'
 import type {
   SaleProfit, ShippingMethod, SaleKind, SaleInput, SaleFilter, SaleTotals, Tag,
-  Listing, ListingStatus, CollectorRun, SaleStatus, SalesProgress,
+  Listing, ListingStatus, CollectorRun, SaleStatus, SalesProgress, SalesChannel,
 } from '../../shared/types'
+import { CHANNEL_LABEL } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
@@ -80,6 +81,8 @@ const stage = ref<Stage>('to_ship')
 type ListedFilter = 'all' | 'unallocated' | 'allocated'
 const listedFilter = ref<ListedFilter>('all')
 const tagFilter = ref('')
+/** 出品先で絞り込む（すべて／メルカリ／Yahoo!フリマ）。出品・販売の両方に効く */
+const channelFilter = ref<SalesChannel | ''>('')
 /** 「発送してください」だけに絞るなど（タブは増やさない。ホームの要対応から来る） */
 const statusFilter = ref<SaleStatus | ''>('')
 const searchText = ref('')
@@ -134,7 +137,27 @@ const form = ref<SaleInput>({
   sold_at: todayLocal(),
   price: 0,
   kind: 'resale',
+  channel: 'mercari',
   note: '',
+})
+
+// --- 出品先ごとの手数料率（設定 fee_rate_bp / fee_rate_bp_yahoo）。フォームの見込みプレビュー専用で、
+//     登録自体は main 側が sale.fee_rate_bp に焼き付ける（ここでは再計算しない） ---
+const channelFeeRates = ref<Record<SalesChannel, number>>({ mercari: 1000, yahoo: 500 })
+async function loadChannelFeeRates() {
+  const s = await window.soroban.getSettings()
+  channelFeeRates.value = {
+    mercari: Number(s.fee_rate_bp ?? 1000),
+    yahoo: Number(s.fee_rate_bp_yahoo ?? 500),
+  }
+}
+/** 手入力フォームの見込み（手数料・粗利）。まだ送料・原価が決まっていない新規販売なので、
+    価格と出品先の手数料率だけで見た「登録直後の見込み」。選ぶ・打つたびにその場で変わる */
+const formPreview = computed(() => {
+  const price = Math.max(0, Math.round(Number(form.value.price) || 0))
+  const bp = channelFeeRates.value[form.value.channel ?? 'mercari']
+  const fee = Math.floor(price * bp / 10000)
+  return { fee, profit: price - fee }
 })
 
 // 引き当て／紐付けドロワー（出品・販売の両方から開く）
@@ -183,6 +206,11 @@ function rowDateDisplay(r: Row): string {
   return r.kind === 'listing' && r.listing ? r.listing.listed_at : r.date
 }
 
+/** 出品先（既存の販売・出品は移行の既定で 'mercari'） */
+function rowChannel(r: Row): SalesChannel {
+  return (r.kind === 'sale' ? r.sale?.channel : r.listing?.channel) ?? 'mercari'
+}
+
 /** 粗利が確定していない行（未確定）。並び替えの優先度づけに使う。私物は対象外 */
 function rowUnresolved(r: Row): boolean {
   if (r.kind !== 'sale' || !r.sale) return false
@@ -193,6 +221,7 @@ function rowUnresolved(r: Row): boolean {
 function passesFilters(r: Row): boolean {
   if (!inPeriod(rowDateDisplay(r), period.value)) return false
   if (monthFilter.value && !rowDateDisplay(r).startsWith(monthFilter.value)) return false
+  if (channelFilter.value && rowChannel(r) !== channelFilter.value) return false
   if (r.kind === 'sale' && r.sale) {
     const s = r.sale
     if (statusFilter.value && s.status !== statusFilter.value) return false
@@ -420,6 +449,7 @@ onMounted(async () => {
   methods.value = await window.soroban.listShippingMethods()
   await loadTags()
   await loadProgress()
+  await loadChannelFeeRates()
   await load()
 })
 watch(revision, loadTags)
@@ -582,7 +612,7 @@ async function submit() {
     note: form.value.note?.trim() || null,
   })
 
-  form.value = { title: '', sold_at: todayLocal(), price: 0, kind: 'resale', note: '' }
+  form.value = { title: '', sold_at: todayLocal(), price: 0, kind: 'resale', channel: 'mercari', note: '' }
   showForm.value = false
   await load()
   await loadProgress()
@@ -766,9 +796,13 @@ async function remove(sale: SaleProfit) {
   changed()
 }
 
-// --- メルカリで開く（標準ブラウザ。読み取り専用） ---
-async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: string) {
-  await window.soroban.openMercari(kind, mercariItemId)
+// --- 出品先のページを開く（標準ブラウザ。読み取り専用）。id の形が出品先と合わないと Error ---
+async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'transaction', itemId: string) {
+  try {
+    await window.soroban.openChannelPage(channel, kind, itemId)
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  }
 }
 </script>
 
@@ -805,12 +839,22 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
             <option value="personal">私物</option>
           </select>
         </label>
+        <label class="field">
+          <span>出品先</span>
+          <select v-model="form.channel">
+            <option value="mercari">{{ CHANNEL_LABEL.mercari }}</option>
+            <option value="yahoo">{{ CHANNEL_LABEL.yahoo }}</option>
+          </select>
+        </label>
         <label class="field field-wide">
           <span>メモ</span>
           <input v-model="form.note" placeholder="任意" />
         </label>
       </div>
-      <p class="faint form-hint">金額はすべて税込。メルカリの表示どおりに入れてください</p>
+      <p class="faint form-hint">
+        金額はすべて税込。メルカリ・Yahoo!フリマの表示どおりに入れてください ・
+        見込み：手数料 −{{ yen(formPreview.fee) }}（{{ CHANNEL_LABEL[form.channel ?? 'mercari'] }}）・ 粗利 {{ yen(formPreview.profit) }}
+      </p>
       <div class="row">
         <span class="grow" />
         <button class="primary" @click="submit">登録</button>
@@ -855,6 +899,11 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
       <select v-else v-model="statusFilter" title="取引の進み具合で絞り込む">
         <option value="">すべての状態</option>
         <option value="waiting_shipment">発送してください</option>
+      </select>
+      <select v-model="channelFilter" title="出品先で絞り込む">
+        <option value="">すべての出品先</option>
+        <option value="mercari">{{ CHANNEL_LABEL.mercari }}</option>
+        <option value="yahoo">{{ CHANNEL_LABEL.yahoo }}</option>
       </select>
       <select
         v-model="tagFilter"
@@ -964,6 +1013,7 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
 
           <div class="cell-product">
             <div class="row-labels">
+              <StatusChip tone="neutral" :label="CHANNEL_LABEL[rowChannel(r)]" :title="`出品先：${CHANNEL_LABEL[rowChannel(r)]}`" />
               <StatusPill v-if="r.kind === 'sale' && r.sale?.status && SALE_STATUS_PILL[r.sale.status]"
                 :tone="SALE_STATUS_PILL[r.sale.status].tone" :label="SALE_STATUS_PILL[r.sale.status].label"
                 :title="SALE_STATUS_PILL[r.sale.status].title" />
@@ -1109,9 +1159,9 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
               <button
                 v-if="r.sale.mercari_item_id"
                 class="icon ghost"
-                aria-label="メルカリで開く"
-                title="メルカリの取引画面を開く"
-                @click.stop="r.sale && openMercariExternal('transaction', r.sale.mercari_item_id)"
+                :aria-label="`${CHANNEL_LABEL[r.sale.channel]}で開く`"
+                :title="`${CHANNEL_LABEL[r.sale.channel]}の取引画面を開く`"
+                @click.stop="r.sale && openChannelPageExternal(r.sale.channel, 'transaction', r.sale.mercari_item_id)"
               >
                 <Icon name="external" :size="14" />
               </button>
@@ -1127,9 +1177,9 @@ async function openMercariExternal(kind: 'item' | 'transaction', mercariItemId: 
             <template v-else-if="r.listing && (r.listing.status === 'active' || r.listing.status === 'suspended')">
               <button
                 class="icon ghost"
-                aria-label="メルカリで開く"
-                title="メルカリの商品ページを開く"
-                @click.stop="r.listing && openMercariExternal('item', r.listing.mercari_item_id)"
+                :aria-label="`${CHANNEL_LABEL[r.listing.channel]}で開く`"
+                :title="`${CHANNEL_LABEL[r.listing.channel]}の商品ページを開く`"
+                @click.stop="r.listing && openChannelPageExternal(r.listing.channel, 'item', r.listing.mercari_item_id)"
               >
                 <Icon name="external" :size="14" />
               </button>

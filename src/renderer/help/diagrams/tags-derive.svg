@@ -1,0 +1,78 @@
+<svg class="dg-tags-derive" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 440" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="tg-title">
+  <title id="tg-title">タグは派生で見える図：仕入のタグが在庫・販売にもコピーではなく派生で見え、上流で直せば下流に効き、紐付けを外せば消える</title>
+  <defs>
+    <marker id="tg-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-faint, #97979e)"/>
+    </marker>
+    <marker id="tg-arrow-loss" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--loss, #d9463f)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-tags-derive .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-tags-derive .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-tags-derive .card { fill: var(--surface-hi, #f3f2ee); }
+    .dg-tags-derive .box-title { font-size: 15px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-tags-derive .box-sub { font-size: 12px; fill: var(--text-faint, #97979e); text-anchor: middle; }
+    .dg-tags-derive .conn { stroke: var(--text-faint, #97979e); stroke-width: 2; stroke-dasharray: 6 5; fill: none; marker-end: url(#tg-arrow); }
+    .dg-tags-derive .conn-loss { stroke: var(--loss, #d9463f); stroke-width: 2; stroke-dasharray: 6 5; fill: none; marker-end: url(#tg-arrow-loss); }
+    .dg-tags-derive .chip { fill: var(--info-bg, #e8f0fc); }
+    .dg-tags-derive .chip-off { fill: var(--surface-hi, #f3f2ee); opacity: .6; }
+    .dg-tags-derive .chip-text { font-size: 12px; font-weight: 600; fill: var(--info, #2f6fcf); text-anchor: middle; }
+    .dg-tags-derive .chip-text-off { font-size: 12px; font-weight: 600; fill: var(--text-faint, #97979e); text-anchor: middle; }
+    .dg-tags-derive .badge { fill: var(--brand, #fbcf52); }
+    .dg-tags-derive .badge-num { font-size: 12px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; dominant-baseline: middle; }
+    .dg-tags-derive .section-note { font-size: 13px; font-weight: 600; fill: var(--text-dim, #63636a); }
+    .dg-tags-derive .warn-x { stroke: var(--loss, #d9463f); stroke-width: 3; }
+  </style>
+
+  <text class="heading" x="40" y="36">タグは下流にコピーではなく派生で見える</text>
+  <text class="lead" x="40" y="60">仕入に付けたタグが、在庫・販売にもそのまま見える（上流を直せば下流に効く）</text>
+
+  <!-- Row 1: derive -->
+  <circle class="badge" cx="80" cy="100" r="12"/>
+  <text class="badge-num" x="80" y="101">1</text>
+  <rect class="card" x="60" y="120" width="200" height="90" rx="12"/>
+  <text class="box-title" x="160" y="150">仕入</text>
+  <rect class="chip" x="115" y="164" width="90" height="24" rx="12"/>
+  <text class="chip-text" x="160" y="180">セール品</text>
+
+  <path class="conn" d="M264,165 L326,165"/>
+  <text class="box-sub" x="295" y="150">派生</text>
+
+  <circle class="badge" cx="350" cy="100" r="12"/>
+  <text class="badge-num" x="350" y="101">2</text>
+  <rect class="card" x="330" y="120" width="200" height="90" rx="12"/>
+  <text class="box-title" x="430" y="150">在庫</text>
+  <rect class="chip" x="385" y="164" width="90" height="24" rx="12"/>
+  <text class="chip-text" x="430" y="180">セール品</text>
+
+  <path class="conn" d="M534,165 L596,165"/>
+  <text class="box-sub" x="565" y="150">派生</text>
+
+  <circle class="badge" cx="620" cy="100" r="12"/>
+  <text class="badge-num" x="620" y="101">3</text>
+  <rect class="card" x="600" y="120" width="200" height="90" rx="12"/>
+  <text class="box-title" x="700" y="150">販売</text>
+  <rect class="chip" x="655" y="164" width="90" height="24" rx="12"/>
+  <text class="chip-text" x="700" y="180">セール品</text>
+
+  <text class="section-note" x="430" y="255" text-anchor="middle">仕入のタグを直す・消すと、在庫と販売の表示もそのまま変わる</text>
+
+  <!-- Row 2: unlink removes it -->
+  <rect class="card" x="330" y="300" width="200" height="90" rx="12"/>
+  <text class="box-title" x="430" y="330">在庫</text>
+  <rect class="chip" x="385" y="344" width="90" height="24" rx="12"/>
+  <text class="chip-text" x="430" y="360">セール品</text>
+
+  <path class="conn-loss" d="M534,345 L596,345"/>
+  <line class="warn-x" x1="555" y1="330" x2="575" y2="350"/>
+  <line class="warn-x" x1="575" y1="330" x2="555" y2="350"/>
+
+  <rect class="card" x="600" y="300" width="200" height="90" rx="12"/>
+  <text class="box-title" x="700" y="330">販売</text>
+  <rect class="chip-off" x="655" y="344" width="90" height="24" rx="12"/>
+  <text class="chip-text-off" x="700" y="360">（タグなし）</text>
+
+  <text class="section-note" x="430" y="420" text-anchor="middle" style="fill:var(--loss, #d9463f)">紐付けを外すと、そこから先のタグは消える</text>
+</svg>

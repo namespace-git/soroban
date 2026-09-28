@@ -61,7 +61,7 @@ vi.mock('../applog', () => ({
   initAppLog: vi.fn(),
 }))
 
-import { collectAll } from '../index'
+import { channelPageUrl, collectAll } from '../index'
 import * as collector from '../collector'
 import * as db from '../db'
 import * as collectorMellojoy from '../collector-mellojoy'
@@ -209,5 +209,86 @@ describe('runCollectAll（3グループの並列化）', () => {
     const runs = await collectAll(true)
 
     expect(runs.map((r) => r.id)).toEqual(['run-1', 'run-a1', 'run-a2'])
+  })
+})
+
+// ============================================================
+// channelPageUrl（出品先のページの URL を組み立てる。ここだけが URL を知っている）
+//
+// item id の形が出品先と合わなければ Error にする＝別サイトの id で開かせないための最後の防波堤。
+// 正規表現は index.ts の実装を読んで確認した：
+//   mercari: /^m\d{9,}$/         （小文字の m + 数字9桁以上、^$ で全体一致）
+//   yahoo:   /^[a-z]\d{8,}$/     （小文字1文字 + 数字8桁以上、^$ で全体一致）
+// ============================================================
+describe('channelPageUrl（出品先のURL組み立て・別サイトのidは弾く）', () => {
+  it('メルカリの商品ページのURLを組み立てる', () => {
+    expect(channelPageUrl('mercari', 'item', 'm123456789')).toBe('https://jp.mercari.com/item/m123456789')
+  })
+
+  it('メルカリの取引画面のURLを組み立てる', () => {
+    expect(channelPageUrl('mercari', 'transaction', 'm123456789'))
+      .toBe('https://jp.mercari.com/transaction/m123456789')
+  })
+
+  it('Yahoo!フリマの商品ページのURLを組み立てる', () => {
+    expect(channelPageUrl('yahoo', 'item', 'z693579992'))
+      .toBe('https://paypayfleamarket.yahoo.co.jp/item/z693579992')
+  })
+
+  it('Yahoo!フリマの取引画面は別ホスト（-sec）で末尾が /trade/seller', () => {
+    expect(channelPageUrl('yahoo', 'transaction', 'z693579992'))
+      .toBe('https://paypayfleamarket-sec.yahoo.co.jp/item/z693579992/trade/seller')
+  })
+
+  it('メルカリにYahooのidを渡すとError（別サイトのidで開かせない）', () => {
+    expect(() => channelPageUrl('mercari', 'item', 'z693579992')).toThrow('メルカリの商品IDではありません')
+  })
+
+  // 【重要な既知の穴・実装は直さず報告のみ】yahoo の正規表現 /^[a-z]\d{8,}$/ は「先頭1文字が
+  // 小文字アルファベットなら何でもよい」ので、メルカリのid（m+数字9桁以上）は m が [a-z] に
+  // 含まれるためそのまま通ってしまう。つまり channelPageUrl('yahoo', 'item', 'm123456789') は
+  // Error にならず、Yahooの通常商品URLとして組み立てられてしまう（ホストが変わるわけではないので
+  // 別サイトに飛ぶわけではないが、id形式のチェックとしては素通りしている）。
+  // これは実装を読んで確認した実際の挙動であり、テストは実際の挙動に合わせている
+  it('【既知の穴】Yahooにメルカリ形の id を渡してもErrorにならない（yahooの正規表現がmercariのidを弾けない）', () => {
+    expect(channelPageUrl('yahoo', 'item', 'm123456789'))
+      .toBe('https://paypayfleamarket.yahoo.co.jp/item/m123456789')
+  })
+
+  it('空文字はError', () => {
+    expect(() => channelPageUrl('mercari', 'item', '')).toThrow('メルカリの商品IDではありません')
+    expect(() => channelPageUrl('yahoo', 'item', '')).toThrow('Yahoo!フリマの商品IDではありません')
+  })
+
+  it('桁が足りないものはError', () => {
+    expect(() => channelPageUrl('mercari', 'item', 'm123')).toThrow('メルカリの商品IDではありません')
+    expect(() => channelPageUrl('yahoo', 'item', 'z1234567')).toThrow('Yahoo!フリマの商品IDではありません')
+  })
+
+  it('大文字はError（正規表現が小文字前提のため大文字小文字は区別される）', () => {
+    expect(() => channelPageUrl('mercari', 'item', 'M123456789')).toThrow('メルカリの商品IDではありません')
+    expect(() => channelPageUrl('yahoo', 'item', 'Z693579992')).toThrow('Yahoo!フリマの商品IDではありません')
+  })
+
+  it('スペース入りはError', () => {
+    expect(() => channelPageUrl('mercari', 'item', 'm123456789 ')).toThrow('メルカリの商品IDではありません')
+    expect(() => channelPageUrl('mercari', 'item', ' m123456789')).toThrow('メルカリの商品IDではありません')
+  })
+
+  it('記号混じりはError', () => {
+    expect(() => channelPageUrl('mercari', 'item', 'm123456789!')).toThrow('メルカリの商品IDではありません')
+  })
+
+  it.each([
+    'm123456789/../../evil',
+    'm123456789?x=1',
+    'm123456789#f',
+    'm123456789/evil',
+  ])('URLに使えない文字を混ぜた id "%s" はError（別ホストへ飛ぶURLにならない）', (itemId) => {
+    expect(() => channelPageUrl('mercari', 'item', itemId)).toThrow('メルカリの商品IDではありません')
+  })
+
+  it('知らない出品先（キャストで型を偽装）はErrorで、日本語で理由が分かる', () => {
+    expect(() => channelPageUrl('rakuma' as never, 'item', 'm123456789')).toThrow('知らない出品先です')
   })
 })

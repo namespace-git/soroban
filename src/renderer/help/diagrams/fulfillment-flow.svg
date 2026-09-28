@@ -1,0 +1,57 @@
+<svg class="dg-fulfillment-flow" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 380" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="ff-title">
+  <title id="ff-title">仕入の到着状態の図：発送準備中から配送中、到着済へ自動更新は前に進む方向だけで、到着だけは17TRACKの追跡番号を見ないと分からない</title>
+  <defs>
+    <marker id="ff-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-dim, #63636a)"/>
+    </marker>
+    <marker id="ff-arrow-info" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--info, #2f6fcf)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-fulfillment-flow .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-fulfillment-flow .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-fulfillment-flow .card { fill: var(--surface-hi, #f3f2ee); }
+    .dg-fulfillment-flow .card-done { fill: var(--profit-bg, #e6f6ec); }
+    .dg-fulfillment-flow .card-info { fill: var(--info-bg, #e8f0fc); }
+    .dg-fulfillment-flow .box-title { font-size: 16px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-fulfillment-flow .box-sub { font-size: 12px; fill: var(--text-dim, #63636a); text-anchor: middle; }
+    .dg-fulfillment-flow .conn { stroke: var(--text-dim, #63636a); stroke-width: 3; fill: none; marker-end: url(#ff-arrow); }
+    .dg-fulfillment-flow .conn-info { stroke: var(--info, #2f6fcf); stroke-width: 2.5; stroke-dasharray: 6 5; fill: none; marker-end: url(#ff-arrow-info); }
+    .dg-fulfillment-flow .note { font-size: 12px; fill: var(--text-faint, #97979e); text-anchor: middle; }
+    .dg-fulfillment-flow .badge { fill: var(--brand, #fbcf52); }
+    .dg-fulfillment-flow .badge-num { font-size: 12px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; dominant-baseline: middle; }
+  </style>
+
+  <text class="heading" x="40" y="36">仕入の到着は、前へ進む方向だけ</text>
+  <text class="lead" x="40" y="60">自動更新は「発送準備中 → 配送中 → 到着済」の順だけ。人はどこへでも手動で変えられる</text>
+
+  <circle class="badge" cx="80" cy="140" r="12"/>
+  <text class="badge-num" x="80" y="141">1</text>
+  <rect class="card" x="60" y="170" width="200" height="70" rx="12"/>
+  <text class="box-title" x="160" y="200">発送準備中</text>
+  <text class="box-sub" x="160" y="220">注文直後の状態</text>
+
+  <line class="conn" x1="264" y1="205" x2="326" y2="205"/>
+
+  <circle class="badge" cx="350" cy="140" r="12"/>
+  <text class="badge-num" x="350" y="141">2</text>
+  <rect class="card" x="330" y="170" width="200" height="70" rx="12"/>
+  <text class="box-title" x="430" y="200">配送中</text>
+  <text class="box-sub" x="430" y="220">メロジョイが出す最後の状態</text>
+
+  <line class="conn" x1="534" y1="205" x2="596" y2="205"/>
+
+  <circle class="badge" cx="620" cy="140" r="12"/>
+  <text class="badge-num" x="620" y="141">3</text>
+  <rect class="card-done" x="600" y="170" width="200" height="70" rx="12"/>
+  <text class="box-title" x="700" y="200" style="fill:var(--profit, #2f9e5a)">到着済</text>
+  <text class="box-sub" x="700" y="220">17TRACKでしか分からない</text>
+
+  <line class="conn-info" x1="700" y1="242" x2="700" y2="296"/>
+  <rect class="card-info" x="540" y="298" width="320" height="60" rx="12"/>
+  <text class="box-sub" x="700" y="322" style="fill:var(--info, #2f6fcf)">追跡番号を17TRACKで見て初めて</text>
+  <text class="box-sub" x="700" y="340" style="fill:var(--info, #2f6fcf)">「到着済」に変わる（読み取り専用）</text>
+
+  <text class="note" x="430" y="270">メロジョイの注文詳細は「配送中」までしか出ない</text>
+</svg>

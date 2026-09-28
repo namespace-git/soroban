@@ -1,0 +1,55 @@
+<svg class="dg-expense-allocation" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 400" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="ea-title">
+  <title id="ea-title">経費の按分の図：レシート1枚分の経費を、その月の販売用の販売へ価格の比で配る。私物の販売には配らない</title>
+  <defs>
+    <marker id="ea-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-dim, #63636a)"/>
+    </marker>
+    <marker id="ea-arrow-loss" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--loss, #d9463f)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-expense-allocation .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-expense-allocation .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-expense-allocation .card-top { fill: var(--surface-hi, #f3f2ee); }
+    .dg-expense-allocation .card { fill: var(--surface-hi, #f3f2ee); }
+    .dg-expense-allocation .card-off { fill: var(--surface-hi, #f3f2ee); opacity: .6; }
+    .dg-expense-allocation .box-title { font-size: 15px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-expense-allocation .box-sub { font-size: 12px; fill: var(--text-dim, #63636a); text-anchor: middle; }
+    .dg-expense-allocation .conn { stroke: var(--text-dim, #63636a); stroke-width: 2; fill: none; marker-end: url(#ea-arrow); }
+    .dg-expense-allocation .conn-off { stroke: var(--loss, #d9463f); stroke-width: 2; stroke-dasharray: 5 4; fill: none; marker-end: url(#ea-arrow-loss); }
+    .dg-expense-allocation .warn-x { stroke: var(--loss, #d9463f); stroke-width: 3; }
+    .dg-expense-allocation .sum-line { font-size: 15px; font-weight: 700; fill: var(--profit, #2f9e5a); text-anchor: middle; }
+    .dg-expense-allocation .off-label { font-size: 13px; font-weight: 700; fill: var(--loss, #d9463f); text-anchor: middle; }
+  </style>
+
+  <text class="heading" x="40" y="36">経費はその月の販売用の販売に配る</text>
+  <text class="lead" x="40" y="60">レシート1枚の経費を、その月の販売の価格比（または点数比）で配る</text>
+
+  <rect class="card-top" x="300" y="80" width="220" height="70" rx="12"/>
+  <text class="box-title" x="410" y="110">経費（レシート1枚）</text>
+  <text class="box-sub" x="410" y="130">¥900</text>
+
+  <path class="conn" d="M350,150 C280,180 160,180 160,208"/>
+  <path class="conn" d="M410,150 L410,208"/>
+  <path class="conn-off" d="M470,150 C560,180 660,180 660,208"/>
+
+  <rect class="card" x="60" y="210" width="200" height="90" rx="12"/>
+  <text class="box-title" x="160" y="238">販売用A</text>
+  <text class="box-sub" x="160" y="258">価格 ¥3,000</text>
+  <text class="box-sub" x="160" y="276">配賦 ¥600</text>
+
+  <rect class="card" x="310" y="210" width="200" height="90" rx="12"/>
+  <text class="box-title" x="410" y="238">販売用B</text>
+  <text class="box-sub" x="410" y="258">価格 ¥1,500</text>
+  <text class="box-sub" x="410" y="276">配賦 ¥300</text>
+
+  <rect class="card-off" x="560" y="210" width="200" height="90" rx="12"/>
+  <text class="box-title" x="660" y="238" style="fill:var(--text-faint, #97979e)">私物C</text>
+  <text class="box-sub" x="660" y="258">私物の売却</text>
+  <line class="warn-x" x1="644" y1="270" x2="676" y2="290"/>
+  <line class="warn-x" x1="676" y1="270" x2="644" y2="290"/>
+
+  <text class="off-label" x="660" y="325">私物には配らない</text>
+  <text class="sum-line" x="285" y="345">¥600 ＋ ¥300 ＝ ¥900（販売用だけに配って合計は一致）</text>
+</svg>

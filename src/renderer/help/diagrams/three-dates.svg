@@ -1,0 +1,48 @@
+<svg class="dg-three-dates" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 380" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="td-title">
+  <title id="td-title">販売の3つの日付の図：購入日時・購入完了日・計上日。計上日は未完了のうちは購入日時の仮置きで、完了すると完了日に動き、月次の基準になる</title>
+  <defs>
+    <marker id="td-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--brand-hover, #f2c23a)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-three-dates .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-three-dates .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-three-dates .box-title { font-size: 15px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-three-dates .box-sub { font-size: 12px; fill: var(--text-dim, #63636a); text-anchor: middle; }
+    .dg-three-dates .axis { stroke: var(--line, #e6e4dd); stroke-width: 3; }
+    .dg-three-dates .dot { fill: var(--surface-hi, #f3f2ee); }
+    .dg-three-dates .diamond { fill: var(--brand, #fbcf52); }
+    .dg-three-dates .conn-brand { stroke: var(--brand-hover, #f2c23a); stroke-width: 2.5; stroke-dasharray: 6 5; fill: none; marker-end: url(#td-arrow); }
+    .dg-three-dates .tag { font-size: 12px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-three-dates .foot { font-size: 13px; font-weight: 600; fill: var(--text-dim, #63636a); text-anchor: middle; }
+  </style>
+
+  <text class="heading" x="40" y="36">販売には日付が3つある</text>
+  <text class="lead" x="40" y="60">「計上日」だけは、完了すると自動で動く（月次・月フィルタの基準）</text>
+
+  <line class="axis" x1="120" y1="150" x2="620" y2="150"/>
+  <circle class="dot" cx="180" cy="150" r="9"/>
+  <circle class="dot" cx="560" cy="150" r="9"/>
+
+  <text class="box-title" x="180" y="110">購入日時</text>
+  <text class="box-sub" x="180" y="128">取引画面から取得</text>
+
+  <text class="box-title" x="560" y="110">購入完了日</text>
+  <text class="box-sub" x="560" y="128">売上金が入る日</text>
+  <text class="box-sub" x="560" y="144">（受取評価のあと）</text>
+
+  <!-- 計上日：未完了のあいだは購入日時に仮置き -->
+  <path class="diamond" d="M180,220 l14,14 l-14,14 l-14,-14 z"/>
+  <text class="tag" x="180" y="270">未完了のあいだ</text>
+  <text class="box-sub" x="180" y="288">計上日＝購入日時（仮）</text>
+
+  <path class="conn-brand" d="M204,234 C320,234 420,234 546,234"/>
+
+  <!-- 完了すると完了日へ動く -->
+  <path class="diamond" d="M560,220 l14,14 l-14,14 l-14,-14 z"/>
+  <text class="tag" x="560" y="270">完了すると</text>
+  <text class="box-sub" x="560" y="288">計上日＝完了日に動く</text>
+
+  <text class="foot" x="370" y="345">計上日が、月次・月フィルタの基準になる（手入力はそのまま入力した日付）</text>
+</svg>

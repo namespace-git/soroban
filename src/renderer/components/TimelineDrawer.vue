@@ -3,7 +3,8 @@ import { isRealized } from '../../shared/recognition'
 // 在庫 1 点の追跡（仕入→到着→出品→売れた→発送→受取→取引完了）を読むだけのドロワー。
 // 編集はしない。開くたびに getItemTimeline を呼び直す（購入元の詳細は「いっしょに買ったもの」用に別途取る）。
 import { ref, computed, inject, watch } from 'vue'
-import type { ItemTimeline, SaleStatus, PurchaseDetail, PurchaseLine, PurchaseLineItem } from '../../shared/types'
+import type { ItemTimeline, SaleStatus, PurchaseDetail, PurchaseLine, PurchaseLineItem, SalesChannel } from '../../shared/types'
+import { CHANNEL_LABEL } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import StatusPill from './StatusPill.vue'
@@ -144,14 +145,20 @@ const saleCard = computed(() => {
   return { price: '—', priceSub: '未出品', fee: '—', feeSub: '未確定', profit: null, profitSub: '未販売' }
 })
 
-// --- メルカリのページを開く。出品ページは在庫が引き当て中ならその id、
-//     売れたあとは販売の id が同じ出品を指す ---
+// --- 出品先のページを開く。出品ページは在庫が引き当て中ならその id、
+//     売れたあとは販売の id が同じ出品を指す。出品先（channel）も id と同じ側から取る ---
 const listingMercariId = computed(() => timeline.value?.item.listing?.mercari_item_id ?? timeline.value?.sale?.mercari_item_id ?? null)
+const listingChannel = computed<SalesChannel>(() => timeline.value?.item.listing?.channel ?? timeline.value?.sale?.channel ?? 'mercari')
 const saleMercariId = computed(() => timeline.value?.sale?.mercari_item_id ?? null)
+const saleChannel = computed<SalesChannel>(() => timeline.value?.sale?.channel ?? 'mercari')
 
-async function openMercariLink(kind: 'item' | 'transaction', id: string | null) {
+async function openChannelLink(channel: SalesChannel, kind: 'item' | 'transaction', id: string | null) {
   if (!id) return
-  await window.soroban.openMercari(kind, id)
+  try {
+    await window.soroban.openChannelPage(channel, kind, id)
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  }
 }
 
 // --- いっしょに買ったもの（同じ注文の他の在庫） ---
@@ -211,6 +218,11 @@ function openProduct() {
           </template>
           原価 {{ yen(timeline.item.landed_cost) }} ・ 今：
         </span>
+        <StatusChip
+          v-if="timeline.sale || timeline.item.listing"
+          tone="neutral"
+          :label="CHANNEL_LABEL[timeline.sale?.channel ?? timeline.item.listing!.channel]"
+        />
         <StatusPill v-if="nowPill" :tone="nowPill.tone" :label="nowPill.label" />
         <StatusChip v-else-if="nowChip" :tone="nowChip.tone" :label="nowChip.label" />
       </div>
@@ -287,12 +299,12 @@ function openProduct() {
             <div class="tl-detail row-sub" :title="e.detail ?? ''">{{ e.detail }}</div>
             <button
               v-if="e.kind === 'listed' && listingMercariId"
-              type="button" class="tl-link" @click="openMercariLink('item', listingMercariId)"
-            >出品ページ <Icon name="external" :size="12" /></button>
+              type="button" class="tl-link" @click="openChannelLink(listingChannel, 'item', listingMercariId)"
+            >{{ CHANNEL_LABEL[listingChannel] }}の出品ページ <Icon name="external" :size="12" /></button>
             <button
               v-if="e.kind === 'sale_completed' && saleMercariId"
-              type="button" class="tl-link" @click="openMercariLink('transaction', saleMercariId)"
-            >取引画面 <Icon name="external" :size="12" /></button>
+              type="button" class="tl-link" @click="openChannelLink(saleChannel, 'transaction', saleMercariId)"
+            >{{ CHANNEL_LABEL[saleChannel] }}の取引画面 <Icon name="external" :size="12" /></button>
           </div>
           <div v-if="e.amount != null" class="tl-amount num">{{ yen(e.amount) }}</div>
         </li>

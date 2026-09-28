@@ -1,0 +1,56 @@
+<svg class="dg-model-code" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 420" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="mc-title">
+  <title id="mc-title">型番による自動紐付けの図：在庫の型番と出品タイトルの型番が完全一致したときだけ自動で紐付き、枝番などが違えば候補止まりになる</title>
+  <defs>
+    <marker id="mc-arrow-ok" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--profit, #2f9e5a)"/>
+    </marker>
+    <marker id="mc-arrow-warn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--warn, #b45f06)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-model-code .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-model-code .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-model-code .card { fill: var(--surface-hi, #f3f2ee); }
+    .dg-model-code .box-title { font-size: 12px; fill: var(--text-dim, #63636a); text-anchor: middle; }
+    .dg-model-code .box-code { font-size: 20px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-model-code .conn-ok { stroke: var(--profit, #2f9e5a); stroke-width: 2.5; fill: none; marker-end: url(#mc-arrow-ok); }
+    .dg-model-code .conn-warn { stroke: var(--warn, #b45f06); stroke-width: 2.5; stroke-dasharray: 6 5; fill: none; marker-end: url(#mc-arrow-warn); }
+    .dg-model-code .result-ok { font-size: 14px; font-weight: 700; fill: var(--profit, #2f9e5a); text-anchor: middle; }
+    .dg-model-code .result-warn { font-size: 14px; font-weight: 700; fill: var(--warn, #b45f06); text-anchor: middle; }
+    .dg-model-code .chip-ok { fill: var(--profit-solid, #3aa25c); }
+    .dg-model-code .chip-warn { fill: var(--warn-solid, #e07a12); }
+    .dg-model-code .chip-text { font-size: 12px; font-weight: 700; fill: #ffffff; text-anchor: middle; }
+  </style>
+
+  <text class="heading" x="40" y="36">型番が同じなら結び付く</text>
+  <text class="lead" x="40" y="60">在庫の型番と出品タイトルの型番が、文字列として完全に一致したときだけ自動でつながる</text>
+
+  <!-- Row 1: match -->
+  <rect class="card" x="60" y="90" width="220" height="80" rx="12"/>
+  <text class="box-title" x="170" y="112">在庫の型番</text>
+  <text class="box-code" x="170" y="145">A037</text>
+
+  <rect class="card" x="520" y="90" width="220" height="80" rx="12"/>
+  <text class="box-title" x="630" y="112">出品タイトル</text>
+  <text class="box-code" x="630" y="145">【A037】</text>
+
+  <path class="conn-ok" d="M280,130 L518,130"/>
+  <rect class="chip-ok" x="365" y="112" width="90" height="24" rx="12"/>
+  <text class="chip-text" x="410" y="128">完全一致</text>
+  <text class="result-ok" x="410" y="195">自動で紐付く（link_source = auto）</text>
+
+  <!-- Row 2: mismatch -->
+  <rect class="card" x="60" y="250" width="220" height="80" rx="12"/>
+  <text class="box-title" x="170" y="272">在庫の型番</text>
+  <text class="box-code" x="170" y="305">A035-1</text>
+
+  <rect class="card" x="520" y="250" width="220" height="80" rx="12"/>
+  <text class="box-title" x="630" y="272">出品タイトル</text>
+  <text class="box-code" x="630" y="305">【A035】</text>
+
+  <path class="conn-warn" d="M280,290 L518,290"/>
+  <rect class="chip-warn" x="365" y="272" width="90" height="24" rx="12"/>
+  <text class="chip-text" x="410" y="288">枝番が違う</text>
+  <text class="result-warn" x="410" y="355">候補止まり（人が確認してから紐付ける）</text>
+</svg>

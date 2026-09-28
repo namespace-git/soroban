@@ -15,6 +15,20 @@ export type RunStatus = 'ok' | 'auth_required' | 'failed' | 'empty'
 /** 収集の対象。mercari = 販売履歴 / mellojoy = 仕入先アカウントの注文履歴 */
 export type CollectorSource = 'mercari' | 'mellojoy'
 /** draft = 注文履歴から積んだ下書き（価格が確定できなかったもの）。在庫は confirmed で生成 */
+/**
+ * 出品先（販売した／出品しているサイト）。
+ * **同じ在庫を同時に両社へ出品しない**運用なので、紐付けに衝突のルールは要らない。
+ * item id は衝突しない（メルカリ `m\d{9,}` / Yahoo!フリマ `[a-z]\d{8,}`）が、
+ * 列名が嘘にならないよう channel は明示して持つ
+ */
+export type SalesChannel = 'mercari' | 'yahoo'
+
+/** 画面に出す出品先の名前。main でも renderer でも同じ言葉を使う */
+export const CHANNEL_LABEL: Record<SalesChannel, string> = {
+  mercari: 'メルカリ',
+  yahoo: 'Yahoo!フリマ',
+}
+
 export type PurchaseStatus = 'draft' | 'confirmed'
 /**
  * 注文の到着状態（メロジョイの注文一覧から毎回更新）。
@@ -43,6 +57,17 @@ export type SaleStatus = 'waiting_payment' | 'waiting_shipment' | 'shipped' | 'd
 export type ShopAccountKind = 'mellojoy' | 'tiktok' | 'other'
 /** actual = メルカリの取引詳細から取った実額 / master = 発送方法マスタ / manual = 手入力 */
 export type ShippingSource = 'actual' | 'master' | 'manual'
+/**
+ * 販売手数料がどこから来たか。
+ * actual = 取り込みで**実額**が取れた（これが帳簿の値。率で上書きしてはいけない） /
+ * rate = 率からの**見込み**（fee_rate_bp × 価格）。
+ *
+ * なぜ要るか：Yahoo!フリマの手数料は**率で計算できない**（実測で
+ * 6,400→320・5,899→294・4,280→213・5,200→**0**（キャンペーン））。
+ * この区別が無いと、価格を直したときに保存済みの実額が率で上書きされて
+ * 帳簿が静かに狂う（実際にそうなっていた）
+ */
+export type FeeSource = 'actual' | 'rate'
 /** auto = 型番の完全一致で自動確定 / manual = 人が確定 */
 /** listing = 出品に人が引き当てた在庫を、売れたときにそのまま引き継いだ */
 export type LinkSource = 'auto' | 'manual' | 'listing'
@@ -142,6 +167,9 @@ export interface ShippingMethod {
 /** sale_profit ビューの1行 */
 export interface SaleProfit {
   id: string
+  /** 出品先。既存の販売は全部 'mercari'（移行の既定） */
+  channel: SalesChannel
+  /** 出品先での商品ID。メルカリは `m…`、Yahoo!フリマは `z…`。手入力なら null */
   mercari_item_id: string | null
   /** 商品サムネイル（`soroban-thumb://<file>`）。取り込みで保存し、メルカリ側の画像が変わっていれば差し替える。無ければ null */
   thumb_url: string | null
@@ -157,6 +185,8 @@ export interface SaleProfit {
   kind: SaleKind
   price: number
   fee: number
+  /** 手数料が実額か見込みか。**actual のときは価格を直しても手数料を再計算しない** */
+  fee_source: FeeSource
   shipping_fee: number
   packaging_cost: number
   is_shipping_confirmed: number
@@ -193,6 +223,12 @@ export interface SaleInput {
   sold_at: string
   price: number
   kind?: SaleKind
+  /**
+   * 出品先。省略時は 'mercari'。
+   * **手数料率はここで決まる**（設定 fee_rate_bp / fee_rate_bp_yahoo のどちらを使うか）。
+   * 率は sale.fee_rate_bp に焼き付けるので、あとで設定を変えても過去の販売は動かない
+   */
+  channel?: SalesChannel
   mercari_item_id?: string | null
   note?: string | null
 }
@@ -386,7 +422,7 @@ export interface InventoryItem {
   /** 紐付いた販売のサムネイル（売れた在庫だけ）。無ければ null */
   thumb_url: string | null
   /** 出品に引き当て済みなら、その出品（派生。在庫の status は in_stock のまま） */
-  listing: { mercari_item_id: string; price: number; status: ListingStatus } | null
+  listing: { channel: SalesChannel; mercari_item_id: string; price: number; status: ListingStatus } | null
   /** 販売済み（sale_line あり）なら、その販売。付け替え（takeFromSale）の警告に使う */
   sold_to: { sale_id: string; title: string; price: number; sold_at: string } | null
 }
@@ -396,6 +432,9 @@ export interface InventoryItem {
 // ------------------------------------------------------------
 
 export interface Listing {
+  /** 出品先。既存の出品は全部 'mercari'（移行の既定） */
+  channel: SalesChannel
+  /** 出品先での商品ID。メルカリは `m…`、Yahoo!フリマは `z…` */
   mercari_item_id: string
   title: string
   price: number
@@ -1316,10 +1355,11 @@ export interface SorobanApi {
   resetData(): Promise<void>
 
   /**
-   * メルカリのページを標準ブラウザで開く。item = 商品ページ（https://jp.mercari.com/item/mXXX）、
-   * transaction = 取引画面（https://jp.mercari.com/transaction/mXXX）。この 2 種以外は開かない
+   * 出品先のページを標準ブラウザで開く。**URL は main が組み立てる**（画面から任意の URL は開かせない）。
+   * item = 商品ページ / transaction = 取引画面。この 2 種以外は開かない。
+   * id の形が出品先と合わなければ Error（メルカリ `m\d{9,}` / Yahoo!フリマ `[a-z]\d{8,}`）
    */
-  openMercari(kind: 'item' | 'transaction', mercariItemId: string): Promise<void>
+  openChannelPage(channel: SalesChannel, kind: 'item' | 'transaction', itemId: string): Promise<void>
 
   // 更新（GitHub Releases）
   /** いまのアプリのバージョンと、更新の確認結果。起動時と 6 時間ごとに自動で確認し、手動でも呼べる */

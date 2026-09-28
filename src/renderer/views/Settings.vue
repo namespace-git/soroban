@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
+import { CHANNEL_LABEL } from '../../shared/types'
 import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck } from '../../shared/types'
 
 type SaleExclusion = { mercari_item_id: string; title: string; excluded_at: string }
@@ -535,7 +536,7 @@ const runLabel: Record<string, string> = {
         </div>
         <div class="fields">
           <label class="field">
-            <span>メルカリ販売手数料（%）</span>
+            <span>{{ CHANNEL_LABEL.mercari }}販売手数料（%）</span>
             <input
               type="number" step="0.1" style="width:120px"
               :value="Number(settings.fee_rate_bp ?? 1000) / 100"
@@ -543,15 +544,29 @@ const runLabel: Record<string, string> = {
                 String(Math.round(Number(($event.target as HTMLInputElement).value) * 100)))"
             />
           </label>
+          <label class="field">
+            <span>{{ CHANNEL_LABEL.yahoo }}販売手数料（%）</span>
+            <input
+              type="number" step="0.1" style="width:120px"
+              :value="Number(settings.fee_rate_bp_yahoo ?? 500) / 100"
+              @change="saveSetting('fee_rate_bp_yahoo',
+                String(Math.round(Number(($event.target as HTMLInputElement).value) * 100)))"
+            />
+          </label>
         </div>
         <p class="faint hint">
-          メルカリの販売手数料は税込価格に対する率（既定 10%）です。
+          税込価格に対する率です（{{ CHANNEL_LABEL.mercari }}既定 10%・{{ CHANNEL_LABEL.yahoo }}既定 5%）。
+          ここの率は見込みの計算にだけ使い、取り込みで実額が分かればそちらを使います。
+        </p>
+        <p class="faint hint">
+          {{ CHANNEL_LABEL.yahoo }}はキャンペーンで手数料が 0 円になったり、率どおりに 1 円合わないことがあります。
+          実額が分かればそちらが優先されます。
         </p>
         <p class="faint hint">
           振込手数料などの経費は経費タブで登録します。
         </p>
         <p class="faint hint">
-          手数料率を変えても、登録済みの販売は再計算されません。
+          手数料率を変えても、登録済みの販売は再計算されません（率は販売ごとに焼き付きます）。
           過去の利益を動かさないためです。
         </p>
       </div>

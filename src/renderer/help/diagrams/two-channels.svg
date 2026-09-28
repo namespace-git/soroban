@@ -1,0 +1,47 @@
+<svg class="dg-two-channels" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 420" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="tc-title">
+  <title id="tc-title">出品先が2つある図：メルカリとYahoo!フリマのどちらかに出品する。同じ在庫を同時に両方へは出さない</title>
+  <defs>
+    <marker id="tc-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--text-dim, #63636a)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-two-channels .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-two-channels .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-two-channels .card { fill: var(--surface-hi, #f3f2ee); }
+    .dg-two-channels .card-brand { fill: var(--brand-soft, #fdf3d8); }
+    .dg-two-channels .box-title { font-size: 16px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-two-channels .box-sub { font-size: 12px; fill: var(--text-dim, #63636a); text-anchor: middle; }
+    .dg-two-channels .conn { stroke: var(--text-dim, #63636a); stroke-width: 2.5; fill: none; marker-end: url(#tc-arrow); }
+    .dg-two-channels .or-circle { fill: var(--surface-hi, #f3f2ee); }
+    .dg-two-channels .or-text { font-size: 13px; font-weight: 700; fill: var(--text-dim, #63636a); text-anchor: middle; }
+    .dg-two-channels .warn-x { stroke: var(--loss, #d9463f); stroke-width: 3; }
+    .dg-two-channels .warn-label { font-size: 13px; font-weight: 700; fill: var(--loss, #d9463f); text-anchor: middle; }
+  </style>
+
+  <text class="heading" x="40" y="36">出品先は2つ、でも同時には出さない</text>
+  <text class="lead" x="40" y="60">同じ在庫を、メルカリとYahoo!フリマへ同時に出品することはない</text>
+
+  <rect class="card-brand" x="60" y="160" width="180" height="100" rx="12"/>
+  <text class="box-title" x="150" y="200">在庫</text>
+  <text class="box-sub" x="150" y="222">売れるまで1点だけ</text>
+  <text class="box-sub" x="150" y="240">（どちらかに出品）</text>
+
+  <circle class="or-circle" cx="300" cy="210" r="26"/>
+  <text class="or-text" x="300" y="215">どちらか</text>
+
+  <path class="conn" d="M326,198 C370,150 400,110 458,90"/>
+  <path class="conn" d="M326,222 C370,270 400,310 458,330"/>
+
+  <rect class="card" x="460" y="50" width="220" height="80" rx="12"/>
+  <text class="box-title" x="570" y="82">メルカリ</text>
+  <text class="box-sub" x="570" y="102">出品</text>
+
+  <rect class="card" x="460" y="290" width="220" height="80" rx="12"/>
+  <text class="box-title" x="570" y="322">Yahoo!フリマ</text>
+  <text class="box-sub" x="570" y="342">出品</text>
+
+  <line class="warn-x" x1="765" y1="195" x2="795" y2="225"/>
+  <line class="warn-x" x1="795" y1="195" x2="765" y2="225"/>
+  <text class="warn-label" x="620" y="255">同時に両方へは出さない</text>
+</svg>

@@ -1,0 +1,48 @@
+<svg class="dg-realized-vs-forecast" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 440" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="rf-title">
+  <title id="rf-title">実績と見込みの図：取引完了と手入力を実績、未完了を見込みとして分け、月次・粗利・経費の按分は実績だけを使う</title>
+  <defs>
+    <marker id="rf-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-dim, #63636a)"/>
+    </marker>
+    <marker id="rf-arrow-warn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--warn, #b45f06)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-realized-vs-forecast .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-realized-vs-forecast .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-realized-vs-forecast .card-ok { fill: var(--profit-bg, #e6f6ec); }
+    .dg-realized-vs-forecast .card-warn { fill: var(--warn-bg, #fff0e0); }
+    .dg-realized-vs-forecast .box-title { font-size: 16px; font-weight: 700; text-anchor: middle; }
+    .dg-realized-vs-forecast .box-item { font-size: 13px; fill: var(--text-dim, #63636a); }
+    .dg-realized-vs-forecast .conn { stroke: var(--text-dim, #63636a); stroke-width: 2.5; fill: none; marker-end: url(#rf-arrow); }
+    .dg-realized-vs-forecast .conn-warn { stroke: var(--warn, #b45f06); stroke-width: 2.5; stroke-dasharray: 6 5; fill: none; marker-end: url(#rf-arrow-warn); }
+  </style>
+
+  <text class="heading" x="40" y="36">実績と見込みは分けて見せる</text>
+  <text class="lead" x="40" y="60">取引が終わっているかどうかで、集計の対象を分ける</text>
+
+  <rect class="card-ok" x="60" y="90" width="320" height="120" rx="12"/>
+  <text class="box-title" x="220" y="116" style="fill:var(--profit, #2f9e5a)">実績</text>
+  <text class="box-item" x="80" y="145">・取引完了（status = completed）</text>
+  <text class="box-item" x="80" y="167">・手入力で状態のないもの</text>
+  <text class="box-item" x="80" y="189">（source = manual）</text>
+
+  <rect class="card-warn" x="440" y="90" width="320" height="120" rx="12"/>
+  <text class="box-title" x="600" y="116" style="fill:var(--warn, #b45f06)">見込み</text>
+  <text class="box-item" x="460" y="145">・まだ完了していない取引</text>
+  <text class="box-item" x="460" y="167">（受取評価待ちなど）</text>
+
+  <path class="conn" d="M220,210 L220,298"/>
+  <path class="conn-warn" d="M600,210 L600,298"/>
+
+  <rect class="card-ok" x="80" y="300" width="280" height="100" rx="12"/>
+  <text class="box-title" x="220" y="328" style="fill:var(--profit, #2f9e5a)">月次・ホームの粗利</text>
+  <text class="box-item" x="100" y="352">経費の按分も含めて</text>
+  <text class="box-item" x="100" y="374">実績だけを集計する</text>
+
+  <rect class="card-warn" x="440" y="300" width="320" height="100" rx="12"/>
+  <text class="box-title" x="600" y="328" style="fill:var(--warn, #b45f06)">別に「見込み」として表示</text>
+  <text class="box-item" x="460" y="352">集計（月次・粗利・経費按分）</text>
+  <text class="box-item" x="460" y="374">には含めない</text>
+</svg>

@@ -101,7 +101,10 @@ CREATE TABLE IF NOT EXISTS mellojoy_excluded_order (
   PRIMARY KEY (shop_account_id, order_key)
 );
 
--- fee_rate_bp: ベーシスポイント。1000 = 10.00%
+-- fee_rate_bp: ベーシスポイント。1000 = 10.00%（メルカリ）
+-- fee_rate_bp_yahoo: Yahoo!フリマの手数料率（500 = 5.00%）。実額が取れない見込みにしか使えない
+-- （実測：6,400円→320円(5%)・5,899円→294円(切り捨て)・4,280円→213円(5%なら214で合わない)・
+-- 5,200円→0円(キャンペーン) と式が存在しないため。詳細は db.ts の feeRateBpFor を参照）
 -- 小数を避けるため整数で持つ
 -- collect_interval_h: 2026-09-19 に 6 時間から 1 時間へ変更（既存DBは migrate() で更新）
 -- mercari_keyword: 転売と判定するキーワード（, 、 空白 区切りで複数可）。空なら型番の有無で判定する
@@ -112,6 +115,7 @@ CREATE TABLE IF NOT EXISTS mellojoy_excluded_order (
 -- item_code_seq: 在庫コード（S-0001…）の採番カウンタ。整数を+1しながら発行する
 INSERT OR IGNORE INTO setting (key, value) VALUES
   ('fee_rate_bp',                 '1000'),
+  ('fee_rate_bp_yahoo',           '500'),
   ('transfer_fee',                '200'),
   ('aging_warn_days',             '90'),
   ('collect_interval_h',          '1'),
@@ -255,7 +259,11 @@ CREATE INDEX IF NOT EXISTS idx_inv_pline    ON inventory_item(purchase_line_id);
 CREATE TABLE IF NOT EXISTS sale (
   id                 TEXT PRIMARY KEY,
 
-  mercari_item_id    TEXT UNIQUE,            -- m123456789
+  -- 出品先（メルカリ / Yahoo!フリマ）。同じ在庫を同時に両社へ出品しない運用なので、
+  -- 紐付けに衝突のルールは要らない。既存の販売は全部 'mercari'（移行の既定）
+  channel            TEXT NOT NULL DEFAULT 'mercari'
+                     CHECK (channel IN ('mercari','yahoo')),
+  mercari_item_id    TEXT UNIQUE,            -- 出品先での商品ID。メルカリは m123456789
   title              TEXT NOT NULL,
   sold_at            TEXT NOT NULL,          -- YYYY-MM-DD
   price              INTEGER NOT NULL,
@@ -266,6 +274,10 @@ CREATE TABLE IF NOT EXISTS sale (
 
   fee_rate_bp        INTEGER NOT NULL DEFAULT 1000,
   fee                INTEGER NOT NULL DEFAULT 0,  -- 販売手数料（確定値）
+  -- 手数料が実額か見込みか。actual なら insertCollected/applySaleActuals が実額を入れた
+  -- （0円も実額として扱う）。updateSale は actual の手数料を価格変更で上書きしない
+  -- （Yahoo!フリマは手数料が率で計算できず、キャンペーンで実額0円になることがある）
+  fee_source         TEXT NOT NULL DEFAULT 'rate' CHECK (fee_source IN ('actual','rate')),
 
   shipping_method_id TEXT REFERENCES shipping_method(id),
   shipping_fee       INTEGER NOT NULL DEFAULT 0,
@@ -362,7 +374,10 @@ END;
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS listing (
-  mercari_item_id TEXT PRIMARY KEY,          -- m123456789
+  mercari_item_id TEXT PRIMARY KEY,          -- 出品先での商品ID。メルカリは m123456789
+  -- 出品先（メルカリ / Yahoo!フリマ）。既存の出品は全部 'mercari'（移行の既定）
+  channel         TEXT NOT NULL DEFAULT 'mercari'
+                  CHECK (channel IN ('mercari','yahoo')),
   title           TEXT NOT NULL,
   price           INTEGER NOT NULL,
   -- active = 出品中 / suspended = 公開停止中 / sold = 売却済み一覧で観測 / ended = 人が取り下げたと記録
@@ -562,6 +577,7 @@ DROP VIEW IF EXISTS sale_profit;
 CREATE VIEW sale_profit AS
 SELECT
   s.id,
+  s.channel,
   s.mercari_item_id,
   s.thumb_file,
   s.sold_at,
@@ -570,6 +586,7 @@ SELECT
   s.kind,
   s.price,
   s.fee,
+  s.fee_source,
   s.shipping_fee,
   s.packaging_cost,
   s.is_shipping_confirmed,
@@ -649,6 +666,7 @@ SELECT
   -- 出品への引き当て（active/suspended のみ。trg_listing_line_guard により
   -- 1在庫につき active/suspended な引き当ては高々1件なので行は増えない）
   lst.mercari_item_id AS listing_id,
+  lst.channel         AS listing_channel,
   lst.price           AS listing_price,
   lst.status          AS listing_status
 FROM inventory_item i

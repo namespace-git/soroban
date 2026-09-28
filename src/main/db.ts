@@ -10,13 +10,15 @@ import { extractCode, extractCodeQuantities, extractCodes, extractItemCodes, ext
 import { thisMonthLocal, todayLocal } from '../shared/date'
 import { isRealized, forecastTotals, realizedTotals } from '../shared/recognition'
 import type {
-  AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, ExportKind, Fulfillment,
+  AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, ExportKind, FeeSource,
+  Fulfillment,
   HealthCheck,
   InventoryItem, InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus,
   Material, MonthClose, MonthDetail, MonthlySummary, MonthSaleRow, MonthTotals, ProductDetail,
   ProductMonthPoint, ProductSummary, PurchaseDetail,
   PurchaseDraftInput, PurchaseImportResult, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
-  PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SaleSource, SaleStatus, SaleTotals,
+  PurchaseSummary, SaleFilter, SaleInput, SaleKind, SalePatch, SaleProfit, SalesChannel, SaleSource, SaleStatus,
+  SaleTotals,
   SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, ShopAccountStats, Tag, TimelineEvent, VariantSummary,
   CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
@@ -130,6 +132,22 @@ function settingStr(key: string, fallback = ''): string {
   const r = db.prepare('SELECT value FROM setting WHERE key = ?').get(key) as
     | { value: string } | undefined
   return r ? r.value : fallback
+}
+
+/**
+ * 出品先ごとの手数料率（ベーシスポイント）。mercari は設定 fee_rate_bp（既定1000=10.00%）、
+ * yahoo は fee_rate_bp_yahoo（既定500=5.00%）。
+ *
+ * 【Yahoo!フリマの手数料は率で計算できない】実測：6,400円→320円(5%)・5,899円→294円(切り捨て)・
+ * 4,280円→213円(5%なら214円で合わない)・5,200円→0円(キャンペーン適用)。式が存在しないため、
+ * ここで返す率は「実額が取れないときの見込み」にしか使えない。実額が取れたらそちらを優先すること
+ * （insertCollected の fee 引数・applySaleActuals がその受け皿。新しい仕組みは作らない）。
+ *
+ * 率は sale.fee_rate_bp に焼き付けて使う。あとで設定を変えても、焼き付け済みの過去の販売は動かさない
+ * （CLAUDE.md：手数料率を変えても既存の販売を再計算しない）。
+ */
+function feeRateBpFor(channel: SalesChannel): number {
+  return channel === 'yahoo' ? setting('fee_rate_bp_yahoo', 500) : setting('fee_rate_bp', 1000)
 }
 
 /**
@@ -1175,6 +1193,52 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 31) {
+    // 出品先が増えた（メルカリ / Yahoo!フリマ）。同じ在庫を同時に両社へ出品しない運用なので、
+    // 紐付けに衝突のルールは要らない。既存の行は全部 'mercari'（移行の既定）
+    addColumnIfMissing('sale', 'channel',
+      `TEXT NOT NULL DEFAULT 'mercari' CHECK (channel IN ('mercari','yahoo'))`)
+    addColumnIfMissing('listing', 'channel',
+      `TEXT NOT NULL DEFAULT 'mercari' CHECK (channel IN ('mercari','yahoo'))`)
+
+    // Yahoo!フリマの手数料率（5.00%）。メルカリの fee_rate_bp とは別に持つ
+    db.prepare(`INSERT OR IGNORE INTO setting (key, value) VALUES ('fee_rate_bp_yahoo', '500')`).run()
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '31')
+         ON CONFLICT(key) DO UPDATE SET value = '31'`,
+    ).run()
+  }
+
+  if (version < 32) {
+    // 手数料が実額か見込みか（Yahoo!フリマの手数料は率で計算できず、キャンペーンで実額が
+    // 0円になることがある。updateSale が価格変更のたびに率で上書きすると、実額を消してしまう）。
+    addColumnIfMissing('sale', 'fee_source',
+      `TEXT NOT NULL DEFAULT 'rate' CHECK (fee_source IN ('actual','rate'))`)
+
+    // 既存行は「実額か見込みか」を記録していないため、fee が calcFee(price, fee_rate_bp) と
+    // 一致するかどうかで判定する：一致すれば率から出せる値なので 'rate'、一致しなければ
+    // 率では絶対に出ない値＝実額としか考えられないので 'actual'。
+    // 偶然一致した実額を 'rate' と誤判定する取りこぼしはあり得るが、逆（率の値を 'actual' と
+    // 誤判定）にすると updateSale が以後その手数料を再計算しなくなるだけで実額を壊すことはない。
+    // 安全側（壊れない側）に倒すため、一致しない方を 'actual' にする
+    const feeRows = db.prepare(
+      `SELECT id, price, fee, fee_rate_bp FROM sale`,
+    ).all() as Array<{ id: string; price: number; fee: number; fee_rate_bp: number }>
+    const setFeeSource = db.prepare(`UPDATE sale SET fee_source = ? WHERE id = ?`)
+    const feeSourceTx = db.transaction(() => {
+      for (const r of feeRows) {
+        setFeeSource.run(r.fee === calcFee(r.price, r.fee_rate_bp) ? 'rate' : 'actual', r.id)
+      }
+    })
+    feeSourceTx()
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '32')
+         ON CONFLICT(key) DO UPDATE SET value = '32'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -2122,16 +2186,17 @@ export function updateSaleStatus(
 export function createSale(input: SaleInput): string {
   assertYen('価格', input.price)
   const id = randomUUID()
-  const rateBp = setting('fee_rate_bp', 1000)
+  const channel = input.channel ?? 'mercari'
+  const rateBp = feeRateBpFor(channel)
   const modelCodes = extractCodes(input.title)
 
   db.prepare(
     `INSERT INTO sale
-       (id, mercari_item_id, title, sold_at, price, kind,
-        fee_rate_bp, fee, note, source, model_codes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?)`,
+       (id, channel, mercari_item_id, title, sold_at, price, kind,
+        fee_rate_bp, fee, fee_source, note, source, model_codes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'rate', ?, 'manual', ?)`,
   ).run(
-    id, input.mercari_item_id ?? null, input.title, input.sold_at,
+    id, channel, input.mercari_item_id ?? null, input.title, input.sold_at,
     input.price, input.kind ?? 'resale', rateBp,
     calcFee(input.price, rateBp), input.note ?? null,
     JSON.stringify(modelCodes),
@@ -2144,7 +2209,7 @@ export function createSale(input: SaleInput): string {
 
 export function updateSale(id: string, patch: SalePatch): void {
   const cur = db.prepare('SELECT * FROM sale WHERE id = ?').get(id) as
-    | { price: number; fee_rate_bp: number } | undefined
+    | { price: number; fee_rate_bp: number; fee_source: FeeSource } | undefined
   if (!cur) throw new Error('販売が見つかりません')
 
   const sets: string[] = []
@@ -2161,11 +2226,15 @@ export function updateSale(id: string, patch: SalePatch): void {
   }
   if (patch.note !== undefined) put('note', patch.note)
 
-  // 価格が変わったら手数料を再計算する
+  // 価格が変わったら手数料を再計算する。ただし実額（fee_source='actual'）は率で上書きしない
+  // （Yahoo!フリマは手数料を率で計算できず、キャンペーンで実額0円のことがある。率で上書き
+  // すると帳簿が実額と食い違ってしまう。CLAUDE.md：金額計算は間違うと気づきにくい）
   if (patch.price !== undefined) {
     assertYen('価格', patch.price)
     put('price', patch.price)
-    put('fee', calcFee(patch.price, cur.fee_rate_bp))
+    if (cur.fee_source !== 'actual') {
+      put('fee', calcFee(patch.price, cur.fee_rate_bp))
+    }
   }
 
   // 発送方法を選んだら送料をマスタから引き、確認済みにする
@@ -2234,7 +2303,9 @@ export function applySaleActuals(
   const vals: unknown[] = []
 
   if (actuals.fee !== undefined && actuals.fee !== null) {
-    sets.push('fee = ?')
+    // 0円も実額（Yahoo!フリマのキャンペーン等）。fee_source='actual' にして、以後
+    // updateSale の価格変更で率に上書きされないようにする
+    sets.push('fee = ?', `fee_source = 'actual'`)
     vals.push(actuals.fee)
   }
   if (actuals.shipping_fee !== undefined && actuals.shipping_fee !== null) {
@@ -2952,6 +3023,7 @@ function normalizeName(s: string): string {
 type InventoryRow = Omit<InventoryItem, 'tags' | 'inherited_tags' | 'thumb_url' | 'listing' | 'sold_to'> & {
   thumb_file: string | null
   listing_id: string | null
+  listing_channel: SalesChannel | null
   listing_price: number | null
   listing_status: ListingStatus | null
   sold_sale_id: string | null
@@ -2978,7 +3050,7 @@ function attachInventoryTags(items: InventoryRow[]): InventoryItem[] {
 
   return items.map(i => {
     const {
-      thumb_file, listing_id, listing_price, listing_status,
+      thumb_file, listing_id, listing_channel, listing_price, listing_status,
       sold_sale_id, sold_title, sold_price, sold_sold_at, ...rest
     } = i
     const tags = tagMap.get(i.id) ?? []
@@ -2994,7 +3066,7 @@ function attachInventoryTags(items: InventoryRow[]): InventoryItem[] {
       tags,
       inherited_tags,
       listing: listing_id
-        ? { mercari_item_id: listing_id, price: listing_price!, status: listing_status! }
+        ? { channel: listing_channel!, mercari_item_id: listing_id, price: listing_price!, status: listing_status! }
         : null,
       sold_to: sold_sale_id
         ? { sale_id: sold_sale_id, title: sold_title!, price: sold_price!, sold_at: sold_sold_at! }
@@ -3124,9 +3196,11 @@ export function upsertListings(
   // （Codexレビュー指摘：形式が違うと文字列比較が常に不一致になる）
   const now = new Date().toISOString()
   const getExisting = db.prepare('SELECT status, listed_at FROM listing WHERE mercari_item_id = ?')
+  // 出品中タブの取り込みはメルカリだけ（Yahoo!フリマの取り込みは次の段）。
+  // 既定値に任せず明示しておく（次の段で足しやすくするため）
   const insertStmt = db.prepare(`
-    INSERT INTO listing (mercari_item_id, title, price, status, first_seen_at, last_seen_at, listed_at, likes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO listing (mercari_item_id, channel, title, price, status, first_seen_at, last_seen_at, listed_at, likes)
+    VALUES (?, 'mercari', ?, ?, ?, ?, ?, ?, ?)
   `)
   const updateStmt = db.prepare(`
     UPDATE listing SET title = ?, price = ?, status = ?, last_seen_at = ?,
@@ -3164,6 +3238,7 @@ export function upsertListings(
 
 type ListingRow = {
   mercari_item_id: string
+  channel: SalesChannel
   title: string
   price: number
   status: ListingStatus
@@ -3175,7 +3250,8 @@ type ListingRow = {
   thumb_file: string | null
 }
 
-function hydrateListing(r: ListingRow, rateBp: number): Listing {
+function hydrateListing(r: ListingRow): Listing {
+  const rateBp = feeRateBpFor(r.channel)
   const items = db.prepare(`
     SELECT i.id, i.item_code, i.name, i.model_code,
            (SELECT name FROM product_name WHERE model_code = i.model_code) AS product_name,
@@ -3207,6 +3283,7 @@ function hydrateListing(r: ListingRow, rateBp: number): Listing {
 
   return {
     mercari_item_id: r.mercari_item_id,
+    channel: r.channel,
     title: r.title,
     price: r.price,
     status: r.status,
@@ -3234,8 +3311,7 @@ export function listListings(
     `SELECT * FROM listing WHERE status IN (${ph}) ORDER BY first_seen_at DESC, created_at DESC`,
   ).all(...statuses) as ListingRow[]
 
-  const rateBp = setting('fee_rate_bp', 1000)
-  const listings = rows.map(r => hydrateListing(r, rateBp))
+  const listings = rows.map(r => hydrateListing(r))
 
   return filter?.onlyUnallocated ? listings.filter(l => l.items.length === 0) : listings
 }
@@ -5650,9 +5726,9 @@ export function insertCollected(
   const ins = db.prepare(
     `INSERT INTO sale
        (id, mercari_item_id, title, sold_at, price, kind,
-        fee_rate_bp, fee, source, raw, is_shipping_confirmed, model_codes,
+        fee_rate_bp, fee, fee_source, source, raw, is_shipping_confirmed, model_codes,
         shipping_fee, shipping_source, status, shipped_at, delivered_at, completed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'collector', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'collector', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
 
   const inserted: Array<{ id: string; mercariItemId: string }> = []
@@ -5664,8 +5740,11 @@ export function insertCollected(
         ? (matchesAnyKeyword(text, keywords) ? 'resale' : 'personal')
         : (codes.length > 0 ? 'resale' : 'personal')
 
+      // hasFee は typeof で判定する。0 も実額（Yahoo!フリマのキャンペーン等）なので
+      // 「値が渡っているか」と「0円か」を混同しない
       const hasFee = typeof r.fee === 'number'
       const fee = hasFee ? (r.fee as number) : calcFee(r.price, rateBp)
+      const feeSource: FeeSource = hasFee ? 'actual' : 'rate'
 
       // shippingFee は実額として記録するが、0 はメルカリ便を使っていない可能性が高いので
       // 確定扱いにしない（送料未入力として要対応に出す）。undefined/null は従来どおり未確定
@@ -5680,7 +5759,7 @@ export function insertCollected(
       const id = randomUUID()
       ins.run(
         id, r.mercariItemId, r.title, r.soldAt, r.price, kind,
-        rateBp, fee, JSON.stringify(r), confirmed, JSON.stringify(codes),
+        rateBp, fee, feeSource, JSON.stringify(r), confirmed, JSON.stringify(codes),
         shippingFee, shippingSource, status,
         statusDates.shipped_at, statusDates.delivered_at, statusDates.completed_at,
       )

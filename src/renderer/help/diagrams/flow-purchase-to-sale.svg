@@ -1,0 +1,72 @@
+<svg class="dg-flow-purchase-to-sale" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="fp-title">
+  <title id="fp-title">仕入から販売までの流れ：注文の明細の数量分だけ在庫が1点ずつ生まれ、出品を経て販売になる図</title>
+  <defs>
+    <marker id="fp-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--text-dim, #63636a)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-flow-purchase-to-sale .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-flow-purchase-to-sale .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-flow-purchase-to-sale .note { font-size: 12px; fill: var(--text-faint, #97979e); }
+    .dg-flow-purchase-to-sale .card { fill: var(--surface-hi, #f3f2ee); }
+    .dg-flow-purchase-to-sale .card-brand { fill: var(--brand-soft, #fdf3d8); }
+    .dg-flow-purchase-to-sale .box-title { font-size: 15px; font-weight: 600; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-flow-purchase-to-sale .box-sub { font-size: 12px; fill: var(--text-dim, #63636a); text-anchor: middle; }
+    .dg-flow-purchase-to-sale .conn { stroke: var(--text-dim, #63636a); stroke-width: 2; fill: none; marker-end: url(#fp-arrow); }
+    .dg-flow-purchase-to-sale .badge { fill: var(--brand, #fbcf52); }
+    .dg-flow-purchase-to-sale .badge-num { font-size: 12px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; dominant-baseline: middle; }
+  </style>
+
+  <text class="heading" x="40" y="36">仕入から販売までの流れ</text>
+  <text class="lead" x="40" y="60">明細の数量が3なら、在庫は3点できる（1点ずつ、別々に管理する）</text>
+
+  <!-- 仕入 -->
+  <rect class="card" x="30" y="175" width="110" height="70" rx="12"/>
+  <text class="box-title" x="85" y="205">仕入</text>
+  <text class="box-sub" x="85" y="224">1注文</text>
+
+  <line class="conn" x1="140" y1="210" x2="188" y2="210"/>
+
+  <!-- 明細（数量3） -->
+  <rect class="card" x="190" y="175" width="130" height="70" rx="12"/>
+  <text class="box-title" x="255" y="205">注文の明細</text>
+  <text class="box-sub" x="255" y="224">数量 3</text>
+
+  <!-- fan out to 3 在庫 -->
+  <path class="conn" d="M320,190 C360,190 360,80 400,80"/>
+  <path class="conn" d="M320,210 L398,210"/>
+  <path class="conn" d="M320,230 C360,230 360,340 400,340"/>
+
+  <rect class="card-brand" x="400" y="50" width="140" height="60" rx="12"/>
+  <circle class="badge" cx="416" cy="66" r="11"/>
+  <text class="badge-num" x="416" y="67">1</text>
+  <text class="box-title" x="470" y="76">在庫 1点</text>
+  <text class="box-sub" x="470" y="94">売れるまで資産</text>
+
+  <rect class="card-brand" x="400" y="180" width="140" height="60" rx="12"/>
+  <circle class="badge" cx="416" cy="196" r="11"/>
+  <text class="badge-num" x="416" y="197">2</text>
+  <text class="box-title" x="470" y="206">在庫 1点</text>
+  <text class="box-sub" x="470" y="224">売れるまで資産</text>
+
+  <rect class="card-brand" x="400" y="310" width="140" height="60" rx="12"/>
+  <circle class="badge" cx="416" cy="326" r="11"/>
+  <text class="badge-num" x="416" y="327">3</text>
+  <text class="box-title" x="470" y="336">在庫 1点</text>
+  <text class="box-sub" x="470" y="354">売れるまで資産</text>
+
+  <!-- 在庫2 -> 出品 -->
+  <line class="conn" x1="540" y1="210" x2="638" y2="210"/>
+  <rect class="card" x="640" y="175" width="110" height="70" rx="12"/>
+  <text class="box-title" x="695" y="205">出品</text>
+  <text class="box-sub" x="695" y="224">出品中も資産</text>
+
+  <!-- 出品 -> 販売 -->
+  <line class="conn" x1="750" y1="210" x2="798" y2="210"/>
+  <rect class="card" x="800" y="175" width="70" height="70" rx="12"/>
+  <text class="box-title" x="835" y="205">販売</text>
+  <text class="box-sub" x="835" y="224">紐付ける</text>
+
+  <text class="note" x="470" y="123" text-anchor="middle">在庫1・3は出品しなくても在庫のまま</text>
+</svg>

@@ -1,6 +1,7 @@
 // ヘルプ「こういうときは…？」の内容。画面（Help.vue）とは分離し、データだけをここに置く。
 // GotoPayload / Tab は App.vue のものと構造的に同じだが、循環 import を避けるためここで型だけ再定義する。
 import type { SaleStatus } from '../../shared/types'
+import type { HelpFigure } from './shots'
 
 export type HelpTab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'expenses' | 'settings'
 
@@ -23,6 +24,8 @@ export type HelpTopic = {
   steps?: string[]
   notes?: string[]
   example?: string[]
+  /** スクショ／説明図。挙げた順に並ぶ。step があれば「手順N」の印が付く */
+  figures?: HelpFigure[]
   links?: HelpLink[]
   keywords?: string[]
 }
@@ -43,19 +46,33 @@ export const HELP: HelpCategory[] = [
           '1 件ずつ入力すると利益が確定する',
         ],
         notes: ['1 件 10 秒で終わる作りになっています。要対応が 0 なら今日はおしまい'],
+        figures: [
+          { kind: 'shot', id: 'home-overview', caption: 'ホーム全体。上に今月の粗利、下に「今やること」が並ぶ' },
+          { kind: 'shot', id: 'home-todo', caption: '「今やること」の一覧。送料未入力・未紐付け・発送してください・取り込みの問題がここに並ぶ', step: 1 },
+          { kind: 'shot', id: 'home-shipping-row', caption: '例えば「送料を入れる」の行。発送方法を選ぶとその場で行が消える', step: 1 },
+          { kind: 'shot', id: 'home-link-row', caption: '「在庫を紐付ける」の行の「在庫を選ぶ」から、売上タブのその出品へ行ける', step: 2 },
+          { kind: 'shot', id: 'sales-profit-confirmed-row', caption: '入力が終わると、その行の粗利欄に金額が出る', step: 3 },
+        ],
         links: [{ label: 'ホームを開く', tab: 'dashboard' }],
       },
       {
         id: 'confirm-profit',
         q: '売れた商品の利益を確定したい',
         steps: [
-          '売上タブの「売れた・要入力」を開く',
+          '売上タブの「すべて」を開く（既定の並びは未確定の行が先）',
           '発送方法を選ぶ（送料が入る。取り込みで実額が取れていれば自動で入っている）',
           '原価の列の「在庫を選ぶ」を押して在庫にチェック（型番が一致していれば自動で入っている）',
-          '粗利が出た行は「利益確定」に移る',
+          '粗利が出た行はその欄に金額が表示される（取引完了前は「見込み」の印）',
         ],
         notes: ['粗利 ＝ 販売価格 − 販売手数料 − 送料 − 梱包材費 − 紐付けた在庫の原価'],
-        links: [{ label: '売上タブ（売れた・要入力）', tab: 'sales', payload: { stage: 'pending' } }],
+        figures: [
+          { kind: 'shot', id: 'sales-stage-tabs', caption: '売上タブの上の段。「すべて」なら出品中も含めて全部見える', step: 1 },
+          { kind: 'shot', id: 'sales-ship-select', caption: '発送方法を選ぶと送料が入り、粗利がその場で動く', step: 2 },
+          { kind: 'shot', id: 'sales-cost-pick', caption: '原価の欄。「在庫を選ぶ」から紐付ける在庫を選ぶ', step: 3 },
+          { kind: 'shot', id: 'sales-profit-confirmed-row', caption: '入力が終わった行。粗利の欄に金額が出る', step: 4 },
+          { kind: 'diagram', id: 'gross-profit', caption: '粗利は販売価格から手数料・送料・梱包材費・原価を順に引いた額' },
+        ],
+        links: [{ label: '売上タブを開く（未確定が先）', tab: 'sales', payload: { stage: 'pending' } }],
       },
       {
         id: 'list-toolbar',
@@ -63,6 +80,9 @@ export const HELP: HelpCategory[] = [
         notes: [
           '売上・仕入・在庫・商品・経費のどの一覧にも、上に 検索 → 絞り込み（状態・タグ・期間）→ 並び替え が同じ並びで付いています',
           '右端の「n 件 ・ 合計 ¥x」は、今の絞り込みに一致している件数と合計金額です',
+        ],
+        figures: [
+          { kind: 'shot', id: 'sales-toolbar', caption: '売上タブのツールバー。検索 → 絞り込み → 並び替え → 件数と合計の順に並ぶ' },
         ],
         keywords: ['絞り込み', '並び替え', 'ソート', '検索', '件数', '合計'],
       },
@@ -81,7 +101,36 @@ export const HELP: HelpCategory[] = [
           '発送方法をここで決めておくと、売れたときそのまま販売に入る',
         ],
         notes: ['出品しても在庫は減りません（出品中も資産）。紐付けは「売れたらこの在庫を使う」という予約です'],
+        figures: [
+          { kind: 'diagram', id: 'flow-purchase-to-sale', caption: '仕入→在庫→出品→販売の流れ。在庫は明細の数量分だけ1点ずつ生まれる' },
+          { kind: 'shot', id: 'sales-stage-tabs', caption: '取り込むと売上タブの「出品中」に並ぶ', step: 1 },
+        ],
         links: [{ label: '売上タブ（出品中）', tab: 'sales', payload: { stage: 'listed' } }],
+      },
+      {
+        id: 'yahoo-channel',
+        q: 'Yahoo!フリマでも売っている。メルカリと何が違う？',
+        steps: [
+          '売上タブ・ホームの行に「メルカリ」「Yahoo!フリマ」のラベルが付くので、どちらの取引か見分けられる',
+          '出品先の絞り込みで、どちらかだけを表示できる',
+          'Yahoo!フリマの取り込みはまだ無いので、売れたら売上タブの「販売を登録」で出品先に「Yahoo!フリマ」を選んで手で入れる',
+          '行の外部リンクから商品ページ・取引画面をブラウザで開ける（メルカリと同じ操作）',
+        ],
+        notes: [
+          '販売手数料は出品先で違う（メルカリ 10%・Yahoo!フリマ 5% が既定）。設定 → 手数料 で変えられる',
+          'この率は見込みの計算にだけ使う。取り込みで実額が分かればそちらを使う（Yahoo!フリマはキャンペーンで 0 円になったり、率どおりに 1 円合わないことがある）',
+          '同じ在庫を両方の出品先に同時には出さない前提なので、紐付け・候補の出し方はこれまでと同じ',
+        ],
+        figures: [
+          { kind: 'diagram', id: 'two-channels', caption: '出品先はメルカリかYahoo!フリマのどちらか。同じ在庫を同時に両方へは出さない' },
+          { kind: 'shot', id: 'sales-manual-form', caption: '「販売を登録」フォーム。出品先にYahoo!フリマを選んで手で入れる', step: 3 },
+          { kind: 'shot', id: 'settings-fee', caption: '設定の手数料。メルカリとYahoo!フリマで別々に決められる' },
+        ],
+        links: [
+          { label: '売上タブを開く', tab: 'sales' },
+          { label: '設定を開く', tab: 'settings' },
+        ],
+        keywords: ['Yahoo', 'ヤフー', 'フリマ', '出品先', 'チャネル', '手数料'],
       },
       {
         id: 'listing-title',
@@ -94,6 +143,9 @@ export const HELP: HelpCategory[] = [
         ],
         example: ['「【A037】ミニランド ネコポス」', '「【A037】×2 ミニランド 2個セット」', '「【S-0012】【S-0013】まとめ売り」'],
         notes: ['【】が無くても型番は拾いますが、【】で囲むと確実です。「Z048-10」は「Z048 の 10 個」とは読みません（型番の一部として扱う）'],
+        figures: [
+          { kind: 'diagram', id: 'model-code', caption: '型番が完全一致すると自動で紐付く。枝番の有無だけなら一致、番号自体が違えば候補止まり', step: 1 },
+        ],
         keywords: ['タイトル', '型番', 'ブランド名'],
       },
       {
@@ -106,6 +158,10 @@ export const HELP: HelpCategory[] = [
           'または、タイトルに在庫コード【S-0012】を入れておくと取り込み時にその在庫が名指しで紐付く',
         ],
         notes: ['人が紐付けた在庫は、売れたときそのまま販売に引き継がれます（自動より優先）'],
+        figures: [
+          { kind: 'shot', id: 'sales-alloc-drawer', caption: '右のドロワー。在庫にチェックすると原価が入る', step: 2 },
+          { kind: 'shot', id: 'sales-alloc-checked-profit', caption: 'チェックした瞬間に、下に見込み粗利が出る', step: 3 },
+        ],
         links: [
           { label: '売上タブ（出品中）', tab: 'sales', payload: { stage: 'listed' } },
           { label: '在庫タブを開く', tab: 'inventory' },
@@ -121,6 +177,9 @@ export const HELP: HelpCategory[] = [
           'いつもの確定ボタンで保存する',
         ],
         notes: ['分割品や特定の在庫を選びたいときは「在庫から選ぶ」に戻して在庫コードで見分けてください'],
+        figures: [
+          { kind: 'shot', id: 'sales-alloc-drawer', caption: 'ドロワー上部の「商品から選ぶ（先入れ先出し）」ボタン', step: 1 },
+        ],
         keywords: ['先入れ先出し', 'FIFO', '商品から選ぶ'],
       },
       {
@@ -128,6 +187,10 @@ export const HELP: HelpCategory[] = [
         q: '自動で紐付いた在庫が違う',
         steps: ['その行の「紐付けを編集」（原価の欄のボタン）を押す', 'ドロワーでチェックを外して、正しい在庫にチェック'],
         notes: ['解除は 1 クリック。自動で入ったものは「自動紐付け」の印が付いています'],
+        figures: [
+          { kind: 'shot', id: 'sales-cost-pick', caption: '原価の欄。ボタンから紐付けを選び直せる（自動で入っていれば「自動紐付け」の印）', step: 1 },
+          { kind: 'shot', id: 'sales-alloc-drawer', caption: 'ドロワーでチェックを外し、正しい在庫にチェックし直す', step: 2 },
+        ],
       },
       {
         id: 'no-auto-link',
@@ -143,6 +206,10 @@ export const HELP: HelpCategory[] = [
           '売上タブ「出品中」の「型番で自動紐付け」を押して溜まった分を一括で試す',
           'それでも入らなければ行の「在庫を選ぶ」で手で選ぶ',
         ],
+        figures: [
+          { kind: 'shot', id: 'sales-needs-input-row', caption: '自動で紐付かなかった行の例。原価欄に「在庫を選ぶ」のボタンが出る' },
+          { kind: 'diagram', id: 'model-code', caption: '型番の完全一致だけが自動で紐付く。枝番が違うと候補止まりになる' },
+        ],
         links: [{ label: '売上タブ（出品中）', tab: 'sales', payload: { stage: 'listed' } }],
       },
       {
@@ -157,6 +224,9 @@ export const HELP: HelpCategory[] = [
         notes: [
           '付け替えると元の販売はその在庫の紐付けが外れて未紐付けに戻り、ホームの要対応に出ます',
           '普段の紐付けでは使いません。仕入間違いなど、後から直したいときだけの機能です',
+        ],
+        figures: [
+          { kind: 'shot', id: 'sales-alloc-drawer', caption: '付け替えたい先の行でドロワーを開く', step: 1 },
         ],
         links: [{ label: '売上タブを開く', tab: 'sales' }],
         keywords: ['付け替え', '入れ替え', 'メンテナンス'],
@@ -177,6 +247,11 @@ export const HELP: HelpCategory[] = [
           '出品するときはタイトルに子の在庫コード【S-0021】を入れる（チップをタップでコピー）',
           '間違えたら、子の行の「分割を戻す」で 1 点に戻せる（子が全部未出品で、出品に紐付けていないときだけ）',
         ],
+        figures: [
+          { kind: 'shot', id: 'inventory-group', caption: '在庫の行にある「分割」ボタン', step: 1 },
+          { kind: 'shot', id: 'inventory-split', caption: '何点に分けるか入れる画面', step: 2 },
+          { kind: 'diagram', id: 'split-evenly', caption: '原価は均等に配り、端数は最後の子に。合計は元の在庫と同じになる' },
+        ],
         notes: [
           '分割した子は元と同じ型番なので、型番だけだと「古い順」で別の在庫が選ばれることがあります。分割品は在庫コードで名指ししてください',
           '元の在庫は「分割済」になり、売れません。在庫タブの一覧には普段出ません（状態セレクトの「分割前の親（メンテナンス）」を選んだときだけ見られます）',
@@ -196,6 +271,9 @@ export const HELP: HelpCategory[] = [
         ],
         notes: ['1 つの販売に複数の在庫が紐付き、原価は合計、粗利は 1 つになります。1 点あたりの内訳は均等割り（端数は末尾）'],
         example: ['「【S-0006】【S-0024】まとめ売り クリームソルト＆いちご」'],
+        figures: [
+          { kind: 'diagram', id: 'bundle-sale', caption: '1つの販売に複数の在庫が紐付く。1回の販売＝1つの仕入とは限らない' },
+        ],
         keywords: ['まとめ売り', '複数'],
       },
       {
@@ -203,6 +281,9 @@ export const HELP: HelpCategory[] = [
         q: '同じ商品を 2 個まとめて売りたい',
         steps: ['タイトルの型番の直後に「×2」か「2個」：【A037】×2', '古い順に 2 点が自動で紐付く（在庫が足りなければ候補止まり）'],
         example: ['「【A037】×2 ミニランド 2個セット」', '「【A037】2個 ミニランド」'],
+        figures: [
+          { kind: 'diagram', id: 'bundle-sale', caption: '同じ考え方で、同じ商品を2点まとめて1つの販売に紐付けられる' },
+        ],
         keywords: ['まとめ売り', '複数'],
       },
       {
@@ -213,6 +294,9 @@ export const HELP: HelpCategory[] = [
           '【S-0012】の形でコピーされるので、メルカリのタイトルに貼る',
         ],
         notes: ['在庫コードは 1 点ごとに違う番号です。普段の出品は型番だけで足ります（分割・セットのときだけ使う）'],
+        figures: [
+          { kind: 'shot', id: 'inventory-flat', caption: '「1点ずつ」表示。行のコードのチップをタップするとコピーできる' },
+        ],
         links: [{ label: '在庫タブを開く', tab: 'inventory' }],
         keywords: ['S-', '商品コード', '番号'],
       },
@@ -236,6 +320,11 @@ export const HELP: HelpCategory[] = [
           '仕入先のキーワードを設定していると、一致した明細だけ取り込みます',
           '仕入先に「自動タグ」を決めておくと、その仕入先の仕入に自動でタグが付きます',
         ],
+        figures: [
+          { kind: 'shot', id: 'purchases-account-cards', caption: '仕入先ごとのアカウントカード。下書きの件数もここに出る', step: 1 },
+          { kind: 'shot', id: 'purchases-list', caption: '取り込んだ注文が仕入タブに並ぶ', step: 2 },
+          { kind: 'shot', id: 'purchases-drawer', caption: '下書きの詳細。足りない値を入れて「確定して在庫を作る」', step: 4 },
+        ],
         links: [
           { label: '仕入タブを開く', tab: 'purchases' },
           { label: '設定を開く', tab: 'settings' },
@@ -256,6 +345,12 @@ export const HELP: HelpCategory[] = [
           '17TRACK の無料枠は登録した追跡番号の数で減ります（設定 → 取り込み に残り件数が出ます）',
           '手で「到着済」にしたものは、取り込みや自動確認で「配送中」に戻りません（前に進む方向だけ）',
         ],
+        figures: [
+          { kind: 'shot', id: 'settings-import', caption: '設定 → 取り込み。ここに17TRACKのAPIキーを入れる', step: 1 },
+          { kind: 'shot', id: 'purchases-shipping-progress', caption: '注文→発送→配送中→到着の進み方。前に進む方向にしか自動では動かない' },
+          { kind: 'shot', id: 'purchases-tracking-row', caption: '「追跡」で17TRACKを開く。キーがあれば「配送状況を確認」でその場で1件だけ確認できる' },
+          { kind: 'diagram', id: 'fulfillment-flow', caption: '到着済だけは17TRACKでしか分からない。メロジョイは「配送中」までしか教えてくれない' },
+        ],
         links: [
           { label: '仕入タブを開く', tab: 'purchases' },
           { label: '設定を開く', tab: 'settings' },
@@ -269,11 +364,18 @@ export const HELP: HelpCategory[] = [
           '送料＋その他費用−割引を、明細に按分して原価に乗せます（金額按分か数量按分。端数は最後の明細）',
           '在庫 1 点の原価（landed_cost）は生成時に確定し、後から変わりません。過去の利益が動かないためです',
         ],
+        figures: [
+          { kind: 'shot', id: 'purchases-lines-alloc', caption: '明細ごとに送料が配られ、原価に乗る様子' },
+          { kind: 'diagram', id: 'allocate-shipping', caption: '送料100円を3点に配ると33円・33円・34円。端数は最後の行に寄せて合計を一致させる' },
+        ],
       },
       {
         id: 'manual-purchase',
         q: '仕入を手で登録したい',
         steps: ['仕入タブの「仕入を登録」', '商品名・型番（【Z078-2】の形で書けば自動で抜ける）・数量・単価・送料', '保存すると数量分の在庫ができる'],
+        figures: [
+          { kind: 'shot', id: 'purchases-register-form', caption: '「仕入を登録」フォーム', step: 1 },
+        ],
         links: [{ label: '仕入タブを開く', tab: 'purchases' }],
       },
       {
@@ -288,6 +390,9 @@ export const HELP: HelpCategory[] = [
           '注文番号が同じ仕入先で既にあるものは登録されません（空なら重複は見ません）',
           '金額はすべて税込。送料が空なら仕入先の既定値',
         ],
+        figures: [
+          { kind: 'shot', id: 'purchases-csv-import', caption: 'ファイルを選ぶとプレビューが出る。ここで内容を確認してから登録する', step: 3 },
+        ],
         keywords: ['CSV', '一括', 'まとめて', 'Excel', '取り込み'],
         links: [{ label: '仕入タブを開く', tab: 'purchases' }],
       },
@@ -301,6 +406,10 @@ export const HELP: HelpCategory[] = [
           '届いたら行の「配送」で到着済に。在庫は登録時にできる（届く前でも出品・紐付けはできる。到着まで「未着」の印）',
         ],
         notes: ['メロジョイは注文一覧から自動で更新されるので手で変えなくてよい'],
+        figures: [
+          { kind: 'shot', id: 'purchases-register-form', caption: '「仕入を登録」フォームで仕入先・配送状態を選ぶ', step: 1 },
+          { kind: 'shot', id: 'purchases-shipping-progress', caption: '配送状態は注文→発送→配送中→到着として進む（フォームでは発送準備中／配送中／到着済から選ぶ）', step: 3 },
+        ],
         keywords: ['TikTok', '配送状態', '未着', '到着', '手入力'],
         links: [{ label: '仕入タブを開く', tab: 'purchases' }],
       },
@@ -309,12 +418,18 @@ export const HELP: HelpCategory[] = [
         q: '自分で使った・壊れた（自家消費・廃棄）',
         steps: ['在庫タブでその在庫の行の「自家消費」または「廃棄」', '在庫から外れる（原価は販売の利益には入らない）'],
         notes: ['在庫の「その他」フィルタで見返せます'],
+        figures: [
+          { kind: 'shot', id: 'inventory-dispose', caption: '在庫の行の「廃棄」を押したところ', step: 1 },
+        ],
         links: [{ label: '在庫タブを開く', tab: 'inventory' }],
       },
       {
         id: 'aging-inventory',
         q: '長く売れ残っている在庫を見たい',
         steps: ['在庫タブは滞留日数の長い順', 'ホームの「長期滞留」の日数は 設定 → 在庫 で変えられる'],
+        figures: [
+          { kind: 'shot', id: 'inventory-list', caption: '在庫タブは滞留日数の長い順に並ぶ', step: 1 },
+        ],
         links: [{ label: '在庫タブを開く', tab: 'inventory' }],
       },
       {
@@ -322,6 +437,10 @@ export const HELP: HelpCategory[] = [
         q: '商品名（型番の表示名）を変えたい',
         steps: ['商品タブの行の「名前」', '空にすると元に戻る'],
         notes: ['何もしないと、その型番で最後に仕入れた明細の名前が出ます。仕入明細・在庫の元の名前は変わりません'],
+        figures: [
+          { kind: 'shot', id: 'products-list', caption: '商品タブの一覧。型番をクリックするとカルテが開く' },
+          { kind: 'shot', id: 'products-karte', caption: 'カルテ上部の「名前」ボタンで表示名を変えられる', step: 1 },
+        ],
         links: [{ label: '商品タブを開く', tab: 'products' }],
         keywords: ['商品名', '表示名', '改名'],
       },
@@ -338,8 +457,29 @@ export const HELP: HelpCategory[] = [
           '画像は URL が変わったとき（メルカリ・メロジョイ側で差し替えられたとき）だけ取り直します。同じ URL なら取りに行きません',
           '仕入の取引詳細ドロワーの「画像を取り直す」で、メロジョイの商品画像だけその場で読み直せます',
         ],
+        figures: [
+          { kind: 'shot', id: 'products-image-set', caption: '「画像を変える」でファイルを選ぶ。固定した画像は取り込みで上書きされない', step: 1 },
+        ],
         links: [{ label: '商品タブを開く', tab: 'products' }],
         keywords: ['画像', 'サムネ', '写真', 'アイキャッチ'],
+      },
+      {
+        id: 'product-estimate',
+        q: '商品タブの「この金額で売ったら？」は何？',
+        steps: [
+          '商品タブでその型番を開く',
+          '売価・発送方法・（あれば）売る在庫を選ぶ',
+          '粗利がその場に出る（手数料・送料・原価を引いた額）',
+        ],
+        notes: [
+          '出品する前に「いくらなら儲かるか」を確かめるための見込み計算です。ここで何かを登録するわけではありません',
+          '在庫を選ばなければ原価を引かずに計算します（まだ仕入れていない商品の見積もりにも使えます）',
+        ],
+        figures: [
+          { kind: 'shot', id: 'products-estimate', caption: '売価・発送方法・在庫を選ぶと、粗利がその場に出る（実際には何も登録されない）', step: 2 },
+        ],
+        links: [{ label: '商品タブを開く', tab: 'products' }],
+        keywords: ['見積もり', '試算', '売ったら', 'いくら'],
       },
     ],
   },
@@ -351,6 +491,9 @@ export const HELP: HelpCategory[] = [
         id: 'manual-sale',
         q: 'メルカリ以外で売れた・手で登録したい',
         steps: ['売上タブの「販売を登録」', '商品名・価格・販売日を入れる', '発送方法と紐付けは取り込んだ販売と同じ'],
+        figures: [
+          { kind: 'shot', id: 'sales-manual-form', caption: '「販売を登録」フォーム。商品名・価格・販売日を入れる', step: 1 },
+        ],
         links: [{ label: '売上タブを開く', tab: 'sales' }],
       },
       {
@@ -360,10 +503,31 @@ export const HELP: HelpCategory[] = [
         notes: ['取り込み時は、設定のキーワードに一致すれば販売用、キーワードが無いときは型番があれば販売用、なければ私物として入ります'],
       },
       {
+        id: 'shipping-methods-manage',
+        q: '発送方法の一覧（ネコポス・ゆうパケットなど）を登録・料金を直したい',
+        steps: [
+          '設定 → 発送方法 の表で名前・配送サービス・送料を直す（そのまま保存される）',
+          '「発送方法を追加」で新しい発送方法を増やせる',
+          'ゴミ箱アイコンで削除できる',
+        ],
+        notes: [
+          '売上タブで発送方法を選ぶと、ここに登録した送料がその販売に入ります（取り込みで実額が取れていれば実額が優先）',
+          '送料が変わったら、まずここを直してから使ってください。すでに確定した販売の送料は変わりません',
+        ],
+        figures: [
+          { kind: 'shot', id: 'settings-shipping-methods', caption: '設定 → 発送方法。名前・配送サービス・送料をその場で直せる', step: 1 },
+        ],
+        links: [{ label: '設定を開く', tab: 'settings' }],
+        keywords: ['発送方法', 'ネコポス', 'ゆうパケット', '配送サービス', '送料設定'],
+      },
+      {
         id: 'fix-shipping-fee',
         q: '送料を後から直したい',
         steps: ['売上の行の発送方法を選び直す', '取り込みで実額（メルカリの取引画面の送料）が取れている販売はそちらが優先されます'],
         notes: ['設定 → 手数料 の手数料率を変えても、登録済みの販売は再計算しません'],
+        figures: [
+          { kind: 'shot', id: 'sales-ship-select', caption: '発送方法を選び直すと送料が変わる', step: 1 },
+        ],
       },
       {
         id: 'transaction-status',
@@ -374,6 +538,9 @@ export const HELP: HelpCategory[] = [
           '行の外部リンクでメルカリの取引画面を既定のブラウザで開く',
         ],
         notes: ['状態は 1 時間ごとの取り込みで進みます（後戻りはしない）。販売履歴に出たら「取引完了」'],
+        figures: [
+          { kind: 'shot', id: 'home-ship-row', caption: 'ホームの「発送してください」の行', step: 2 },
+        ],
         links: [
           { label: '売上タブ（発送してください）', tab: 'sales', payload: { status: 'waiting_shipment' } },
           { label: 'ホームを開く', tab: 'dashboard' },
@@ -388,6 +555,10 @@ export const HELP: HelpCategory[] = [
           '計上日（月次・月の絞り込みの基準）＝取り込みの販売は、完了していれば購入完了日、まだ完了していなければ購入日時を仮置きし、完了したときに動きます。手入力の販売は入力した日付のまま変わりません',
         ],
         steps: ['履歴ドロワーを開くと「購入日時」が出ます。取れていなければ「取り直す」で取引画面を 1 回だけ読み直せます'],
+        figures: [
+          { kind: 'shot', id: 'sales-timeline', caption: '履歴ドロワー。購入日時が出て、無ければ「取り直す」で読み直せる', step: 1 },
+          { kind: 'diagram', id: 'three-dates', caption: '購入日時・購入完了日・計上日。計上日は完了すると購入完了日に動く' },
+        ],
         links: [{ label: '売上タブを開く', tab: 'sales' }],
         keywords: ['購入日時', '購入完了日', '計上日', '日付', 'sold_at'],
       },
@@ -421,12 +592,18 @@ export const HELP: HelpCategory[] = [
         q: '取り込む範囲を絞りたい（キーワード）',
         steps: ['設定 → メルカリ のキーワード（複数は「,」「、」空白で区切る。どれか 1 つ含めば対象）', '仕入先にもそれぞれキーワード', '空にすると全部取り込む'],
         notes: ['一致しないものは販売も出品も仕入の明細も取り込まず、画像も取りに行きません'],
+        figures: [
+          { kind: 'shot', id: 'settings-import', caption: '設定 → 取り込みのキーワード欄', step: 1 },
+        ],
         links: [{ label: '設定を開く', tab: 'settings' }],
       },
       {
         id: 'hide-browser',
         q: '取り込みの動きを見たい／ブラウザが出てうっとうしい',
         steps: ['設定 → 取り込み の「取り込み中にブラウザのウィンドウを表示する」を切り替える', '普段は非表示で動く。本人確認のときだけ自動で表示される'],
+        figures: [
+          { kind: 'shot', id: 'settings-import', caption: '設定 → 取り込みの「ブラウザのウィンドウを表示する」の切り替え', step: 1 },
+        ],
         links: [{ label: '設定を開く', tab: 'settings' }],
       },
       {
@@ -449,6 +626,10 @@ export const HELP: HelpCategory[] = [
           '設定 → 仕入先 の「自動タグ」で、その仕入先の仕入に登録時に自動で付く（例：「マージン対象」の口座）',
           '各タブの「すべてのタグ」で絞り込む。派生タグには 仕／品／在 の印',
         ],
+        figures: [
+          { kind: 'shot', id: 'products-karte', caption: '商品タブのタグ。ここで付けると在庫・販売にも見える', step: 2 },
+          { kind: 'diagram', id: 'tags-derive', caption: 'タグはコピーではなく派生。上流で直すと下流に効き、紐付けを外すと消える' },
+        ],
         links: [
           { label: '商品タブを開く', tab: 'products' },
           { label: '設定を開く', tab: 'settings' },
@@ -466,6 +647,10 @@ export const HELP: HelpCategory[] = [
         notes: [
           '粗利は販売ごと（販売価格−手数料−送料−梱包材−原価）。純利益＝月の粗利−その月の経費（経費タブ）',
         ],
+        figures: [
+          { kind: 'diagram', id: 'gross-profit', caption: '粗利は販売価格から手数料・送料・梱包材費・原価を順に引いた額' },
+          { kind: 'shot', id: 'monthly-list', caption: '月次タブの月の帯。粗利・純利益が並ぶ' },
+        ],
         links: [{ label: '月次タブを開く', tab: 'monthly' }],
       },
       {
@@ -477,6 +662,11 @@ export const HELP: HelpCategory[] = [
           '手入力の販売（TikTok Shop など）は状態を持たないので、入力した日付の月でそのまま実績に入ります',
           'タグ集計・商品別集計・CSV も同じ実績／見込みの区分です',
         ],
+        figures: [
+          { kind: 'shot', id: 'home-profit-strip', caption: 'ホーム上部。今月の粗利（実績）と確定待ちの粗利（見込み）が分かれて出る' },
+          { kind: 'shot', id: 'monthly-realized-forecast', caption: '月次の「見込み（取引未完了）」。まだ実績に入らない分がここに出る' },
+          { kind: 'diagram', id: 'realized-vs-forecast', caption: '取引完了と手入力の販売が実績、それ以外は見込み。月次・粗利・経費の按分は実績だけを使う' },
+        ],
         links: [
           { label: 'ホームを開く', tab: 'dashboard' },
           { label: '月次タブを開く', tab: 'monthly' },
@@ -487,6 +677,9 @@ export const HELP: HelpCategory[] = [
         id: 'fee-rate-change',
         q: '手数料率を変えたら過去の販売は？',
         notes: ['変わりません。登録済みの販売は登録時の率で固定です（帳簿が動かないようにするため）'],
+        figures: [
+          { kind: 'shot', id: 'settings-fee', caption: '設定の手数料率。ここを変えても登録済みの販売は変わらない' },
+        ],
       },
       {
         id: 'add-expense',
@@ -500,6 +693,10 @@ export const HELP: HelpCategory[] = [
         notes: [
           '金額は税込',
           '「レシートを読み取る」は Google の Gemini に画像を送って読み取ります（設定 → AI 読み取り で API キーが必要。無料枠で足ります）。数字は確認してから登録',
+        ],
+        figures: [
+          { kind: 'shot', id: 'expenses-list', caption: '経費タブの一覧' },
+          { kind: 'shot', id: 'expenses-receipt-read', caption: '「レシートを読み取って登録」の画面。AIが読み取った内容は登録前に確認する' },
         ],
         keywords: ['経費', 'レシート', '梱包費', '消耗品', 'ビニール', '箱'],
         links: [{ label: '経費タブを開く', tab: 'expenses' }],
@@ -544,6 +741,11 @@ export const HELP: HelpCategory[] = [
           '締めても編集はロックしません。後で数字が変われば「締めた後に変わった」と出ます',
           '経費は販売用の販売にだけ配賦します。私物には配賦しません',
         ],
+        figures: [
+          { kind: 'shot', id: 'monthly-detail-alloc', caption: '按分方法を選ぶと、各販売の「按分経費」「按分後利益」が変わる', step: 3 },
+          { kind: 'shot', id: 'expenses-alloc', caption: 'その月の経費の一覧。ここに出ている経費が販売用の販売に配られる' },
+          { kind: 'diagram', id: 'expense-allocation', caption: '経費は販売用の販売に価格の比で配る。私物には配らない' },
+        ],
         keywords: ['締め', '月末', '按分', 'マージン', '支払い', '純利益'],
       },
       {
@@ -554,6 +756,27 @@ export const HELP: HelpCategory[] = [
           '税抜の欄はありません。消費税の申告用の集計はこのアプリでは行いません（月次の粗利・純利益は税込ベース）',
         ],
         keywords: ['税込', '税抜', '消費税', '内税', '外税'],
+      },
+      {
+        id: 'csv-export-tax',
+        q: '確定申告用に売上・仕入・経費をCSVで書き出したい',
+        steps: [
+          '設定 → データ の「CSVで書き出す（全期間）」で 売上／仕入／経費／在庫 のボタンを押す',
+          'その場でファイルに保存される（全期間まとめて。月では切れない）',
+        ],
+        notes: [
+          '売上のCSVには「集計区分」（実績／見込み）の列が付きます。確定申告には実績の行だけを使ってください',
+          '在庫は「今の姿」をそのまま出します（過去のある時点の記録ではありません）',
+          '月次タブの計算書からも、その月だけの売上・仕入・経費をCSVで書き出せます',
+        ],
+        figures: [
+          { kind: 'shot', id: 'settings-csv-export', caption: '設定 → データの「CSVで書き出す」。売上・仕入・経費・在庫をボタン1つで書き出せる', step: 1 },
+        ],
+        links: [
+          { label: '設定を開く', tab: 'settings' },
+          { label: '月次タブを開く', tab: 'monthly' },
+        ],
+        keywords: ['CSV', '書き出し', 'エクスポート', '確定申告', '税務', '年間'],
       },
     ],
   },
@@ -569,16 +792,103 @@ export const HELP: HelpCategory[] = [
           '移す先のアプリで、設定 → データ → 「バックアップから復元」でその zip を選ぶ。今のデータを退避してから置き換わり、自動で再起動する',
         ],
         notes: ['取り込みのログイン状態はバックアップに含まれません（移した先でログインし直す）'],
+        figures: [
+          { kind: 'shot', id: 'settings-backup', caption: '設定 → データの「バックアップを保存（zip）」', step: 1 },
+        ],
         links: [{ label: '設定を開く', tab: 'settings' }],
       },
       {
         id: 'app-update',
-        q: 'アプリの更新はどうなる？',
+        q: 'アプリを新しくしたい（アップデート）',
+        steps: [
+          '設定タブの一番下「アプリの更新」を開く',
+          '「更新を確認」を押す（放っておいても、起動 10 秒後と 6 時間ごとに自動で確認しています）',
+          '新しい版があれば「vX.X.X があります」と出ます。ここから先は Windows と Mac で手順が違います',
+        ],
         notes: [
-          '起動 10 秒後と 6 時間ごとに新しい版を確認し、ヘッダにお知らせが出ます。Windows は自動でダウンロードして終了時に入れ替え、macOS は「更新する」で Releases ページを開き dmg を上書きインストール',
-          'データベースは残ります。新しい版で必要な DB の更新は起動時に自動で行われます',
+          '新しい版が無ければ「最新です」とだけ出ます。何もしなくて大丈夫です',
+          '帳簿（データベース）はアプリ本体の中ではなく別の場所に保存されているので、アプリを新しくしても消えません。それでも念のため、入れ替える前に 設定 → データ の「バックアップを保存（zip）」を取っておくと安心です',
+        ],
+        figures: [
+          { kind: 'shot', id: 'settings-app-update', caption: '設定の「アプリの更新」。現在のバージョンと「更新を確認」ボタンがある', step: 1 },
         ],
         links: [{ label: '設定を開く', tab: 'settings' }],
+        keywords: ['アップデート', '更新', '新しい版', 'バージョンアップ', 'バージョン'],
+      },
+      {
+        id: 'app-update-windows',
+        q: 'Windows でアプリを新しくする',
+        steps: [
+          '設定の「アプリの更新」で「更新を確認」を押す',
+          '新しい版があれば自動でダウンロードが始まります（何もしなくてよく、そのままいつも通り使い続けて構いません）',
+          'ダウンロードが終わった後、そろばんを閉じる（右上の×やタスクバーから終了）と、そのタイミングで新しい版に自動で入れ替わります',
+          '次に開いたときには新しい版になっています。設定の「現在のバージョン」で確かめられます',
+        ],
+        notes: [
+          '急いで入れ替えたいときは、設定に出る「更新する」ボタンを押すと、その場で再起動して入れ替わります',
+          '自分で新しいインストーラー（.exe）をダウンロードして実行したときは、「WindowsによってPCが保護されました」という青い画面が出ることがあります。これは開発元の署名（証明書）がまだ無いために出る画面で、そろばんが壊れているわけではありません。画面の中の小さな文字「詳細情報」を押すと「実行」というボタンが出てくるので、それを押すと起動します',
+        ],
+        figures: [
+          { kind: 'shot', id: 'settings-app-update', caption: '設定の「アプリの更新」。新しい版があると「更新する」ボタンが出る', step: 1 },
+        ],
+        links: [{ label: '設定を開く', tab: 'settings' }],
+        keywords: ['Windows', 'アップデート', '更新', 'WindowsによってPCが保護されました', 'SmartScreen', '詳細情報', '実行', '起動しない', '保護されました'],
+      },
+      {
+        id: 'app-update-mac',
+        q: 'Mac でアプリを新しくする',
+        steps: [
+          '設定の「アプリの更新」の「ダウンロードページを開く」を押す（Mac は自動では入れ替わらないので、手で入れ替えます）',
+          '開いたページ（Releases）の一番上にある新しい版から、ファイルを選びます。お使いの Mac の種類で選ぶファイルが違います：画面左上のアップルマーク →「この Mac について」を開き、「チップ」の欄を見る。「Apple M1」「Apple M2」など Apple〜 と書いてあれば arm64 と付くファイル（例：soroban-0.4.5-arm64.dmg）、「Intel」と書いてあれば x64 と付くファイル（例：soroban-0.4.5-x64.dmg）を選びます。間違えると開けません',
+          'ダウンロードした .dmg をダブルクリックで開き、中の「そろばん」のアイコンを、同じ画面にある「Applications（アプリケーション）」フォルダへドラッグ＆ドロップします',
+        ],
+        notes: [
+          '開こうとして「"そろばん"は壊れているため開けません」と出て起動できないときは、次の項目「Mac で『壊れているため開けません』と出て開けない」を見てください',
+          'データ（帳簿）は消えません。念のため、入れ替える前に 設定 → データ の「バックアップを保存（zip）」を取っておくと安心です',
+        ],
+        figures: [
+          { kind: 'shot', id: 'settings-app-update', caption: '設定の「アプリの更新」。Mac では「ダウンロードページを開く」が出る', step: 1 },
+          { kind: 'shot', id: 'settings-backup', caption: '設定 → データの「バックアップを保存（zip）」。入れ替える前に取っておくと安心' },
+        ],
+        links: [{ label: '設定を開く', tab: 'settings' }],
+        keywords: ['Mac', 'macOS', 'arm64', 'x64', 'Apple silicon', 'Intel', 'dmg', 'アップデート', '更新'],
+      },
+      {
+        id: 'mac-cannot-open',
+        q: 'Mac で「壊れているため開けません」と出て開けない（起動しない）',
+        steps: [
+          'アプリケーション → ユーティリティ → ターミナル、の順で開く（Finder の左上「移動」メニューから「ユーティリティ」を選んでも構いません）',
+          'ターミナルの黒い画面に、次の文字をそのまま打つ（最後に半角スペースを 1 つ忘れずに）：xattr -dr com.apple.quarantine ',
+          '続けて、Finder の「アプリケーション」フォルダから「そろばん」のアイコンをつまみ、ターミナルの窓の中にドラッグして落とす。正しい場所（例：/Applications/Soroban.app）が自動で入力される',
+          'Enter キーを押す。何も表示されなければ成功（このコマンドは成功すると何も表示しません。「効かなかった」と勘違いしやすいので注意してください）',
+          'これで、そろばんをいつも通り開けるようになります',
+        ],
+        notes: [
+          'これは正式な配布網（App Store）を通さないアプリに Mac が自動で付ける印（隔離属性）のせいで、そろばんが本当に壊れているわけではありません',
+          'パスワードを聞かれることはありません。sudo も要りません。もし何か聞かれたら、コマンドの打ち間違いです。落ち着いて 1 からやり直してください',
+          '手順 2〜3 の代わりに、パスまで自分で一行に打ってもかまいません。下の例をそのままコピーして使えます',
+        ],
+        example: ['xattr -dr com.apple.quarantine /Applications/Soroban.app'],
+        figures: [
+          { kind: 'shot', id: 'settings-app-update', caption: '設定の「アプリの更新」。Mac では「ダウンロードページを開く」からここに至る' },
+        ],
+        links: [{ label: '設定を開く', tab: 'settings' }],
+        keywords: ['Mac', 'macOS', '壊れている', '開けません', '起動しない', 'xattr', '隔離', 'quarantine', 'ターミナル'],
+      },
+      {
+        id: 'health-check',
+        q: '粗利が合わない気がする。数字の抜けを確認したい',
+        steps: [
+          '設定 → データ の「データの健康診断」を見る（開くと自動で調べてある）',
+          '気になる行があれば「開く →」でその一覧・行にすぐ飛べる',
+          '直したら「もう一度調べる」で数え直す',
+        ],
+        notes: ['見ているのは「金額や紐付けにおかしなところが無いか」だけです。ここが自動で直すことはありません。直すのは各画面から'],
+        figures: [
+          { kind: 'shot', id: 'settings-health', caption: '設定の「データの健康診断」。気になる行は「開く →」ですぐ確認できる', step: 1 },
+        ],
+        links: [{ label: '設定を開く', tab: 'settings' }],
+        keywords: ['健康診断', '整合性', '合わない', '点検'],
       },
       {
         id: 'reset-data',

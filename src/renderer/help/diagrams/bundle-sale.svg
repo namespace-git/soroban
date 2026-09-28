@@ -1,0 +1,53 @@
+<svg class="dg-bundle-sale" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 420" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="bs-title">
+  <title id="bs-title">まとめ売りの図：1つの販売に複数の在庫が紐付く。1販売＝1仕入とは限らない</title>
+  <defs>
+    <marker id="bs-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-dim, #63636a)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-bundle-sale .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-bundle-sale .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-bundle-sale .note { font-size: 13px; fill: var(--warn, #b45f06); font-weight: 600; }
+    .dg-bundle-sale .card { fill: var(--surface-hi, #f3f2ee); }
+    .dg-bundle-sale .card-sale { fill: var(--profit-bg, #e6f6ec); }
+    .dg-bundle-sale .box-title { font-size: 15px; font-weight: 600; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-bundle-sale .box-sub { font-size: 12px; fill: var(--text-dim, #63636a); text-anchor: middle; }
+    .dg-bundle-sale .conn { stroke: var(--text-dim, #63636a); stroke-width: 2; fill: none; marker-end: url(#bs-arrow); }
+    .dg-bundle-sale .badge { fill: var(--brand, #fbcf52); }
+    .dg-bundle-sale .badge-num { font-size: 12px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; dominant-baseline: middle; }
+  </style>
+
+  <text class="heading" x="40" y="36">まとめ売り</text>
+  <text class="lead" x="40" y="60">1つの販売に、複数の在庫が紐付くことがある</text>
+
+  <rect class="card" x="60" y="50" width="220" height="80" rx="12"/>
+  <circle class="badge" cx="80" cy="70" r="11"/>
+  <text class="badge-num" x="80" y="71">1</text>
+  <text class="box-title" x="170" y="95">在庫（A）</text>
+  <text class="box-sub" x="170" y="114">原価 ¥800</text>
+
+  <rect class="card" x="60" y="170" width="220" height="80" rx="12"/>
+  <circle class="badge" cx="80" cy="190" r="11"/>
+  <text class="badge-num" x="80" y="191">2</text>
+  <text class="box-title" x="170" y="215">在庫（B）</text>
+  <text class="box-sub" x="170" y="234">原価 ¥600</text>
+
+  <rect class="card" x="60" y="290" width="220" height="80" rx="12"/>
+  <circle class="badge" cx="80" cy="310" r="11"/>
+  <text class="badge-num" x="80" y="311">3</text>
+  <text class="box-title" x="170" y="335">在庫（C）</text>
+  <text class="box-sub" x="170" y="354">原価 ¥400</text>
+
+  <path class="conn" d="M280,90 C400,90 400,190 518,205"/>
+  <path class="conn" d="M280,210 L518,210"/>
+  <path class="conn" d="M280,330 C400,330 400,220 518,212"/>
+
+  <rect class="card-sale" x="520" y="150" width="240" height="120" rx="12"/>
+  <text class="box-title" x="640" y="185" style="fill:var(--profit, #2f9e5a)">1つの販売</text>
+  <text class="box-sub" x="640" y="208">3点まとめて売れた</text>
+  <text class="box-sub" x="640" y="228">原価 合計 ¥1,800</text>
+  <text class="box-sub" x="640" y="248">粗利は販売1件に対して1つ</text>
+
+  <text class="note" x="410" y="400" text-anchor="middle">1販売＝1仕入とは決め打たない</text>
+</svg>

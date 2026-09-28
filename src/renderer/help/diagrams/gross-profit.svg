@@ -1,0 +1,73 @@
+<svg class="dg-gross-profit" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 480" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="gp-title">
+  <title id="gp-title">粗利の式：販売価格から手数料・送料・梱包材費・原価を順番に引いていく図</title>
+  <defs>
+    <marker id="gp-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-dim, #63636a)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-gross-profit .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-gross-profit .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-gross-profit .note { font-size: 12px; fill: var(--text-faint, #97979e); }
+    .dg-gross-profit .badge { fill: var(--brand, #fbcf52); }
+    .dg-gross-profit .badge-num { font-size: 13px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; dominant-baseline: middle; }
+    .dg-gross-profit .row-label { font-size: 16px; font-weight: 600; fill: var(--text, #26262a); }
+    .dg-gross-profit .row-amount { font-size: 18px; font-weight: 700; fill: var(--text, #26262a); font-variant-numeric: tabular-nums; }
+    .dg-gross-profit .bar-neutral { fill: var(--surface-hi, #f3f2ee); }
+    .dg-gross-profit .bar-final { fill: var(--profit-bg, #e6f6ec); }
+    .dg-gross-profit .conn { stroke: var(--text-dim, #63636a); stroke-width: 2; marker-end: url(#gp-arrow); }
+    .dg-gross-profit .conn-label { font-size: 13px; font-weight: 600; fill: var(--loss, #d9463f); }
+  </style>
+
+  <text class="heading" x="40" y="40">粗利はどう決まる？</text>
+  <text class="lead" x="40" y="68">粗利 ＝ 販売価格 − 販売手数料 − 発送送料 − 梱包材費 − 紐付けた在庫の原価</text>
+
+  <!-- row 1: 販売価格 -->
+  <circle class="badge" cx="55" cy="118" r="13"/>
+  <text class="badge-num" x="55" y="119">1</text>
+  <text class="row-label" x="80" y="123">販売価格</text>
+  <rect class="bar-neutral" x="230" y="100" width="480" height="36" rx="8"/>
+  <text class="row-amount" x="722" y="123">¥4,000</text>
+
+  <line class="conn" x1="255" y1="136" x2="255" y2="166"/>
+  <text class="conn-label" x="275" y="156">− 販売手数料　¥400</text>
+
+  <!-- row 2: 残り -->
+  <circle class="badge" cx="55" cy="186" r="13"/>
+  <text class="badge-num" x="55" y="187">2</text>
+  <text class="row-label" x="80" y="191">残り</text>
+  <rect class="bar-neutral" x="230" y="168" width="432" height="36" rx="8"/>
+  <text class="row-amount" x="674" y="191">¥3,600</text>
+
+  <line class="conn" x1="255" y1="204" x2="255" y2="234"/>
+  <text class="conn-label" x="275" y="224">− 発送送料　¥600</text>
+
+  <!-- row 3: 残り -->
+  <circle class="badge" cx="55" cy="254" r="13"/>
+  <text class="badge-num" x="55" y="255">3</text>
+  <text class="row-label" x="80" y="259">残り</text>
+  <rect class="bar-neutral" x="230" y="236" width="360" height="36" rx="8"/>
+  <text class="row-amount" x="602" y="259">¥3,000</text>
+
+  <line class="conn" x1="255" y1="272" x2="255" y2="302"/>
+  <text class="conn-label" x="275" y="292">− 梱包材費　¥200</text>
+
+  <!-- row 4: 残り -->
+  <circle class="badge" cx="55" cy="322" r="13"/>
+  <text class="badge-num" x="55" y="323">4</text>
+  <text class="row-label" x="80" y="327">残り</text>
+  <rect class="bar-neutral" x="230" y="304" width="336" height="36" rx="8"/>
+  <text class="row-amount" x="578" y="327">¥2,800</text>
+
+  <line class="conn" x1="255" y1="340" x2="255" y2="370"/>
+  <text class="conn-label" x="275" y="360">− 紐付けた在庫の原価　¥1,800</text>
+
+  <!-- row 5: 粗利（最終） -->
+  <circle class="badge" cx="55" cy="390" r="13"/>
+  <text class="badge-num" x="55" y="391">5</text>
+  <text class="row-label" x="80" y="395">粗利</text>
+  <rect class="bar-final" x="230" y="372" width="120" height="36" rx="8"/>
+  <text class="row-amount" x="362" y="395" style="fill:var(--profit, #2f9e5a)">¥1,000</text>
+
+  <text class="note" x="780" y="460" text-anchor="end">（金額は説明のための例です）</text>
+</svg>

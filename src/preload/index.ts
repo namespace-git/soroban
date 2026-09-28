@@ -134,7 +134,7 @@ const api: SorobanApi = {
   revealDbFolder: invoke('revealDbFolder'),
   resetData: invoke('resetData'),
 
-  openMercari: invoke('openMercari'),
+  openChannelPage: invoke('openChannelPage'),
 
   logClient: invoke('logClient'),
   checkForUpdate: invoke('checkForUpdate'),

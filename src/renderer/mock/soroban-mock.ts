@@ -18,7 +18,7 @@ import type {
   MonthlySummary, DashboardStats, CollectorRun,
   Material, VariantSummary, Tag, Fulfillment,
   ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
-  Listing, ListingStatus,
+  Listing, ListingStatus, SalesChannel, FeeSource,
   Expense, ExpenseInput, ExpenseLineInput, ExpenseLine, ExpenseCategory,
   ReceiptDraft, ReceiptRead, AiStatus, TrackingApiStatus,
   AllocMethod, MonthClose, MonthDetail, MonthSaleRow, MonthTotals,
@@ -295,6 +295,7 @@ const deletedShippingMethodFees = new Map<string, number>()
 
 let settings: Record<string, string> = {
   fee_rate_bp: '1000',
+  fee_rate_bp_yahoo: '500',
   collect_interval_h: '1',
   aging_warn_days: '90',
   mercari_keyword: '【',
@@ -801,6 +802,37 @@ function mercariId(): string {
   return 'm' + s
 }
 
+/** Yahoo!フリマの商品ID（見本）。実物と同じ `z` + 数字の形（channelPageUrl の検査に合わせる） */
+function yahooId(): string {
+  let s = ''
+  for (let i = 0; i < 9; i++) s += Math.floor(Math.random() * 10)
+  return 'z' + s
+}
+
+/** 出品先ごとの手数料率（設定 fee_rate_bp / fee_rate_bp_yahoo）。率は sale.fee に焼き付けるだけで、
+    設定を変えても既存の販売は動かさない（main と同じ） */
+function rateBpForChannel(channel: SalesChannel): number {
+  return Number((channel === 'yahoo' ? settings.fee_rate_bp_yahoo : settings.fee_rate_bp) ?? (channel === 'yahoo' ? 500 : 1000))
+}
+
+/**
+ * 出品先ページの URL。**main の channelPageUrl（src/main/index.ts）と同じ検査**。
+ * id の形が出品先と合わなければ Error（別サイトの id で開かせない）
+ */
+function mockChannelPageUrl(channel: SalesChannel, kind: 'item' | 'transaction', itemId: string): string {
+  if (channel === 'mercari') {
+    if (!/^m\d{9,}$/.test(itemId)) throw new Error(`メルカリの商品IDではありません: ${itemId}`)
+    return `https://jp.mercari.com/${kind === 'item' ? 'item' : 'transaction'}/${itemId}`
+  }
+  if (channel === 'yahoo') {
+    if (!/^[a-z]\d{8,}$/.test(itemId)) throw new Error(`Yahoo!フリマの商品IDではありません: ${itemId}`)
+    return kind === 'item'
+      ? `https://paypayfleamarket.yahoo.co.jp/item/${itemId}`
+      : `https://paypayfleamarket-sec.yahoo.co.jp/item/${itemId}/trade/seller`
+  }
+  throw new Error(`知らない出品先です: ${String(channel)}`)
+}
+
 /**
  * 自動取得（collector）の販売のうち半分だけダミーのサムネURLを持たせる。
  * モックからは実ファイルを読めないので、画面側は @error でプレースホルダに落ちることの確認になる。
@@ -825,21 +857,37 @@ function buildSaleFixed(opts: {
   statusOverride?: SaleStatus
   /** 計上日を明示指定する見本（省略時は soldAtFor が今月・先月の範囲に散らす） */
   soldAtOverride?: string
+  /** 出品先。省略時は 'mercari' */
+  channel?: SalesChannel
+  /**
+   * 実額の手数料を明示指定する見本（Yahoo!フリマはキャンペーンで 0 円になったり、率どおりに
+   * 1 円合わないことがある。指定すると fee_source は既定で 'actual' になる。省略時は率どおりに計算する）
+   */
+  feeOverride?: number
+  /** 取り込み・手入力を明示指定する見本（省略時は半々。Yahoo!フリマはまだ自動取り込みが無いので manual 固定にする） */
+  sourceOverride?: SaleSource
+  /** fee_source を明示指定する見本（省略時は feeOverride の有無と source から決める） */
+  feeSourceOverride?: FeeSource
 }): SaleProfit {
-  const rateBp = Number(settings.fee_rate_bp)
+  const channel: SalesChannel = opts.channel ?? 'mercari'
+  const rateBp = rateBpForChannel(channel)
   const price = opts.priceOverride ?? priceFor(opts.i)
-  const fee = calcFeeMock(price, rateBp)
+  const fee = opts.feeOverride ?? calcFeeMock(price, rateBp)
   const packaging = opts.packaging ?? 0
   const cost = opts.items.reduce((s, it) => s + it.landed_cost, 0)
   const itemCount = opts.items.length
   // 取り込み風・手入力風を半々にする（実際の収集は行わない）
-  const source: SaleSource = opts.i % 2 === 0 ? 'collector' : 'manual'
+  const source: SaleSource = opts.sourceOverride ?? (opts.i % 2 === 0 ? 'collector' : 'manual')
+  // 実額が取れているのは、取り込み（取引画面から実額を読む）か、明示的に実額を指定した見本だけ。
+  // 手入力は率からの見込みしか持たない
+  const feeSource: FeeSource = opts.feeSourceOverride ?? (opts.feeOverride !== undefined || source === 'collector' ? 'actual' : 'rate')
   const soldAt = opts.soldAtOverride ?? soldAtFor(opts.i)
   const statusInfo = opts.statusOverride ? statusInfoFor(opts.statusOverride, soldAt, opts.i) : saleStatusFor(source, soldAt)
 
   const sale: SaleProfit = {
     id: uid(),
-    mercari_item_id: mercariId(),
+    channel,
+    mercari_item_id: channel === 'yahoo' ? yahooId() : mercariId(),
     thumb_url: thumbUrlFor(opts.i, source),
     sold_at: soldAt,
     purchased_at: purchasedAtFor(statusInfo.status, soldAt, opts.i),
@@ -847,6 +895,7 @@ function buildSaleFixed(opts: {
     kind: opts.kind,
     price,
     fee,
+    fee_source: feeSource,
     shipping_fee: opts.shipping.fee,
     packaging_cost: packaging,
     is_shipping_confirmed: opts.shipping.confirmed ? 1 : 0,
@@ -1015,6 +1064,45 @@ function buildInitialSales(): void {
     }))
   }
 
+  // --- Yahoo!フリマの販売（見本。まだ自動取り込みが無いので手入力の体）。手数料は実額が優先されるため、
+  //     率どおり／キャンペーンで0円／率と1円合わない、の3パターンを混ぜる。商品名の長さも揃えない ---
+  {
+    const i = idx++
+    out.push(buildSaleFixed({
+      i, title: '【Z074-4】メロジョイ風ポーチ', kind: 'resale', items: [],
+      shipping: { id: null, fee: 0, confirmed: false, source: null },
+      channel: 'yahoo', sourceOverride: 'manual',
+    }))
+  }
+  {
+    const i = idx++
+    const model = 'Z045-2'
+    const item = takeOldestByModel(model)
+    const method = sm(i)
+    out.push(buildSaleFixed({
+      i,
+      title: `【${model}】${displayName(variantOf(model))} 美品・匿名配送・送料込みで即購入OKです、まとめ買い歓迎します`,
+      kind: 'resale', items: item ? [item] : [],
+      shipping: { id: method.id, fee: method.fee, confirmed: true, source: 'actual' },
+      packaging: packagingFor(i),
+      channel: 'yahoo', sourceOverride: 'manual',
+      feeOverride: 0, // キャンペーンで手数料無料になった実額
+    }))
+  }
+  {
+    const i = idx++
+    const model = 'Z012-1'
+    const method = sm(i)
+    out.push(buildSaleFixed({
+      i, title: `【${model}】${displayName(variantOf(model))}`, kind: 'resale', items: [],
+      shipping: { id: method.id, fee: method.fee, confirmed: true, source: 'actual' },
+      packaging: packagingFor(i),
+      channel: 'yahoo', sourceOverride: 'manual',
+      priceOverride: 2000,
+      feeOverride: 99, // 5%なら100円のはずが、実額は1円合わない
+    }))
+  }
+
   sales = out
 }
 
@@ -1023,6 +1111,8 @@ function buildInitialSales(): void {
 // ------------------------------------------------------------
 
 interface ListingRecord {
+  /** 出品先。既存の出品はすべて 'mercari' */
+  channel: SalesChannel
   mercari_item_id: string
   title: string
   price: number
@@ -1048,7 +1138,7 @@ function buildListing(rec: ListingRecord): Listing {
     .map(id => inventory.find(i => i.id === id))
     .filter((i): i is InventoryItem => !!i)
   const reservedCost = items.reduce((s, it) => s + it.landed_cost, 0)
-  const rateBp = Number(settings.fee_rate_bp)
+  const rateBp = rateBpForChannel(rec.channel)
   const shippingMethod = rec.shipping_method_id
     ? shippingMethods.find(m => m.id === rec.shipping_method_id) ?? null
     : null
@@ -1057,6 +1147,7 @@ function buildListing(rec: ListingRecord): Listing {
     ? rec.price - calcFeeMock(rec.price, rateBp) - shippingFee - reservedCost
     : null
   return {
+    channel: rec.channel,
     mercari_item_id: rec.mercari_item_id,
     title: rec.title,
     price: rec.price,
@@ -1083,12 +1174,16 @@ function addListing(opts: {
   reserve: boolean
   likes?: number | null
   shippingMethodId?: string | null
+  /** 出品先。省略時は 'mercari' */
+  channel?: SalesChannel
 }): void {
   const v = variantOf(opts.model)
+  const channel: SalesChannel = opts.channel ?? 'mercari'
   const title = `【${opts.model}】${displayName(v)}`
   const price = Math.round((v.price * 1.8) / 100) * 100
-  const id = mercariId()
+  const id = channel === 'yahoo' ? yahooId() : mercariId()
   listingRecords.push({
+    channel,
     mercari_item_id: id,
     title,
     price,
@@ -1109,12 +1204,12 @@ function addListing(opts: {
     const item = takeOldestByModel(opts.model)
     if (item) {
       listingItems.set(id, [item.id])
-      item.listing = { mercari_item_id: id, price, status: opts.status }
+      item.listing = { channel, mercari_item_id: id, price, status: opts.status }
     }
   }
 }
 
-/** 出品中6件（うち未引き当て3件）・公開停止中2件・売れた2件・取り下げ1件 */
+/** 出品中6件（うち未引き当て3件）・公開停止中2件・売れた2件・取り下げ1件・Yahoo!フリマ2件 */
 function buildInitialListings(): void {
   addListing({ model: 'Z080-2', status: 'active', daysAgoFirstSeen: 10, reserve: true, likes: 5 })
   addListing({ model: 'Z012-1', status: 'active', daysAgoFirstSeen: 6, reserve: false, likes: 1 })
@@ -1127,6 +1222,8 @@ function buildInitialListings(): void {
   addListing({ model: 'Z001-4', status: 'sold', daysAgoFirstSeen: 25, reserve: true })
   addListing({ model: 'Z088-2', status: 'sold', daysAgoFirstSeen: 22, reserve: true })
   addListing({ model: 'Z012-3', status: 'ended', daysAgoFirstSeen: 30, reserve: false })
+  addListing({ model: 'Z056-2', status: 'active', daysAgoFirstSeen: 5, reserve: false, likes: 2, channel: 'yahoo' })
+  addListing({ model: 'A012', status: 'active', daysAgoFirstSeen: 2, reserve: false, channel: 'yahoo' })
 }
 
 // ------------------------------------------------------------
@@ -2699,7 +2796,8 @@ const api: SorobanApi = {
   },
 
   async createSale(input: SaleInput) {
-    const rateBp = Number(settings.fee_rate_bp)
+    const channel: SalesChannel = input.channel ?? 'mercari'
+    const rateBp = rateBpForChannel(channel)
     const price = input.price
     const fee = calcFeeMock(price, rateBp)
     const modelCodes = extractAllCodes(input.title)
@@ -2707,6 +2805,7 @@ const api: SorobanApi = {
 
     const sale: SaleProfit = {
       id,
+      channel,
       mercari_item_id: input.mercari_item_id ?? null,
       thumb_url: null, // 手入力の販売はサムネイルを持たない
       sold_at: input.sold_at,
@@ -2715,6 +2814,7 @@ const api: SorobanApi = {
       kind: input.kind ?? 'resale',
       price,
       fee,
+      fee_source: 'rate', // 手入力は実額を知らないので、率からの見込み
       shipping_fee: 0,
       packaging_cost: 0,
       is_shipping_confirmed: 0,
@@ -2765,7 +2865,10 @@ const api: SorobanApi = {
     if (patch.note !== undefined) sale.note = patch.note
     if (patch.price !== undefined) {
       sale.price = patch.price
-      sale.fee = calcFeeMock(patch.price, Number(settings.fee_rate_bp))
+      // fee_source が実額（actual）のときは、価格を直しても手数料を率で上書きしない
+      if (sale.fee_source !== 'actual') {
+        sale.fee = calcFeeMock(patch.price, rateBpForChannel(sale.channel))
+      }
     }
     if (patch.shipping_method_id !== undefined) {
       sale.shipping_method_id = patch.shipping_method_id
@@ -3678,7 +3781,7 @@ const api: SorobanApi = {
         const fromId = item.listing.mercari_item_id
         listingItems.set(fromId, (listingItems.get(fromId) ?? []).filter(x => x !== id))
       }
-      item.listing = { mercari_item_id: mercariItemId, price: rec.price, status: rec.status }
+      item.listing = { channel: rec.channel, mercari_item_id: mercariItemId, price: rec.price, status: rec.status }
     }
     const current = listingItems.get(mercariItemId) ?? []
     listingItems.set(mercariItemId, [...new Set([...current, ...inventoryItemIds])])
@@ -3744,7 +3847,7 @@ const api: SorobanApi = {
       const item = takeOldestByModel(model)
       if (!item) continue
       listingItems.set(rec.mercari_item_id, [item.id])
-      item.listing = { mercari_item_id: rec.mercari_item_id, price: rec.price, status: rec.status }
+      item.listing = { channel: rec.channel, mercari_item_id: rec.mercari_item_id, price: rec.price, status: rec.status }
       confirmed++
     }
     return wait(confirmed)
@@ -4164,11 +4267,12 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
-  // メルカリのページを標準ブラウザで開く。モックにはブラウザ制御が無いため、開く先を確認できるよう
-  // alert で知らせる（本物は shell.openExternal で新規タブに開く。読み取り専用・ログイン操作はしない）
-  async openMercari(kind: 'item' | 'transaction', mercariItemId: string) {
-    const url = `https://jp.mercari.com/${kind}/${mercariItemId}`
-    window.alert(`ブラウザで開きます: ${url}`)
+  // 出品先のページを標準ブラウザで開く。モックにはブラウザ制御が無いため console にだけ出す
+  // （本物は shell.openExternal で新規タブに開く。読み取り専用・ログイン操作はしない）。
+  // id の形が出品先と合わなければ Error（main の channelPageUrl と同じ検査）
+  async openChannelPage(channel: SalesChannel, kind: 'item' | 'transaction', itemId: string) {
+    const url = mockChannelPageUrl(channel, kind, itemId)
+    console.debug('[soroban:openChannelPage]', url)
     return wait(undefined)
   },
 

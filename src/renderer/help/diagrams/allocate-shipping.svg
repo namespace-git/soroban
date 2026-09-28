@@ -1,0 +1,47 @@
+<svg class="dg-allocate-shipping" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 420" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="as-title">
+  <title id="as-title">仕入送料の按分：送料100円を明細3点へ33円・33円・34円に配り、端数は最後の行に寄せて合計を一致させる図</title>
+  <defs>
+    <marker id="as-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--text-dim, #63636a)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-allocate-shipping .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-allocate-shipping .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-allocate-shipping .note { font-size: 12px; fill: var(--text-faint, #97979e); }
+    .dg-allocate-shipping .card { fill: var(--surface-hi, #f3f2ee); }
+    .dg-allocate-shipping .card-top { fill: var(--surface-hi, #f3f2ee); }
+    .dg-allocate-shipping .card-last { fill: var(--info-bg, #e8f0fc); }
+    .dg-allocate-shipping .box-title { font-size: 15px; font-weight: 600; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-allocate-shipping .box-amount { font-size: 20px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; font-variant-numeric: tabular-nums; }
+    .dg-allocate-shipping .conn { stroke: var(--text-dim, #63636a); stroke-width: 2; fill: none; marker-end: url(#as-arrow); }
+    .dg-allocate-shipping .pill-note { font-size: 12px; font-weight: 600; fill: var(--info, #2f6fcf); text-anchor: middle; }
+    .dg-allocate-shipping .sum-line { font-size: 15px; font-weight: 700; fill: var(--profit, #2f9e5a); text-anchor: middle; }
+  </style>
+
+  <text class="heading" x="40" y="36">送料は明細に配り分ける</text>
+  <text class="lead" x="40" y="60">仕入の送料・その他費用を、明細に金額か数量の比で配る（端数は最後の行に寄せる）</text>
+
+  <rect class="card-top" x="310" y="90" width="200" height="60" rx="12"/>
+  <text class="box-title" x="410" y="116">仕入送料など</text>
+  <text class="box-amount" x="410" y="140">¥100</text>
+
+  <path class="conn" d="M360,150 C300,190 160,190 160,218"/>
+  <path class="conn" d="M410,150 L410,218"/>
+  <path class="conn" d="M460,150 C520,190 660,190 660,218"/>
+
+  <rect class="card" x="60" y="220" width="200" height="80" rx="12"/>
+  <text class="box-title" x="160" y="248">明細1</text>
+  <text class="box-amount" x="160" y="278">¥33</text>
+
+  <rect class="card" x="310" y="220" width="200" height="80" rx="12"/>
+  <text class="box-title" x="410" y="248">明細2</text>
+  <text class="box-amount" x="410" y="278">¥33</text>
+
+  <rect class="card-last" x="560" y="220" width="200" height="80" rx="12"/>
+  <text class="box-title" x="660" y="248">明細3（最終行）</text>
+  <text class="box-amount" x="660" y="278">¥34</text>
+  <text class="pill-note" x="660" y="296">端数はここに寄せる</text>
+
+  <text class="sum-line" x="410" y="350">¥33 ＋ ¥33 ＋ ¥34 ＝ ¥100（合計は必ず一致）</text>
+</svg>

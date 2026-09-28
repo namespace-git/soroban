@@ -41,7 +41,9 @@ describe('ペルソナ22：出し直す人（移動・取り下げ・廃棄）',
     expect(listB.items.map(i => i.id)).toEqual([x.id])
     const xAfterMove = db.listInventory('in_stock').find(i => i.id === x.id)!
     expect(xAfterMove.status).toBe('in_stock')
-    expect(xAfterMove.listing).toEqual({ mercari_item_id: 'B', price: 2100, status: 'active' })
+    expect(xAfterMove.listing).toEqual({
+      channel: 'mercari', mercari_item_id: 'B', price: 2100, status: 'active',
+    })
 
     // suggestForListing(B) には自分自身に引き当て済みのXは出ない。別在庫Zは出る
     const z = makeSingleItem('M101', '2026-06-02')

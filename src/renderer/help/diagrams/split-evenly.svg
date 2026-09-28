@@ -1,0 +1,47 @@
+<svg class="dg-split-evenly" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 420" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="se-title">
+  <title id="se-title">在庫の均等割り：1,001円を3点に分けると333円・334円・334円になり、余りは末尾から1円ずつ配って合計を一致させる図</title>
+  <defs>
+    <marker id="se-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--text-dim, #63636a)"/>
+    </marker>
+  </defs>
+  <style>
+    .dg-split-evenly .heading { font-size: 22px; font-weight: 700; fill: var(--text, #26262a); }
+    .dg-split-evenly .lead { font-size: 14px; fill: var(--text-dim, #63636a); }
+    .dg-split-evenly .card { fill: var(--surface-hi, #f3f2ee); }
+    .dg-split-evenly .card-top { fill: var(--surface-hi, #f3f2ee); }
+    .dg-split-evenly .card-plus { fill: var(--info-bg, #e8f0fc); }
+    .dg-split-evenly .box-title { font-size: 15px; font-weight: 600; fill: var(--text, #26262a); text-anchor: middle; }
+    .dg-split-evenly .box-amount { font-size: 20px; font-weight: 700; fill: var(--text, #26262a); text-anchor: middle; font-variant-numeric: tabular-nums; }
+    .dg-split-evenly .conn { stroke: var(--text-dim, #63636a); stroke-width: 2; fill: none; marker-end: url(#se-arrow); }
+    .dg-split-evenly .pill-note { font-size: 12px; font-weight: 600; fill: var(--info, #2f6fcf); text-anchor: middle; }
+    .dg-split-evenly .sum-line { font-size: 15px; font-weight: 700; fill: var(--profit, #2f9e5a); text-anchor: middle; }
+  </style>
+
+  <text class="heading" x="40" y="36">在庫を均等に分ける</text>
+  <text class="lead" x="40" y="60">1点あたりの金額は割り切れないことがある。余りは1円ずつ、末尾の行から配る</text>
+
+  <rect class="card-top" x="310" y="90" width="200" height="60" rx="12"/>
+  <text class="box-title" x="410" y="116">分割する在庫</text>
+  <text class="box-amount" x="410" y="140">¥1,001</text>
+
+  <path class="conn" d="M360,150 C300,190 160,190 160,218"/>
+  <path class="conn" d="M410,150 L410,218"/>
+  <path class="conn" d="M460,150 C520,190 660,190 660,218"/>
+
+  <rect class="card" x="60" y="220" width="200" height="80" rx="12"/>
+  <text class="box-title" x="160" y="248">1点目</text>
+  <text class="box-amount" x="160" y="278">¥333</text>
+
+  <rect class="card-plus" x="310" y="220" width="200" height="80" rx="12"/>
+  <text class="box-title" x="410" y="248">2点目</text>
+  <text class="box-amount" x="410" y="278">¥334</text>
+  <text class="pill-note" x="410" y="296">＋1円</text>
+
+  <rect class="card-plus" x="560" y="220" width="200" height="80" rx="12"/>
+  <text class="box-title" x="660" y="248">3点目（末尾）</text>
+  <text class="box-amount" x="660" y="278">¥334</text>
+  <text class="pill-note" x="660" y="296">＋1円</text>
+
+  <text class="sum-line" x="410" y="350">¥333 ＋ ¥334 ＋ ¥334 ＝ ¥1,001（合計は必ず一致）</text>
+</svg>

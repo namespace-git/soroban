@@ -48,7 +48,9 @@ describe('ペルソナ21：出品する人（基本の流れ）', () => {
     // listInventory：引き当て済みでも status は in_stock のまま。listing は派生で見える
     const afterReserve = db.listInventory('in_stock').find(i => i.id === first.id)!
     expect(afterReserve.status).toBe('in_stock')
-    expect(afterReserve.listing).toEqual({ mercari_item_id: 'LST1', price: 2500, status: 'active' })
+    expect(afterReserve.listing).toEqual({
+      channel: 'mercari', mercari_item_id: 'LST1', price: 2500, status: 'active',
+    })
 
     // 在庫数・在庫金額は出品しても変わらない
     const dashBefore = db.getDashboard()

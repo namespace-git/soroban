@@ -4,6 +4,7 @@
 // レンダラー側では利益を再計算しない。
 import { ref, reactive, computed, onMounted, watch, inject, type Ref } from 'vue'
 import type { Inbox, InboxItem, InboxKind, ShippingMethod, DashboardStats } from '../../shared/types'
+import { CHANNEL_LABEL } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
 import StatusPill from '../components/StatusPill.vue'
@@ -25,6 +26,7 @@ const groupLabels: Record<InboxKind, string> = {
 
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
+const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const goto = inject<(t: string, payload?: {
   modelCode?: string
   stage?: 'listed' | 'pending' | 'done' | 'all'
@@ -154,10 +156,14 @@ async function snooze(item: InboxItem) {
   await withBusy(item.id, () => window.soroban.snoozeReminder(r.type, r.purchase_id ?? r.month ?? null))
 }
 
-// --- 取引画面を開く（メルカリを既定ブラウザで） ---
+// --- 取引画面を開く（既定ブラウザで。出品先に応じて正しい URL を main が組み立てる） ---
 async function openTransaction(item: InboxItem) {
   if (!item.sale?.mercari_item_id) return
-  await window.soroban.openMercari('transaction', item.sale.mercari_item_id)
+  try {
+    await window.soroban.openChannelPage(item.sale.channel, 'transaction', item.sale.mercari_item_id)
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  }
 }
 
 // --- 見直すもの ---
@@ -222,6 +228,7 @@ function gotoTopModel() {
 
                 <div class="row-main">
                   <div class="row-labels">
+                    <StatusChip v-if="item.sale" tone="neutral" :label="CHANNEL_LABEL[item.sale.channel]" :title="`出品先：${CHANNEL_LABEL[item.sale.channel]}`" />
                     <StatusPill v-if="group.kind === 'ship'" tone="solid-info" label="発送してください" />
                     <StatusChip v-if="group.kind === 'confirm' && item.purchase" tone="neutral" :label="item.purchase.shop_account_name" />
                   </div>
