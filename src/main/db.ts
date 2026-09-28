@@ -578,6 +578,55 @@ function rebuildInventoryItemForItemCode(): void {
   db.pragma('foreign_keys = ON')
 }
 
+function collectorRunHasYahooSource(): boolean {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'collector_run'`,
+  ).get() as { sql: string } | undefined
+  return !!row && row.sql.includes("'yahoo'")
+}
+
+/**
+ * collector_run.source の CHECK に 'yahoo'（Yahoo!フリマの取り込み実行記録）を足す。
+ * rebuildSaleLineForListingSource と同じ流儀。collector_run は外部キー・ビュー・トリガーの
+ * どこからも参照されていない（参照しているのはインデックス2本だけ）ため、ビューやトリガーの
+ * DROP/再作成は不要。インデックス2本（idx_run_started・idx_run_source_started）だけ作り直す。
+ * データ（既存の実行記録）は一切落とさない。
+ */
+function rebuildCollectorRunForYahoo(): void {
+  db.pragma('foreign_keys = OFF')
+  const tx = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE collector_run_new (
+        id          TEXT PRIMARY KEY,
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        status      TEXT NOT NULL DEFAULT 'ok'
+                    CHECK (status IN ('ok','auth_required','failed','empty')),
+        fetched     INTEGER NOT NULL DEFAULT 0,
+        inserted    INTEGER NOT NULL DEFAULT 0,
+        message     TEXT,
+        source          TEXT NOT NULL DEFAULT 'mercari'
+                        CHECK (source IN ('mercari','mellojoy','yahoo')),
+        shop_account_id TEXT REFERENCES shop_account(id)
+      );
+
+      INSERT INTO collector_run_new
+        (id, started_at, finished_at, status, fetched, inserted, message, source, shop_account_id)
+      SELECT
+        id, started_at, finished_at, status, fetched, inserted, message, source, shop_account_id
+      FROM collector_run;
+
+      DROP TABLE collector_run;
+      ALTER TABLE collector_run_new RENAME TO collector_run;
+
+      CREATE INDEX IF NOT EXISTS idx_run_started ON collector_run(started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_run_source_started ON collector_run(source, started_at DESC);
+    `)
+  })
+  tx()
+  db.pragma('foreign_keys = ON')
+}
+
 function migrate(): void {
   const verRow = db.prepare(`SELECT value FROM setting WHERE key = 'schema_version'`).get() as
     | { value: string } | undefined
@@ -1236,6 +1285,17 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '32')
          ON CONFLICT(key) DO UPDATE SET value = '32'`,
+    ).run()
+  }
+
+  if (version < 33) {
+    // 出品先が増えた（Yahoo!フリマ）ので、収集の実行記録（collector_run.source）にも
+    // 'yahoo' を足す。既存の行は1件も減らさない
+    if (!collectorRunHasYahooSource()) rebuildCollectorRunForYahoo()
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '33')
+         ON CONFLICT(key) DO UPDATE SET value = '33'`,
     ).run()
   }
 
@@ -2190,15 +2250,22 @@ export function createSale(input: SaleInput): string {
   const rateBp = feeRateBpFor(channel)
   const modelCodes = extractCodes(input.title)
 
+  // 実額（0円も実額。Yahoo!フリマは率で計算できないため）が渡っていればそれを使い
+  // fee_source='actual' にする。無ければ率で見込みを計算し fee_source='rate'
+  const hasActualFee = typeof input.fee === 'number'
+  if (hasActualFee) assertYen('手数料', input.fee as number)
+  const fee = hasActualFee ? (input.fee as number) : calcFee(input.price, rateBp)
+  const feeSource: FeeSource = hasActualFee ? 'actual' : 'rate'
+
   db.prepare(
     `INSERT INTO sale
        (id, channel, mercari_item_id, title, sold_at, price, kind,
         fee_rate_bp, fee, fee_source, note, source, model_codes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'rate', ?, 'manual', ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?)`,
   ).run(
     id, channel, input.mercari_item_id ?? null, input.title, input.sold_at,
     input.price, input.kind ?? 'resale', rateBp,
-    calcFee(input.price, rateBp), input.note ?? null,
+    fee, feeSource, input.note ?? null,
     JSON.stringify(modelCodes),
   )
 
@@ -2232,9 +2299,22 @@ export function updateSale(id: string, patch: SalePatch): void {
   if (patch.price !== undefined) {
     assertYen('価格', patch.price)
     put('price', patch.price)
-    if (cur.fee_source !== 'actual') {
-      put('fee', calcFee(patch.price, cur.fee_rate_bp))
+  }
+
+  // patch.fee が渡っていれば、価格が同時に変わっていても実額が勝つ（number→実額、null→率に戻す）。
+  // 渡っていなければ従来どおり、価格が変わったときだけ・実額でなければ率で再計算する
+  if (patch.fee !== undefined) {
+    if (patch.fee === null) {
+      const price = patch.price !== undefined ? patch.price : cur.price
+      put('fee', calcFee(price, cur.fee_rate_bp))
+      put('fee_source', 'rate')
+    } else {
+      assertYen('手数料', patch.fee)
+      put('fee', patch.fee)
+      put('fee_source', 'actual')
     }
+  } else if (patch.price !== undefined && cur.fee_source !== 'actual') {
+    put('fee', calcFee(patch.price, cur.fee_rate_bp))
   }
 
   // 発送方法を選んだら送料をマスタから引き、確認済みにする
@@ -3189,6 +3269,8 @@ export function upsertListings(
     /** いいね数。取れなければ null */
     likes?: number | null
   }>,
+  /** 出品先（省略時 'mercari'）。1回の呼び出しは1チャンネル分の一覧を渡す前提 */
+  channel: SalesChannel = 'mercari',
 ): { inserted: number; updated: number } {
   const today = todayLocal()
   // last_seen_at は画面側で collector_run.finished_at（ISO）と比較するため、
@@ -3196,11 +3278,9 @@ export function upsertListings(
   // （Codexレビュー指摘：形式が違うと文字列比較が常に不一致になる）
   const now = new Date().toISOString()
   const getExisting = db.prepare('SELECT status, listed_at FROM listing WHERE mercari_item_id = ?')
-  // 出品中タブの取り込みはメルカリだけ（Yahoo!フリマの取り込みは次の段）。
-  // 既定値に任せず明示しておく（次の段で足しやすくするため）
   const insertStmt = db.prepare(`
     INSERT INTO listing (mercari_item_id, channel, title, price, status, first_seen_at, last_seen_at, listed_at, likes)
-    VALUES (?, 'mercari', ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
   const updateStmt = db.prepare(`
     UPDATE listing SET title = ?, price = ?, status = ?, last_seen_at = ?,
@@ -3220,7 +3300,7 @@ export function upsertListings(
       const existing = getExisting.get(r.mercariItemId) as
         | { status: ListingStatus; listed_at: string } | undefined
       if (!existing) {
-        insertStmt.run(r.mercariItemId, r.title, r.price, status, today, now, candidate ?? today, likes)
+        insertStmt.run(r.mercariItemId, channel, r.title, r.price, status, today, now, candidate ?? today, likes)
         inserted++
       } else if (existing.status === 'active' || existing.status === 'suspended') {
         const listedAt = candidate !== null && candidate < existing.listed_at
@@ -5717,18 +5797,20 @@ export function insertCollected(
      */
     status?: SaleStatus | null
   }>,
+  /** 出品先（省略時 'mercari'）。手数料率（feeRateBpFor）・sale.channel に効く */
+  channel: SalesChannel = 'mercari',
 ): Array<{ id: string; mercariItemId: string }> {
-  const rateBp = setting('fee_rate_bp', 1000)
+  const rateBp = feeRateBpFor(channel)
   // 空なら「型番が抜けるか」で転売/私物を判定。空でなければキーワード（どれか1つでも部分一致・大小無視）で判定
   // （キーワードが設定されていれば collector 側で不一致は取り込まれないので、ここに来るのは一致したものだけ）
   const keywords = parseKeywords(settingStr('mercari_keyword', ''))
 
   const ins = db.prepare(
     `INSERT INTO sale
-       (id, mercari_item_id, title, sold_at, price, kind,
+       (id, channel, mercari_item_id, title, sold_at, price, kind,
         fee_rate_bp, fee, fee_source, source, raw, is_shipping_confirmed, model_codes,
         shipping_fee, shipping_source, status, shipped_at, delivered_at, completed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'collector', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'collector', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
 
   const inserted: Array<{ id: string; mercariItemId: string }> = []
@@ -5758,7 +5840,7 @@ export function insertCollected(
 
       const id = randomUUID()
       ins.run(
-        id, r.mercariItemId, r.title, r.soldAt, r.price, kind,
+        id, channel, r.mercariItemId, r.title, r.soldAt, r.price, kind,
         rateBp, fee, feeSource, JSON.stringify(r), confirmed, JSON.stringify(codes),
         shippingFee, shippingSource, status,
         statusDates.shipped_at, statusDates.delivered_at, statusDates.completed_at,
@@ -5989,18 +6071,22 @@ export function listSaleLines(saleId: string): InventoryItem[] {
 
 /**
  * 粗利の見積もり（AllocateDrawer が使う。画面で再計算しないための共通計算）。
- * 手数料は現在の fee_rate_bp で floor、送料は発送方法の料金（無効化・削除済み＝is_active=0でも
- * 引く。shipping_method_id が無ければ 0）、原価は渡した在庫の landed_cost の合計。
- * 既存の販売・手数料率は変えない（見るだけ）。
+ * 手数料は channel（省略時 mercari）の現在の率で floor。input.fee に実額（0 も実額）が
+ * 渡っていれば率は使わずそのまま返す（Yahoo!フリマは率で計算できないため）。
+ * 送料は発送方法の料金（無効化・削除済み＝is_active=0でも引く。shipping_method_id が
+ * 無ければ 0）、原価は渡した在庫の landed_cost の合計。既存の販売・手数料率は変えない（見るだけ）。
  */
 export function estimateSaleProfit(input: {
   price: number
   shipping_method_id: string | null
   packaging_cost?: number
   inventory_item_ids: string[]
+  channel?: SalesChannel
+  fee?: number | null
 }): { fee: number; shipping_fee: number; packaging_cost: number; cost: number; gross_profit: number } {
-  const rateBp = setting('fee_rate_bp', 1000)
-  const fee = calcFee(input.price, rateBp)
+  const rateBp = feeRateBpFor(input.channel ?? 'mercari')
+  if (typeof input.fee === 'number') assertYen('手数料', input.fee)
+  const fee = typeof input.fee === 'number' ? input.fee : calcFee(input.price, rateBp)
 
   let shipping_fee = 0
   if (input.shipping_method_id) {

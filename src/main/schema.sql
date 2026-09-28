@@ -498,9 +498,9 @@ CREATE TABLE IF NOT EXISTS collector_run (
   inserted    INTEGER NOT NULL DEFAULT 0,
   message     TEXT,
 
-  -- mercari = 販売履歴 / mellojoy = 仕入先アカウントの注文履歴
+  -- mercari = 販売履歴 / mellojoy = 仕入先アカウントの注文履歴 / yahoo = Yahoo!フリマの販売履歴
   source          TEXT NOT NULL DEFAULT 'mercari'
-                  CHECK (source IN ('mercari','mellojoy')),
+                  CHECK (source IN ('mercari','mellojoy','yahoo')),
   -- mellojoy のときだけ。どのアカウントの実行か
   shop_account_id TEXT REFERENCES shop_account(id)
 );

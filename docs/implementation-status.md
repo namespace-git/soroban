@@ -57,8 +57,14 @@
 
 ### まだ分かっていないこと
 
-- **送料**。4 件とも `決済金額 − 手数料 = 受取額` で、送料が引かれていない（未発送のため）。**発送後に売上金管理をもう一度見る**
+- **送料**。**発送しただけでは出ない**（2026-09-28 に実物で確認）。4 件とも `tradstat=SELLER_SHIPPED`／「受け取り評価待ち」になったが、売上金管理には送料の行が現れない。**受取評価が終わって取引完了になってから、もう一度見る**
 - **取引完了の見え方**と完了日（まだ完了した取引が無い）
+
+### `tradstat` の値（実物で観測した順）
+
+`NONE`（出品中）→ `WAIT_FOR_SELLER_SHIP`（売れて未発送）→ `SELLER_SHIPPED`（発送済み・受け取り評価待ち）→ （取引完了。未観測）
+
+**取引中・取引完了のページに日付は無い**（`data-cl-params` にも `opentime` は無い）。完了日は売上金管理か受け取り明細から取るしかない。
 
 ### 個人情報
 
@@ -66,18 +72,35 @@
 
 ---
 
-## Yahoo!フリマ 第2段（自動取り込み）でやること
+## Yahoo!フリマ 第2段（自動取り込み）— **着手中**
 
-第1段では**あえて先送り**したもの。
+利用者の指示で第2段に入った。ログインは**手動**（メルカリと同じ。セッションのプロファイルだけ持つ）。
 
-| やること | なぜ先送りしたか |
+### 済んだもの
+
+| | 状態 |
 |---|---|
-| `sale.mercari_item_id` → `channel_item_id` の改名 | テーブル再構築を伴う。いま必要ない |
-| `collector_run.source` の CHECK に `'yahoo'` | 同上（CHECK の変更は再構築）。共有型の `CollectorSource` も未対応 |
+| `src/main/collector-yahoo.ts` のパーサ（取引中・取引完了） | **済**。実物の HTML を `__tests__/fixtures/yahoo-sold.html` に入れて 16 件のテスト。クラス名を全置換しても結果が変わらないことを固定 |
+| `CollectorSource` に `'yahoo'` | **済**（`src/shared/types.ts`） |
+| `estimateSaleProfit` に `channel` と実額 `fee` | **済**。先送りをやめた（Yahoo の紐付けプレビューが 320 円ずれていたため） |
+
+### これから
+
+| やること | 備考 |
+|---|---|
+| `collector_run.source` の CHECK に `'yahoo'` | **再構築が要る**（CHECK は ALTER できない）。参照はインデックス 2 本だけで、FK・ビュー・トリガーは無い |
+| `insertCollected` / `upsertListings` に `channel` 引数 | いまは列の DEFAULT `'mercari'` に頼っている |
+| 収集の実行部（ウィンドウ・ログイン・巡回） | パーティションは `persist:yahoo`。メルカリと同じ振る舞い（UA・ページ間 2〜6 秒・CAPTCHA で停止） |
+| 出品中（`/my/item/selling`）のパーサ | **実物の HTML 待ち**。`opentime`（unix秒）が載る |
+| 売上金管理（`salesmanagement.yahoo.co.jp/list`）のパーサ | **実物の HTML 待ち**。**手数料の実額が取れる唯一の場所** |
+| 売上金管理の **CSV**（`POST /salesmanagelist_csv` に `.crumb` と `i=YYYYMM`） | DOM より桁違いに安定。過去の月も取れる |
+| `sale.mercari_item_id` → `channel_item_id` の改名 | 再構築を伴う。**いま必要ない**ので引き続き先送り |
 | 除外履歴は `deleted_sale` ではなく **`sale_exclusion`** | 名前を取り違えると旧列のまま残る（Codex の指摘） |
-| `insertCollected` に `channel` 引数 | いまは列の DEFAULT `'mercari'` で正しいが、Yahoo を足すときは明示が必要 |
-| `estimateSaleProfit`（紐付けパネルの粗利プレビュー）が**常にメルカリの率**で見積もる | 契約に `channel` が無い。Yahoo の販売に追加で紐付けるときのプレビューがずれる |
-| 売上金管理の **CSV**（`POST /salesmanagelist_csv` に `.crumb` と `i=YYYYMM`） | DOM を読むより桁違いに安定。過去の月も取れる |
+
+### まだ分からないこと（推測で埋めないこと）
+
+- **「取引完了」の `tradstat` の値**。4 件とも `SELLER_SHIPPED`（受け取り評価待ち）までしか観測できていない。`mapYahooTradstat` は**知らない値に `null` を返す**。観測できたら 1 行足す
+- **送料**と**完了日**。上と同じタイミングで分かるはず
 
 **次：Yahoo!フリマを出品先に足す（2段構え）**
 
@@ -91,7 +114,7 @@
 - `listing` の主キーが **`mercari_item_id TEXT PRIMARY KEY`**。`listing_line` の外部キー・トリガー・ビュー3つが参照 → テーブル再構築
 - `sale.mercari_item_id TEXT UNIQUE`（`deleted_sale` の主キーにもなっている）
 - `collector_run.source CHECK (source IN ('mercari','mellojoy'))` → `'yahoo'` を足すには再構築
-- **手数料**：Yahoo!フリマは 2026-05-19 から**一律 5%**。しかも**おまかせ配送は「販売価格 − 送料」に対して 5%** ＝ 率だけでなく**計算の土台が違う**。`販売価格 × 率` で決め打っている箇所を全部洗う
+- **手数料**：**率では計算できない**。実測 6,400→320 / 5,899→294 / 4,280→**213**（5% なら 214）/ 5,200→**0**（キャンペーン）。5% は**見込みの表示にだけ**使い、実額が取れたら必ず実額（`sale.fee_source` が `actual`）。実額の出どころは売上金管理
 - `sale.source` は `'collector'/'manual'`（取り込みか手入力か）なので、**出品先の列は新規に必要**
 - 救い：**同じ在庫を同時に両社へ出品しない**（利用者の運用）ので、紐付けに新しい衝突ルールは要らない
 

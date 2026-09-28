@@ -13,7 +13,7 @@ export type InventoryStatus = 'in_stock' | 'sold' | 'disposed' | 'personal_use' 
 export type AllocMethod = 'by_amount' | 'by_quantity'
 export type RunStatus = 'ok' | 'auth_required' | 'failed' | 'empty'
 /** 収集の対象。mercari = 販売履歴 / mellojoy = 仕入先アカウントの注文履歴 */
-export type CollectorSource = 'mercari' | 'mellojoy'
+export type CollectorSource = 'mercari' | 'mellojoy' | 'yahoo'
 /** draft = 注文履歴から積んだ下書き（価格が確定できなかったもの）。在庫は confirmed で生成 */
 /**
  * 出品先（販売した／出品しているサイト）。
@@ -229,6 +229,16 @@ export interface SaleInput {
    * 率は sale.fee_rate_bp に焼き付けるので、あとで設定を変えても過去の販売は動かない
    */
   channel?: SalesChannel
+  /**
+   * 販売手数料の**実額**（円）。分かっているなら入れる。省略・null なら率から計算する。
+   *
+   * Yahoo!フリマは**率で計算できない**（実測：6,400→320 / 5,899→294 / 4,280→213 /
+   * 5,200→0）。式が存在しないので、実額が分かっているときは必ずこちらを使う。
+   * **0 も実額**（キャンペーンで手数料が無料になる）。「入れていない」は undefined か null
+   *
+   * 入れると sale.fee_source が 'actual' になり、あとで価格を直しても手数料は動かない
+   */
+  fee?: number | null
   mercari_item_id?: string | null
   note?: string | null
 }
@@ -239,6 +249,12 @@ export interface SalePatch {
   /** 手入力の送料。shipping_source は 'manual' になる */
   shipping_fee?: number
   packaging_cost?: number
+  /**
+   * 販売手数料の**実額**（円）に直す。fee_source は 'actual' になり、
+   * 以後は価格を直しても手数料が率で上書きされない。**0 も実額**。
+   * `null` を渡すと率の計算に戻す（fee_source は 'rate'）
+   */
+  fee?: number | null
   price?: number
   sold_at?: string
   title?: string
@@ -1316,7 +1332,14 @@ export interface SorobanApi {
    * 粗利の見積もり（画面で再計算しないための共通計算）。手数料は現在の手数料率、送料は発送方法の料金
    * （無効化・削除済みの発送方法でも料金を引く）、原価は在庫の landed_cost の合計
    */
-  estimateSaleProfit(input: { price: number; shipping_method_id: string | null; packaging_cost?: number; inventory_item_ids: string[] }): Promise<{ fee: number; shipping_fee: number; packaging_cost: number; cost: number; gross_profit: number }>
+  /**
+   * 紐付けパネルの粗利プレビュー。**保存はしない**。
+   *
+   * `channel` を渡さないとメルカリの率で見積もる。Yahoo!フリマの販売で省略すると
+   * 手数料が倍に見える（6,400 円なら 320 のところ 640）。
+   * `fee` に実額が渡ったときは率を使わず**そのまま使う**（0 も実額）
+   */
+  estimateSaleProfit(input: { price: number; shipping_method_id: string | null; packaging_cost?: number; inventory_item_ids: string[]; channel?: SalesChannel; fee?: number | null }): Promise<{ fee: number; shipping_fee: number; packaging_cost: number; cost: number; gross_profit: number }>
   /** 取り込んだ販売を削除したときに残る「もう取り込まない」記録。設定 → データ で見て解除できる */
   listSaleExclusions(): Promise<Array<{ mercari_item_id: string; title: string; excluded_at: string }>>
   removeSaleExclusion(mercariItemId: string): Promise<void>

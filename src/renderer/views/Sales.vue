@@ -140,6 +140,52 @@ const form = ref<SaleInput>({
   channel: 'mercari',
   note: '',
 })
+/**
+ * 販売手数料（実額）の入力欄。文字列のまま持ち、空欄と '0' を区別する
+ * （0 もキャンペーンなどで実際にある値）。空欄なら送らず、率からの計算に任せる
+ */
+const feeInput = ref('')
+/** 商品ID（任意）。入れると一覧に出品先ページへのリンクボタンが出る */
+const itemIdInput = ref('')
+
+/**
+ * 金額の手入力を正規化する。利用者は Yahoo!フリマ・メルカリの画面からそのままコピペするため、
+ * 前後の空白・¥ ￥・円・桁区切りの , ，・全角数字（２９４ → 294）は受け入れて整数円に直す。
+ * 正規化しても整数にならないもの（記号混じり・小数・負の数）は弾く。
+ * 「Number(...) || 0」で黙って0円にしないための唯一の入口（新規登録・実額直しの両方で使う）。
+ * 呼び出し側は空欄をここに渡さない（空欄と'0'の区別は呼び出し側の責務のまま）
+ */
+function normalizeYenInput(raw: string): { ok: true; value: number } | { ok: false; error: string } {
+  const s = raw
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/[¥￥]/g, '')
+    .replace(/円/g, '')
+    .replace(/[,，]/g, '')
+    .trim()
+  if (s === '' || !/^-?\d+(\.\d+)?$/.test(s)) {
+    return { ok: false, error: `「${raw.trim()}」は金額として読み取れません。数字だけにしてください` }
+  }
+  if (s.includes('.')) {
+    return { ok: false, error: '金額は整数（円）で入力してください（小数は使えません）' }
+  }
+  const n = Number(s)
+  if (n < 0) return { ok: false, error: '金額はマイナスにできません' }
+  return { ok: true, value: Math.round(n) }
+}
+
+/**
+ * 商品IDの形を保存前に確かめる（main の channelPageUrl と同じ正規表現）。
+ * 出品先ページを開いたときに初めて気づいても訂正する手段が無いため、保存時に弾く
+ */
+const CHANNEL_ITEM_ID_PATTERN: Record<SalesChannel, RegExp> = {
+  mercari: /^m\d{9,}$/,
+  yahoo: /^[a-z]\d{8,}$/,
+}
+function itemIdMismatchError(channel: SalesChannel, id: string): string | null {
+  if (CHANNEL_ITEM_ID_PATTERN[channel].test(id)) return null
+  const example = channel === 'mercari' ? 'm123456789' : 'z12345678'
+  return `商品IDの形が${CHANNEL_LABEL[channel]}と合いません（例: ${example}）`
+}
 
 // --- 出品先ごとの手数料率（設定 fee_rate_bp / fee_rate_bp_yahoo）。フォームの見込みプレビュー専用で、
 //     登録自体は main 側が sale.fee_rate_bp に焼き付ける（ここでは再計算しない） ---
@@ -151,13 +197,19 @@ async function loadChannelFeeRates() {
     yahoo: Number(s.fee_rate_bp_yahoo ?? 500),
   }
 }
-/** 手入力フォームの見込み（手数料・粗利）。まだ送料・原価が決まっていない新規販売なので、
-    価格と出品先の手数料率だけで見た「登録直後の見込み」。選ぶ・打つたびにその場で変わる */
+/**
+ * 手入力フォームの見込み（手数料・粗利）。まだ送料・原価が決まっていない新規販売なので、
+ * 価格と出品先の手数料率だけで見た「登録直後の見込み」。選ぶ・打つたびにその場で変わる。
+ * 手数料（実額）を入れているときはそちらをそのまま使う（率では計算しない。0 も実額）
+ */
 const formPreview = computed(() => {
   const price = Math.max(0, Math.round(Number(form.value.price) || 0))
+  const feeTrimmed = feeInput.value.trim()
+  const feeParsed = feeTrimmed === '' ? null : normalizeYenInput(feeTrimmed)
+  const feeOverride = feeParsed && feeParsed.ok ? feeParsed.value : null
   const bp = channelFeeRates.value[form.value.channel ?? 'mercari']
-  const fee = Math.floor(price * bp / 10000)
-  return { fee, profit: price - fee }
+  const fee = feeOverride !== null ? feeOverride : Math.floor(price * bp / 10000)
+  return { fee, profit: price - fee, isActual: feeOverride !== null }
 })
 
 // 引き当て／紐付けドロワー（出品・販売の両方から開く）
@@ -411,21 +463,23 @@ async function loadProfitPreviews() {
   const next = new Map<string, { min: number; max: number }>()
   await Promise.all(targets.map(async (s) => {
     const which = needsSinglePreview(s)
+    // 手数料が実額で確定しているなら率では見積もらず、その実額をそのまま使う（0 も実額）
+    const feeOverride = s.fee_source === 'actual' ? s.fee : undefined
     if (which === 'shipping') {
       if (!activeMethods.length) return
       const ids = saleItemIds.value.get(s.id) ?? []
       const minM = activeMethods.reduce((a, b) => (a.fee <= b.fee ? a : b))
       const maxM = activeMethods.reduce((a, b) => (a.fee >= b.fee ? a : b))
       const [ra, rb] = await Promise.all([
-        window.soroban.estimateSaleProfit({ price: s.price, shipping_method_id: minM.id, packaging_cost: s.packaging_cost, inventory_item_ids: ids }),
-        window.soroban.estimateSaleProfit({ price: s.price, shipping_method_id: maxM.id, packaging_cost: s.packaging_cost, inventory_item_ids: ids }),
+        window.soroban.estimateSaleProfit({ price: s.price, shipping_method_id: minM.id, packaging_cost: s.packaging_cost, inventory_item_ids: ids, channel: s.channel, fee: feeOverride }),
+        window.soroban.estimateSaleProfit({ price: s.price, shipping_method_id: maxM.id, packaging_cost: s.packaging_cost, inventory_item_ids: ids, channel: s.channel, fee: feeOverride }),
       ])
       next.set(s.id, { min: Math.min(ra.gross_profit, rb.gross_profit), max: Math.max(ra.gross_profit, rb.gross_profit) })
     } else if (which === 'link') {
       const cand = costCandidates.value.get(s.id)
       if (!cand) return
       const r = await window.soroban.estimateSaleProfit({
-        price: s.price, shipping_method_id: s.shipping_method_id, packaging_cost: s.packaging_cost, inventory_item_ids: [cand.id],
+        price: s.price, shipping_method_id: s.shipping_method_id, packaging_cost: s.packaging_cost, inventory_item_ids: [cand.id], channel: s.channel, fee: feeOverride,
       })
       next.set(s.id, { min: r.gross_profit, max: r.gross_profit })
     }
@@ -439,6 +493,16 @@ function profitWhyText(s: SaleProfit): string | null {
 }
 function pendingReasonLabel(s: SaleProfit): string {
   return s.is_shipping_confirmed ? '紐付けると確定' : '送料を選ぶと確定'
+}
+
+/**
+ * 手数料の「実額」チップを出すかどうか。メルカリの取り込みは明細から手数料の実額が取れるため
+ * fee_source='actual' がほぼ全行になり、チップを毎行に出すと情報量ゼロのノイズになる。
+ * Yahoo!フリマは率で計算できない（見込みの精度が低い）ため、実額かどうかが意味を持つ。
+ * 送料の「実額」チップ（cell-ship）とは色（tone）も分け、隣り合っても取り違えないようにする
+ */
+function showFeeActualChip(s: SaleProfit): boolean {
+  return s.fee_source === 'actual' && s.channel === 'yahoo'
 }
 
 async function loadTags() {
@@ -604,15 +668,41 @@ watch(gotoPayload, async (p) => {
 
 async function submit() {
   if (!form.value.title.trim()) { toast('商品名を入力してください', 'warn'); return }
-  if (!form.value.price || form.value.price <= 0) { toast('価格を入力してください', 'warn'); return }
+  // type="number" は '294円' 等の貼り付けをブラウザ側で空欄にしてくれるが、'1.5' のような
+  // 小数は通ってしまう。丸めて通すと**打った数字を黙って変える**ことになるので、
+  // 手数料（normalizeYenInput）と同じく弾いて人に言う
+  const rawPrice = Number(form.value.price)
+  if (!Number.isFinite(rawPrice) || rawPrice <= 0) { toast('価格を入力してください', 'warn'); return }
+  if (!Number.isInteger(rawPrice)) { toast('価格は整数（円）で入力してください（小数は使えません）', 'warn'); return }
+  const price = rawPrice
+
+  const feeTrimmed = feeInput.value.trim()
+  let fee: number | undefined
+  if (feeTrimmed !== '') {
+    const parsed = normalizeYenInput(feeTrimmed)
+    if (!parsed.ok) { toast(parsed.error, 'warn'); return }
+    fee = parsed.value
+  }
+
+  const itemIdTrimmed = itemIdInput.value.trim()
+  const channel = form.value.channel ?? 'mercari'
+  if (itemIdTrimmed) {
+    const idError = itemIdMismatchError(channel, itemIdTrimmed)
+    if (idError) { toast(idError, 'warn'); return }
+  }
 
   await window.soroban.createSale({
     ...form.value,
+    price,
     title: form.value.title.trim(),
     note: form.value.note?.trim() || null,
+    fee,
+    mercari_item_id: itemIdTrimmed || null,
   })
 
   form.value = { title: '', sold_at: todayLocal(), price: 0, kind: 'resale', channel: 'mercari', note: '' }
+  feeInput.value = ''
+  itemIdInput.value = ''
   showForm.value = false
   await load()
   await loadProgress()
@@ -642,6 +732,30 @@ async function editPackaging(sale: SaleProfit) {
   if (v === null) return
   const packaging_cost = Math.max(0, Math.round(Number(v) || 0))
   await window.soroban.updateSale(sale.id, { packaging_cost })
+  await load()
+  changed()
+}
+
+/**
+ * 販売手数料を実額に直す。空欄で決定すると率からの計算に戻す（fee: null）。
+ * '0' は実額の0円（キャンペーンなど）として送る。梱包材費（editPackaging）と同じ作法
+ */
+async function editFee(sale: SaleProfit) {
+  const v = await ask('販売手数料（実額・税込）', {
+    initial: sale.fee_source === 'actual' ? String(sale.fee) : '',
+    placeholder: '空なら率からの自動計算に戻ります',
+  })
+  if (v === null) return
+  const trimmed = v.trim()
+  let fee: number | null
+  if (trimmed === '') {
+    fee = null
+  } else {
+    const parsed = normalizeYenInput(trimmed)
+    if (!parsed.ok) { toast(parsed.error, 'warn'); return }
+    fee = parsed.value
+  }
+  await window.soroban.updateSale(sale.id, { fee })
   await load()
   changed()
 }
@@ -846,14 +960,26 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
             <option value="yahoo">{{ CHANNEL_LABEL.yahoo }}</option>
           </select>
         </label>
+        <label class="field">
+          <span>販売手数料（実額・任意）</span>
+          <input type="text" inputmode="numeric" v-model="feeInput" placeholder="空なら自動計算" />
+        </label>
+        <label class="field">
+          <span>商品ID（任意）</span>
+          <input v-model="itemIdInput" :placeholder="form.channel === 'yahoo' ? '例: z693579992' : '例: m123456789'" />
+        </label>
         <label class="field field-wide">
           <span>メモ</span>
           <input v-model="form.note" placeholder="任意" />
         </label>
       </div>
+      <p v-if="form.channel === 'yahoo' && !feeInput.trim()" class="warn form-hint-warn">
+        <Icon name="alert" :size="14" />
+        Yahoo!フリマの手数料は率で計算できません。分かっている実額を入力してください（キャンペーンで0円のこともあります）
+      </p>
       <p class="faint form-hint">
         金額はすべて税込。メルカリ・Yahoo!フリマの表示どおりに入れてください ・
-        見込み：手数料 −{{ yen(formPreview.fee) }}（{{ CHANNEL_LABEL[form.channel ?? 'mercari'] }}）・ 粗利 {{ yen(formPreview.profit) }}
+        手数料 −{{ yen(formPreview.fee) }}{{ formPreview.isActual ? '（入力した実額）' : `（${CHANNEL_LABEL[form.channel ?? 'mercari']}の見込み）` }} ・ 粗利 {{ yen(formPreview.profit) }}
       </p>
       <div class="row">
         <span class="grow" />
@@ -1080,7 +1206,15 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
           <div class="cell-meta">
             <div class="cell-price num">
               {{ yen(r.kind === 'sale' ? (r.sale?.price ?? 0) : (r.listing?.price ?? 0)) }}
-              <div v-if="r.kind === 'sale' && r.sale && r.sale.kind !== 'personal'" class="faint fee-line">手数料 −{{ yen(r.sale.fee) }}</div>
+              <div v-if="r.kind === 'sale' && r.sale && r.sale.kind !== 'personal'" class="faint fee-line">
+                手数料 −{{ yen(r.sale.fee) }}
+                <StatusChip
+                  v-if="showFeeActualChip(r.sale)"
+                  tone="info"
+                  label="実額"
+                  title="手数料の実額（率の見込みではなく実際にかかった手数料）"
+                />
+              </div>
             </div>
 
             <div class="cell-ship">
@@ -1100,7 +1234,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                 <span v-if="r.sale.kind === 'personal'" class="faint">—</span>
                 <span v-else-if="r.sale.shipping_source === 'actual' && r.sale.shipping_fee > 0" class="shipping-actual">
                   {{ yen(r.sale.shipping_fee) }}
-                  <StatusChip tone="ok" label="実額" />
+                  <StatusChip tone="ok" label="実額" title="送料の実額（実際に払った送料）" />
                 </span>
                 <select
                   v-else
@@ -1169,6 +1303,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
               <button v-if="canOpenTimeline(r.sale)" class="sm ghost" @click="openTimelineForSale(r.sale)">履歴</button>
               <button class="sm ghost fade-btn" @click="r.sale && editNote(r.sale)" title="メモを編集する">メモ</button>
               <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editPackaging(r.sale)" title="梱包材費を編集する">梱包</button>
+              <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editFee(r.sale)" title="販売手数料を実額に直す（空欄で率の計算に戻ります）">手数料</button>
               <button v-if="r.sale.kind === 'personal'" class="sm ghost fade-btn" @click="r.sale && setKind(r.sale, 'resale')">転売にする</button>
               <button class="icon ghost" aria-label="削除" @click="r.sale && remove(r.sale)">
                 <Icon name="trash" :size="16" />
@@ -1236,6 +1371,13 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 }
 .field-wide input { width: 320px; }
 .form-hint { margin: -4px 0 0; }
+.form-hint-warn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: -4px 0 0;
+  font-size: var(--fs-13);
+}
 
 /* 派生タグ（仕入・商品・在庫から引き継いだもの）は直接付けたタグより少し薄く見せる。
    先頭の小さな記号で出どころを示す */

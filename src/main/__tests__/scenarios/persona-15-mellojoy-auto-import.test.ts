@@ -51,15 +51,15 @@ describe('ペルソナ15：メロジョイの注文が自動で入る人', () =>
     const purchaseId = db.createPurchase(result.input)
 
     // 3) 按分の手計算：単価2499・2399、送料499を金額按分（by_amount）
-    //    total = 4898、line1 share = round(499*2499/4898) = round(254.59) = 255
-    //    line2（最終行）share = 499 - 255 = 244
+    //    total = 4898、line1 share = trunc(499*2499/4898) = trunc(254.59) = 254（0方向への切り捨て）
+    //    line2（最終行）share = 499 - 254 = 245（端数を最終行に寄せる）
     //    landed_cost = 単価 + 端数配分（quantity=1なので配分そのまま）
     const z0782 = db.listInventory('in_stock').find(i => i.model_code === 'Z078-2')
     const z0744 = db.listInventory('in_stock').find(i => i.model_code === 'Z074-4')
     expect(z0782).toBeDefined()
     expect(z0744).toBeDefined()
-    expect(z0782!.landed_cost).toBe(2499 + 255) // 2754
-    expect(z0744!.landed_cost).toBe(2399 + 244) // 2643
+    expect(z0782!.landed_cost).toBe(2499 + 254) // 2753
+    expect(z0744!.landed_cost).toBe(2399 + 245) // 2644
     // 合計が総額（小計+送料）と一致する
     expect(z0782!.landed_cost + z0744!.landed_cost).toBe(4898 + 499)
 

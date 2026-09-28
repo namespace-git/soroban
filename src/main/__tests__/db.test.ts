@@ -917,6 +917,44 @@ describe('db（:memory:）', () => {
       expect(db.listSales().find(s => s.id === saleId)!.fee_source).toBe('rate')
     })
 
+    it('createSale：feeに実額を渡すとそのまま保存されfee_source=actualになる。0円（キャンペーン）も実額', () => {
+      // 実測：5,200円→0円（キャンペーン適用）
+      const zeroId = db.createSale({
+        title: 'キャンペーン販売', sold_at: '2026-01-05', price: 5200, channel: 'yahoo', fee: 0,
+      })
+      const zero = db.listSales().find(s => s.id === zeroId)!
+      expect(zero.fee).toBe(0)
+      expect(zero.fee_source).toBe('actual')
+
+      // 実測：4,280円→213円（5%なら214円になるはずが合わない＝率で計算できない）
+      const oddId = db.createSale({
+        title: '端数が合わない販売', sold_at: '2026-01-05', price: 4280, channel: 'yahoo', fee: 213,
+      })
+      const odd = db.listSales().find(s => s.id === oddId)!
+      expect(odd.fee).toBe(213)
+      expect(odd.fee_source).toBe('actual')
+    })
+
+    it('createSale：feeを省略すると率で計算されfee_source=rateになる（メルカリ10%・Yahoo5%の両方）', () => {
+      const mercariId = db.createSale({ title: 'メルカリ手入力', sold_at: '2026-01-05', price: 3000 })
+      const mercari = db.listSales().find(s => s.id === mercariId)!
+      expect(mercari.fee).toBe(300) // floor(3000*1000/10000)
+      expect(mercari.fee_source).toBe('rate')
+
+      const yahooId = db.createSale({
+        title: 'Yahoo手入力', sold_at: '2026-01-05', price: 6400, channel: 'yahoo',
+      })
+      const yahoo = db.listSales().find(s => s.id === yahooId)!
+      expect(yahoo.fee).toBe(320) // floor(6400*500/10000)
+      expect(yahoo.fee_source).toBe('rate')
+    })
+
+    it('createSale：feeに負の額を渡すとthrow', () => {
+      expect(() => db.createSale({
+        title: '不正な手数料', sold_at: '2026-01-05', price: 1000, fee: -1,
+      })).toThrow('手数料は整数で入力してください')
+    })
+
     it('insertCollected：feeを渡さなければrate、渡せば0でもactualになる（Yahooのキャンペーンは実額0円）', () => {
       db.insertCollected([{ mercariItemId: 'fs-1', title: '見込みのまま', price: 1000, soldAt: '2026-09-01' }])
       db.insertCollected([{ mercariItemId: 'fs-2', title: '実額0円', price: 5200, soldAt: '2026-09-01', fee: 0 }])
@@ -963,6 +1001,51 @@ describe('db（:memory:）', () => {
       expect(rateSale.fee_source).toBe('rate')
     })
 
+    it('updateSale：patch.feeで実額に直す／nullで率に戻す。価格と同時に渡しても実額が勝つ', () => {
+      // createSale の時点でfee: 0の実額（キャンペーン）にしておく
+      const saleId = db.createSale({
+        title: 'patch.feeテスト', sold_at: '2026-01-05', price: 5200, channel: 'yahoo', fee: 0,
+      })
+      expect(db.listSales().find(s => s.id === saleId)!.fee_source).toBe('actual')
+
+      // 価格だけ変える → 実額0円のまま動かない
+      db.updateSale(saleId, { price: 6000 })
+      const afterPrice = db.listSales().find(s => s.id === saleId)!
+      expect(afterPrice.price).toBe(6000)
+      expect(afterPrice.fee).toBe(0)
+      expect(afterPrice.fee_source).toBe('actual')
+
+      // patch.feeで実額300円に直す
+      db.updateSale(saleId, { fee: 300 })
+      const afterFee = db.listSales().find(s => s.id === saleId)!
+      expect(afterFee.fee).toBe(300)
+      expect(afterFee.fee_source).toBe('actual')
+
+      // 価格と手数料を同時に渡す → 実額が勝つ（率の700にも、手数料単独の300にもならない）
+      db.updateSale(saleId, { price: 7000, fee: 999 })
+      const afterBoth = db.listSales().find(s => s.id === saleId)!
+      expect(afterBoth.price).toBe(7000)
+      expect(afterBoth.fee).toBe(999)
+      expect(afterBoth.fee_source).toBe('actual')
+
+      // fee: null で率の計算に戻す。fee_rate_bpはchannel=yahoo既定500 → floor(7000*500/10000)=350
+      // （実額999とは異なる＝ちゃんと率で計算し直していることが分かる）
+      db.updateSale(saleId, { fee: null })
+      const afterNull = db.listSales().find(s => s.id === saleId)!
+      expect(afterNull.fee_source).toBe('rate')
+      expect(afterNull.fee).toBe(350)
+
+      const raw = db.getDb().prepare('SELECT fee_rate_bp FROM sale WHERE id = ?').get(saleId) as
+        { fee_rate_bp: number }
+      expect(afterNull.fee).toBe(Math.floor((afterNull.price * raw.fee_rate_bp) / 10000))
+    })
+
+    it('updateSale：patch.feeに負の額を渡すとthrow', () => {
+      const saleId = db.createSale({ title: '不正な手数料パッチ', sold_at: '2026-01-05', price: 1000 })
+      expect(() => db.updateSale(saleId, { fee: -1 }))
+        .toThrow('手数料は整数で入力してください')
+    })
+
     it('粗利の検算：実額0円のYahoo販売の価格を変えたあとも、粗利が「新価格−0−送料−梱包材費−原価」と数字で一致する', () => {
       db.createPurchase({
         shop_account_id: shopId,
@@ -988,6 +1071,18 @@ describe('db（:memory:）', () => {
       expect(sale.cost).toBe(1500)
       expect(sale.gross_profit).toBe(6000 - 0 - 300 - 50 - 1500)
       expect(sale.gross_profit).toBe(4150)
+    })
+
+    it('monthly_summary：createSaleでfee:0（実額）のYahoo販売を入れると、その月の手数料合計・粗利に0円が反映される（260円ずれない）', () => {
+      db.createSale({
+        title: 'キャンペーン販売（月次検算）', sold_at: todayLocal(), price: 5200, channel: 'yahoo', fee: 0,
+      })
+
+      const dash = db.getDashboard()
+      expect(dash.thisMonth).not.toBeNull()
+      expect(dash.thisMonth!.revenue).toBe(5200)
+      expect(dash.thisMonth!.total_fee).toBe(0) // 率(5%)なら260円になるところ、実額0円で入っている
+      expect(dash.thisMonth!.gross_profit).toBe(5200) // 5200 - 0(fee) - 0(shipping) - 0(packaging) - 0(cost)
     })
 
     it('migrate：version31相当（fee_sourceが無い）→32で列が足され、feeが率と一致すればrate・一致しなければactualになる', () => {
@@ -1019,7 +1114,7 @@ describe('db（:memory:）', () => {
 
         expect(() => db.initDb(path)).not.toThrow()
 
-        expect(db.getSettings().schema_version).toBe('32')
+        expect(db.getSettings().schema_version).toBe('33')
         const sales = db.listSales()
         expect(sales.find(s => s.id === rateId)!.fee_source).toBe('rate')
         expect(sales.find(s => s.id === actualId)!.fee_source).toBe('actual')
@@ -1502,7 +1597,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('32')
+      expect(db.getSettings().schema_version).toBe('33')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1697,7 +1792,7 @@ describe('db（:memory:）', () => {
   })
 
   it('migrate：schema_versionが30になる', () => {
-    expect(db.getSettings().schema_version).toBe('32')
+    expect(db.getSettings().schema_version).toBe('33')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1783,7 +1878,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('32')
+      expect(db.getSettings().schema_version).toBe('33')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1817,7 +1912,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('32')
+      expect(db.getSettings().schema_version).toBe('33')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -1844,7 +1939,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('32')
+      expect(db.getSettings().schema_version).toBe('33')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       expect(expense.registration_no).toBeNull()
     } finally {
@@ -1888,7 +1983,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('32')
+      expect(db.getSettings().schema_version).toBe('33')
       // 既存の表示名はそのまま残る
       const p = db.listProducts().find(x => x.model_code === 'Z078-2')
       expect(p?.custom_name).toBe('旧表示名')
@@ -2659,7 +2754,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('32')
+      expect(db.getSettings().schema_version).toBe('33')
       const p = db.getPurchase(purchaseId)
       expect(p.tracking_carrier).toBeNull()
       expect(p.tracking_number).toBeNull()
@@ -2699,7 +2794,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('32')
+      expect(db.getSettings().schema_version).toBe('33')
       expect(db.getPurchaseTracking(purchaseId)!.tracking_registered_at).toBeNull()
 
       // 移行後は普通に登録できる
@@ -2741,13 +2836,80 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('32')
+      expect(db.getSettings().schema_version).toBe('33')
       expect(db.getSettings().fee_rate_bp_yahoo).toBe('500')
 
       const sale = db.listSales().find(s => s.id === saleId)!
       expect(sale.channel).toBe('mercari')
       const listing = db.listListings().find(l => l.mercari_item_id === 'MIGR-1')!
       expect(listing.channel).toBe('mercari')
+    } finally {
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('migrate：version32相当（collector_run.sourceのCHECKにyahooが無い）→33で足され、既存の実行記録は1件も減らない', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-run-yahoo-migrate-'))
+    const path = join(dir, 'v32.db')
+    try {
+      db.closeDb()
+      db.initDb(path) // 一旦フルスキーマで作り、v32相当（source CHECKにyahooが無い）まで剥がす
+      const runId1 = db.startRun('mercari')
+      db.finishRun(runId1, 'ok', 5, 5)
+      const migrateShopId = db.createShopAccount('メロジョイE')
+      const runId2 = db.startRun('mellojoy', migrateShopId)
+      db.finishRun(runId2, 'empty', 0, 0)
+
+      // collector_run は外部キー・ビュー・トリガーから参照されていないため、
+      // テーブルだけ作り直せばよい（v26相当のproduct_nameと同じ流儀）
+      db.getDb().exec(`
+        CREATE TABLE collector_run_old (
+          id          TEXT PRIMARY KEY,
+          started_at  TEXT NOT NULL,
+          finished_at TEXT,
+          status      TEXT NOT NULL DEFAULT 'ok'
+                      CHECK (status IN ('ok','auth_required','failed','empty')),
+          fetched     INTEGER NOT NULL DEFAULT 0,
+          inserted    INTEGER NOT NULL DEFAULT 0,
+          message     TEXT,
+          source          TEXT NOT NULL DEFAULT 'mercari'
+                          CHECK (source IN ('mercari','mellojoy')),
+          shop_account_id TEXT REFERENCES shop_account(id)
+        );
+        INSERT INTO collector_run_old SELECT * FROM collector_run;
+        DROP TABLE collector_run;
+        ALTER TABLE collector_run_old RENAME TO collector_run;
+        CREATE INDEX IF NOT EXISTS idx_run_started ON collector_run(started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_run_source_started ON collector_run(source, started_at DESC);
+      `)
+      db.getDb().prepare(`UPDATE setting SET value = '32' WHERE key = 'schema_version'`).run()
+      db.closeDb()
+
+      expect(() => db.initDb(path)).not.toThrow()
+
+      expect(db.getSettings().schema_version).toBe('33')
+
+      // 既存の実行記録が1件も減らない
+      const runs = db.listRuns(10)
+      expect(runs.length).toBe(2)
+      expect(runs.map(r => r.source).sort()).toEqual(['mellojoy', 'mercari'])
+
+      // 移行後はsource='mercari'/'mellojoy'は今までどおり、'yahoo'も新規に挿入できる
+      const yahooRunId = db.startRun('yahoo')
+      db.finishRun(yahooRunId, 'ok', 3, 3)
+      expect(db.listRuns(10).find(r => r.id === yahooRunId)?.source).toBe('yahoo')
+
+      // 知らないsourceはCHECKで弾かれる（CHECKが生きている）
+      expect(() => db.getDb().prepare(
+        `INSERT INTO collector_run (id, started_at, source) VALUES ('bad-source', datetime('now'), 'foo')`,
+      ).run()).toThrow()
+
+      // インデックス2本が再構築後も残っている
+      const indexes = db.getDb().prepare(`PRAGMA index_list('collector_run')`).all() as Array<{ name: string }>
+      expect(indexes.map(i => i.name)).toEqual(
+        expect.arrayContaining(['idx_run_started', 'idx_run_source_started']),
+      )
     } finally {
       try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
       rmSync(dir, { recursive: true, force: true })
@@ -2850,6 +3012,55 @@ describe('db（:memory:）', () => {
       expect(sale.cost).toBe(1200)
       expect(sale.gross_profit).toBe(5000 - 250 - 300 - 50 - 1200)
       expect(sale.gross_profit).toBe(3200)
+    })
+
+    it('insertCollected：channelを渡すとsale.channelに乗り、実額が無いときの手数料が出品先の率になる', () => {
+      const [yahoo] = db.insertCollected(
+        [{ mercariItemId: 'YIC-1', title: 'Yahoo取り込み', price: 6000, soldAt: '2026-02-01' }],
+        'yahoo',
+      )
+      const sale = db.listSales().find(s => s.id === yahoo.id)!
+      expect(sale.channel).toBe('yahoo')
+      // fee_rate_bp_yahoo 既定500(5%) → fee = floor(6000*500/10000) = 300
+      expect(sale.fee).toBe(300)
+      expect(sale.fee_source).toBe('rate')
+    })
+
+    it('insertCollected：channelを渡さない既存の呼び出しは今までどおりmercariになる', () => {
+      const [mercari] = db.insertCollected(
+        [{ mercariItemId: 'MIC-1', title: 'メルカリ取り込み', price: 6000, soldAt: '2026-02-01' }],
+      )
+      const sale = db.listSales().find(s => s.id === mercari.id)!
+      expect(sale.channel).toBe('mercari')
+      // fee_rate_bp 既定1000(10%) → fee = floor(6000*1000/10000) = 600
+      expect(sale.fee).toBe(600)
+    })
+
+    it('insertCollected：channel=yahooでも、feeの実額が渡ればfee_source=actual（0円も実額）で率は使わない', () => {
+      const [zero] = db.insertCollected(
+        [{ mercariItemId: 'YIC-2', title: 'Yahooキャンペーン', price: 5200, soldAt: '2026-02-01', fee: 0 }],
+        'yahoo',
+      )
+      const zeroSale = db.listSales().find(s => s.id === zero.id)!
+      expect(zeroSale.fee).toBe(0)
+      expect(zeroSale.fee_source).toBe('actual')
+
+      const [actual] = db.insertCollected(
+        [{ mercariItemId: 'YIC-3', title: 'Yahoo実額', price: 6400, soldAt: '2026-02-01', fee: 320 }],
+        'yahoo',
+      )
+      const actualSale = db.listSales().find(s => s.id === actual.id)!
+      expect(actualSale.fee).toBe(320)
+      expect(actualSale.fee_source).toBe('actual')
+    })
+
+    it('upsertListings：channelを渡すとlisting.channelに乗る（省略時mercari）', () => {
+      db.upsertListings(
+        [{ mercariItemId: 'YLST-1', title: 'Yahoo出品', price: 3000, suspended: false, thumbUrl: null }],
+        'yahoo',
+      )
+      const listing = db.listListings().find(l => l.mercari_item_id === 'YLST-1')!
+      expect(listing.channel).toBe('yahoo')
     })
   })
 
@@ -4673,6 +4884,38 @@ describe('db（:memory:）', () => {
     it('発送方法なし・在庫指定なしなら送料・原価は0', () => {
       const result = db.estimateSaleProfit({ price: 1000, shipping_method_id: null, inventory_item_ids: [] })
       expect(result).toEqual({ fee: 100, shipping_fee: 0, packaging_cost: 0, cost: 0, gross_profit: 900 })
+    })
+
+    it('channel省略はmercari(10%)、channel:yahooはYahoo率(5%、実測どおり切り捨て)で計算する', () => {
+      const mercari = db.estimateSaleProfit({ price: 6400, shipping_method_id: null, inventory_item_ids: [] })
+      expect(mercari.fee).toBe(640) // floor(6400*1000/10000)
+
+      // 実測：6,400円→320円（5%どおり）
+      const yahoo = db.estimateSaleProfit({
+        price: 6400, shipping_method_id: null, inventory_item_ids: [], channel: 'yahoo',
+      })
+      expect(yahoo.fee).toBe(320)
+    })
+
+    it('feeに実額が渡ったら率を使わずそのまま返す（0も実額）', () => {
+      const result = db.estimateSaleProfit({
+        price: 6400, shipping_method_id: null, inventory_item_ids: [], channel: 'yahoo', fee: 320,
+      })
+      expect(result.fee).toBe(320)
+      expect(result.gross_profit).toBe(6400 - 320)
+
+      // 実測：5,200円→0円（キャンペーン）
+      const zero = db.estimateSaleProfit({
+        price: 5200, shipping_method_id: null, inventory_item_ids: [], channel: 'yahoo', fee: 0,
+      })
+      expect(zero.fee).toBe(0)
+      expect(zero.gross_profit).toBe(5200)
+    })
+
+    it('feeに負の額を渡すとthrow', () => {
+      expect(() => db.estimateSaleProfit({
+        price: 1000, shipping_method_id: null, inventory_item_ids: [], fee: -1,
+      })).toThrow('手数料は整数で入力してください')
     })
   })
 

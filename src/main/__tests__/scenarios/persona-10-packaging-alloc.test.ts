@@ -37,7 +37,7 @@ describe('ペルソナ10：梱包材費と他費用の人', () => {
     expect(byAmountItems).toHaveLength(3)
 
     // by_amount: base(A)=2000, base(B)=500, total=2500, pool=-100
-    //   Aへの配賦 = round(-100*2000/2500) = -80 → 1点あたり-40（割り切れる）→ 960/960
+    //   Aへの配賦 = trunc(-100*2000/2500) = -80（割り切れるので round と同じ）→ 1点あたり-40 → 960/960
     //   Bへの配賦 = 残り -100-(-80) = -20 → 480
     const aAmount = byAmountItems.filter(i => i.name === '商品A（金額按分）').map(i => i.landed_cost).sort()
     const bAmount = byAmountItems.filter(i => i.name === '商品B（金額按分）').map(i => i.landed_cost)
@@ -61,12 +61,12 @@ describe('ペルソナ10：梱包材費と他費用の人', () => {
     expect(byQtyItems).toHaveLength(3)
 
     // by_quantity: base(A)=2, base(B)=1, total=3, pool=-100
-    //   Aへの配賦 = round(-100*2/3) = -67 → splitEvenly(-67,2) = [-34,-33] → 966/967
-    //   Bへの配賦 = 残り -100-(-67) = -33 → 467
+    //   Aへの配賦 = trunc(-100*2/3) = trunc(-66.67) = -66（0方向への切り捨て）→ splitEvenly(-66,2) = [-33,-33] → 967/967
+    //   Bへの配賦 = 残り -100-(-66) = -34（最終行に端数を寄せる）→ 466
     const aQty = byQtyItems.filter(i => i.name === '商品A（数量按分）').map(i => i.landed_cost).sort()
     const bQty = byQtyItems.filter(i => i.name === '商品B（数量按分）').map(i => i.landed_cost)
-    expect(aQty).toEqual([966, 967])
-    expect(bQty).toEqual([467])
+    expect(aQty).toEqual([967, 967])
+    expect(bQty).toEqual([466])
     expect(byQtyItems.reduce((s, i) => s + i.landed_cost, 0)).toBe(1000 * 2 + 500 * 1 - 100) // 2400
 
     // 端数の寄せ方（各アイテムへの配分）は金額按分と数量按分で違うが、総額はどちらも一致する

@@ -32,11 +32,11 @@ describe('ペルソナ01：基本の人', () => {
     const totalLanded = items.reduce((s, i) => s + i.landed_cost, 0)
     expect(totalLanded).toBe(7597 + 499)
 
-    // 手計算：金額按分。round(499*unit/7597)、端数は最終行(Z003-1)へ寄せる
+    // 手計算：金額按分。trunc(499*unit/7597)（0方向への切り捨て）、端数は最終行(Z003-1)へ寄せる
     const byModel = Object.fromEntries(items.map(i => [i.model_code, i.landed_cost]))
-    expect(byModel['Z001-1']).toBe(2499 + 164) // round(499*2499/7597) = 164
-    expect(byModel['Z002-1']).toBe(2399 + 158) // round(499*2399/7597) = 158
-    expect(byModel['Z003-1']).toBe(2699 + 177) // 残り 499-164-158=177
+    expect(byModel['Z001-1']).toBe(2499 + 164) // trunc(499*2499/7597) = trunc(164.14) = 164
+    expect(byModel['Z002-1']).toBe(2399 + 157) // trunc(499*2399/7597) = trunc(157.58) = 157
+    expect(byModel['Z003-1']).toBe(2699 + 178) // 残り 499-164-157=178
 
     // メルカリ取り込み：型番付き・送料実額
     const collected = db.insertCollected([{

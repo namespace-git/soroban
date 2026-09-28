@@ -46,10 +46,14 @@ export function allocate(
   let assigned = 0
   lines.forEach((l, idx) => {
     const isLast = idx === lines.length - 1
-    // 端数は最終行へ。合計を pool と一致させるため
+    // 端数は最終行へ。合計を pool と一致させるため。
+    // 四捨五入（round）は切り上げる方向にも丸まるため、行の配賦合計が pool を超えて
+    // 最終行が pool と逆符号になり得る（例: pool=2円・同額4行 → round だと 1/1/1/-1）。
+    // pool は割引超過で負にもなり得るので、0方向への切り捨て（trunc）を使う。これなら
+    // 各行の絶対値が pool の絶対値を超えず、最終行も pool と同じ符号に収まる。
     const share = isLast
       ? pool - assigned
-      : Math.round((pool * base(l)) / total)
+      : Math.trunc((pool * base(l)) / total)
     if (!isLast) assigned += share
 
     result.set(l.id, { allocated: share })

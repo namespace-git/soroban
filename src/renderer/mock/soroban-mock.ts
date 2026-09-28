@@ -1064,14 +1064,16 @@ function buildInitialSales(): void {
     }))
   }
 
-  // --- Yahoo!フリマの販売（見本。まだ自動取り込みが無いので手入力の体）。手数料は実額が優先されるため、
-  //     率どおり／キャンペーンで0円／率と1円合わない、の3パターンを混ぜる。商品名の長さも揃えない ---
+  // --- Yahoo!フリマの販売（見本。まだ自動取り込みが無いので手入力の体）。手数料は実額（fee_source='actual'）が
+  //     優先される。率では出せない実測4パターン（キャンペーンで無料／5%ちょうど／切り捨て／率と1円合わない）を、
+  //     利用者の実際の取引の数字そのままで見せる。商品名の長さも揃えない ---
   {
     const i = idx++
     out.push(buildSaleFixed({
       i, title: '【Z074-4】メロジョイ風ポーチ', kind: 'resale', items: [],
       shipping: { id: null, fee: 0, confirmed: false, source: null },
       channel: 'yahoo', sourceOverride: 'manual',
+      priceOverride: 5200, feeOverride: 0, // キャンペーンで手数料無料になった実額
     }))
   }
   {
@@ -1086,7 +1088,7 @@ function buildInitialSales(): void {
       shipping: { id: method.id, fee: method.fee, confirmed: true, source: 'actual' },
       packaging: packagingFor(i),
       channel: 'yahoo', sourceOverride: 'manual',
-      feeOverride: 0, // キャンペーンで手数料無料になった実額
+      priceOverride: 6400, feeOverride: 320, // 5%ちょうどの実額
     }))
   }
   {
@@ -1098,8 +1100,19 @@ function buildInitialSales(): void {
       shipping: { id: method.id, fee: method.fee, confirmed: true, source: 'actual' },
       packaging: packagingFor(i),
       channel: 'yahoo', sourceOverride: 'manual',
-      priceOverride: 2000,
-      feeOverride: 99, // 5%なら100円のはずが、実額は1円合わない
+      priceOverride: 5899, feeOverride: 294, // 5%を切り捨てた実額
+    }))
+  }
+  {
+    const i = idx++
+    const model = 'A012'
+    const method = sm(i)
+    out.push(buildSaleFixed({
+      i, title: `【${model}】${displayName(variantOf(model))}`, kind: 'resale', items: [],
+      shipping: { id: method.id, fee: method.fee, confirmed: true, source: 'actual' },
+      packaging: packagingFor(i),
+      channel: 'yahoo', sourceOverride: 'manual',
+      priceOverride: 4280, feeOverride: 213, // 5%なら214円のはずが、実額は1円合わない
     }))
   }
 
@@ -2799,7 +2812,11 @@ const api: SorobanApi = {
     const channel: SalesChannel = input.channel ?? 'mercari'
     const rateBp = rateBpForChannel(channel)
     const price = input.price
-    const fee = calcFeeMock(price, rateBp)
+    // 実額（0円も実額。Yahoo!フリマは率で計算できないため）が渡っていればそれを使い
+    // fee_source='actual' にする。無ければ率で見込みを計算し fee_source='rate'（main の createSale と同じ）
+    const hasActualFee = typeof input.fee === 'number'
+    const fee = hasActualFee ? (input.fee as number) : calcFeeMock(price, rateBp)
+    const feeSource: FeeSource = hasActualFee ? 'actual' : 'rate'
     const modelCodes = extractAllCodes(input.title)
     const id = uid()
 
@@ -2814,7 +2831,7 @@ const api: SorobanApi = {
       kind: input.kind ?? 'resale',
       price,
       fee,
-      fee_source: 'rate', // 手入力は実額を知らないので、率からの見込み
+      fee_source: feeSource,
       shipping_fee: 0,
       packaging_cost: 0,
       is_shipping_confirmed: 0,
@@ -2868,6 +2885,17 @@ const api: SorobanApi = {
       // fee_source が実額（actual）のときは、価格を直しても手数料を率で上書きしない
       if (sale.fee_source !== 'actual') {
         sale.fee = calcFeeMock(patch.price, rateBpForChannel(sale.channel))
+      }
+    }
+    // patch.fee が渡っていれば、価格が同時に変わっていても実額が勝つ（number→実額、null→率に戻す）。
+    // 渡っていなければ従来どおり、価格が変わったときだけ・実額でなければ率で再計算する（main の updateSale と同じ）
+    if (patch.fee !== undefined) {
+      if (patch.fee === null) {
+        sale.fee = calcFeeMock(sale.price, rateBpForChannel(sale.channel))
+        sale.fee_source = 'rate'
+      } else {
+        sale.fee = patch.fee
+        sale.fee_source = 'actual'
       }
     }
     if (patch.shipping_method_id !== undefined) {
@@ -4046,8 +4074,9 @@ const api: SorobanApi = {
   },
 
   async estimateSaleProfit(input) {
-    const rateBp = Number(settings.fee_rate_bp ?? 1000)
-    const fee = calcFeeMock(input.price, rateBp)
+    const rateBp = rateBpForChannel(input.channel ?? 'mercari')
+    // input.fee に実額（0 も実額）が渡っていれば率は使わずそのまま返す（main の estimateSaleProfit と同じ）
+    const fee = typeof input.fee === 'number' ? input.fee : calcFeeMock(input.price, rateBp)
     const method = input.shipping_method_id
       ? shippingMethods.find(m => m.id === input.shipping_method_id)
       : null

@@ -81,6 +81,95 @@ describe('allocate', () => {
   it('明細が空なら空のMapを返す', () => {
     expect(allocate([], 100, 'by_amount').size).toBe(0)
   })
+
+  it('送料2円・同額4明細 → 端数は最終行だけに乗り、他は0円（0/0/0/2）', () => {
+    const lines = [
+      { id: 'a', unit_price: 100, quantity: 1 },
+      { id: 'b', unit_price: 100, quantity: 1 },
+      { id: 'c', unit_price: 100, quantity: 1 },
+      { id: 'd', unit_price: 100, quantity: 1 },
+    ]
+    const result = allocate(lines, 2, 'by_amount')
+    expect(result.get('a')!.allocated).toBe(0)
+    expect(result.get('b')!.allocated).toBe(0)
+    expect(result.get('c')!.allocated).toBe(0)
+    expect(result.get('d')!.allocated).toBe(2)
+    const total = [...result.values()].reduce((s, v) => s + v.allocated, 0)
+    expect(total).toBe(2)
+  })
+
+  it('単価がバラバラでも合計が一致し、符号はpoolと揃う（単価100/300/600円・送料100円）', () => {
+    const lines = [
+      { id: 'a', unit_price: 100, quantity: 1 },
+      { id: 'b', unit_price: 300, quantity: 1 },
+      { id: 'c', unit_price: 600, quantity: 1 },
+    ]
+    const result = allocate(lines, 100, 'by_amount')
+    const values = [...result.values()].map((v) => v.allocated)
+    const total = values.reduce((s, v) => s + v, 0)
+    expect(total).toBe(100)
+    for (const v of values) expect(v).toBeGreaterThanOrEqual(0)
+  })
+
+  it('pool=0なら全行0円', () => {
+    const lines = [
+      { id: 'a', unit_price: 100, quantity: 1 },
+      { id: 'b', unit_price: 200, quantity: 1 },
+      { id: 'c', unit_price: 300, quantity: 1 },
+    ]
+    for (const method of ['by_amount', 'by_quantity'] as const) {
+      const result = allocate(lines, 0, method)
+      for (const v of result.values()) expect(v.allocated).toBe(0)
+    }
+  })
+
+  // 総当たり：どの行もpoolと逆符号にならない・合計が必ずpoolと一致することを、
+  // 明細2〜10行・配賦1〜200円の範囲で確かめる（roundだとここで最終行が負に振れていた）。
+  describe('総当たり：符号反転と合計一致', () => {
+    function makeLines(n: number, weighted: boolean) {
+      return Array.from({ length: n }, (_, i) => ({
+        id: `l${i}`,
+        // weighted=falseは全行同額（丸めの偏りが出やすいケース）、
+        // weighted=trueは単価が行ごとに異なるケース
+        unit_price: weighted ? (i + 1) * 37 : 100,
+        quantity: weighted ? ((i % 3) + 1) : 1,
+      }))
+    }
+
+    for (const method of ['by_amount', 'by_quantity'] as const) {
+      for (const weighted of [false, true]) {
+        it(`${method}／weighted=${weighted}：pool>=0で負が出ない`, () => {
+          let negativeCount = 0
+          for (let n = 2; n <= 10; n++) {
+            const lines = makeLines(n, weighted)
+            for (let pool = 1; pool <= 200; pool++) {
+              const result = allocate(lines, pool, method)
+              const values = [...result.values()].map((v) => v.allocated)
+              const total = values.reduce((s, v) => s + v, 0)
+              expect(total).toBe(pool)
+              if (values.some((v) => v < 0)) negativeCount++
+            }
+          }
+          expect(negativeCount).toBe(0)
+        })
+
+        it(`${method}／weighted=${weighted}：pool<0（割引超過）で正が出ない`, () => {
+          let positiveCount = 0
+          for (let n = 2; n <= 10; n++) {
+            const lines = makeLines(n, weighted)
+            for (let pool = -1; pool >= -200; pool--) {
+              const result = allocate(lines, pool, method)
+              const values = [...result.values()].map((v) => v.allocated)
+              const total = values.reduce((s, v) => s + v, 0)
+              expect(total).toBe(pool)
+              if (values.some((v) => v > 0)) positiveCount++
+            }
+          }
+          expect(positiveCount).toBe(0)
+        })
+      }
+    }
+  })
 })
 
 describe('assertYen', () => {

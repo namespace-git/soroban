@@ -1,0 +1,143 @@
+<!-- Yahoo! 売上金管理 https://salesmanagement.yahoo.co.jp/list
+     利用者の実物（2026-09-28 取得）から、一覧の表と CSV のフォーム・月指定だけを抜き出したもの。
+
+     ★落としたもの（テストにもリポジトリにも入れない）★
+       - .crumb（CSRF トークン。セッションに紐づく秘密）→ REDACTED に置換
+       - PayPay 残高・ポイント・失効日
+       - ニックネーム、ユーザーアイコンの URL（ハッシュを含む）
+       - ヘッダ・フッタ・広告・トラッキングの一切
+
+     ここは古典的なサーバ描画で、クラス名が意味を持つ（styled-components ではない）。
+     ただし引くなら「ラベルの文字」（決済金額：／販売手数料：）が最も壊れにくい。
+
+     ⚠ 取扱内容の商品名は**途中で切れている**（例：「…新品未開封【Z07」）。
+        型番をここから取ってはいけない。型番は取引中・取引完了のページの全文から取る。 -->
+
+<form name="csvdownload" method="POST" action="https://salesmanagement.yahoo.co.jp/salesmanagelist_csv">
+    <input type="hidden" name="i" value="">
+    <input type="hidden" name=".crumb" value="REDACTED">
+</form>
+
+<p class="listTitle"><em>直近3カ月の受け取り一覧</em>（件数：<em>0件</em>　金額：<em>0円</em>）
+<span class="fnt12" id="csvd">［<a href="" onclick="javascript:document.csvdownload.submit();return false;">CSVダウンロード</a>］</span></p>
+
+<form action="https://salesmanagement.yahoo.co.jp/list" method="post">
+  <input type="hidden" name="p" value="1">
+  <p class="listTerm" id="pd">月指定：
+    <select name="i" onchange="this.form.submit()">
+      <option value="" selected="">直近3カ月</option>
+      <option value="202609">2026年9月</option>
+      <option value="202608">2026年8月</option>
+      <option value="202607">2026年7月</option>
+    </select>
+  </p>
+</form>
+
+<table width="100%" border="0" cellspacing="0" cellpadding="0" class="SalesList TableUrikan" id="salelst">
+  <colgroup class="colInfo"></colgroup>
+  <colgroup class="colDate"></colgroup>
+  <colgroup class="colStatus"></colgroup>
+  <colgroup class="colIn"></colgroup>
+  <colgroup class="colDetail"></colgroup>
+  <tbody><tr>
+    <th>取扱内容</th>
+    <th>取扱日</th>
+    <th>状態</th>
+    <th>金額</th>
+    <th>詳細</th>
+  </tr>
+
+    <tr>
+      <td>メロジョイ ふわふわ肉球ミルクパフ ねっとりヨーグルト【Z074-4】<br>(z693579992)</td>
+      <td>2026/9/28</td>
+      <td><span class="statusSuspend">受取連絡待ち</span></td>
+      <td>
+        <span class="u-fontSize16 u-textBold suspend">5,200円</span>
+        <div class="js-expand">
+          <p class="SalesList__trigger js-expand-trigger">内訳</p>
+          <div class="SalesList__breakdown js-expand-body">
+            <dl class="SalesList__breakdownText u-clearfix">
+              <dt class="u-floatL">決済金額：</dt>
+              <dd class="u-floatR">5,200円</dd>
+            </dl>
+            <dl class="SalesList__breakdownText u-clearfix">
+              <dt class="u-floatL">販売手数料：</dt>
+              <dd class="u-floatR">-0円</dd>
+            </dl>
+          </div>
+        </div>
+      </td>
+      <td><a href="https://aucpay.yahoo.co.jp/detail-front/ReceiveDetailItem?_settle_id=26092882071555" class="libBtnGrayS">詳細</a></td>
+    </tr>
+
+    <tr>
+      <td>Mellojoy メロジョイ 贅沢スフレ チョコレート Mサイズ 新品未開封【Z07<br>(z693407762)</td>
+      <td>2026/9/28</td>
+      <td><span class="statusSuspend">受取連絡待ち</span></td>
+      <td>
+        <span class="u-fontSize16 u-textBold suspend">6,080円</span>
+        <div class="js-expand">
+          <p class="SalesList__trigger js-expand-trigger">内訳</p>
+          <div class="SalesList__breakdown js-expand-body">
+            <dl class="SalesList__breakdownText u-clearfix">
+              <dt class="u-floatL">決済金額：</dt>
+              <dd class="u-floatR">6,400円</dd>
+            </dl>
+            <dl class="SalesList__breakdownText u-clearfix">
+              <dt class="u-floatL">販売手数料：</dt>
+              <dd class="u-floatR">-320円</dd>
+            </dl>
+          </div>
+        </div>
+      </td>
+      <td><a href="https://aucpay.yahoo.co.jp/detail-front/ReceiveDetailItem?_settle_id=26092881969171" class="libBtnGrayS">詳細</a></td>
+    </tr>
+
+    <tr>
+      <td>Mellojoy メロジョイ いちごショートケーキ ホール スクイーズ 新品未開封<br>(z693289446)</td>
+      <td>2026/9/28</td>
+      <td><span class="statusSuspend">受取連絡待ち</span></td>
+      <td>
+        <span class="u-fontSize16 u-textBold suspend">5,605円</span>
+        <div class="js-expand">
+          <p class="SalesList__trigger js-expand-trigger">内訳</p>
+          <div class="SalesList__breakdown js-expand-body">
+            <dl class="SalesList__breakdownText u-clearfix">
+              <dt class="u-floatL">決済金額：</dt>
+              <dd class="u-floatR">5,899円</dd>
+            </dl>
+            <dl class="SalesList__breakdownText u-clearfix">
+              <dt class="u-floatL">販売手数料：</dt>
+              <dd class="u-floatR">-294円</dd>
+            </dl>
+          </div>
+        </div>
+      </td>
+      <td><a href="https://aucpay.yahoo.co.jp/detail-front/ReceiveDetailItem?_settle_id=26092881911392" class="libBtnGrayS">詳細</a></td>
+    </tr>
+
+    <tr>
+      <td>Mellojoy メロジョイ クッキークラブ クリームブロッサム もちもちもち<br>(z693287844)</td>
+      <td>2026/9/27</td>
+      <td><span class="statusSuspend">受取連絡待ち</span></td>
+      <td>
+        <span class="u-fontSize16 u-textBold suspend">4,067円</span>
+        <div class="js-expand">
+          <p class="SalesList__trigger js-expand-trigger">内訳</p>
+          <div class="SalesList__breakdown js-expand-body">
+            <dl class="SalesList__breakdownText u-clearfix">
+              <dt class="u-floatL">決済金額：</dt>
+              <dd class="u-floatR">4,280円</dd>
+            </dl>
+            <dl class="SalesList__breakdownText u-clearfix">
+              <dt class="u-floatL">販売手数料：</dt>
+              <dd class="u-floatR">-213円</dd>
+            </dl>
+          </div>
+        </div>
+      </td>
+      <td><a href="https://aucpay.yahoo.co.jp/detail-front/ReceiveDetailItem?_settle_id=26092781753104" class="libBtnGrayS">詳細</a></td>
+    </tr>
+
+  </tbody>
+</table>

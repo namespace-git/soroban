@@ -3,7 +3,7 @@ import { isRealized } from '../../shared/recognition'
 // 在庫の引き当て／紐付け。出品（mode='listing'）と販売（mode='sale'）の両方から使う。
 // チェックした瞬間に下端の原価合計・粗利プレビューが動く。確定は「引き当てる／紐付ける」ボタンで初めて起きる。
 import { ref, computed, watch, inject } from 'vue'
-import type { Listing, InventoryItem, ListingStatus, SaleProfit, ProductSummary } from '../../shared/types'
+import type { Listing, InventoryItem, ListingStatus, SaleProfit, ProductSummary, SalesChannel } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import CodeChip from './CodeChip.vue'
@@ -196,22 +196,30 @@ async function runEstimate() {
   let priceVal: number
   let shippingMethodId: string | null
   let packagingCost: number | undefined
+  let channel: SalesChannel | undefined
+  let fee: number | null | undefined
   if (props.mode === 'listing') {
     if (!props.listing) { estimate.value = null; return }
     priceVal = props.listing.price
     shippingMethodId = props.listing.shipping_method_id
     packagingCost = 0 // 出品はまだ梱包費が無い（見込み粗利は送料込み・梱包前）
+    channel = props.listing.channel
   } else {
     if (!props.sale) { estimate.value = null; return }
     priceVal = props.sale.price
     shippingMethodId = props.sale.shipping_method_id
     packagingCost = props.sale.packaging_cost
+    channel = props.sale.channel
+    // 手数料が実額で確定しているなら率では見積もらず、その実額をそのまま使う（0 も実額）
+    if (props.sale.fee_source === 'actual') fee = props.sale.fee
   }
   const result = await window.soroban.estimateSaleProfit({
     price: priceVal,
     shipping_method_id: shippingMethodId,
     packaging_cost: packagingCost,
     inventory_item_ids: inventoryItemIds,
+    channel,
+    fee,
   })
   if (seq === estimateSeq) estimate.value = result
 }
