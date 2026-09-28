@@ -183,6 +183,156 @@ describe('getTrackInfo：到着日（JSTのローカル日付）の抽出', () =
   })
 })
 
+// ------------------------------------------------------------
+// getTrackInfo：実物の応答の形（time_raw がオブジェクト）
+//
+// 17TRACK の実際の API を本物のキー・追跡番号で1回叩いて確認した形。
+// events[] の1要素は time_iso / time_utc / time_raw / sub_status / stage 等を持ち、
+// time_raw はオブジェクト（{ date, time, timezone }）。
+// location・address・description には配達先の実際の情報が入るため、
+// テストのデータには実物の文字列を入れず、形だけを再現した架空の値にする。
+// ------------------------------------------------------------
+
+describe('getTrackInfo：実物の応答の形（time_raw がオブジェクト）', () => {
+  it('time_raw がオブジェクトの event から到着日が取れる（TZ に左右されない）', async () => {
+    mockFetch.mockResolvedValueOnce(apiOk({
+      accepted: [{
+        number: 'B1',
+        track_info: {
+          latest_status: { status: 'Delivered', sub_status: 'Delivered_Other' },
+          tracking: {
+            providers: [{
+              events: [{
+                time_iso: '2026-09-17T10:07:00+09:00',
+                time_utc: '2026-09-17T01:07:00Z',
+                time_raw: { date: '2026-09-17', time: '10:07:00', timezone: '+09:00' },
+                sub_status: 'Delivered_Other',
+                stage: 'Delivered',
+              }],
+            }],
+          },
+        },
+      }],
+      rejected: [],
+    }))
+
+    const [result] = await getTrackInfo(API_KEY, ['B1'])
+    expect(result.deliveredAt).toBe('2026-09-17')
+  })
+
+  it('time_raw.date が第一候補（time_iso に別の日付が入っていても time_raw.date を採る）', async () => {
+    mockFetch.mockResolvedValueOnce(apiOk({
+      accepted: [{
+        number: 'B2',
+        track_info: {
+          latest_status: { status: 'Delivered', sub_status: 'Delivered_Other' },
+          tracking: {
+            providers: [{
+              events: [{
+                time_iso: '2026-09-18T23:00:00+09:00', // わざと違う日付
+                time_raw: { date: '2026-09-17', time: '10:07:00', timezone: '+09:00' },
+                sub_status: 'Delivered_Other',
+              }],
+            }],
+          },
+        },
+      }],
+      rejected: [],
+    }))
+
+    const [result] = await getTrackInfo(API_KEY, ['B2'])
+    expect(result.deliveredAt).toBe('2026-09-17')
+  })
+
+  it('time_raw が文字列の配送会社でも従来どおり取れる', async () => {
+    mockFetch.mockResolvedValueOnce(apiOk({
+      accepted: [{
+        number: 'B3',
+        track_info: {
+          latest_status: { status: 'Delivered', sub_status: 'Delivered_Other' },
+          tracking: { providers: [{ events: [{ sub_status: 'Delivered_Other', time_raw: '2024-05-01T10:00:00+09:00' }] }] },
+        },
+      }],
+      rejected: [],
+    }))
+
+    const [result] = await getTrackInfo(API_KEY, ['B3'])
+    expect(result.deliveredAt).toBe('2024-05-01')
+  })
+
+  it('sub_status が無く stage が Delivered だけの event でも見つかる', async () => {
+    mockFetch.mockResolvedValueOnce(apiOk({
+      accepted: [{
+        number: 'B4',
+        track_info: {
+          latest_status: { status: 'Delivered' },
+          tracking: {
+            providers: [{
+              events: [{ stage: 'Delivered', time_raw: { date: '2026-09-20', time: '09:00:00', timezone: '+09:00' } }],
+            }],
+          },
+        },
+      }],
+      rejected: [],
+    }))
+
+    const [result] = await getTrackInfo(API_KEY, ['B4'])
+    expect(result.deliveredAt).toBe('2026-09-20')
+  })
+
+  it('配達 event が複数あるとき、いちばん新しいものが採られる', async () => {
+    mockFetch.mockResolvedValueOnce(apiOk({
+      accepted: [{
+        number: 'B5',
+        track_info: {
+          latest_status: { status: 'Delivered', sub_status: 'Delivered_Other' },
+          tracking: {
+            providers: [{
+              events: [
+                { sub_status: 'Delivered_Other', time_raw: { date: '2026-09-15', time: '09:00:00', timezone: '+09:00' } },
+                // 配達後の返送スキャン等、より新しい「配達扱い」の event
+                { sub_status: 'Delivered_Other', time_raw: { date: '2026-09-18', time: '09:00:00', timezone: '+09:00' } },
+              ],
+            }],
+          },
+        },
+      }],
+      rejected: [],
+    }))
+
+    const [result] = await getTrackInfo(API_KEY, ['B5'])
+    expect(result.deliveredAt).toBe('2026-09-18')
+  })
+
+  // 「PC のタイムゾーンに左右されない」ことは、この時刻文字列を new Date().getFullYear() 等の
+  // ローカル時刻換算に一切通さず（time_raw.date を正規表現でそのまま使う）実現している。
+  // 実行環境の TZ を変えても結果が変わらないことは、この spec ファイルを
+  // `TZ=UTC` で実行して確かめる（pnpm test は TZ=Asia/Tokyo を固定しているため）
+  it('time_iso が JST 深夜（UTC 前日）でも time_raw.date が優先され、日付がずれない', async () => {
+    mockFetch.mockResolvedValueOnce(apiOk({
+      accepted: [{
+        number: 'B6',
+        track_info: {
+          latest_status: { status: 'Delivered', sub_status: 'Delivered_Other' },
+          tracking: {
+            providers: [{
+              events: [{
+                sub_status: 'Delivered_Other',
+                time_iso: '2026-09-17T00:30:00+09:00',
+                time_raw: { date: '2026-09-17', time: '00:30:00', timezone: '+09:00' },
+              }],
+            }],
+          },
+        },
+      }],
+      rejected: [],
+    }))
+
+    const [result] = await getTrackInfo(API_KEY, ['B6'])
+    expect(result.deliveredAt).toBe('2026-09-17')
+  })
+})
+
 describe('getTrackInfo：番号の突き合わせ（核心）', () => {
   it('応答に自分が問い合わせていない番号が混ざっていたら捨てる', async () => {
     mockFetch.mockResolvedValueOnce(apiOk({

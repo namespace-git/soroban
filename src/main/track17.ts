@@ -244,20 +244,37 @@ export async function registerNumbers(apiKey: string, numbers: string[]): Promis
   return { accepted, rejected }
 }
 
+/** event が「配達された event」か（sub_status か stage のどちらかで当たればよい） */
+function isDeliveredEvent(event: any): boolean {
+  return event?.sub_status === 'Delivered_Other' || event?.stage === 'Delivered'
+}
+
 /**
- * providers[].events[] から Delivered_Other の time_raw を探す。無ければ null
+ * event の時刻を「並び替え用」の ms へ。実物は time_utc（文字列）・time_iso（文字列）・
+ * time_raw（文字列 or { date, time, timezone }）のどれかを持つ。複数の配達 event が
+ * あるとき「いちばん新しいもの」を選ぶためだけに使う。読めなければ NaN
  */
-function findDeliveredEventTime(trackInfo: any): string | null {
-  const providers: any[] = trackInfo?.tracking?.providers ?? []
-  for (const provider of providers) {
-    const events: any[] = Array.isArray(provider?.events) ? provider.events : []
-    for (const event of events) {
-      if (event?.sub_status === 'Delivered_Other' && typeof event?.time_raw === 'string' && event.time_raw) {
-        return event.time_raw
-      }
+function eventTimestampMs(event: any): number {
+  for (const raw of [event?.time_utc, event?.time_iso]) {
+    if (typeof raw !== 'string' || !raw) continue
+    const t = new Date(raw).getTime()
+    if (!Number.isNaN(t)) return t
+  }
+  const timeRaw = event?.time_raw
+  if (typeof timeRaw === 'string' && timeRaw) {
+    const t = new Date(timeRaw).getTime()
+    if (!Number.isNaN(t)) return t
+  }
+  if (timeRaw && typeof timeRaw === 'object') {
+    const date = typeof timeRaw.date === 'string' ? timeRaw.date : ''
+    const time = typeof timeRaw.time === 'string' ? timeRaw.time : '00:00:00'
+    const timezone = typeof timeRaw.timezone === 'string' ? timeRaw.timezone : ''
+    if (date) {
+      const t = new Date(`${date}T${time}${timezone}`).getTime()
+      if (!Number.isNaN(t)) return t
     }
   }
-  return null
+  return Number.NaN
 }
 
 /** 時刻の文字列（ISO・「YYYY-MM-DD HH:mm:ss」等）を JST の YYYY-MM-DD へ。読めなければ null */
@@ -266,6 +283,52 @@ function toLocalDate(raw: string | null): string | null {
   const d = new Date(raw)
   if (Number.isNaN(d.getTime())) return null
   return todayLocal(d)
+}
+
+/**
+ * 1件の event から到着日（YYYY-MM-DD）を取り出す。優先順位：
+ *   1. time_raw.date（配達場所の壁時計の日付。実行環境のタイムゾーン設定に一切左右されない）
+ *   2. time_raw が文字列ならそれを toLocalDate へ（time_raw をオブジェクトで返さない配送会社向け）
+ *   3. time_iso（文字列）→ toLocalDate
+ *   4. time_utc（文字列）→ toLocalDate
+ * どれも読めなければ null
+ */
+function extractEventDate(event: any): string | null {
+  const timeRaw = event?.time_raw
+  if (timeRaw && typeof timeRaw === 'object' && typeof timeRaw.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(timeRaw.date)) {
+    return timeRaw.date
+  }
+  if (typeof timeRaw === 'string' && timeRaw) {
+    const local = toLocalDate(timeRaw)
+    if (local) return local
+  }
+  const isoLocal = toLocalDate(typeof event?.time_iso === 'string' ? event.time_iso : null)
+  if (isoLocal) return isoLocal
+  return toLocalDate(typeof event?.time_utc === 'string' ? event.time_utc : null)
+}
+
+/**
+ * providers[].events[] から「配達された event」（sub_status が Delivered_Other、
+ * または stage が Delivered）を探す。複数あれば最も新しいものの到着日を返す。
+ * 無ければ null
+ */
+function findDeliveredEventDate(trackInfo: any): string | null {
+  const providers: any[] = trackInfo?.tracking?.providers ?? []
+  let best: any = null
+  let bestTime = Number.NEGATIVE_INFINITY
+  for (const provider of providers) {
+    const events: any[] = Array.isArray(provider?.events) ? provider.events : []
+    for (const event of events) {
+      if (!isDeliveredEvent(event)) continue
+      const t = eventTimestampMs(event)
+      const rank = Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t
+      if (!best || rank > bestTime) {
+        best = event
+        bestTime = rank
+      }
+    }
+  }
+  return best ? extractEventDate(best) : null
 }
 
 /** 1件の accepted 要素を Track17Read へ整える */
@@ -281,8 +344,9 @@ function toTrack17Read(item: any): Track17Read {
 
   let deliveredAt: string | null = null
   if (status === 'Delivered') {
-    const deliveredEventTime = findDeliveredEventTime(trackInfo)
-    deliveredAt = toLocalDate(deliveredEventTime) ?? toLocalDate(latestEventAt)
+    // 「配達された event」自身の日付を優先。無ければ latest_event を予備に使う
+    // （latest_event についても同じ優先順位＝time_raw.date を先に見る）
+    deliveredAt = findDeliveredEventDate(trackInfo) ?? extractEventDate(trackInfo?.latest_event)
   }
 
   return { number, status, subStatus, deliveredAt, latestEventAt, error: null }
