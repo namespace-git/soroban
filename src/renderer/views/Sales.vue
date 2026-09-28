@@ -786,16 +786,55 @@ async function editNote(sale: SaleProfit) {
 
 // --- 型番で自動紐付け ---
 
+/**
+ * 実行前後で未紐付け（unmatched）の転売を突き合わせ、「なぜ引き当たらなかったか」を
+ * model_codes（抽出した型番）の個数で仕分ける。判定ルール自体（db.ts の autoLinkSale）は
+ * 変えない。ここはメッセージのための後追いの数え上げだけ：
+ *   0件 → タイトルから型番が読み取れなかった（取り込みの不具合／最初から型番が無い、両方を含む）
+ *   1件 → 型番は読み取れたが、在庫が無い（他の出品に引き当て済みで奪わなかった場合を含む）
+ *   2件以上 → 型番が複数あって1つに絞れない
+ */
 async function autoLinkPending() {
-  const n = await window.soroban.autoLinkPending()
-  if (n > 0) {
-    toast(`${n}件を自動で紐付けました`, 'ok')
-  } else {
-    toast('型番が一致する在庫はありませんでした', 'warn')
+  const before = (await window.soroban.listSales({ kind: 'resale' })).filter(s => s.unmatched === 1)
+  if (before.length === 0) {
+    toast('未紐付けの販売はありません', 'ok')
+    return
   }
+
+  const n = await window.soroban.autoLinkPending()
+
   await load()
   await loadProgress()
   changed()
+
+  const after = new Map(
+    (await window.soroban.listSales({ kind: 'resale' }))
+      .filter(s => s.unmatched === 1)
+      .map(s => [s.id, s]),
+  )
+
+  let noCode = 0
+  let ambiguous = 0
+  let noMatch = 0
+  for (const s of before) {
+    const a = after.get(s.id)
+    if (!a) continue // 引き当てられた
+    if (a.model_codes.length === 0) noCode++
+    else if (a.model_codes.length >= 2) ambiguous++
+    else noMatch++
+  }
+
+  const reasons: string[] = []
+  if (noCode > 0) reasons.push(`型番が読み取れない${noCode}件`)
+  if (ambiguous > 0) reasons.push(`型番が複数あって絞れない${ambiguous}件`)
+  if (noMatch > 0) reasons.push(`型番はあるが在庫が無い${noMatch}件`)
+  const detail = reasons.length ? `${reasons.join('、')}は手で選んでください` : ''
+
+  if (n > 0) {
+    toast(detail ? `${n}件を自動で紐付けました。${detail}` : `${n}件を自動で紐付けました`, 'ok')
+  } else {
+    toast(detail ? `型番が一致する在庫がありませんでした。${detail}` : '型番が一致する在庫はありませんでした', 'warn')
+  }
 }
 
 // --- 型番で自動引き当て（出品中） ---
