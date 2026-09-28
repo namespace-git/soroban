@@ -16,10 +16,16 @@ const props = defineProps<{
   open: boolean
   inventoryItemId: string | null
 }>()
-const emit = defineEmits<{ close: [] }>()
+const emit = defineEmits<{
+  close: []
+  /** ここで直接 API を叩いて自分の timeline だけ読み直した（＝一覧の行はまだ古いまま）ときに出す */
+  changed: []
+}>()
 
 const goto = inject<(tab: string, payload?: { modelCode?: string; search?: string; focusId?: string }) => void>('goto')!
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+// 購入日時が変わりうる操作（購入日時の取り直し）は一覧（Sales.vue / Inventory.vue）にも効かせる
+const changed = inject<() => void>('changed', () => {})
 
 const timeline = ref<ItemTimeline | null>(null)
 const purchaseDetail = ref<PurchaseDetail | null>(null)
@@ -69,6 +75,10 @@ async function refetchPurchasedAt() {
       result.purchased_at ? 'ok' : 'warn',
     )
     await load()
+    if (result.purchased_at) {
+      changed()
+      emit('changed')
+    }
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), 'warn')
   } finally {

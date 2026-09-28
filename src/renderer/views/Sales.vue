@@ -1428,6 +1428,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
       :open="!!timelineItemId"
       :inventory-item-id="timelineItemId"
       @close="timelineItemId = null"
+      @changed="load"
     />
   </div>
 </template>

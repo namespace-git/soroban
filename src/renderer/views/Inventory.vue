@@ -942,6 +942,7 @@ async function editNote(item: InventoryItem) {
       :open="!!timelineItemId"
       :inventory-item-id="timelineItemId"
       @close="timelineItemId = null"
+      @changed="load"
     />
   </div>
 </template>
