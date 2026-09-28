@@ -63,6 +63,8 @@ const api: SorobanApi = {
   readReceiptImage: invoke('readReceiptImage'),
   readReceipt: invoke('readReceipt'),
   getAiStatus: invoke('getAiStatus'),
+  getTrackingApiStatus: invoke('getTrackingApiStatus'),
+  setTrack17ApiKey: invoke('setTrack17ApiKey'),
   setGeminiApiKey: invoke('setGeminiApiKey'),
   setAiModel: invoke('setAiModel'),
   testGemini: invoke('testGemini'),

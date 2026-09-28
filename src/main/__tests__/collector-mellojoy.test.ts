@@ -122,7 +122,7 @@ vi.mock('../db', () => ({
   setPurchaseLineImage: vi.fn(),
   setPurchaseLineImageUrls: vi.fn(() => 0),
   getPurchase: vi.fn(),
-  purchaseImageRefreshCandidates: vi.fn(() => []),
+  purchaseDetailRevisitCandidates: vi.fn(() => []),
   setPurchaseImageChecked: vi.fn(),
   getSettings: vi.fn(() => ({})),
   setSetting: vi.fn(),
@@ -753,7 +753,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
 
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.mocked(db.purchaseImageRefreshCandidates).mockReturnValue([])
+    vi.mocked(db.purchaseDetailRevisitCandidates).mockReturnValue([])
     vi.mocked(db.getSettings).mockReturnValue({})
     vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue([])
     vi.mocked(db.getShopAccount).mockReturnValue({ id: 'shop-1', import_keywords: '' } as never)
@@ -839,7 +839,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
         .replace('<span>テスト商品</span>', '<span>テスト商品</span><small>【A001-2】青</small>'),
     }
     vi.mocked(db.existingImportKeys).mockReturnValue(new Set(['mellojoy:#300001']))
-    vi.mocked(db.purchaseImageRefreshCandidates).mockReturnValue([{ id: 'existing', import_key: 'mellojoy:#300001' }])
+    vi.mocked(db.purchaseDetailRevisitCandidates).mockReturnValue([{ id: 'existing', import_key: 'mellojoy:#300001' }])
     vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue([{ id: 'blue', image_url: 'https://cdn.example.com/a_400x400.jpg?v=2' }])
 
     const run = await collectShopOrders('shop-1', true)
@@ -859,7 +859,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
     state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/order/300001' }])
     // detailHtmlByUrl に何も積まない → outerHTML が空文字 → shouldSkipDetail で読めなかった扱い
     vi.mocked(db.existingImportKeys).mockReturnValue(new Set(['mellojoy:#300001']))
-    vi.mocked(db.purchaseImageRefreshCandidates).mockReturnValue([{ id: 'existing', import_key: 'mellojoy:#300001' }])
+    vi.mocked(db.purchaseDetailRevisitCandidates).mockReturnValue([{ id: 'existing', import_key: 'mellojoy:#300001' }])
 
     const run = await collectShopOrders('shop-1', true)
 
@@ -873,7 +873,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
     state.opts.detailHtmlByUrl = Object.fromEntries(orders.map(o => [o.href, buildDetailHtml(o.orderNo, 1000)]))
     const existing = orders.slice(1).map((o, i) => ({ id: `p${i}`, import_key: `mellojoy:${o.orderNo}` }))
     vi.mocked(db.existingImportKeys).mockReturnValue(new Set(existing.map(p => p.import_key)))
-    vi.mocked(db.purchaseImageRefreshCandidates).mockReturnValue(existing)
+    vi.mocked(db.purchaseDetailRevisitCandidates).mockReturnValue(existing)
     vi.mocked(db.getSettings).mockReturnValue({ 'mellojoy_image_cursor:shop-1': 'p3' })
 
     await collectShopOrders('shop-1', true)

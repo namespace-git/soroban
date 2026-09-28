@@ -2,8 +2,8 @@
 // 仕入の取引詳細（読み取り＋タグ／メモ／下書きの確定への入口）。
 // 何を何個買って、そこから生まれた在庫が今どうなっているかを1画面で見せる。
 // タグ・メモ・確定は Purchases.vue にある既存の処理をそのまま呼ぶ（ここでは持たない）。
-import { ref, watch, inject } from 'vue'
-import type { PurchaseDetail, PurchaseLine, PurchaseLineItem, Fulfillment } from '../../shared/types'
+import { ref, watch, inject, onMounted, computed } from 'vue'
+import type { PurchaseDetail, PurchaseLine, PurchaseLineItem, Fulfillment, TrackingApiStatus } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import CodeChip from './CodeChip.vue'
@@ -31,6 +31,14 @@ const goto = inject<(t: string, payload?: { stage?: 'listed' | 'pending' | 'done
 
 const detail = ref<PurchaseDetail | null>(null)
 const loading = ref(false)
+
+// 17TRACK の API キーの有無。ドロワーを開くたびには問い合わせず、この部品が生きている間は1回だけ見る
+const trackingApiStatus = ref<TrackingApiStatus | null>(null)
+onMounted(async () => {
+  trackingApiStatus.value = await window.soroban.getTrackingApiStatus()
+})
+/** キーが無ければ「配送状況を確認」は押せない（読み込み中はまだ分からないので押せる扱い） */
+const canCheckTracking = computed(() => trackingApiStatus.value?.configured ?? true)
 
 async function load() {
   if (!props.purchaseId) {
@@ -133,8 +141,13 @@ async function onOpenTracking() {
   }
 }
 
-/** 17TRACK で最後に見た配送状況。メロジョイは配達済みを教えてくれないので、到着はここでしか分からない */
+/**
+ * 17TRACK で最後に見た配送状況。メロジョイは配達済みを教えてくれないので、到着はここでしか分からない。
+ * 到着済になったら（自動・手動どちらでも）もう読みに行く意味が無いので、確認済みの結果は出さずその旨だけ伝える
+ */
 function trackingStatusText(): string {
+  if (detail.value?.fulfillment === 'delivered') return '到着済みなので、もう確認しません'
+  if (!canCheckTracking.value) return '設定で 17TRACK の API キーを入れると、自動で到着が分かります'
   if (!detail.value?.tracking_status) return 'まだ確認していません'
   return `${detail.value.tracking_status} ・ ${shortDate(detail.value.tracking_checked_at)} に確認`
 }
@@ -142,7 +155,7 @@ function trackingStatusText(): string {
 // --- 配送状況を17TRACKで確認（メンテ用）：onRefetchImages と同じ型（busy ref・try/catch/finally・toast） ---
 const checkingTracking = ref(false)
 async function onCheckTracking() {
-  if (!detail.value || checkingTracking.value) return
+  if (!detail.value || checkingTracking.value || !canCheckTracking.value) return
   checkingTracking.value = true
   try {
     const result = await window.soroban.checkTracking(detail.value.id)
@@ -250,8 +263,11 @@ async function onRefetchImages() {
             追跡 <Icon name="external" :size="12" />
           </button>
           <button
-            class="sm ghost" :disabled="checkingTracking"
-            title="メロジョイは配達済みを教えてくれないので、17TRACK を今すぐ 1 件だけ確認します"
+            v-if="detail.fulfillment !== 'delivered'"
+            class="sm ghost" :disabled="checkingTracking || !canCheckTracking"
+            :title="canCheckTracking
+              ? 'メロジョイは配達済みを教えてくれないので、17TRACK を今すぐ 1 件だけ確認します'
+              : '設定で 17TRACK の API キーを入れると使えます'"
             @click="onCheckTracking"
           >{{ checkingTracking ? '確認中…' : '配送状況を確認' }}</button>
         </div>

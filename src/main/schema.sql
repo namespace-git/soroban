@@ -164,6 +164,9 @@ CREATE TABLE IF NOT EXISTS purchase (
   -- メロジョイの注文詳細は「配達中」までしか出さないため、別途 17TRACK を見て埋める
   tracking_status      TEXT,
   tracking_checked_at  TEXT,
+  -- この追跡番号を 17TRACK に登録した日時。NULL = まだ登録していない。
+  -- 登録（register）は無料枠を消費するため、一度登録したら二度と送らない
+  tracking_registered_at TEXT,
 
   note            TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),

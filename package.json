@@ -14,7 +14,7 @@
     "pack:mac": "pnpm build && electron-builder --mac --dir",
     "dist:win": "pnpm build && electron-builder --win",
     "dist:mac": "pnpm build && electron-builder --mac",
-    "test": "cross-env ELECTRON_RUN_AS_NODE=1 electron ./node_modules/vitest/vitest.mjs run",
+    "test": "cross-env TZ=Asia/Tokyo ELECTRON_RUN_AS_NODE=1 electron ./node_modules/vitest/vitest.mjs run",
     "icon": "electron scripts/make-icon.cjs",
     "release:patch": "npm version patch -m \"v%s\" && git push && git push --tags",
     "release:minor": "npm version minor -m \"v%s\" && git push && git push --tags",

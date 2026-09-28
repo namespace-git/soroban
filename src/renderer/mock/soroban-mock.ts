@@ -20,7 +20,7 @@ import type {
   ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
   Listing, ListingStatus,
   Expense, ExpenseInput, ExpenseLineInput, ExpenseLine, ExpenseCategory,
-  ReceiptDraft, ReceiptRead, AiStatus,
+  ReceiptDraft, ReceiptRead, AiStatus, TrackingApiStatus,
   AllocMethod, MonthClose, MonthDetail, MonthSaleRow, MonthTotals,
   SearchHit,
   UpdateStatus,
@@ -305,6 +305,12 @@ let settings: Record<string, string> = {
 let aiKeyConfigured = true
 let aiModelSetting = 'gemini-flash-latest'
 const AI_SAFE_STORAGE = true
+
+// --- 17TRACK API（配送状況の自動確認）。キー本体は返さない。既定は「キーあり」の見本 ---
+let trackingKeyConfigured = true
+const TRACK17_SAFE_STORAGE = true
+const trackingUnregistered = 2
+const trackingWatching = 1
 
 /** 実際の Gemini 呼び出しは数秒かかる想定に寄せて 1 秒待つ */
 function waitAi<T>(value: T): Promise<T> {
@@ -664,7 +670,8 @@ function buildInitialPurchasesAndInventory(): void {
     shopId: mB.id, shopName: mB.name, orderedAt: todayLocal(daysAgo(150)), shippingFee: 850,
     lines: [{ model: 'Z080-1', qty: 3 }, { model: 'Z056-1', qty: 3 }, { model: 'Z056-2', qty: 3 }],
     importKey: 'mellojoy:#256112',
-    fulfillment: 'shipped',
+    // 到着済＋追跡番号ありの見本（checkTracking を押さなくても「配送状況を確認」が出ない状態）
+    fulfillment: 'delivered',
     // 配送業者・追跡番号の見本（メロジョイの注文詳細から読めたもの）
     trackingCarrier: 'SF Express',
     trackingNumber: 'SF6047878426775',
@@ -3247,18 +3254,20 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
-  // 17TRACK を今すぐ 1 件だけ確認する見本。追跡番号が無ければ null。あれば常に「配達完了」で
-  // 到着済にする（前に進む方向だけ。既に到着済ならそのまま）。例外は投げない
+  // 17TRACK を今すぐ 1 件だけ確認する見本。追跡番号が無ければ null。到着済は読みに行かず、
+  // 保存済みの状態をそのまま返す（main 側の「到着済なら読み直さない」ガードに合わせる）。
+  // キーが無ければ日本語のエラーを投げる（main と同じ文言。画面のエラー表示を確認できるように）。
+  // 未到着・キーありなら常に「配達完了」で到着済にする（前に進む方向だけ）
   async checkTracking(purchaseId: string) {
     const p = purchases.find(x => x.id === purchaseId)
     if (!p?.tracking_number) return wait(null)
+    if (p.fulfillment === 'delivered') return wait({ status_text: p.tracking_status, delivered_at: null })
+    if (!trackingKeyConfigured) throw new Error('17TRACK の設定がありません（設定 → 配送状況）')
     const now = new Date().toISOString()
     p.tracking_status = '配達完了'
     p.tracking_checked_at = now
-    if (p.fulfillment !== 'delivered') {
-      p.fulfillment = 'delivered'
-      p.delivered_at = p.delivered_at ?? todayLocal()
-    }
+    p.fulfillment = 'delivered'
+    p.delivered_at = p.delivered_at ?? todayLocal()
     return wait({ status_text: p.tracking_status, delivered_at: p.delivered_at })
   },
 
@@ -3364,6 +3373,20 @@ const api: SorobanApi = {
     const e = expenses.find(x => x.id === id)
     if (!e || !e.receipt_url) throw new Error('レシートが添付されていません')
     return waitReceipt(MOCK_RECEIPT_DRAFT)
+  },
+
+  async getTrackingApiStatus(): Promise<TrackingApiStatus> {
+    return wait({
+      configured: trackingKeyConfigured,
+      safe_storage: TRACK17_SAFE_STORAGE,
+      unregistered: trackingUnregistered,
+      watching: trackingWatching,
+    })
+  },
+
+  async setTrack17ApiKey(key: string | null) {
+    trackingKeyConfigured = !!key
+    return wait(undefined)
   },
 
   async getAiStatus(): Promise<AiStatus> {

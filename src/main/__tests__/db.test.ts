@@ -1383,7 +1383,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('29')
+      expect(db.getSettings().schema_version).toBe('30')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1577,8 +1577,8 @@ describe('db（:memory:）', () => {
     expect(other.last_ordered_at).toBeNull()
   })
 
-  it('migrate：schema_versionが28になる', () => {
-    expect(db.getSettings().schema_version).toBe('29')
+  it('migrate：schema_versionが30になる', () => {
+    expect(db.getSettings().schema_version).toBe('30')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1664,7 +1664,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('29')
+      expect(db.getSettings().schema_version).toBe('30')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1698,7 +1698,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('29')
+      expect(db.getSettings().schema_version).toBe('30')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -1725,7 +1725,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('29')
+      expect(db.getSettings().schema_version).toBe('30')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       expect(expense.registration_no).toBeNull()
     } finally {
@@ -1769,7 +1769,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('29')
+      expect(db.getSettings().schema_version).toBe('30')
       // 既存の表示名はそのまま残る
       const p = db.listProducts().find(x => x.model_code === 'Z078-2')
       expect(p?.custom_name).toBe('旧表示名')
@@ -2288,10 +2288,38 @@ describe('db（:memory:）', () => {
     expect(db.getPurchaseTrackingNumber('no-such-id')).toBeNull()
   })
 
+  it('getPurchaseTracking：番号・到着状態・保存済みの状態をまとめて返す。存在しない仕入はnull', () => {
+    const id = db.createPurchase({
+      shop_account_id: shopId,
+      ordered_at: '2026-09-01',
+      fulfillment: 'shipped',
+      lines: [{ name: '配送中', unit_price: 1000, quantity: 1 }],
+    })
+    db.applyFulfillmentFromShop(id, {
+      status: null, shipped_at: null, delivered_at: null, carrier: null, tracking_number: 'TRK-GET-1',
+    })
+    expect(db.getPurchaseTracking(id)).toEqual({
+      tracking_number: 'TRK-GET-1', fulfillment: 'shipped', tracking_status: null,
+      tracking_registered_at: null,
+    })
+
+    db.applyTrackingResult(id, { status_text: '輸送中', fulfillment: null, delivered_at: null })
+    expect(db.getPurchaseTracking(id)).toEqual({
+      tracking_number: 'TRK-GET-1', fulfillment: 'shipped', tracking_status: '輸送中',
+      tracking_registered_at: null,
+    })
+
+    db.markTrackingRegistered([id])
+    expect(db.getPurchaseTracking(id)!.tracking_registered_at).not.toBeNull()
+
+    expect(db.getPurchaseTracking('no-such-id')).toBeNull()
+  })
+
   describe('trackingCheckCandidates / applyTrackingResult：17TRACK（追跡番号のサイト）を見るべき仕入と結果の反映', () => {
     function makeTrackedPurchase(
       name: string, trackingNumber: string | null,
       fulfillment: 'pending' | 'shipped' | 'delivered' | null = 'shipped',
+      registered = true,
     ) {
       const id = db.createPurchase({
         shop_account_id: shopId,
@@ -2303,6 +2331,7 @@ describe('db（:memory:）', () => {
         db.applyFulfillmentFromShop(id, {
           status: null, shipped_at: null, delivered_at: null, carrier: null, tracking_number: trackingNumber,
         })
+        if (registered) db.markTrackingRegistered([id])
       }
       return id
     }
@@ -2317,9 +2346,15 @@ describe('db（:memory:）', () => {
       expect(db.trackingCheckCandidates(10).some(c => c.id === id)).toBe(false)
     })
 
-    it('未確認（tracking_checked_atがnull）が先、次に古い順。6時間以内に確認済みのものは候補に出ない', () => {
+    it('17TRACKにまだ登録していない（tracking_registered_atがnull）は候補に出ない（register前にgettrackinfoを呼ぶとエラーになるため）', () => {
+      const id = makeTrackedPurchase('未登録', 'TRK-UNREGISTERED', 'shipped', false)
+      expect(db.trackingCheckCandidates(10).some(c => c.id === id)).toBe(false)
+      expect(db.trackingCheckCandidates().some(c => c.id === id)).toBe(false)
+    })
+
+    it('未確認（tracking_checked_atがnull）が先、次に古い順', () => {
       const idUnchecked = makeTrackedPurchase('未確認', 'TRK-A')
-      const idOldChecked = makeTrackedPurchase('6時間より前に確認済み', 'TRK-B')
+      const idOldChecked = makeTrackedPurchase('前に確認済み', 'TRK-B')
       const idRecentChecked = makeTrackedPurchase('直近に確認済み', 'TRK-C')
 
       db.getDb().prepare(
@@ -2330,30 +2365,25 @@ describe('db（:memory:）', () => {
       ).run(idRecentChecked)
 
       const ids = db.trackingCheckCandidates(10).map(c => c.id)
-      expect(ids).toEqual([idUnchecked, idOldChecked])
+      expect(ids).toEqual([idUnchecked, idOldChecked, idRecentChecked])
     })
 
-    it('境界：5時間前に確認したものは出ない、7時間前に確認したものは出る', () => {
-      const id5h = makeTrackedPurchase('5時間前に確認', 'TRK-5H')
-      const id7h = makeTrackedPurchase('7時間前に確認', 'TRK-7H')
+    it('最後に見た時刻にかかわらず候補に出る（取り込みは起動時と手動のときだけで間隔を空ける意味が無い）', () => {
+      const idJustChecked = makeTrackedPurchase('1分前に確認済み', 'TRK-1M')
 
       db.getDb().prepare(
-        `UPDATE purchase SET tracking_checked_at = datetime('now', '-5 hours') WHERE id = ?`,
-      ).run(id5h)
-      db.getDb().prepare(
-        `UPDATE purchase SET tracking_checked_at = datetime('now', '-7 hours') WHERE id = ?`,
-      ).run(id7h)
+        `UPDATE purchase SET tracking_checked_at = datetime('now', '-1 minutes') WHERE id = ?`,
+      ).run(idJustChecked)
 
       const ids = db.trackingCheckCandidates(10).map(c => c.id)
-      expect(ids).not.toContain(id5h)
-      expect(ids).toContain(id7h)
+      expect(ids).toContain(idJustChecked)
     })
 
-    it('limitで絞られる', () => {
+    it('limitを渡すと絞られる、省略すると全件返る', () => {
       makeTrackedPurchase('limit-a', 'TRK-L1')
       makeTrackedPurchase('limit-b', 'TRK-L2')
       expect(db.trackingCheckCandidates(1)).toHaveLength(1)
-      expect(db.trackingCheckCandidates(10)).toHaveLength(2)
+      expect(db.trackingCheckCandidates()).toHaveLength(2)
     })
 
     it('applyTrackingResult：配送中→delivered＋到着日で、fulfillmentとdelivered_atが入りtrue', () => {
@@ -2401,6 +2431,94 @@ describe('db（:memory:）', () => {
     })
   })
 
+  describe('trackingRegisterCandidates / markTrackingRegistered / trackingCounts：17TRACKへの登録（無料枠を消費する側）', () => {
+    function makeUnregisteredPurchase(
+      name: string, trackingNumber: string | null,
+      fulfillment: 'pending' | 'shipped' | 'delivered' | null = 'shipped',
+    ) {
+      const id = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-09-01',
+        fulfillment,
+        lines: [{ name, unit_price: 1000, quantity: 1 }],
+      })
+      if (trackingNumber !== null) {
+        db.applyFulfillmentFromShop(id, {
+          status: null, shipped_at: null, delivered_at: null, carrier: null, tracking_number: trackingNumber,
+        })
+      }
+      return id
+    }
+
+    it('trackingRegisterCandidates：追跡番号が無い／到着済／すでに登録済みは出ない。未登録の未到着だけ出る', () => {
+      const noNumber = makeUnregisteredPurchase('番号なし', null)
+      const delivered = makeUnregisteredPurchase('到着済', 'TRK-REG-DELIVERED', 'delivered')
+      const alreadyRegistered = makeUnregisteredPurchase('登録済み', 'TRK-REG-DONE', 'shipped')
+      db.markTrackingRegistered([alreadyRegistered])
+      const target = makeUnregisteredPurchase('未登録', 'TRK-REG-TARGET', 'shipped')
+
+      const ids = db.trackingRegisterCandidates().map(c => c.id)
+      expect(ids).not.toContain(noNumber)
+      expect(ids).not.toContain(delivered)
+      expect(ids).not.toContain(alreadyRegistered)
+      expect(ids).toContain(target)
+    })
+
+    it('trackingRegisterCandidates：新しい注文が先（ordered_at DESC）', () => {
+      const older = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        fulfillment: 'shipped',
+        lines: [{ name: '古い注文', unit_price: 1000, quantity: 1 }],
+      })
+      db.applyFulfillmentFromShop(older, {
+        status: null, shipped_at: null, delivered_at: null, carrier: null, tracking_number: 'TRK-REG-OLD',
+      })
+      const newer = db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-09-01',
+        fulfillment: 'shipped',
+        lines: [{ name: '新しい注文', unit_price: 1000, quantity: 1 }],
+      })
+      db.applyFulfillmentFromShop(newer, {
+        status: null, shipped_at: null, delivered_at: null, carrier: null, tracking_number: 'TRK-REG-NEW',
+      })
+
+      const ids = db.trackingRegisterCandidates().map(c => c.id)
+      expect(ids.indexOf(newer)).toBeLessThan(ids.indexOf(older))
+    })
+
+    it('markTrackingRegistered：印が付き、updated_atは変わらない。空配列では何も起きない。複数idをまとめて更新できる', () => {
+      const a = makeUnregisteredPurchase('まとめて登録A', 'TRK-MARK-A')
+      const b = makeUnregisteredPurchase('まとめて登録B', 'TRK-MARK-B')
+      const before = db.getDb().prepare('SELECT updated_at FROM purchase WHERE id = ?').get(a) as
+        { updated_at: string }
+
+      expect(() => db.markTrackingRegistered([])).not.toThrow()
+      expect(db.getPurchaseTracking(a)!.tracking_registered_at).toBeNull()
+
+      db.markTrackingRegistered([a, b])
+
+      expect(db.getPurchaseTracking(a)!.tracking_registered_at).not.toBeNull()
+      expect(db.getPurchaseTracking(b)!.tracking_registered_at).not.toBeNull()
+      const after = db.getDb().prepare('SELECT updated_at FROM purchase WHERE id = ?').get(a) as
+        { updated_at: string }
+      expect(after.updated_at).toBe(before.updated_at)
+    })
+
+    it('trackingCounts：未登録2件・登録済み未到着1件・到着済1件で { unregistered: 2, watching: 1 }', () => {
+      makeUnregisteredPurchase('未登録1', 'TRK-COUNT-1', 'shipped')
+      makeUnregisteredPurchase('未登録2', 'TRK-COUNT-2', 'shipped')
+      const watching = makeUnregisteredPurchase('登録済み・未到着', 'TRK-COUNT-3', 'shipped')
+      db.markTrackingRegistered([watching])
+      const arrived = makeUnregisteredPurchase('到着済', 'TRK-COUNT-4', 'shipped')
+      db.markTrackingRegistered([arrived])
+      db.applyTrackingResult(arrived, { status_text: '配達完了', fulfillment: 'delivered', delivered_at: '2026-09-20' })
+
+      expect(db.trackingCounts()).toEqual({ unregistered: 2, watching: 1 })
+    })
+  })
+
   it('migrate：version27相当（purchase.tracking_carrier/tracking_numberが無い）→28で列が足され、既存行はnullになる', () => {
     const dir = mkdtempSync(join(tmpdir(), 'soroban-tracking-migrate-'))
     const path = join(dir, 'v27.db')
@@ -2422,7 +2540,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('29')
+      expect(db.getSettings().schema_version).toBe('30')
       const p = db.getPurchase(purchaseId)
       expect(p.tracking_carrier).toBeNull()
       expect(p.tracking_number).toBeNull()
@@ -2433,6 +2551,41 @@ describe('db（:memory:）', () => {
         carrier: 'ヤマト運輸', tracking_number: '1234-5678-9012',
       })
       expect(db.getPurchaseTrackingNumber(purchaseId)).toBe('1234-5678-9012')
+    } finally {
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('migrate：version29相当（purchase.tracking_registered_atが無い）→30で列が足され、既存行はnullになる', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-tracking-registered-migrate-'))
+    const path = join(dir, 'v29.db')
+    try {
+      db.closeDb()
+      db.initDb(path) // 一旦フルスキーマで作り、v29相当（tracking_registered_atが無い）まで剥がす
+      const migrateShopId = db.createShopAccount('メロジョイC')
+      const purchaseId = db.createPurchase({
+        shop_account_id: migrateShopId,
+        ordered_at: '2026-01-01',
+        fulfillment: 'shipped',
+        lines: [{ name: '移行前の仕入', unit_price: 1000, quantity: 1 }],
+      })
+      db.applyFulfillmentFromShop(purchaseId, {
+        status: null, shipped_at: null, delivered_at: null,
+        carrier: null, tracking_number: 'TRK-MIGRATE-1',
+      })
+      db.getDb().exec(`ALTER TABLE purchase DROP COLUMN tracking_registered_at;`)
+      db.getDb().prepare(`UPDATE setting SET value = '29' WHERE key = 'schema_version'`).run()
+      db.closeDb()
+
+      expect(() => db.initDb(path)).not.toThrow()
+
+      expect(db.getSettings().schema_version).toBe('30')
+      expect(db.getPurchaseTracking(purchaseId)!.tracking_registered_at).toBeNull()
+
+      // 移行後は普通に登録できる
+      db.markTrackingRegistered([purchaseId])
+      expect(db.getPurchaseTracking(purchaseId)!.tracking_registered_at).not.toBeNull()
     } finally {
       try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
       rmSync(dir, { recursive: true, force: true })
@@ -4609,14 +4762,14 @@ describe('db（:memory:）', () => {
         lines: [{ name: 'テスト【A001-2】青', unit_price: 1000, quantity: 1 }],
       })
       const keys = ['mellojoy:#images']
-      expect(db.purchaseImageRefreshCandidates(shopId, keys, ['テスト'])).toEqual([{ id, import_key: keys[0] }])
-      expect(db.purchaseImageRefreshCandidates('other-shop', keys, [])).toEqual([])
-      expect(db.purchaseImageRefreshCandidates(shopId, ['mellojoy:#other'], [])).toEqual([])
-      expect(db.purchaseImageRefreshCandidates(shopId, keys, ['不一致'])).toEqual([])
+      expect(db.purchaseDetailRevisitCandidates(shopId, keys, ['テスト'])).toEqual([{ id, import_key: keys[0] }])
+      expect(db.purchaseDetailRevisitCandidates('other-shop', keys, [])).toEqual([])
+      expect(db.purchaseDetailRevisitCandidates(shopId, ['mellojoy:#other'], [])).toEqual([])
+      expect(db.purchaseDetailRevisitCandidates(shopId, keys, ['不一致'])).toEqual([])
       db.upsertProductImage('A001-2', 'fixed.jpg')
-      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toEqual([])
+      expect(db.purchaseDetailRevisitCandidates(shopId, keys, [])).toEqual([])
       db.deleteProductImage('A001-2')
-      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toHaveLength(1)
+      expect(db.purchaseDetailRevisitCandidates(shopId, keys, [])).toHaveLength(1)
     })
 
     it('image_checked_atで画像巡回の終わりを判定する（取り終えたら候補から外れ、失敗が残れば対象のまま）', () => {
@@ -4626,16 +4779,16 @@ describe('db（:memory:）', () => {
       })
       const keys = ['mellojoy:#checked']
       // (a) 未確認（image_checked_at が NULL）：候補に出る
-      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toHaveLength(1)
+      expect(db.purchaseDetailRevisitCandidates(shopId, keys, [])).toHaveLength(1)
 
       db.setPurchaseImageChecked(id)
       const line = db.getPurchase(id).lines[0]
       // (c) 確認済みだが、URLはあるのにダウンロードが済んでいない（前回失敗）：候補のまま
-      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toHaveLength(1)
+      expect(db.purchaseDetailRevisitCandidates(shopId, keys, [])).toHaveLength(1)
 
       db.setPurchaseLineImage(line.id, 'a002.jpg')
       // (b) 確認済み・全明細の画像を保存済み：候補から外れる＝巡回が終わる
-      expect(db.purchaseImageRefreshCandidates(shopId, keys, [])).toEqual([])
+      expect(db.purchaseDetailRevisitCandidates(shopId, keys, [])).toEqual([])
     })
 
     it('バリアントを取り違えず更新し、自動OFFの画像は固定、ONなら公式画像を優先する', () => {
@@ -4734,6 +4887,51 @@ describe('db（:memory:）', () => {
       expect(db.purchaseLinesNeedingImage(draftId)).toEqual([
         { id: db.getPurchase(draftId).lines[0].id, image_url: 'https://x/confirm.jpg' },
       ])
+    })
+  })
+
+  describe('purchaseDetailRevisitCandidates：配送状況・追跡番号のためにも注文詳細を開き直す', () => {
+    const daysAgo = (n: number): string =>
+      todayLocal(new Date(Date.now() - n * 24 * 60 * 60 * 1000))
+
+    // 画像は取り終えた状態（product_image を登録済み＝画像の理由では候補に出ない）にして、
+    // 配送の理由だけを見る
+    function makeImageDoneButUndelivered(name: string, importKey: string, orderedAt: string) {
+      const id = db.createPurchase({
+        shop_account_id: shopId, ordered_at: orderedAt, import_key: importKey,
+        lines: [{ name, unit_price: 1000, quantity: 1 }],
+      })
+      return id
+    }
+
+    it('画像を取り終えていても、追跡番号が無く未到着なら候補に出る', () => {
+      db.upsertProductImage('D001', 'fixed.jpg')
+      const id = makeImageDoneButUndelivered('テスト【D001】', 'mellojoy:#deliv-1', daysAgo(1))
+      expect(db.purchaseDetailRevisitCandidates(shopId, ['mellojoy:#deliv-1'], [])
+        .map(c => c.id)).toEqual([id])
+    })
+
+    it('追跡番号が入ったら（未到着でも）その理由では候補に出ない', () => {
+      db.upsertProductImage('D002', 'fixed.jpg')
+      const id = makeImageDoneButUndelivered('テスト【D002】', 'mellojoy:#deliv-2', daysAgo(1))
+      db.applyFulfillmentFromShop(id, {
+        status: 'shipped', shipped_at: null, delivered_at: null, carrier: null, tracking_number: 'TRK-DELIV-2',
+      })
+      expect(db.purchaseDetailRevisitCandidates(shopId, ['mellojoy:#deliv-2'], [])).toEqual([])
+    })
+
+    it('手で商品画像をセットした型番を含む注文でも、追跡番号が無く未到着なら候補に出る', () => {
+      // 通常なら product_image が存在する型番は画像の理由から丸ごと外れるが、配送の理由は別
+      db.upsertProductImage('D003', 'manual.jpg')
+      const id = makeImageDoneButUndelivered('テスト【D003】', 'mellojoy:#deliv-3', daysAgo(1))
+      expect(db.purchaseDetailRevisitCandidates(shopId, ['mellojoy:#deliv-3'], [])
+        .map(c => c.id)).toEqual([id])
+    })
+
+    it('90日より古い注文は、追跡番号が無くても候補に出ない', () => {
+      db.upsertProductImage('D004', 'fixed.jpg')
+      makeImageDoneButUndelivered('テスト【D004】', 'mellojoy:#deliv-4', daysAgo(91))
+      expect(db.purchaseDetailRevisitCandidates(shopId, ['mellojoy:#deliv-4'], [])).toEqual([])
     })
   })
 

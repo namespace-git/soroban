@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
-import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, AutoBackupStatus, ExportKind, HealthCheck } from '../../shared/types'
+import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck } from '../../shared/types'
 
 type SaleExclusion = { mercari_item_id: string; title: string; excluded_at: string }
 import Icon from '../components/Icon.vue'
@@ -38,6 +38,9 @@ const aiApiKeyInput = ref('')
 const aiModel = ref('gemini-flash-latest')
 const savingAiKey = ref(false)
 const testingAi = ref(false)
+const trackingApiStatus = ref<TrackingApiStatus | null>(null)
+const trackingApiKeyInput = ref('')
+const savingTrackingKey = ref(false)
 const geminiModels = ref<Array<{ name: string; display_name: string; description: string }>>([])
 const loadingModels = ref(false)
 const customModelInput = ref('')
@@ -67,7 +70,7 @@ const modelOptions = computed(() => {
 })
 
 async function load() {
-  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes, autoBackupRes, healthRes] = await Promise.all([
+  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes, trackingApiStatusRes, autoBackupRes, healthRes] = await Promise.all([
     window.soroban.listShippingMethods(),
     window.soroban.getSettings(),
     window.soroban.listRuns(10),
@@ -77,6 +80,7 @@ async function load() {
     window.soroban.listShopAccountStats(),
     window.soroban.listSaleExclusions(),
     window.soroban.getAiStatus(),
+    window.soroban.getTrackingApiStatus(),
     window.soroban.getAutoBackupStatus(),
     window.soroban.getHealthChecks(),
   ])
@@ -90,6 +94,7 @@ async function load() {
   saleExclusions.value = exclusionsRes
   aiStatus.value = aiStatusRes
   aiModel.value = aiStatusRes.model
+  trackingApiStatus.value = trackingApiStatusRes
   autoBackup.value = autoBackupRes
   healthChecks.value = healthRes
   loaded.value = true
@@ -215,6 +220,30 @@ async function testAiConnection() {
   } finally {
     testingAi.value = false
   }
+}
+
+// --- 配送状況（17TRACK API）：Gemini の API キー欄と同じ型（保存済みの見せ方・削除の導線） ---
+
+async function saveTrackingKey() {
+  const key = trackingApiKeyInput.value.trim()
+  if (!key) return
+  savingTrackingKey.value = true
+  try {
+    await window.soroban.setTrack17ApiKey(key)
+    trackingApiKeyInput.value = ''
+    trackingApiStatus.value = await window.soroban.getTrackingApiStatus()
+    toast('保存しました', 'ok')
+  } finally {
+    savingTrackingKey.value = false
+  }
+}
+
+async function deleteTrackingKey() {
+  if (!await confirmDialog('API キーを削除しますか？', { okLabel: '削除する', danger: true })) return
+  await window.soroban.setTrack17ApiKey(null)
+  trackingApiKeyInput.value = ''
+  trackingApiStatus.value = await window.soroban.getTrackingApiStatus()
+  toast('削除しました', 'ok')
 }
 
 // 仕入タブでアカウントを増やしたら、こちらの一覧も追従させる
@@ -605,18 +634,6 @@ const runLabel: Record<string, string> = {
           />
           取り込み中にブラウザのウィンドウを表示する（動きを確認したいときだけ）
         </label>
-        <label class="row hint">
-          <input
-            type="checkbox"
-            :checked="settings.track_shipping !== '0'"
-            @change="toggleTrackShipping(($event.target as HTMLInputElement).checked)"
-          />
-          配送状況を 17TRACK で自動確認して到着済にする（メロジョイの注文詳細は配達中までしか教えてくれません）
-        </label>
-        <p class="faint hint">
-          1 回に数件だけ、1 日 1 回程度しか確認しに行きません。17TRACK 側に止められたときは
-          自動では突破せず、仕入の詳細から手で確認してください。
-        </p>
         <p class="faint hint">
           アプリ起動時、前回から指定時間が空いていれば裏で取り込みます。
           頻度を上げすぎないでください。
@@ -625,6 +642,57 @@ const runLabel: Record<string, string> = {
           収集は人間と同じ速度で数ページだけ読みます。普段はオフで大丈夫です。
           本人確認（CAPTCHA）が出たときはウィンドウが自動で表示されるので、
           そこで手で進めてください。
+        </p>
+
+        <!-- 配送状況（17TRACK API）：メロジョイは配達済みを教えてくれないので、17TRACK の API キーで
+             自動確認する。キーが無ければチェックを入れても何も起きないので、その旨を必ず見せる -->
+        <p class="panel-title tracking-title">配送状況</p>
+        <label class="row hint">
+          <input
+            type="checkbox"
+            :checked="settings.track_shipping !== '0'"
+            @change="toggleTrackShipping(($event.target as HTMLInputElement).checked)"
+          />
+          配送状況を 17TRACK で自動確認して到着済にする（メロジョイの注文詳細は配送中までしか教えてくれません）
+        </label>
+
+        <div class="fields">
+          <label class="field">
+            <span>17TRACK の API キー</span>
+            <input
+              type="password" style="width:260px"
+              v-model="trackingApiKeyInput"
+              :disabled="!trackingApiStatus?.safe_storage"
+              placeholder="新しいキーを入力"
+            />
+            <span v-if="trackingApiStatus?.configured" class="faint">保存済み（••••）</span>
+          </label>
+        </div>
+        <div class="row">
+          <button class="sm" :disabled="!trackingApiStatus?.safe_storage || !trackingApiKeyInput.trim() || savingTrackingKey" @click="saveTrackingKey">
+            {{ savingTrackingKey ? '保存中…' : '保存' }}
+          </button>
+          <button v-if="trackingApiStatus?.configured" class="sm ghost" @click="deleteTrackingKey">削除</button>
+        </div>
+        <p v-if="trackingApiStatus && !trackingApiStatus.safe_storage" class="faint hint">
+          このPCでは OS の安全な保存が使えないため、API キーを保存できません。
+        </p>
+        <p v-else-if="trackingApiStatus && !trackingApiStatus.configured" class="faint hint">
+          API キーが無いあいだは、上のチェックを入れても自動確認は動きません。
+          仕入の詳細の「配送状況を確認」も押せません。
+        </p>
+        <p v-else-if="trackingApiStatus" class="faint hint">
+          未登録の追跡番号 {{ trackingApiStatus.unregistered }} 件・確認待ち {{ trackingApiStatus.watching }} 件。
+          17TRACK の無料枠は登録した追跡番号の数で減ります。
+        </p>
+        <p class="faint hint">
+          取り込みのたびに、まだ到着していない仕入をまとめて 17TRACK の API で確認します（件数の上限はありません）。
+          キーが違う・混み合っている等で読めなかったときはその回は打ち切り、次の取り込みでまた試します。
+        </p>
+        <p class="faint hint">
+          キーの取得：17TRACK の API アカウント（個人アカウントとは別）を作り、
+          管理画面の Settings → Security → Access Key で発行します
+          ↗　<code class="track-key-url">https://user.17track.net/ja/register?app=api</code>
         </p>
 
         <p class="panel-title runs-title">実行履歴</p>
@@ -1078,6 +1146,7 @@ const runLabel: Record<string, string> = {
 .health-row > button { flex-shrink: 0; }
 
 .runs-title { margin-top: 16px; }
+.tracking-title { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .auto-backup-title { margin-top: 16px; }
 .manual-backup-title { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .small { font-size: var(--fs-12); }
@@ -1148,7 +1217,7 @@ const runLabel: Record<string, string> = {
   background: var(--surface);
 }
 
-.ai-key-url { user-select: all; font-size: var(--fs-12); background: var(--surface-hi); padding: 1px 6px; border-radius: var(--radius-sm); }
+.ai-key-url, .track-key-url { user-select: all; font-size: var(--fs-12); background: var(--surface-hi); padding: 1px 6px; border-radius: var(--radius-sm); }
 .model-manual { gap: 6px; align-items: center; }
 
 .money-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; width: auto; }

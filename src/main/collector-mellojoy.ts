@@ -1037,7 +1037,7 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     const targets = freshNotExcluded.slice(0, budget)
 
     // 新規取り込み後の余った詳細枠で既存注文も巡回する。画像なしの注文で後続を塞がない。
-    const refreshCandidates = db.purchaseImageRefreshCandidates(shopAccountId, [...known], importKeywords)
+    const refreshCandidates = db.purchaseDetailRevisitCandidates(shopAccountId, [...known], importKeywords)
     const cursorKey = `mellojoy_image_cursor:${shopAccountId}`
     const cursor = db.getSettings()[cursorKey]
     const cursorIndex = refreshCandidates.findIndex(p => p.id === cursor)

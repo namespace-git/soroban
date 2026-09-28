@@ -123,7 +123,8 @@ async function collectShopAccountsSerially(
 
 /**
  * 到着の確認。メロジョイの注文詳細は「発送準備中 → 配達中」までしか出さないので、
- * 到着済にできるのは追跡番号（17TRACK）を見たときだけ。1回に数件だけ見る。
+ * 到着済にできるのは追跡番号を 17TRACK の API で見たときだけ（画面の DOM は
+ * 別物を読んでしまうので使わない）。API キーが無ければ何もしない。
  * collector_run は作らない（メロジョイ自体は成功しているのに失敗として出さないため）。
  * 設定で切られていれば何もしない。失敗しても reject しない。
  */
@@ -133,10 +134,10 @@ async function checkShippingIfEnabled(): Promise<void> {
     // 並行して成功していたメルカリ・メロジョイの結果まで捨ててしまう
     if (db.getSettings().track_shipping === '0') return
     const t = await collectorTracking.checkTrackingBatch()
-    if (t.checked > 0 || t.failed > 0 || t.blocked) {
+    if (t.registered > 0 || t.checked > 0 || t.failed > 0 || t.stopped) {
       applog.log('collector', 'tracking', '配送状況を確認しました', t)
     }
-    if (t.blocked) console.warn(collectorTracking.TRACKING_BLOCKED_MESSAGE)
+    if (t.stopped) console.warn('配送状況の確認を中断しました:', t.stopped)
   } catch (e) {
     console.error('配送状況の確認に失敗しました', e)
     applog.log('collector', 'tracking', '配送状況の確認に失敗しました', undefined, {
@@ -175,12 +176,12 @@ async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
  */
 const UNLOGGED_HANDLERS = new Set<keyof SorobanApi>([
   'logClient', 'getDashboard', 'listSales', 'listListings', 'listInventory',
-  'getAutoBackupStatus', 'getHealthChecks',
+  'getAutoBackupStatus', 'getHealthChecks', 'getTrackingApiStatus',
   'suggestProductInventory',
   'listPurchases', 'listMonthly', 'listExpenses', 'searchAll', 'getSettings',
   'getMonthDetail', 'listProducts', 'listTags', 'listShopAccounts', 'listShippingMethods',
   // 引数に API キーが載るので記録しない（summarize はキー名でしか伏せられない）
-  'setGeminiApiKey',
+  'setGeminiApiKey', 'setTrack17ApiKey',
 ])
 
 function registerIpc(): void {
@@ -266,6 +267,8 @@ function registerIpc(): void {
   handle('readReceiptImage', () => receipts.readReceiptImage(mainWindow))
   handle('readReceipt', (id) => receipts.readReceipt(id))
   handle('getAiStatus', () => ai.getAiStatus())
+  handle('getTrackingApiStatus', () => collectorTracking.getTrackingApiStatus())
+  handle('setTrack17ApiKey', (key) => collectorTracking.setTrack17ApiKey(key))
   handle('setGeminiApiKey', (key) => ai.setGeminiApiKey(key))
   handle('setAiModel', (model) => ai.setAiModel(model))
   handle('testGemini', () => ai.testGemini())
@@ -318,7 +321,7 @@ function registerIpc(): void {
   handle('saveShippingMethod', (m) => db.saveShippingMethod(m))
   handle('deleteShippingMethod', (id) => db.deleteShippingMethod(id))
   // 暗号化済みの API キーは画面に出さない（getAiStatus で有無だけ返す）
-  handle('getSettings', () => { const { gemini_api_key_enc: _k, ...rest } = db.getSettings() as Record<string, string>; return rest })
+  handle('getSettings', () => { const { gemini_api_key_enc: _k, track17_api_key_enc: _t, ...rest } = db.getSettings() as Record<string, string>; return rest })
   handle('setSetting', (k, v) => db.setSetting(k, v))
 
   handle('collect', () => collectAll(db.getSettings().collect_show_window !== '1'))

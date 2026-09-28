@@ -35,10 +35,6 @@ import type {
 
 let db: Database.Database
 
-// 17TRACK（追跡番号のサイト）を見る間隔。短すぎると「追跡が頻繁すぎます」で止められ、
-// 配送会社側の更新も1日数回しかないため、これより短く見ても意味が薄い
-const TRACKING_RECHECK_HOURS = 6
-
 const VIEW_MARKER = '-- __VIEWS__'
 const viewMarkerIndex = schemaSql.indexOf(VIEW_MARKER)
 const tablesSql = viewMarkerIndex === -1 ? schemaSql : schemaSql.slice(0, viewMarkerIndex)
@@ -1092,7 +1088,7 @@ function migrate(): void {
 
   if (version < 25) {
     // 注文詳細を開いて商品画像URLを確認した日時。NULL = 未確認。
-    // 既取込注文の画像巡回（purchaseImageRefreshCandidates）が終わりなく回り続けないための印
+    // 既取込注文の画像巡回（purchaseDetailRevisitCandidates）が終わりなく回り続けないための印
     addColumnIfMissing('purchase', 'image_checked_at', 'TEXT')
 
     db.prepare(
@@ -1165,6 +1161,17 @@ function migrate(): void {
     db.prepare(
       `INSERT INTO setting (key, value) VALUES ('schema_version', '29')
          ON CONFLICT(key) DO UPDATE SET value = '29'`,
+    ).run()
+  }
+
+  if (version < 30) {
+    // この追跡番号を 17TRACK に登録（register）した日時。NULL = まだ登録していない。
+    // 登録は無料枠を消費するため、一度登録したら二度と送らない
+    addColumnIfMissing('purchase', 'tracking_registered_at', 'TEXT')
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '30')
+         ON CONFLICT(key) DO UPDATE SET value = '30'`,
     ).run()
   }
 
@@ -1731,20 +1738,70 @@ export function applyFulfillmentFromShop(purchaseId: string, f: {
 }
 
 /**
- * 17TRACK を見るべき仕入。追跡番号があり、まだ到着済でなく、最後に見てから
- * TRACKING_RECHECK_HOURS 時間以上経ったもの。未確認が先、次に古い順。
- * 収集頻度を上げないため呼び出し側が limit で絞る
+ * まだ 17TRACK に登録していない追跡番号。登録（register）は無料枠を消費するので、
+ * 一度登録したら二度と送らない。新しい注文が先
  */
-export function trackingCheckCandidates(limit: number): Array<{ id: string; tracking_number: string }> {
-  return db.prepare(
-    `SELECT id, tracking_number
+export function trackingRegisterCandidates(): Array<{ id: string; tracking_number: string }> {
+  return db.prepare(`
+    SELECT id, tracking_number
+      FROM purchase
+     WHERE tracking_number IS NOT NULL AND trim(tracking_number) <> ''
+       AND (fulfillment IS NULL OR fulfillment <> 'delivered')
+       AND tracking_registered_at IS NULL
+     ORDER BY ordered_at DESC
+  `).all() as Array<{ id: string; tracking_number: string }>
+}
+
+/**
+ * 17TRACK に登録（register）できた仕入に印をつける。ここを忘れると無料枠を食い続ける。
+ * updated_at は触らない（人が見る「更新」ではないため。setPurchaseImageChecked と同じ考え方）
+ */
+export function markTrackingRegistered(purchaseIds: string[]): void {
+  if (purchaseIds.length === 0) return
+  db.prepare(
+    `UPDATE purchase SET tracking_registered_at = datetime('now')
+      WHERE id IN (${purchaseIds.map(() => '?').join(',')})`,
+  ).run(...purchaseIds)
+}
+
+/**
+ * 17TRACK を見るべき仕入。追跡番号を登録済みで、まだ到着が分かっていないもの。
+ * 未登録の番号を送るとエラーになるだけなので対象にしない。未確認が先、次に古い順。
+ * 取り込みは setInterval を持たず起動時と手動ボタンのときだけ（1日数回）走るため、
+ * 見た時刻による間隔・件数の絞り込みは不要。limit を省略すると全件返す
+ */
+export function trackingCheckCandidates(limit?: number): Array<{ id: string; tracking_number: string }> {
+  const sql = `SELECT id, tracking_number
        FROM purchase
       WHERE tracking_number IS NOT NULL AND trim(tracking_number) <> ''
         AND (fulfillment IS NULL OR fulfillment <> 'delivered')
-        AND (tracking_checked_at IS NULL OR tracking_checked_at < datetime('now', '-${TRACKING_RECHECK_HOURS} hours'))
-      ORDER BY (tracking_checked_at IS NULL) DESC, tracking_checked_at ASC, ordered_at DESC
-      LIMIT ?`,
-  ).all(limit) as Array<{ id: string; tracking_number: string }>
+        AND tracking_registered_at IS NOT NULL
+      ORDER BY (tracking_checked_at IS NULL) DESC, tracking_checked_at ASC, ordered_at DESC`
+  if (limit === undefined) {
+    return db.prepare(sql).all() as Array<{ id: string; tracking_number: string }>
+  }
+  return db.prepare(`${sql} LIMIT ?`).all(limit) as Array<{ id: string; tracking_number: string }>
+}
+
+/**
+ * 設定画面に出す件数。17TRACK の無料枠を気にするので、これから登録する数が分かるようにする。
+ * unregistered = trackingRegisterCandidates と同じ条件の件数、watching = 登録済みで未到着の件数
+ */
+export function trackingCounts(): { unregistered: number; watching: number } {
+  const unregistered = db.prepare(`
+    SELECT COUNT(*) AS n
+      FROM purchase
+     WHERE tracking_number IS NOT NULL AND trim(tracking_number) <> ''
+       AND (fulfillment IS NULL OR fulfillment <> 'delivered')
+       AND tracking_registered_at IS NULL
+  `).get() as { n: number }
+  const watching = db.prepare(`
+    SELECT COUNT(*) AS n
+      FROM purchase
+     WHERE tracking_registered_at IS NOT NULL
+       AND (fulfillment IS NULL OR fulfillment <> 'delivered')
+  `).get() as { n: number }
+  return { unregistered: unregistered.n, watching: watching.n }
 }
 
 /**
@@ -1790,6 +1847,31 @@ export function getPurchaseTrackingNumber(purchaseId: string): string | null {
 }
 
 /**
+ * 17TRACK を見るのに必要な情報をまとめて返す（checkTracking が使う）。
+ * 到着済（fulfillment === 'delivered'）なら二度と見に行かないので、判定できるよう
+ * fulfillment と、既に保存済みの tracking_status も一緒に返す。
+ * tracking_registered_at が null なら、まだ register していないので先に登録が要る。仕入が無ければ null
+ */
+export function getPurchaseTracking(purchaseId: string): {
+  tracking_number: string | null
+  fulfillment: Fulfillment | null
+  tracking_status: string | null
+  tracking_registered_at: string | null
+} | null {
+  const row = db.prepare(
+    'SELECT tracking_number, fulfillment, tracking_status, tracking_registered_at FROM purchase WHERE id = ?',
+  ).get(purchaseId) as
+    | {
+        tracking_number: string | null
+        fulfillment: Fulfillment | null
+        tracking_status: string | null
+        tracking_registered_at: string | null
+      }
+    | undefined
+  return row ?? null
+}
+
+/**
  * 到着状態を手で変える（TikTok Shop など自動取得しない仕入先向け）。
  * shipped / delivered に初めて到達した日を shipped_at / delivered_at に刻む（既に入っていれば触らない）。
  * メロジョイの自動取得がある仕入は次の取り込みで注文一覧の状態に戻る
@@ -1814,14 +1896,19 @@ export function purchaseLinesNeedingImage(purchaseId: string, keywords: string[]
 }
 
 /**
- * 一覧にある既取込注文のうち、自動画像を使う商品を含み、かつまだ画像の確認が済んでいないもの。
- * 口座とキーワードも照合する。
+ * 一覧にある既取込注文のうち、注文詳細を開き直す理由があるもの。口座とキーワードも照合する。
  *
- * 「済んでいない」＝ 注文詳細を一度も開いていない（image_checked_at IS NULL）か、
- * URL は分かっているのにダウンロードが済んでいない明細がある（前回の保存失敗）場合だけ。
- * これが無いと、画像を取り終えた後も毎回この注文を候補として詳細を開き続けてしまう
+ * 注文詳細は画像だけでなく、配送状況・追跡番号（applyFulfillmentFromDetail）もここから読むため、
+ * 開く理由は次の OR：
+ *   ① 画像のため … 自動画像を使う商品を含み（product_image を人が個別にセットした型番は除く）、
+ *     かつ画像の確認が済んでいない（一度も詳細を開いていないか、URL は分かっているのに
+ *     ダウンロードが済んでいない明細がある＝前回の保存失敗）
+ *   ② 配送のため … まだ到着が分かっておらず、追跡番号もまだ無い（付けば17TRACKが引き継ぐので
+ *     以降はこの理由では開かない）。ただし ordered_at が90日より前の注文は対象にしない
+ *     （キャンセル・国内発送など最後まで追跡番号が付かない古い注文を毎回開き続けないため）
+ * ①も②も理由が無くなれば、この注文は候補から外れる
  */
-export function purchaseImageRefreshCandidates(
+export function purchaseDetailRevisitCandidates(
   shopAccountId: string, importKeys: string[], keywords: string[],
 ): Array<{ id: string; import_key: string }> {
   if (importKeys.length === 0) return []
@@ -1829,12 +1916,21 @@ export function purchaseImageRefreshCandidates(
     SELECT p.id, p.import_key, pl.name
       FROM purchase p JOIN purchase_line pl ON pl.purchase_id = p.id
      WHERE p.shop_account_id = ? AND p.import_key IN (${importKeys.map(() => '?').join(',')})
-       AND NOT EXISTS (SELECT 1 FROM product_image pi WHERE pi.model_code = pl.model_code)
        AND (
-         p.image_checked_at IS NULL
-         OR EXISTS (
-           SELECT 1 FROM purchase_line pl2
-            WHERE pl2.purchase_id = p.id AND pl2.image_url IS NOT NULL AND pl2.image_file IS NULL
+         (
+           NOT EXISTS (SELECT 1 FROM product_image pi WHERE pi.model_code = pl.model_code)
+           AND (
+             p.image_checked_at IS NULL
+             OR EXISTS (
+               SELECT 1 FROM purchase_line pl2
+                WHERE pl2.purchase_id = p.id AND pl2.image_url IS NOT NULL AND pl2.image_file IS NULL
+             )
+           )
+         )
+         OR (
+           (p.fulfillment IS NULL OR p.fulfillment <> 'delivered')
+           AND (p.tracking_number IS NULL OR trim(p.tracking_number) = '')
+           AND p.ordered_at >= date('now', '-90 days')
          )
        )
      ORDER BY p.ordered_at DESC, p.id

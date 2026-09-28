@@ -677,6 +677,21 @@ export interface ReceiptDraft {
   confidence: number
 }
 
+/**
+ * 17TRACK API の状態。**キーそのものは絶対に返さない**（Gemini キーと同じ扱い）。
+ * メロジョイは「配達済み」を出さないので、到着が分かるのは 17TRACK だけ
+ */
+export interface TrackingApiStatus {
+  /** API キーが保存されているか */
+  configured: boolean
+  /** この環境で safeStorage が使えるか（使えないとキーを保存できない） */
+  safe_storage: boolean
+  /** まだ 17TRACK に登録していない追跡番号の数（次の取り込みで登録する） */
+  unregistered: number
+  /** 登録済みで、まだ到着が分かっていない追跡番号の数 */
+  watching: number
+}
+
 export interface AiStatus {
   /** API キーが保存されていれば true */
   configured: boolean
@@ -1121,11 +1136,16 @@ export interface SorobanApi {
    */
   openTracking(purchaseId: string): Promise<void>
   /**
-   * この仕入の配送状況を 17TRACK で今すぐ 1 件だけ確認する（メンテナンス的な立ち位置）。
+   * この仕入の配送状況を **17TRACK の API** で今すぐ 1 件だけ確認する（メンテナンス的な立ち位置）。
    * メロジョイは「配達済み」を出さないので、到着は 17TRACK 側でしか分からない。
-   * 「配達完了」なら到着済＋到着日を入れる（前に進む方向だけ。人が入れた到着済は戻さない）。
-   * 追跡番号が無ければ null を返して何もしない。番号が見つからない・読めないときは
-   * status_text にその言葉を入れて delivered_at は null。頻繁に押しても連打しない
+   * Delivered なら到着済＋到着日を入れる（前に進む方向だけ。人が入れた到着済は戻さない）。
+   *
+   * - 追跡番号が無ければ **null** を返して何もしない
+   * - **すでに到着済の仕入は二度と問い合わせない**（保存済みの status_text をそのまま返し、
+   *   delivered_at は新しく何も読んでいないので null）
+   * - API キーが無い・キーが違う・枠を使い切った・まだ配送会社のデータが来ていない、は
+   *   いずれも**人に読める日本語の Error** にして投げる（画面がそのまま出す）
+   * - 番号が 17TRACK に未登録なら、この 1 件だけ登録してから読む
    */
   checkTracking(purchaseId: string): Promise<{ status_text: string | null; delivered_at: string | null } | null>
 
@@ -1147,6 +1167,13 @@ export interface SorobanApi {
   /** 添付済みのレシートを AI で読む。レシートが無ければ Error */
   readReceipt(id: string): Promise<ReceiptDraft>
   /** AI 読み取りの状態。キーそのものは返さない */
+  /** 17TRACK API の状態（キーは返さない） */
+  getTrackingApiStatus(): Promise<TrackingApiStatus>
+  /**
+   * 17TRACK の API キーを safeStorage で暗号化して保存する（null・空文字で削除）。
+   * 平文では持たない。getSettings からは除外し、IPC のログにも出さない
+   */
+  setTrack17ApiKey(key: string | null): Promise<void>
   getAiStatus(): Promise<AiStatus>
   /** API キーを保存（safeStorage で暗号化）／null で削除 */
   setGeminiApiKey(key: string | null): Promise<void>

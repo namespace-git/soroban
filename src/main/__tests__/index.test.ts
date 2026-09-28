@@ -43,10 +43,9 @@ vi.mock('../collector-mellojoy', () => ({
   collectShopOrders: vi.fn(),
 }))
 
-// 17TRACK。既定では対象0件で何もしない体で返す（checked=0）
+// 17TRACK の API。既定では対象0件で何もしない体で返す
 vi.mock('../collector-tracking', () => ({
-  checkTrackingBatch: vi.fn(async () => ({ checked: 0, delivered: 0, failed: 0, blocked: false })),
-  TRACKING_BLOCKED_MESSAGE: '17TRACK に読み込みを止められました',
+  checkTrackingBatch: vi.fn(async () => ({ registered: 0, checked: 0, delivered: 0, failed: 0, stopped: null })),
 }))
 
 vi.mock('../updater', () => ({
@@ -147,7 +146,7 @@ describe('runCollectAll（3グループの並列化）', () => {
     })
     vi.mocked(collectorTracking.checkTrackingBatch).mockImplementation(async () => {
       await arrive()
-      return { checked: 0, delivered: 0, failed: 0, blocked: false }
+      return { registered: 0, checked: 0, delivered: 0, failed: 0, stopped: null }
     })
 
     await collectAll(true)
