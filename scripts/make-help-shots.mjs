@@ -38,7 +38,9 @@ const PORT = 5199
 // 判定してしまう（実際に踏んだ）。localhost で名前解決させて実体に合わせる
 const BASE_URL = `http://localhost:${PORT}/`
 const WINDOW_WIDTH = 1366
-const WINDOW_HEIGHT = 768
+// 768 だと縦に長いパネル（設定 → 取り込みの実行履歴など）が下端で切れる（実際に踏んだ）。
+// capturePage は今見えているビューポートしか撮れないため、スクロールでは直せない。少し広げておく
+const WINDOW_HEIGHT = 1000
 const MAX_IMAGE_WIDTH = 900
 
 function delay(ms) {
@@ -247,6 +249,15 @@ const HELPERS_JS = `
       el.scrollIntoView({ block: 'start' });
       return true;
     },
+    // overflow-x:auto な内側の要素を右端までスクロールする（表の右のほうの列を撮るとき用）。
+    // ページ自体のスクロールではなく、その要素自身の scrollLeft を動かす
+    scrollRight: function (sel, nth) {
+      var els = document.querySelectorAll(sel);
+      var el = els[nth || 0];
+      if (!el) return false;
+      el.scrollLeft = el.scrollWidth;
+      return true;
+    },
   };
   return true;
 })()
@@ -292,6 +303,15 @@ async function runStep(win, step) {
       `window.__sb.scrollTo(${JSON.stringify(step.scrollTo)}, ${step.nth || 0})`,
     )
     await delay(step.after ?? 150)
+    return
+  }
+  if (step.scrollRight) {
+    const { sel, nth } = step.scrollRight
+    const ok = await win.webContents.executeJavaScript(
+      `window.__sb.scrollRight(${JSON.stringify(sel)}, ${nth || 0})`,
+    )
+    if (!ok) throw new Error(`横スクロールの対象が見つかりません：${sel}`)
+    await delay(step.after ?? 250)
     return
   }
   if (step.click != null || step.clickContains != null) {
@@ -460,7 +480,13 @@ const SHOTS = [
   },
   {
     id: 'sales-needs-input-row',
-    go: [{ click: '売上' }, { waitFor: '.work-panel' }, { wait: 250 }],
+    // 「未紐付け」の入力バンドのピル（2番目の .input-pill-btn）で絞ると、原価欄に
+    // 「在庫を選ぶ」が出る本当に未紐付けの行だけになる（既定の並びだと自動紐付け済みの行が
+    // 先頭に来ることがあり、間違って撮ってしまう。実際に踏んだ）
+    go: [
+      { click: '売上' }, { waitFor: '.stage-strip' }, { wait: 250 },
+      { clickSelector: '.input-pill-btn', nth: 1, after: 500 },
+    ],
     clip: { sel: '.work-row:not(.work-row-hdr)', nth: 0 },
   },
   {
@@ -498,11 +524,15 @@ const SHOTS = [
   },
   {
     id: 'sales-profit-confirmed-row',
+    // 先頭行（既定の並び）は「未確定が先」なので、そのままでは送料・紐付けが未入力の行を
+    // 撮ってしまう（実際に踏んだ）。.settled（=未確定ではない行）のうち、粗利がプラスの
+    // （.profit が付く＝私物でも赤字でもない）最初の行を選ぶ
     go: [
       { click: '売上' }, { waitFor: '.stage-strip' }, { wait: 250 },
       { click: '取引完了' }, { wait: 400 },
+      { markHasChild: { root: '.work-row.settled', child: '.cell-profit .profit', as: 'confirmed-row' } },
     ],
-    clip: { sel: '.work-row:not(.work-row-hdr)', nth: 0 },
+    clip: '[data-shot="confirmed-row"]',
   },
   {
     id: 'sales-manual-form',
@@ -518,6 +548,16 @@ const SHOTS = [
       { waitFor: '.drawer[role="dialog"]' }, { wait: 300 },
     ],
     clip: '.drawer[role="dialog"]',
+  },
+  {
+    id: 'sales-row-ops',
+    // 行末の操作ボタン（タグ・履歴・メモ・梱包・手数料・削除）。手数料ボタンの説明用
+    go: [
+      { click: '売上' }, { waitFor: '.stage-strip' }, { wait: 250 },
+      { click: '取引完了' }, { wait: 400 },
+      { markHasChild: { root: '.work-row.settled', child: '.cell-profit .profit', as: 'ops-row' } },
+    ],
+    clip: '[data-shot="ops-row"] .cell-ops',
   },
 
   // ---------------- 仕入 ----------------
@@ -652,8 +692,14 @@ const SHOTS = [
   },
   {
     id: 'monthly-detail-alloc',
-    go: [{ click: '月次' }, { waitFor: '.statement-card' }, { wait: 500 }],
-    clip: '.sales-block',
+    // 販売ごとの表は列が多く（.table-panel { overflow-x: auto }）、既定のスクロール位置（左端）
+    // だと右端の「按分経費」「按分後利益」が枠の外に隠れて写らない（実際に踏んだ）。
+    // 内側を右端までスクロールしてから、ツールバー（按分方法のセレクト）と表をまとめて撮る
+    go: [
+      { click: '月次' }, { waitFor: '.statement-card' }, { wait: 500 },
+      { scrollRight: { sel: '.sales-block .table-panel' } },
+    ],
+    clip: { union: ['.sales-block .toolbar', '.sales-block .table-panel'] },
   },
   {
     id: 'monthly-realized-forecast',
@@ -688,11 +734,25 @@ const SHOTS = [
   // ---------------- 設定 ----------------
   {
     id: 'settings-import',
+    // 先にヘッダの「取り込む」を1回押しておくと、実行履歴にメルカリ・メロジョイ・Yahoo!フリマの
+    // 3件が並ぶ（モックの collect() が合成する）。Yahoo!フリマの取り込みが実行履歴に出ることを
+    // 見せるのに使う（ヘルプの yahoo-channel からも参照）。完了直後に出る通知バナーが
+    // パネルに重なって写ってしまうため、消えるまで（5秒で自動で消える）待ってから開く
     go: [
+      { click: '取り込む', after: 6200 },
       { click: '設定' }, { waitFor: '.section-head-title' }, { wait: 400 },
       { mark: { root: '.panel', textSel: '.section-head-title', text: '取り込み', as: 'import' } },
     ],
     clip: '[data-shot="import"]',
+  },
+  {
+    id: 'settings-channel-keywords',
+    go: [
+      { click: '設定' }, { waitFor: '.section-head-title' }, { wait: 400 },
+      { mark: { root: '.panel', textSel: '.section-head-title', text: 'メルカリ', as: 'mercari-panel' } },
+      { mark: { root: '.panel', textSel: '.section-head-title', text: 'Yahoo!フリマ', as: 'yahoo-panel' } },
+    ],
+    clip: { union: ['[data-shot="mercari-panel"]', '[data-shot="yahoo-panel"]'] },
   },
   {
     id: 'settings-fee',
