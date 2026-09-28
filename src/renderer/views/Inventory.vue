@@ -723,14 +723,16 @@ async function editNote(item: InventoryItem) {
               >
                 <span>{{ i.shop_account_name ?? '—' }} ・ {{ i.acquired_at }} 仕入</span>
                 <div class="chip-row fixed-row" :title="itemTagsTitle(i)">
-                  <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
-                  <span
-                    v-for="t in i.inherited_tags" :key="'inh-' + t.id"
-                    class="chip-inherited-wrap" :title="tagOriginTitle(t.from)"
-                  >
-                    <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
-                    <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
-                  </span>
+                  <div class="chip-tags">
+                    <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
+                    <span
+                      v-for="t in i.inherited_tags" :key="'inh-' + t.id"
+                      class="chip-inherited-wrap" :title="tagOriginTitle(t.from)"
+                    >
+                      <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
+                      <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
+                    </span>
+                  </div>
                 </div>
                 <div class="note-row fixed-row">
                   <template v-if="i.note">
@@ -858,15 +860,17 @@ async function editNote(item: InventoryItem) {
                 />
                 <StatusChip v-if="showStatusChips && itemChipState(i)" :tone="itemChipState(i)!.tone" :label="itemChipState(i)!.label" />
                 <StatusChip v-if="i.parent_id" tone="neutral" label="分割" />
-                <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
-                <span
-                  v-for="t in i.inherited_tags" :key="'inh-' + t.id"
-                  class="chip-inherited-wrap"
-                  :title="tagOriginTitle(t.from)"
-                >
-                  <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
-                  <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
-                </span>
+                <div class="chip-tags">
+                  <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
+                  <span
+                    v-for="t in i.inherited_tags" :key="'inh-' + t.id"
+                    class="chip-inherited-wrap"
+                    :title="tagOriginTitle(t.from)"
+                  >
+                    <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
+                    <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
+                  </span>
+                </div>
               </div>
               <div class="note-row fixed-row">
                 <template v-if="i.note">
@@ -1083,8 +1087,10 @@ async function editNote(item: InventoryItem) {
 .git-ops { grid-area: ops; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .clickable { cursor: pointer; }
 
-.table-panel { padding: 0; overflow: hidden; }
-.table-panel table { table-layout: fixed; }
+/* 幅が足りない列を圧縮すると、押せるボタンや金額の文字が切れる。
+   列を潰す代わりに、表に最低幅を持たせて横スクロールで見せる */
+.table-panel { padding: 0; overflow-x: auto; overflow-y: hidden; }
+.table-panel table { table-layout: fixed; min-width: 1120px; }
 .table-panel th.col-thumb { width: 64px; }
 .table-panel th:nth-child(2) { width: 32%; min-width: 260px; }
 .table-panel th:nth-child(3) { width: 18%; }
@@ -1123,10 +1129,6 @@ async function editNote(item: InventoryItem) {
 
 /* 横断検索・ホームから来たときに該当行を一時的に示す */
 tr.focused { background: var(--brand-soft); }
-
-@media (max-width: 1099px) {
-  .table-panel { overflow-x: auto; }
-}
 
 /* 幅が狭い画面では操作列がボタンの折り返しで縦に伸びやすいので、2段目に落として
    コード・数値・状態の列は常に横一列で揃える */

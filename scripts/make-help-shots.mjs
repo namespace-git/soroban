@@ -786,6 +786,22 @@ const SHOTS = [
     clip: { union: ['.auto-backup-title', '.manual-backup-title'] },
   },
   {
+    id: 'settings-data',
+    // 「取り込まない販売」の区画は削除記録が無いと出ない（v-if）ので、先に売上タブで
+    // 取り込んだ販売（自動取得）を1件削除してから設定に移る
+    go: [
+      { click: '売上' }, { waitFor: '.stage-strip' }, { wait: 250 },
+      { click: 'すべて' }, { wait: 400 },
+      { mark: { root: '.work-row', textSel: null, text: '自動取得', as: 'collector-row', mode: 'contains' } },
+      { clickSelector: '[data-shot="collector-row"] .icon.ghost[aria-label="削除"]', after: 500 },
+      { waitFor: '.scrim .panel' }, { wait: 200 },
+      { click: '削除する', after: 700 },
+      { click: '設定' }, { waitFor: '.section-head-title' }, { wait: 400 },
+      { waitFor: '.exclusions-zone', timeout: 4000 }, { wait: 200 },
+    ],
+    clip: '.exclusions-zone',
+  },
+  {
     id: 'settings-app-update',
     go: [
       { click: '設定' }, { waitFor: '.section-head-title' }, { wait: 400 },

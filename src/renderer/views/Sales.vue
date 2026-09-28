@@ -1194,15 +1194,17 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                 <StatusChip v-else tone="neutral" label="私物" />
                 <StatusChip v-if="r.sale.source === 'collector'" tone="neutral" label="自動取得" />
                 <CodeChip v-for="mc in r.sale.model_codes" :key="mc" kind="model" :code="mc" />
-                <StatusChip v-for="t in r.sale.tags" :key="t.id" tone="info" :label="t.name" />
-                <span
-                  v-for="t in r.sale.inherited_tags" :key="'inh-' + t.id"
-                  class="chip-inherited-wrap"
-                  :title="tagOriginTitle(t.from)"
-                >
-                  <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
-                  <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
-                </span>
+                <div class="chip-tags">
+                  <StatusChip v-for="t in r.sale.tags" :key="t.id" tone="info" :label="t.name" />
+                  <span
+                    v-for="t in r.sale.inherited_tags" :key="'inh-' + t.id"
+                    class="chip-inherited-wrap"
+                    :title="tagOriginTitle(t.from)"
+                  >
+                    <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
+                    <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
+                  </span>
+                </div>
               </div>
               <div class="note-row fixed-row">
                 <template v-if="r.sale.note">
@@ -1216,14 +1218,16 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
             <template v-else-if="r.listing">
               <div class="row-sub" title="更新日から推定">{{ listingSubText(r.listing) }}</div>
               <div class="chip-row fixed-row" :title="listingChipRowTitle(r.listing)">
-                <CodeChip v-for="mc in r.listing.model_codes" :key="mc" kind="model" :code="mc" />
-                <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
-                <StatusChip
-                  v-if="seenStale(r.listing)"
-                  tone="neutral"
-                  label="前回の取り込みで見えず"
-                  title="1ページ目に無かっただけかもしれません。売れていれば売上に出ます"
-                />
+                <div class="chip-tags">
+                  <CodeChip v-for="mc in r.listing.model_codes" :key="mc" kind="model" :code="mc" />
+                  <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
+                  <StatusChip
+                    v-if="seenStale(r.listing)"
+                    tone="neutral"
+                    label="前回の取り込みで見えず"
+                    title="1ページ目に無かっただけかもしれません。売れていれば売上に出ます"
+                  />
+                </div>
               </div>
               <!-- 出品にはメモが無いが、販売行と高さを揃えるため同じ分だけ確保する -->
               <div class="note-row fixed-row"></div>

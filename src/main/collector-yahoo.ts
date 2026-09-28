@@ -664,6 +664,33 @@ async function outerHtml(win: BrowserWindow): Promise<string> {
     .catch(() => '') as string
 }
 
+/**
+ * 出品中・取引中一覧（Next.js のクライアント描画）が描き終わるのを待つ上限と間隔。
+ * `randomWait()`（ページ遷移後・連打しないための2〜6秒）とは別物：あちらは収集頻度の
+ * 制約、こちらは1回の loadURL のあとに描画が終わるまで**ローカルの DOM を読み直すだけ**
+ * （ネットワークへ新しく問い合わせるわけではない）なので、収集頻度の制約には当たらない。
+ * 永遠には待たない（上限に達したら諦めて0件として扱い、実行記録に残す＝CLAUDE.mdの
+ * 「取得0件を成功にしない」）。
+ */
+const RENDER_WAIT_TIMEOUT_MS = 10000
+const RENDER_WAIT_INTERVAL_MS = 500
+
+/**
+ * `outerHtml` を上限に達するか商品へのリンク（`hasYahooItemLinks`）が現れるまで読み直す。
+ * 上限に達したら最後に読めた HTML と `rendered: false` を返す（呼び出し側はそれを0件として
+ * 扱いつつ、実行記録に読み取りに失敗した可能性を残す）。
+ */
+async function waitForYahooRender(win: BrowserWindow): Promise<{ html: string; rendered: boolean }> {
+  const deadline = Date.now() + RENDER_WAIT_TIMEOUT_MS
+  let html = await outerHtml(win)
+  while (!hasYahooItemLinks(html)) {
+    if (Date.now() >= deadline) return { html, rendered: false }
+    await sleep(RENDER_WAIT_INTERVAL_MS)
+    html = await outerHtml(win)
+  }
+  return { html, rendered: true }
+}
+
 // ------------------------------------------------------------
 // サムネイル保存（collector.ts と同じ作法。private ヘルパーは export されていないため
 // ここに複製する。thumbFileName だけ collector.ts から借りる）
@@ -751,6 +778,12 @@ export interface YahooCombinedSale {
   yahooItemId: string
   /** タイトル。②（取引ページ）の全文があればそれ、無ければ③（売上金管理）の商品名（途中で切れている） */
   title: string
+  /**
+   * title が③（売上金管理）の商品名（途中で切れている）由来のとき true。②がまだ観測できて
+   * いない行（取引ページに出ていない）はこれが true になる。true のときはキーワードでの
+   * 一致判定をしない（切れた部分にキーワードがあった場合に誤って不一致にしてしまうため）
+   */
+  titleTruncated: boolean
   /** 決済金額（③） */
   price: number
   /** 販売手数料の実額（③。0円もある） */
@@ -763,6 +796,17 @@ export interface YahooCombinedSale {
   thumbUrl: string | null
 }
 
+/** 恒等式（決済金額－手数料＝受取額）が崩れた行（combineYahooSales の inconsistent の要素） */
+export interface YahooInconsistentSale {
+  yahooItemId: string
+  /** ③の商品名（途中で切れている） */
+  itemName: string
+  settlementAmount: number
+  feeAmount: number
+  receivedAmount: number
+  otherBreakdown: Array<{ label: string; amount: number | null }>
+}
+
 /**
  * 「取引中・取引完了」（②）と「売上金管理」（③）を商品idで結合する。
  *
@@ -770,26 +814,35 @@ export interface YahooCombinedSale {
  * 出ていない＝日付が無い）はここでは作らない。次回の収集で③に出てから作る。
  *
  * amountsConsistent が false の行（決済金額－手数料≠受取額。受取連絡後に送料の行が増えて
- * 式が崩れた等）は combine せず、skippedInconsistent の件数だけ増やして返す
- * （黙って通すと送料が利益に残ってしまう）。
+ * 式が崩れた等）は sales に混ぜず、どの商品で何が合わないかが分かる形（inconsistent）で
+ * 返す（黙って通すと送料が利益に残ってしまうし、件数だけ捨てると配偶者が直しようがない）。
  */
 export function combineYahooSales(
   soldRows: YahooScrapedSale[],
   salesRows: YahooSalesRow[],
-): { sales: YahooCombinedSale[]; skippedInconsistent: number } {
+): { sales: YahooCombinedSale[]; inconsistent: YahooInconsistentSale[] } {
   const soldById = new Map(soldRows.map(r => [r.yahooItemId, r]))
   const sales: YahooCombinedSale[] = []
-  let skippedInconsistent = 0
+  const inconsistent: YahooInconsistentSale[] = []
 
   for (const s of salesRows) {
     if (!s.amountsConsistent) {
-      skippedInconsistent++
+      inconsistent.push({
+        yahooItemId: s.yahooItemId,
+        itemName: s.itemName,
+        settlementAmount: s.settlementAmount,
+        feeAmount: s.feeAmount,
+        receivedAmount: s.receivedAmount,
+        otherBreakdown: s.otherBreakdown,
+      })
       continue
     }
     const sold = soldById.get(s.yahooItemId)
+    const hasFullTitle = !!(sold && sold.title)
     sales.push({
       yahooItemId: s.yahooItemId,
-      title: sold && sold.title ? sold.title : s.itemName,
+      title: hasFullTitle ? sold!.title : s.itemName,
+      titleTruncated: !hasFullTitle,
       price: s.settlementAmount,
       fee: s.feeAmount,
       soldAt: s.handledDate,
@@ -798,7 +851,7 @@ export function combineYahooSales(
     })
   }
 
-  return { sales, skippedInconsistent }
+  return { sales, inconsistent }
 }
 
 /** splitYahooCombinedSales の返り値 */
@@ -807,10 +860,15 @@ export interface YahooCombinedSalesSplit {
   freshMatched: YahooCombinedSale[]
   /** 既に帳簿にある（db.updateYahooActuals へ渡す） */
   knownMatched: YahooCombinedSale[]
-  /** 新規のうちキーワード不一致で弾いた件数 */
+  /** 新規のうちキーワード不一致で弾いた件数（タイトルが途中で切れている行は含まない） */
   excludedByKeyword: number
   /** 新規のうち削除済み（sale_exclusion）で弾いた件数 */
   excludedDeleted: number
+  /**
+   * 新規のうち、タイトルが③（売上金管理）の商品名しか無く途中で切れていたため、キーワードでの
+   * 判定をスキップしてそのまま freshMatched に含めた行の商品id（実行記録に残すため）
+   */
+  truncatedTitleIds: string[]
 }
 
 /**
@@ -823,7 +881,15 @@ export interface YahooCombinedSalesSplit {
  * combined は combineYahooSales が amountsConsistent=false の行をすでに除いた後のものなので、
  * ここでは意識しなくてよい（新規・既知のどちらにも式が崩れた行は混ざらない）。
  * 削除済み（sale_exclusion）は新規側だけ弾く（既知はすでに帳簿にある＝削除判定は関係ない）。
- * キーワード不一致は新規・既知の両方から弾く（不一致の詳細・サムネイルを取りに行かない規則と同じ）。
+ *
+ * キーワードは「取り込むかどうか」を決めるものであって「もう帳簿にあるものを更新するかどうか」
+ * ではない。だから既知（knownMatched）は現在のキーワードに関わらず全件を updateYahooActuals へ
+ * 渡す。キーワードで絞るのは新規（freshMatched）だけ（今までどおり）。
+ *
+ * タイトルが③（売上金管理）の商品名しか無く途中で切れている行（titleTruncated）は、切れた
+ * 部分にキーワードがあった場合に誤って「不一致」と判定してしまう。だからキーワード判定を
+ * スキップし、そのまま freshMatched に含める（黙って捨てない）。id は truncatedTitleIds に
+ * 残し、呼び出し側が実行記録に書けるようにする。
  */
 export function splitYahooCombinedSales(
   combined: YahooCombinedSale[],
@@ -832,21 +898,33 @@ export function splitYahooCombinedSales(
   keywords: string[],
 ): YahooCombinedSalesSplit {
   const freshAll = combined.filter(c => !knownIds.has(c.yahooItemId))
-  const knownCombined = combined.filter(c => knownIds.has(c.yahooItemId))
+  const knownMatched = combined.filter(c => knownIds.has(c.yahooItemId))
 
   const freshNotDeleted = freshAll.filter(c => !excludedIds.has(c.yahooItemId))
   const excludedDeleted = freshAll.length - freshNotDeleted.length
 
-  const freshMatched = keywords.length > 0
-    ? freshNotDeleted.filter(c => db.matchesAnyKeyword(c.title, keywords))
-    : freshNotDeleted
-  const excludedByKeyword = freshNotDeleted.length - freshMatched.length
+  const freshTruncated = freshNotDeleted.filter(c => c.titleTruncated)
+  const freshJudgeable = freshNotDeleted.filter(c => !c.titleTruncated)
 
-  const knownMatched = keywords.length > 0
-    ? knownCombined.filter(c => db.matchesAnyKeyword(c.title, keywords))
-    : knownCombined
+  const freshJudgeableMatched = keywords.length > 0
+    ? freshJudgeable.filter(c => db.matchesAnyKeyword(c.title, keywords))
+    : freshJudgeable
+  const excludedByKeyword = freshJudgeable.length - freshJudgeableMatched.length
 
-  return { freshMatched, knownMatched, excludedByKeyword, excludedDeleted }
+  const freshMatched = [...freshJudgeableMatched, ...freshTruncated]
+  const truncatedTitleIds = freshTruncated.map(c => c.yahooItemId)
+
+  return { freshMatched, knownMatched, excludedByKeyword, excludedDeleted, truncatedTitleIds }
+}
+
+/**
+ * ページの HTML に商品ページへのリンク（`href="…/item/<id>"` `<id>` は英字1文字＋数字8桁以上）
+ * が1つでもあるか。出品中・取引中一覧はどちらも Next.js のクライアント描画で、
+ * `loadURL` 直後に読むと**中身が描かれる前の空の殻**（ナビの `/my/item/selling` `/my/item/sold`
+ * のような固定リンクだけ）を取ってしまう（実機で確認済み）。中身が描かれたかどうかの判定に使う。
+ */
+export function hasYahooItemLinks(html: string): boolean {
+  return /<a\b[^>]*\bhref="[^"]*\/item\/[a-z]\d{8,}[^"]*"/.test(html)
 }
 
 /** 3ページとも0件なら true（`empty` 扱い）。1つでも取れていれば false（出品を売り切ると出品0件はあり得る） */
@@ -854,6 +932,64 @@ export function isYahooCollectEmpty(
   listingCount: number, soldCount: number, salesCount: number,
 ): boolean {
   return listingCount === 0 && soldCount === 0 && salesCount === 0
+}
+
+/**
+ * 3ページのうち0件だったページの名前を返す（全部0件のときは isYahooCollectEmpty 側で
+ * `empty` として扱うので、ここは「一部だけ0件」を見るためのもの）。
+ *
+ * 0件は「正常に0件」（出品を売り切った・その期間に売上が無かった）と「セレクタが壊れて
+ * 読めていない」のどちらもあり得て、いまの情報だけでは区別できない。だから「壊れている」と
+ * 決めつけず、どのページが0件だったかだけを返す。呼び出し側は status を `ok` のままにして
+ * 良いが、メッセージに含めて人の目に触れるようにする（黙って成功にしない）。
+ */
+export function zeroYahooPageNames(
+  listingCount: number, soldCount: number, salesCount: number,
+): string[] {
+  const names: string[] = []
+  if (listingCount === 0) names.push('出品中')
+  if (soldCount === 0) names.push('取引中・取引完了')
+  if (salesCount === 0) names.push('売上金管理')
+  return names
+}
+
+/**
+ * 「タイトルが途中で切れていて判定できなかった」件数とidを実行記録用の1行にする。
+ * id を全部並べると件数が多いときに長くなりすぎるため、先頭 MAX_LISTED 件だけ出し、
+ * 残りは件数で示す。
+ */
+export function formatYahooTruncatedTitleNote(ids: string[]): string {
+  if (ids.length === 0) return ''
+  const MAX_LISTED = 5
+  const shown = ids.slice(0, MAX_LISTED)
+  const restCount = ids.length - shown.length
+  const idsText = restCount > 0 ? `${shown.join('・')}、他${restCount}件` : shown.join('・')
+  return `タイトルが途中で切れていて判定できなかった ${ids.length} 件（${idsText}）`
+}
+
+/**
+ * 描画待ち（`waitForYahooRender`）が上限に達したページ名を実行記録用の1行にする。
+ * 静かに0件で成功にしないための文言（`zeroYahooPageNames` より確度が高い：
+ * こちらは「描画そのものを確認できなかった」と分かっている）。
+ */
+export function formatYahooRenderTimeoutNote(pageNames: string[]): string {
+  if (pageNames.length === 0) return ''
+  return `描画待ちが上限に達しました（読み取れていない可能性があります）：${pageNames.join('・')}`
+}
+
+/**
+ * 恒等式（決済金額－手数料＝受取額）が崩れた行を、商品idと金額の内訳が分かる形で
+ * 実行記録用の1行にする。件数が多いときに壊れないよう、先頭 MAX_LISTED 件だけ内訳を出し、
+ * 残りは件数で示す。
+ */
+export function formatYahooInconsistentNote(rows: YahooInconsistentSale[]): string {
+  if (rows.length === 0) return ''
+  const MAX_LISTED = 3
+  const shown = rows.slice(0, MAX_LISTED).map(r =>
+    `${r.yahooItemId}（決済${r.settlementAmount}－手数料${r.feeAmount}≠受取${r.receivedAmount}）`)
+  const restCount = rows.length - shown.length
+  const detail = restCount > 0 ? `${shown.join('、')}、他${restCount}件` : shown.join('、')
+  return `確認が要る ${rows.length} 件（内訳の式が合いません）：${detail}`
 }
 
 // ------------------------------------------------------------
@@ -886,8 +1022,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       )
     }
 
-    const sellingHtml = await outerHtml(win)
-    const scrapedListings = parseYahooSellingHtml(sellingHtml)
+    const renderTimedOutPages: string[] = []
+
+    const sellingRender = await waitForYahooRender(win)
+    if (!sellingRender.rendered) renderTimedOutPages.push('出品中')
+    const scrapedListings = parseYahooSellingHtml(sellingRender.html)
 
     // ② 取引中・取引完了
     await win.loadURL(SOLD_URL)
@@ -905,8 +1044,9 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       )
     }
 
-    const soldHtml = await outerHtml(win)
-    const soldRows = parseYahooSoldHtml(soldHtml)
+    const soldRender = await waitForYahooRender(win)
+    if (!soldRender.rendered) renderTimedOutPages.push('取引中・取引完了')
+    const soldRows = parseYahooSoldHtml(soldRender.html)
 
     // ③ 売上金管理（別ホスト：salesmanagement.yahoo.co.jp）
     await win.loadURL(SALES_URL)
@@ -931,14 +1071,25 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     const salesRows = parseYahooSalesHtml(salesHtml)
 
     if (isYahooCollectEmpty(scrapedListings.length, soldRows.length, salesRows.length)) {
+      const timeoutNote = renderTimedOutPages.length > 0
+        ? `（${renderTimedOutPages.join('・')}は描画待ちの上限に達しました）`
+        : ''
       return db.finishRun(
         runId, 'empty', 0, 0,
-        '0件でした。画面構造が変わってセレクタが壊れている可能性があります',
+        `0件でした。画面構造が変わってセレクタが壊れている可能性があります${timeoutNote}`,
       )
     }
 
+    // 3ページとも0件（＝上のempty）ではないが、1つだけ0件のときは「壊れている疑い」と
+    // 「実際に0件（出品を売り切った・その期間に売上が無かった）」の区別がいまの情報では
+    // つかない。だから status は ok のままにするが、どのページが0件だったかはメッセージに残す。
+    // 描画待ちが上限に達したページ（renderTimedOutPages）は原因がはっきりしているので、
+    // こちらの一般的な文言（zeroPages）とは重複させず formatYahooRenderTimeoutNote 側で示す
+    const zeroPages = zeroYahooPageNames(scrapedListings.length, soldRows.length, salesRows.length)
+      .filter(name => !renderTimedOutPages.includes(name))
+
     // --- 販売：②と③を商品idで結合する ---
-    const { sales: combined, skippedInconsistent } = combineYahooSales(soldRows, salesRows)
+    const { sales: combined, inconsistent } = combineYahooSales(soldRows, salesRows)
 
     const keywords = db.parseKeywords(db.getSettings().yahoo_keyword ?? '')
 
@@ -949,9 +1100,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
         .map(c => c.yahooItemId),
     )
 
-    // キーワードが設定されていれば、不一致は insertCollected / updateYahooActuals どちらにも
-    // 渡さない（詳細・サムネイルも取りに行かない）
-    const { freshMatched, knownMatched, excludedByKeyword, excludedDeleted } =
+    // キーワードが設定されていれば、新規のうち不一致は insertCollected に渡さない（詳細・
+    // サムネイルも取りに行かない）。既知（knownMatched）はキーワードに関わらず更新へ渡る
+    // （splitYahooCombinedSales 参照）。タイトルが途中で切れている新規行はキーワード判定を
+    // スキップしてそのまま取り込む（truncatedTitleIds に id が残る）
+    const { freshMatched, knownMatched, excludedByKeyword, excludedDeleted, truncatedTitleIds } =
       splitYahooCombinedSales(combined, known, excludedIds, keywords)
 
     const insertedRows = freshMatched.length > 0
@@ -965,9 +1118,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
         })), 'yahoo')
       : []
 
-    // --- 既に取り込み済みの販売（キーワード一致分だけ）を実額・状態で更新する ---
+    // --- 既に取り込み済みの販売を実額・状態で更新する（キーワードには関わらない） ---
     // メルカリ用の updateCollectedActuals は status='completed' を決め打ちするため使わない
     // （Yahoo!は受取連絡待ちの取引も出るので、渡された status（null もそのまま）を使う updateYahooActuals を使う）
+    // title：全文（②取引ページ由来）が取れたときだけ渡す。titleTruncated=true（③の切れた商品名
+    // しか無い）のものは渡さない（切れたタイトルで上書きしようとしない）
     const updatedCount = knownMatched.length > 0
       ? db.updateYahooActuals(knownMatched.map(c => ({
           mercariItemId: c.yahooItemId,
@@ -975,10 +1130,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
           fee: c.fee,
           price: c.price,
           status: c.status,
+          title: c.titleTruncated ? undefined : c.title,
         })))
       : 0
 
-    // --- サムネイル：新規 ＋ 既知（現在のキーワードに一致するもの）。予算は出品と合算で管理 ---
+    // --- サムネイル：新規 ＋ 既知（キーワードには関わらない）。予算は出品と合算で管理 ---
 
     const thumbTargets = db.salesNeedingThumb(
       [...freshMatched, ...knownMatched]
@@ -1016,10 +1172,15 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     const parts = [`新規 ${insertedRows.length}・更新 ${updatedCount}`]
     if (excludedByKeyword > 0) parts.push(`キーワード不一致で除外 ${excludedByKeyword} 件`)
     if (excludedDeleted > 0) parts.push(`削除済み ${excludedDeleted} 件`)
-    if (skippedInconsistent > 0) parts.push(`確認が要る ${skippedInconsistent} 件（内訳の式が合いません）`)
+    if (truncatedTitleIds.length > 0) parts.push(formatYahooTruncatedTitleNote(truncatedTitleIds))
+    if (inconsistent.length > 0) parts.push(formatYahooInconsistentNote(inconsistent))
     const totalThumbsSaved = thumbsResult.saved + listingThumbsResult.saved
     if (totalThumbsSaved > 0) parts.push(`サムネイル ${totalThumbsSaved} 枚`)
     parts.push(`出品 新規 ${listingResult.inserted}・更新 ${listingResult.updated}`)
+    if (renderTimedOutPages.length > 0) parts.push(formatYahooRenderTimeoutNote(renderTimedOutPages))
+    if (zeroPages.length > 0) {
+      parts.push(`0件のページ：${zeroPages.join('・')}（実際に0件か読み取りが壊れているかは、この情報だけでは判別できません）`)
+    }
 
     const observedIds = new Set([
       ...scrapedListings.map(l => l.yahooItemId),

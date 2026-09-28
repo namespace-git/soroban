@@ -7,6 +7,10 @@ import {
   extractYahooSalesCsvForm,
   extractYahooSellingCounts,
   extractYahooSoldTotal,
+  formatYahooInconsistentNote,
+  formatYahooRenderTimeoutNote,
+  formatYahooTruncatedTitleNote,
+  hasYahooItemLinks,
   isYahooCollectEmpty,
   mapYahooTradstat,
   parseYahooItemHtml,
@@ -14,6 +18,7 @@ import {
   parseYahooSellingHtml,
   parseYahooSoldHtml,
   splitYahooCombinedSales,
+  zeroYahooPageNames,
   type YahooCombinedSale,
   type YahooSalesRow,
   type YahooScrapedSale,
@@ -141,6 +146,38 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
 
     it('カンマ区切りの件数も読む', () => {
       expect(extractYahooSoldTotal('1~20件/1,234件')).toBe(1234)
+    })
+  })
+
+  describe('hasYahooItemLinks（Next.jsのクライアント描画が終わったかの判定。実機で「2ページが空のまま読まれる」を踏んだ対策）', () => {
+    it('出品中一覧（実物fixture・描画済み）は true', () => {
+      const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-selling.html'), 'utf-8')
+      expect(hasYahooItemLinks(html)).toBe(true)
+    })
+
+    it('取引中・取引完了一覧（実物fixture・描画済み）は true', () => {
+      const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-sold.html'), 'utf-8')
+      expect(hasYahooItemLinks(html)).toBe(true)
+    })
+
+    it('描画前の空の殻（ナビの /my/item/selling /my/item/sold だけがあり、商品へのリンクが無い）は false', () => {
+      const shellHtml = `
+        <html><body>
+          <div id="__next">
+            <nav>
+              <a href="/my/item/selling">出品中</a>
+              <a href="/my/item/sold">取引中・取引完了</a>
+            </nav>
+            <div class="loading-skeleton"></div>
+          </div>
+        </body></html>
+      `
+      expect(hasYahooItemLinks(shellHtml)).toBe(false)
+    })
+
+    it('空文字・タグだけも false（throwしない）', () => {
+      expect(hasYahooItemLinks('')).toBe(false)
+      expect(hasYahooItemLinks('<div><span></span></div>')).toBe(false)
     })
   })
 
@@ -471,14 +508,15 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       }
     }
 
-    it('実物2件（yahoo-sold.html・yahoo-salesmanagement.html）を商品idで結合すると、4件とも②の全文タイトル・③の日付と実額・②のtradstatから判定したstatusになる', () => {
-      const { sales, skippedInconsistent } = combineYahooSales(soldRows, salesRows)
-      expect(skippedInconsistent).toBe(0)
+    it('実物2件（yahoo-sold.html・yahoo-salesmanagement.html）を商品idで結合すると、4件とも②の全文タイトル・③の日付と実額・②のtradstatから判定したstatusになる（titleTruncatedはすべてfalse＝②の全文がある）', () => {
+      const { sales, inconsistent } = combineYahooSales(soldRows, salesRows)
+      expect(inconsistent).toEqual([])
       expect(sales).toHaveLength(4)
       expect(sales).toEqual([
         {
           yahooItemId: 'z693579992',
           title: 'メロジョイ ふわふわ肉球ミルクパフ ねっとりヨーグルト【Z074-4】',
+          titleTruncated: false,
           price: 5200,
           fee: 0,
           soldAt: '2026-09-28',
@@ -488,6 +526,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         {
           yahooItemId: 'z693407762',
           title: 'Mellojoy メロジョイ 贅沢スフレ チョコレート Mサイズ 新品未開封【Z072-7】',
+          titleTruncated: false,
           price: 6400,
           fee: 320,
           soldAt: '2026-09-28',
@@ -497,6 +536,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         {
           yahooItemId: 'z693289446',
           title: 'Mellojoy メロジョイ いちごショートケーキ ホール スクイーズ 新品未開封',
+          titleTruncated: false,
           price: 5899,
           fee: 294,
           soldAt: '2026-09-28',
@@ -506,6 +546,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         {
           yahooItemId: 'z693287844',
           title: 'Mellojoy メロジョイ クッキークラブ クリームブロッサム もちもちもち',
+          titleTruncated: false,
           price: 4280,
           fee: 213,
           soldAt: '2026-09-27',
@@ -515,7 +556,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       ])
     })
 
-    it('売上金管理（③）にだけある行は作る：日付・実額があるので、タイトルは③の商品名（途中で切れている）で代え、statusはnull（②が無いので推測しない）', () => {
+    it('売上金管理（③）にだけある行は作る：日付・実額があるので、タイトルは③の商品名（途中で切れている）で代え、titleTruncatedはtrue、statusはnull（②が無いので推測しない）', () => {
       const sales = [makeSoldRow()] // ②はダミー1件だけ（結合先を確保するためのノイズ）
       const salesOnly = [
         makeSalesRow(),
@@ -527,6 +568,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(onlyInSales).toEqual({
         yahooItemId: 'z900000001',
         title: '売上金管理にしか無い商品名【Z9', // 途中で切れたままでよい（型番の救済はしない）
+        titleTruncated: true,
         price: 3000,
         fee: 150,
         soldAt: '2026-09-15',
@@ -547,17 +589,27 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(sales.some(s => s.yahooItemId === 'z700000001')).toBe(false)
     })
 
-    it('amountsConsistent が false の行は販売にしない（skippedInconsistentだけ増える。受取連絡後に送料の行が増えて式が崩れたケースを想定）', () => {
+    it('amountsConsistent が false の行は販売にしない。inconsistent に商品id・タイトル・金額の内訳がそのまま残る（受取連絡後に送料の行が増えて式が崩れたケースを想定）', () => {
       const soldOk = [makeSoldRow(), makeSoldRow({ yahooItemId: 'z600000002' })]
       const salesMixed = [
         makeSalesRow(),
         makeSalesRow({
-          yahooItemId: 'z600000002', amountsConsistent: false,
+          yahooItemId: 'z600000002', itemName: 'ダミー商品タイトル全文（送料あり）', amountsConsistent: false,
           settlementAmount: 5000, feeAmount: 250, receivedAmount: 4000, // 送料750円ぶん合わない
+          otherBreakdown: [{ label: '送料', amount: 750 }],
         }),
       ]
-      const { sales, skippedInconsistent } = combineYahooSales(soldOk, salesMixed)
-      expect(skippedInconsistent).toBe(1)
+      const { sales, inconsistent } = combineYahooSales(soldOk, salesMixed)
+      expect(inconsistent).toEqual([
+        {
+          yahooItemId: 'z600000002',
+          itemName: 'ダミー商品タイトル全文（送料あり）',
+          settlementAmount: 5000,
+          feeAmount: 250,
+          receivedAmount: 4000,
+          otherBreakdown: [{ label: '送料', amount: 750 }],
+        },
+      ])
       expect(sales).toHaveLength(1)
       expect(sales[0].yahooItemId).toBe('z600000001')
     })
@@ -575,6 +627,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       return {
         yahooItemId: 'z600000001',
         title: 'ダミー商品タイトル全文【Z001】',
+        titleTruncated: false,
         price: 1000,
         fee: 50,
         soldAt: '2026-09-01',
@@ -597,19 +650,37 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         .not.toEqual(expect.arrayContaining(result.knownMatched.map(c => c.yahooItemId)))
     })
 
-    it('knownMatched から updateYahooActuals へ渡す行は mercariItemId/soldAt/fee/price/status の形になる', () => {
+    it('knownMatched から updateYahooActuals へ渡す行は mercariItemId/soldAt/fee/price/status/title の形になる（collect()と同じマッピング）', () => {
       const known = makeCombined({
         yahooItemId: 'z600000002', soldAt: '2026-09-15', fee: 320, price: 6400, status: 'completed',
+        title: '全文タイトル【Z072】', titleTruncated: false,
       })
       const { knownMatched } = splitYahooCombinedSales(
         [known], new Set(['z600000002']), new Set(), [],
       )
       const rows = knownMatched.map(c => ({
         mercariItemId: c.yahooItemId, soldAt: c.soldAt, fee: c.fee, price: c.price, status: c.status,
+        title: c.titleTruncated ? undefined : c.title,
       }))
       expect(rows).toEqual([
-        { mercariItemId: 'z600000002', soldAt: '2026-09-15', fee: 320, price: 6400, status: 'completed' },
+        {
+          mercariItemId: 'z600000002', soldAt: '2026-09-15', fee: 320, price: 6400, status: 'completed',
+          title: '全文タイトル【Z072】',
+        },
       ])
+    })
+
+    it('titleTruncated=true（③の切れた商品名しか無い）の行は、collect()と同じマッピングで title が undefined になる（切れたタイトルで上書きしない）', () => {
+      const knownTruncated = makeCombined({
+        yahooItemId: 'z600000003', title: '切れたタイトル…新品未開封【Z0', titleTruncated: true,
+      })
+      const { knownMatched } = splitYahooCombinedSales(
+        [knownTruncated], new Set(['z600000003']), new Set(), [],
+      )
+      const rows = knownMatched.map(c => ({
+        mercariItemId: c.yahooItemId, title: c.titleTruncated ? undefined : c.title,
+      }))
+      expect(rows).toEqual([{ mercariItemId: 'z600000003', title: undefined }])
     })
 
     it('status が null（②取引ページにまだ出ていない）の行は null のまま渡る（勝手に completed 等で埋めない）', () => {
@@ -620,7 +691,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(knownMatched[0].status).toBeNull()
     })
 
-    it('キーワードが設定されていれば、既知でも不一致のタイトルは knownMatched から弾く（新規と同じ規則）', () => {
+    it('キーワードを設定していても、既知は不一致のタイトルでも knownMatched に残る（キーワードは「取り込むか」を決めるだけで「もう帳簿にあるものを更新するか」ではない。後からキーワードを絞っても既知の更新が止まらないことの確認）', () => {
       const knownMatch = makeCombined({ yahooItemId: 'z600000002', title: 'メロジョイ 贅沢スフレ【Z072】' })
       const knownUnmatch = makeCombined({ yahooItemId: 'z600000003', title: '全く関係ない商品' })
       const result = splitYahooCombinedSales(
@@ -629,7 +700,44 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         new Set(),
         ['メロジョイ'],
       )
-      expect(result.knownMatched.map(c => c.yahooItemId)).toEqual(['z600000002'])
+      expect(result.knownMatched.map(c => c.yahooItemId)).toEqual(['z600000002', 'z600000003'])
+    })
+
+    it('新規はキーワード不一致なら freshMatched から弾かれる（今までどおり。既知とは違う扱い）', () => {
+      const freshMatch = makeCombined({ yahooItemId: 'z600000010', title: 'メロジョイ 贅沢スフレ【Z072】' })
+      const freshUnmatch = makeCombined({ yahooItemId: 'z600000011', title: '全く関係ない商品' })
+      const result = splitYahooCombinedSales(
+        [freshMatch, freshUnmatch], new Set(), new Set(), ['メロジョイ'],
+      )
+      expect(result.freshMatched.map(c => c.yahooItemId)).toEqual(['z600000010'])
+      expect(result.excludedByKeyword).toBe(1)
+    })
+
+    it('新規でタイトルが途中で切れている行（titleTruncated=true）は、キーワードに関わらず freshMatched に含まれ、idが truncatedTitleIds に残る', () => {
+      const truncatedUnmatch = makeCombined({
+        yahooItemId: 'z600000020', title: '切れたタイトル…新品未開封【Z0', titleTruncated: true,
+      })
+      const judgeableMatch = makeCombined({
+        yahooItemId: 'z600000021', title: 'メロジョイ 全文タイトル【Z072】', titleTruncated: false,
+      })
+      const result = splitYahooCombinedSales(
+        [truncatedUnmatch, judgeableMatch], new Set(), new Set(), ['メロジョイ'],
+      )
+      expect(result.freshMatched.map(c => c.yahooItemId).sort()).toEqual(['z600000020', 'z600000021'])
+      expect(result.truncatedTitleIds).toEqual(['z600000020'])
+      expect(result.excludedByKeyword).toBe(0)
+    })
+
+    it('タイトルが途中で切れていても判定できるもの（titleTruncated=false）はキーワードで普通に弾かれる。truncatedTitleIds には出ない', () => {
+      const judgeableUnmatch = makeCombined({
+        yahooItemId: 'z600000030', title: '全く関係ない商品', titleTruncated: false,
+      })
+      const result = splitYahooCombinedSales(
+        [judgeableUnmatch], new Set(), new Set(), ['メロジョイ'],
+      )
+      expect(result.freshMatched).toEqual([])
+      expect(result.excludedByKeyword).toBe(1)
+      expect(result.truncatedTitleIds).toEqual([])
     })
 
     it('削除済み（sale_exclusion）は新規側だけ弾く。既知の判定には関係しない', () => {
@@ -667,8 +775,8 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         otherBreakdown: [{ label: '送料', amount: 750 }],
         amountsConsistent: false,
       }
-      const { sales: combined, skippedInconsistent } = combineYahooSales([soldRow], [inconsistentSalesRow])
-      expect(skippedInconsistent).toBe(1)
+      const { sales: combined, inconsistent } = combineYahooSales([soldRow], [inconsistentSalesRow])
+      expect(inconsistent).toHaveLength(1)
       expect(combined).toHaveLength(0)
 
       // z600000002 は帳簿に既にある（known）としても、combined に入っていない以上 knownMatched にも出ない
@@ -721,6 +829,105 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
 
     it('全部1件以上なら false', () => {
       expect(isYahooCollectEmpty(2, 3, 4)).toBe(false)
+    })
+  })
+
+  describe('zeroYahooPageNames（1ページだけ0件でも、okで握りつぶさず分かる形にする）', () => {
+    it('出品中だけ0件なら「出品中」だけ返る（他2ページは1件以上ある）', () => {
+      expect(zeroYahooPageNames(0, 5, 3)).toEqual(['出品中'])
+    })
+
+    it('取引中・取引完了だけ0件なら「取引中・取引完了」だけ返る', () => {
+      expect(zeroYahooPageNames(8, 0, 3)).toEqual(['取引中・取引完了'])
+    })
+
+    it('売上金管理だけ0件なら「売上金管理」だけ返る', () => {
+      expect(zeroYahooPageNames(8, 5, 0)).toEqual(['売上金管理'])
+    })
+
+    it('2ページが0件なら両方返る', () => {
+      expect(zeroYahooPageNames(0, 0, 3)).toEqual(['出品中', '取引中・取引完了'])
+    })
+
+    it('3ページとも0件なら3つとも返る（isYahooCollectEmptyがtrueになるケース。呼び出し側はこちらを使わずemptyにする）', () => {
+      expect(zeroYahooPageNames(0, 0, 0)).toEqual(['出品中', '取引中・取引完了', '売上金管理'])
+    })
+
+    it('全部1件以上なら空配列', () => {
+      expect(zeroYahooPageNames(8, 5, 3)).toEqual([])
+    })
+  })
+
+  describe('formatYahooTruncatedTitleNote（タイトルが途中で切れていて判定できなかった件数とidの記録）', () => {
+    it('0件なら空文字', () => {
+      expect(formatYahooTruncatedTitleNote([])).toBe('')
+    })
+
+    it('id が少ないときは全部並ぶ', () => {
+      expect(formatYahooTruncatedTitleNote(['z1', 'z2'])).toBe(
+        'タイトルが途中で切れていて判定できなかった 2 件（z1・z2）',
+      )
+    })
+
+    it('id が多いときはメッセージが壊れない：先頭5件＋残り件数で示す', () => {
+      const ids = Array.from({ length: 12 }, (_, i) => `z${i}`)
+      const note = formatYahooTruncatedTitleNote(ids)
+      expect(note).toBe('タイトルが途中で切れていて判定できなかった 12 件（z0・z1・z2・z3・z4、他7件）')
+    })
+  })
+
+  describe('formatYahooRenderTimeoutNote（描画待ちが上限に達したページの記録。静かに0件で成功にしないための文言）', () => {
+    it('0件なら空文字', () => {
+      expect(formatYahooRenderTimeoutNote([])).toBe('')
+    })
+
+    it('1ページなら名前がそのまま出る', () => {
+      expect(formatYahooRenderTimeoutNote(['出品中'])).toBe(
+        '描画待ちが上限に達しました（読み取れていない可能性があります）：出品中',
+      )
+    })
+
+    it('2ページとも上限に達したときは両方出る', () => {
+      expect(formatYahooRenderTimeoutNote(['出品中', '取引中・取引完了'])).toBe(
+        '描画待ちが上限に達しました（読み取れていない可能性があります）：出品中・取引中・取引完了',
+      )
+    })
+  })
+
+  describe('formatYahooInconsistentNote（恒等式が崩れた行の商品id・内訳の記録）', () => {
+    function makeInconsistent(overrides: Partial<{
+      yahooItemId: string; itemName: string; settlementAmount: number; feeAmount: number
+      receivedAmount: number; otherBreakdown: Array<{ label: string; amount: number | null }>
+    }> = {}) {
+      return {
+        yahooItemId: 'z600000002',
+        itemName: 'ダミー商品',
+        settlementAmount: 5000,
+        feeAmount: 250,
+        receivedAmount: 4000,
+        otherBreakdown: [{ label: '送料', amount: 750 }],
+        ...overrides,
+      }
+    }
+
+    it('0件なら空文字', () => {
+      expect(formatYahooInconsistentNote([])).toBe('')
+    })
+
+    it('商品idと金額の内訳（決済・手数料・受取）がメッセージに出る', () => {
+      const note = formatYahooInconsistentNote([makeInconsistent()])
+      expect(note).toBe('確認が要る 1 件（内訳の式が合いません）：z600000002（決済5000－手数料250≠受取4000）')
+    })
+
+    it('件数が多いときはメッセージが壊れない：先頭3件の内訳＋残り件数で示す', () => {
+      const rows = Array.from({ length: 5 }, (_, i) => makeInconsistent({ yahooItemId: `z${i}` }))
+      const note = formatYahooInconsistentNote(rows)
+      expect(note).toBe(
+        '確認が要る 5 件（内訳の式が合いません）：'
+        + 'z0（決済5000－手数料250≠受取4000）、'
+        + 'z1（決済5000－手数料250≠受取4000）、'
+        + 'z2（決済5000－手数料250≠受取4000）、他2件',
+      )
     })
   })
 })

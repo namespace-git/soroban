@@ -2395,6 +2395,14 @@ export function updateSale(id: string, patch: SalePatch): void {
  *
  * status に 'completed' を渡すと、completed_at が未設定なら completedAt で埋める
  * （既に入っていれば触らない。「最初に観測した日」を刻む他の日付と同じ規則）。
+ *
+ * title：Yahoo!フリマの売上金管理は商品名が途中で切れる（「…新品未開封【Z07」）。取引ページで
+ * 全文が取れたときにここへ渡すと、切れたタイトルを全文に直す。ただし無条件には書き換えない。
+ * 「今の値より長く、かつ今の値がその先頭と一致する（＝同じタイトルの続き）」ときだけ書き換える：
+ *   ・人が手でタイトルを直していれば、たいてい先頭が崩れるので上書きしない
+ *   ・すでに全文が入っていれば新しい値は同じ長さ以下になるので上書きしない（短い値で長い値を潰さない）
+ * source='collector' の販売にだけ効く（手入力の販売はそもそも呼び出し元が渡さない想定だが念のため）。
+ * 書き換えたときは、新しい全文から拾える型番を appendModelCodes で追記する（自動紐付けまで進む）。
  */
 export function applySaleActuals(
   id: string,
@@ -2406,10 +2414,25 @@ export function applySaleActuals(
     sold_at?: string
     status?: SaleStatus
     completedAt?: string
+    title?: string
   },
 ): void {
   const sets: string[] = []
   const vals: unknown[] = []
+  let titleApplied = false
+
+  if (actuals.title !== undefined) {
+    const cur = db.prepare('SELECT title, source FROM sale WHERE id = ?').get(id) as
+      | { title: string; source: SaleSource } | undefined
+    if (
+      cur && cur.source === 'collector'
+      && actuals.title.length > cur.title.length && actuals.title.startsWith(cur.title)
+    ) {
+      sets.push('title = ?')
+      vals.push(actuals.title)
+      titleApplied = true
+    }
+  }
 
   if (actuals.fee !== undefined && actuals.fee !== null) {
     // 0円も実額（Yahoo!フリマのキャンペーン等）。fee_source='actual' にして、以後
@@ -2459,6 +2482,13 @@ export function applySaleActuals(
   sets.push(`updated_at = datetime('now')`)
   vals.push(id)
   db.prepare(`UPDATE sale SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
+
+  // タイトルが全文に直った：新しい全文から型番を拾えれば追記し、型番が1つに絞れれば
+  // 自動紐付けまで進める（appendModelCodes に委譲。type='collector' の既存の作法どおり）
+  if (titleApplied) {
+    const codes = extractCodes(actuals.title as string)
+    if (codes.length > 0) appendModelCodes(id, codes)
+  }
 }
 
 /**
@@ -2531,6 +2561,12 @@ export function updateCollectedActuals(
  * fee・shippingFee・price の実額判定・fee_source の自己修復、送料0円のとき
  * shipping_source='master'/'manual' を守る規則は applySaleActuals に委譲する（updateCollectedActuals
  * と同じ）。kind・紐付けには触らない。戻り値は実際に applySaleActuals まで進んだ件数。
+ *
+ * title：切れたタイトル（売上金管理の商品名）を全文（取引ページ）に直したいときに渡す。
+ * ここでの「変わっているか」は単純な文字列比較で緩く見る。「短い値で長い値を潰さない・人が
+ * 直した値を上書きしない」という厳密な判定は applySaleActuals 側の役割（title を渡しても
+ * 実際に書き換わるとは限らない）。呼び出し側（collector-yahoo.ts）は titleTruncated=true の
+ * 行を渡さない（切れたタイトルで上書きしようとしない）。
  */
 export function updateYahooActuals(
   rows: Array<{
@@ -2542,16 +2578,18 @@ export function updateYahooActuals(
     price?: number | null
     /** ②のtradstatから判定した状態。②に出ていなければ null（推測で埋めない） */
     status?: SaleStatus | null
+    /** ②（取引ページ）の全文タイトル。切れたタイトル（title=undefined）なら渡さない */
+    title?: string
   }>,
 ): number {
   let updated = 0
   for (const r of rows) {
     const sale = db.prepare(
-      'SELECT id, sold_at, status, fee, fee_source, shipping_fee, price, source FROM sale WHERE mercari_item_id = ?',
+      'SELECT id, sold_at, status, fee, fee_source, shipping_fee, price, title, source FROM sale WHERE mercari_item_id = ?',
     ).get(r.mercariItemId) as
       | {
           id: string; sold_at: string; status: SaleStatus | null; fee: number; fee_source: FeeSource
-          shipping_fee: number; price: number; source: SaleSource
+          shipping_fee: number; price: number; title: string; source: SaleSource
         }
       | undefined
     if (!sale) continue
@@ -2565,10 +2603,12 @@ export function updateYahooActuals(
     const soldAtChanged = sale.source === 'collector' && isCompleted && sale.sold_at !== r.soldAt
     // status が不明（null）のときは状態不一致を理由に進めない（推測で埋めない）
     const statusChanged = r.status != null && sale.status !== r.status
+    // 緩い判定でよい（厳密な判定は applySaleActuals 側）
+    const titleChanged = r.title != null && r.title !== sale.title
 
     if (
       !feeChanged && !feeSourceStale && !shippingChanged && !priceChanged
-      && !soldAtChanged && !statusChanged
+      && !soldAtChanged && !statusChanged && !titleChanged
     ) continue
 
     applySaleActuals(
@@ -2578,6 +2618,7 @@ export function updateYahooActuals(
         sold_at: isCompleted ? r.soldAt : undefined,
         status: r.status ?? undefined,
         completedAt: isCompleted ? r.soldAt : undefined,
+        title: r.title,
       },
     )
     updated++

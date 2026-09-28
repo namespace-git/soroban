@@ -455,22 +455,36 @@ tr.total-row.loss > td {
 /* 一覧の「行」（売上・仕入・在庫・商品カルテ）だけに付ける修飾クラス。
    行の高さをタグ・メモの量で変えないため、1行分の高さで固定し（nowrap）、
    収まらない分は折り返さずに省く。並び順で先に置いたボタン・状態表示
-   （型番編集・転売/私物 など）は必ず収まり、後ろに続くタグだけが省かれる形にする。
+   （型番編集・転売/私物 など）は押せる／読み取るべき情報なので絶対に切らない。
+   省いてよいのはタグのような補助情報だけ — それらは `.chip-tags`（内側の入れ物）に
+   入れ、そこだけを `min-width: 0; overflow: hidden;` でクリップする。コンテナ自体は
+   overflow を持たないので、ボタン側が幅を使い切っても切れることはない。
    省いた分は呼び出し側が付ける title 属性で読める。
    ドロワー等（PurchaseDrawer の品目チップなど）は対象外 — このクラスを付けない限り
    今までどおり折り返す。 */
 .chip-row.fixed-row {
   flex-wrap: nowrap;
-  overflow: hidden;
   /* button.sm（28px）が混じっても混じらなくても同じ高さになるよう、
      入りうる中で一番背が高いもの（button.sm の高さ）に合わせる */
   min-height: 28px;
 }
 /* flex-shrink の既定（1）だと幅が足りないときに先頭のボタン・チップの文字まで
-   潰れて折り返してしまう。収まらない分は後ろを隠すだけにしたいので、
-   子は縮めずコンテナごとクリップする */
+   潰れて折り返してしまう。押せるもの・状態表示は縮めない */
 .chip-row.fixed-row > * {
   flex-shrink: 0;
+}
+/* タグ（.chip-row.fixed-row の中で押せない補助情報）だけをまとめる内側の入れ物。
+   残り幅をここが引き受けて、収まらない分だけをここでクリップする。
+   ここだけ flex-shrink を許して、幅が無ければ 0 まで縮めてよい */
+.chip-row.fixed-row .chip-tags {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .note-row {

@@ -776,7 +776,7 @@ const runLabel: Record<string, string> = {
           <p class="faint">初回だけ。以後はセッションを再利用します</p>
         </div>
         <p class="faint hint">
-          {{ CHANNEL_LABEL.yahoo }}の取り込みは 2 つのページにまたがりますが、同じ Yahoo ID なので
+          {{ CHANNEL_LABEL.yahoo }}の取り込みは 2 つのサイトにまたがりますが、同じ Yahoo ID なので
           このログイン 1 回で両方に入れるはずです。取り込みが「ログインが必要です」に戻るときは、
           もう一度ここからログインしてください。
         </p>

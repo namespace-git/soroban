@@ -3340,6 +3340,120 @@ describe('db（:memory:）', () => {
       ])
       expect(updated).toBe(0)
     })
+
+    it('updateYahooActuals：切れたタイトルで入った販売に全文のタイトルが来たら直る', () => {
+      const [{ id }] = db.insertCollected(
+        [{
+          mercariItemId: 'YTT-1', title: 'クリームわん新品未開封【Z07', price: 6000, soldAt: '2026-03-01',
+          status: 'completed',
+        }],
+        'yahoo',
+      )
+      expect(db.listSales().find(s => s.id === id)!.title).toBe('クリームわん新品未開封【Z07')
+
+      const updated = db.updateYahooActuals([
+        {
+          mercariItemId: 'YTT-1', soldAt: '2026-03-01', status: 'completed',
+          title: 'クリームわん新品未開封【Z074-4】',
+        },
+      ])
+      expect(updated).toBe(1)
+      expect(db.listSales().find(s => s.id === id)!.title).toBe('クリームわん新品未開封【Z074-4】')
+    })
+
+    it('updateYahooActuals：全文が入っているところに切れたタイトルが来ても上書きされない', () => {
+      const [{ id }] = db.insertCollected(
+        [{
+          mercariItemId: 'YTT-2', title: 'クリームわん新品未開封【Z074-4】', price: 6000, soldAt: '2026-03-01',
+          status: 'completed',
+        }],
+        'yahoo',
+      )
+
+      // 切れたタイトル（短い・prefix関係が逆）が来ても上書きしない。ただし fee が変わっている
+      // ので更新自体は進む（title 以外の列は反映される）
+      const updated = db.updateYahooActuals([
+        {
+          mercariItemId: 'YTT-2', soldAt: '2026-03-01', status: 'completed', fee: 400,
+          title: 'クリームわん新品未開封【Z07',
+        },
+      ])
+      expect(updated).toBe(1)
+      const after = db.listSales().find(s => s.id === id)!
+      expect(after.title).toBe('クリームわん新品未開封【Z074-4】')
+      expect(after.fee).toBe(400)
+    })
+
+    it('updateYahooActuals：人が手で直したタイトルは上書きされない', () => {
+      const [{ id }] = db.insertCollected(
+        [{
+          mercariItemId: 'YTT-3', title: 'クリームわん新品未開封【Z07', price: 6000, soldAt: '2026-03-01',
+          status: 'completed',
+        }],
+        'yahoo',
+      )
+      // 人が手でタイトルを直す（updateSale経由）。以後は先頭が食い違うので収集の全文で上書きされない
+      db.updateSale(id, { title: '人が直したタイトル' })
+
+      const updated = db.updateYahooActuals([
+        {
+          mercariItemId: 'YTT-3', soldAt: '2026-03-01', status: 'completed', fee: 400,
+          title: 'クリームわん新品未開封【Z074-4】',
+        },
+      ])
+      expect(updated).toBe(1) // fee は変わるので更新自体は進む
+      const after = db.listSales().find(s => s.id === id)!
+      expect(after.title).toBe('人が直したタイトル')
+      expect(after.fee).toBe(400)
+    })
+
+    it('updateYahooActuals：タイトルが直ると型番が取れて自動紐付けの候補まで進む', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'クリームわん【Z074-4】', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+
+      const [{ id }] = db.insertCollected(
+        [{
+          mercariItemId: 'YTT-4', title: 'クリームわん新品未開封【Z07', price: 2000, soldAt: '2026-03-01',
+          status: 'completed',
+        }],
+        'yahoo',
+      )
+      const before = db.listSales().find(s => s.id === id)!
+      expect(before.model_codes).toEqual([]) // 閉じ括弧が無いのでCODE_REに一致せず型番なし
+      expect(before.unmatched).toBe(1)
+
+      db.updateYahooActuals([
+        {
+          mercariItemId: 'YTT-4', soldAt: '2026-03-01', status: 'completed',
+          title: 'クリームわん新品未開封【Z074-4】',
+        },
+      ])
+
+      const after = db.listSales().find(s => s.id === id)!
+      expect(after.model_codes).toEqual(['Z074-4'])
+      expect(after.unmatched).toBe(0)
+      expect(after.auto_linked).toBe(1)
+      expect(after.cost).toBe(item.landed_cost)
+    })
+
+    it('updateCollectedActuals（メルカリ用。titleを渡さない）は今までどおり動く', () => {
+      const [{ id }] = db.insertCollected(
+        [{ mercariItemId: 'YTT-5', title: 'メルカリの取引', price: 3000, soldAt: '2026-03-01' }],
+      )
+      const updated = db.updateCollectedActuals([
+        { mercariItemId: 'YTT-5', soldAt: '2026-03-05', fee: 300 },
+      ])
+      expect(updated).toBe(1)
+      const after = db.listSales().find(s => s.id === id)!
+      expect(after.title).toBe('メルカリの取引') // titleを渡していないので変わらない
+      expect(after.fee).toBe(300)
+      expect(after.status).toBe('completed')
+    })
   })
 
   it('getItemTimeline：仕入（送料按分あり）→販売（まとめ売り2点）でeventsの順・detailの数字が合う', () => {
