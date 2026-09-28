@@ -150,27 +150,31 @@ const itemIdInput = ref('')
 
 /**
  * 金額の手入力を正規化する。利用者は Yahoo!フリマ・メルカリの画面からそのままコピペするため、
- * 前後の空白・¥ ￥・円・桁区切りの , ，・全角数字（２９４ → 294）は受け入れて整数円に直す。
- * 正規化しても整数にならないもの（記号混じり・小数・負の数）は弾く。
+ * 前後の空白・先頭の ¥ ￥・末尾の円・正しい位置の桁区切り , ，・全角数字（２９４ → 294）は受け入れて
+ * 整数円に直す。記号を位置に関係なく全部消してから読むと、壊れた表記（`1,00円` → 100、`1円000` → 1000
+ * など）を黙って別の金額に変えてしまうため、受け入れる形そのもの（¥は先頭に1つだけ・円は末尾に1つだけ・
+ * 桁区切りは3桁ごとの正しい位置だけ）を1本の正規表現で確かめてから数字を取り出す。
  * 「Number(...) || 0」で黙って0円にしないための唯一の入口（新規登録・実額直しの両方で使う）。
  * 呼び出し側は空欄をここに渡さない（空欄と'0'の区別は呼び出し側の責務のまま）
  */
 function normalizeYenInput(raw: string): { ok: true; value: number } | { ok: false; error: string } {
-  const s = raw
-    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
-    .replace(/[¥￥]/g, '')
-    .replace(/円/g, '')
-    .replace(/[,，]/g, '')
-    .trim()
-  if (s === '' || !/^-?\d+(\.\d+)?$/.test(s)) {
-    return { ok: false, error: `「${raw.trim()}」は金額として読み取れません。数字だけにしてください` }
+  const trimmed = raw.trim()
+  // 全角数字だけ先に半角へ直す（¥・円・桁区切りの位置はここでは変えない）
+  const halfWidth = trimmed.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+  if (halfWidth.startsWith('-')) {
+    return { ok: false, error: '金額はマイナスにできません' }
   }
-  if (s.includes('.')) {
+  if (halfWidth.includes('.')) {
     return { ok: false, error: '金額は整数（円）で入力してください（小数は使えません）' }
   }
-  const n = Number(s)
-  if (n < 0) return { ok: false, error: '金額はマイナスにできません' }
-  return { ok: true, value: Math.round(n) }
+  // 受け入れる形は「(¥|￥)? 数字（桁区切りは3桁ごとの正しい位置だけ） 円?」だけ。
+  // ¥・数字・円の並び順と回数も同時に確かめる（`円¥100` や `¥1¥2` は弾く）
+  const m = /^([¥￥])?(\d{1,3}(?:[,，]\d{3})+|\d+)(円)?$/.exec(halfWidth)
+  if (!m) {
+    return { ok: false, error: `「${trimmed}」は金額として読み取れません。数字だけにしてください` }
+  }
+  const digits = m[2].replace(/[,，]/g, '')
+  return { ok: true, value: Number(digits) }
 }
 
 /**

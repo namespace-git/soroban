@@ -4,10 +4,12 @@ import { fileURLToPath } from 'node:url'
 import { join, dirname } from 'node:path'
 import {
   extractYahooSalesCsvForm,
+  extractYahooSellingCounts,
   extractYahooSoldTotal,
   mapYahooTradstat,
   parseYahooItemHtml,
   parseYahooSalesHtml,
+  parseYahooSellingHtml,
   parseYahooSoldHtml,
 } from '../collector-yahoo'
 import { CODE_RE, extractCodes } from '../code'
@@ -192,6 +194,54 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(parseYahooSalesHtml(replaceAllClasses(html))).toEqual(rows)
     })
 
+    it('<tr> <td> <dt> <dd> <table> に属性を足しても同じ結果になる（属性の有無に依存しない）', () => {
+      // fixture の <tr> <td> は元々属性を持たない（Yahoo が class や data-* を足しただけで
+      // 表も金額も正常なのに0件になった実害があった箇所）。dt/dd/table は元々属性を持つ
+      // 行もあるが、念のためさらに属性を足しても崩れないことを確かめる
+      const withAttrs = html
+        .replace(/<tr>/g, '<tr class="zz-changed-name" data-yy="1">')
+        .replace(/<td>/g, '<td data-yy="1">')
+        .replace(/<dt class="u-floatL">/g, '<dt class="u-floatL" data-yy="1">')
+        .replace(/<dd class="u-floatR">/g, '<dd class="u-floatR" data-yy="1">')
+        .replace(/<table\b/, '<table data-yy="1"')
+      expect(parseYahooSalesHtml(withAttrs)).toEqual(rows)
+    })
+
+    it('決済金額 − 販売手数料 = 受取額 が成り立つ行は amountsConsistent が true', () => {
+      for (const r of rows) {
+        expect(r.amountsConsistent).toBe(true)
+      }
+    })
+
+    it('恒等式が成り立たない行（決済5,000－手数料250－送料750＝受取4,000）は amountsConsistent が false で、行自体は返り、未知の内訳（送料）は otherBreakdown にそのまま残る', () => {
+      const brokenHtml = `
+        <table id="salelst"><tbody>
+          <tr><th>取扱内容</th><th>取扱日</th><th>状態</th><th>金額</th><th>詳細</th></tr>
+          <tr>
+            <td>ダミー商品<br>(z600000000)</td>
+            <td>2026/9/1</td>
+            <td><span>受取連絡待ち</span></td>
+            <td>
+              <span class="u-fontSize16 u-textBold suspend">4,000円</span>
+              <dl><dt>決済金額：</dt><dd>5,000円</dd></dl>
+              <dl><dt>販売手数料：</dt><dd>-250円</dd></dl>
+              <dl><dt>送料：</dt><dd>-750円</dd></dl>
+            </td>
+            <td></td>
+          </tr>
+        </tbody></table>
+      `
+      const brokenRows = parseYahooSalesHtml(brokenHtml)
+      expect(brokenRows).toHaveLength(1)
+      const r = brokenRows[0]
+      expect(r.yahooItemId).toBe('z600000000')
+      expect(r.receivedAmount).toBe(4000)
+      expect(r.settlementAmount).toBe(5000)
+      expect(r.feeAmount).toBe(250)
+      expect(r.amountsConsistent).toBe(false)
+      expect(r.otherBreakdown).toEqual([{ label: '送料', amount: 750 }])
+    })
+
     it('壊れた HTML（空・タグだけ・表が無い）は throw せず空配列', () => {
       expect(parseYahooSalesHtml('')).toEqual([])
       expect(parseYahooSalesHtml('<div><span></span></div>')).toEqual([])
@@ -270,6 +320,113 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(parseYahooItemHtml('')).toBeNull()
       expect(parseYahooItemHtml('<div><span></span></div>')).toBeNull()
       expect(parseYahooItemHtml('<h1></h1>')).toBeNull()
+    })
+  })
+
+  describe('parseYahooSellingHtml（出品中。実物のfixture 2026-09-28）', () => {
+    const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-selling.html'), 'utf-8')
+    const itemHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-item.html'), 'utf-8')
+    const rows = parseYahooSellingHtml(html)
+
+    it('8件取れる', () => {
+      expect(rows).toHaveLength(8)
+    })
+
+    it('id・出品日時・価格・いいね・閲覧が8件とも実物の数字と一致する', () => {
+      expect(rows.map(r => ({
+        yahooItemId: r.yahooItemId,
+        listedAt: r.listedAt,
+        price: r.price,
+        likes: r.likes,
+        views: r.views,
+      }))).toEqual([
+        { yahooItemId: 'z693775290', listedAt: '2026-09-28T14:37', price: 6499, likes: 0, views: 14 },
+        { yahooItemId: 'z693772284', listedAt: '2026-09-28T14:33', price: 7999, likes: 0, views: 10 },
+        { yahooItemId: 'z693739380', listedAt: '2026-09-28T13:34', price: 5000, likes: 0, views: 10 },
+        { yahooItemId: 'z693609190', listedAt: '2026-09-28T09:55', price: 9300, likes: 2, views: 32 },
+        { yahooItemId: 'z693577586', listedAt: '2026-09-28T08:53', price: 7500, likes: 2, views: 32 },
+        { yahooItemId: 'z693578904', listedAt: '2026-09-28T08:51', price: 6900, likes: 0, views: 22 },
+        { yahooItemId: 'z693541678', listedAt: '2026-09-28T07:27', price: 5800, likes: 4, views: 63 },
+        { yahooItemId: 'z693337994', listedAt: '2026-09-27T22:15', price: 7100, likes: 19, views: 220 },
+      ])
+    })
+
+    it('価格は integer で返る（"6,499円" → 6499）', () => {
+      for (const r of rows) {
+        expect(Number.isInteger(r.price)).toBe(true)
+      }
+    })
+
+    it('検索された数（srchcnt）が取れる。0件の行も0、z693337994だけ304', () => {
+      expect(rows.map(r => r.searchCount)).toEqual([0, 0, 0, 0, 0, 0, 0, 304])
+    })
+
+    it('tradstat は8件とも NONE（出品中）', () => {
+      expect(rows.every(r => r.tradstat === 'NONE')).toBe(true)
+    })
+
+    it('サムネイルURLを img[alt="商品画像"] から拾う', () => {
+      expect(rows[0].thumbUrl).toBe(
+        'https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-1790573703864gybrcd.jpg',
+      )
+    })
+
+    it('出品日時：z693337994 が 2026-09-27 22:15（日本時間）になる', () => {
+      expect(rows[7].yahooItemId).toBe('z693337994')
+      expect(rows[7].listedAt).toBe('2026-09-27T22:15')
+    })
+
+    it('出品日時：opentime から作った値が、商品ページ（yahoo-item.html）のパーサが返す出品日時と一致する', () => {
+      const item = parseYahooItemHtml(itemHtml)
+      expect(item?.yahooItemId).toBe('z693337994')
+      const row = rows.find(r => r.yahooItemId === item?.yahooItemId)
+      expect(row?.listedAt).toBe(item?.listedAt)
+      expect(row?.listedAt).toBe('2026-09-27T22:15')
+    })
+
+    it('型番：8件とも CODE_RE で取れ、B001・Z072-14・Z088-01 が正しく出る', () => {
+      const codes = rows.map(r => CODE_RE.exec(r.title)?.[1] ?? null)
+      expect(codes).toEqual(['A036', 'A039', 'B001', 'A035', 'Z072-14', 'A037', 'A040', 'Z088-01'])
+    })
+
+    it('opentime が壊れている（空・文字・巨大な値・負数・小数）と listedAt は null で、NaN を含む文字列にならない（行自体は返る）', () => {
+      for (const broken of ['', 'abc', '9999999999999999', '-1234567890', '1790573867.5']) {
+        const brokenHtml = html.replace('opentime:1790573867', `opentime:${broken}`)
+        const brokenRows = parseYahooSellingHtml(brokenHtml)
+        const row = brokenRows.find(r => r.yahooItemId === 'z693775290')
+        expect(row).toBeTruthy()
+        expect(row?.listedAt).toBeNull()
+      }
+    })
+
+    it('壊れた HTML（空・タグだけ・data-cl-params 無し）は throw せず空配列', () => {
+      expect(parseYahooSellingHtml('')).toEqual([])
+      expect(parseYahooSellingHtml('<div><span></span></div>')).toEqual([])
+      expect(parseYahooSellingHtml('<a href="/item/z1">x</a>')).toEqual([])
+    })
+
+    it('クラス名（sc-）を全置換しても同じ結果になる（クラス名に依存していないことの証明）', () => {
+      expect(parseYahooSellingHtml(replaceAllClasses(html))).toEqual(rows)
+    })
+  })
+
+  describe('extractYahooSellingCounts（出品中一覧の出品数・総件数）', () => {
+    const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-selling.html'), 'utf-8')
+
+    it('出品数（8/100）と総件数（1~8件/8件 → 8）が取れる', () => {
+      expect(extractYahooSellingCounts(html)).toEqual({
+        listingCount: 8,
+        listingLimit: 100,
+        totalCount: 8,
+      })
+    })
+
+    it('見つからなければ null', () => {
+      expect(extractYahooSellingCounts('該当の記載なし')).toEqual({
+        listingCount: null,
+        listingLimit: null,
+        totalCount: null,
+      })
     })
   })
 })

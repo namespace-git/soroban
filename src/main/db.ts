@@ -1265,19 +1265,35 @@ function migrate(): void {
     addColumnIfMissing('sale', 'fee_source',
       `TEXT NOT NULL DEFAULT 'rate' CHECK (fee_source IN ('actual','rate'))`)
 
-    // 既存行は「実額か見込みか」を記録していないため、fee が calcFee(price, fee_rate_bp) と
-    // 一致するかどうかで判定する：一致すれば率から出せる値なので 'rate'、一致しなければ
-    // 率では絶対に出ない値＝実額としか考えられないので 'actual'。
+    // 既存行は「実額か見込みか」を記録していないため、2段階で判定する。
+    // ①raw（insertCollectedが取り込み時にJSON.stringify(r)で残した生データ。手入力
+    // 　＝source='manual'の行には無い）に fee が数値で明示されていれば、取り込み時点で
+    // 　実額として渡された行だと確定できる＝'actual'。
+    // ②rawが読めない・fee列が入っていない行は、従来どおり fee が calcFee(price, fee_rate_bp)
+    // 　と一致するかどうかで判定する：一致すれば率から出せる値なので 'rate'、一致しなければ
+    // 　率では絶対に出ない値＝実額としか考えられないので 'actual'。
     // 偶然一致した実額を 'rate' と誤判定する取りこぼしはあり得るが、逆（率の値を 'actual' と
     // 誤判定）にすると updateSale が以後その手数料を再計算しなくなるだけで実額を壊すことはない。
     // 安全側（壊れない側）に倒すため、一致しない方を 'actual' にする
     const feeRows = db.prepare(
-      `SELECT id, price, fee, fee_rate_bp FROM sale`,
-    ).all() as Array<{ id: string; price: number; fee: number; fee_rate_bp: number }>
+      `SELECT id, price, fee, fee_rate_bp, raw FROM sale`,
+    ).all() as Array<{ id: string; price: number; fee: number; fee_rate_bp: number; raw: string | null }>
     const setFeeSource = db.prepare(`UPDATE sale SET fee_source = ? WHERE id = ?`)
     const feeSourceTx = db.transaction(() => {
       for (const r of feeRows) {
-        setFeeSource.run(r.fee === calcFee(r.price, r.fee_rate_bp) ? 'rate' : 'actual', r.id)
+        let rawHasNumericFee = false
+        if (r.raw) {
+          try {
+            const parsed = JSON.parse(r.raw) as { fee?: unknown }
+            rawHasNumericFee = typeof parsed.fee === 'number'
+          } catch {
+            // raw が壊れていたら従来判定にフォールバック
+          }
+        }
+        const feeSource = rawHasNumericFee
+          ? 'actual'
+          : (r.fee === calcFee(r.price, r.fee_rate_bp) ? 'rate' : 'actual')
+        setFeeSource.run(feeSource, r.id)
       }
     })
     feeSourceTx()
@@ -2438,6 +2454,10 @@ export function applySaleActuals(
  * applySaleActuals まで進む（一度 actual になった後でも、メルカリ側の実額が後から変わった
  * ケースを取りこぼさない）。送料 0 円のとき shipping_source='master'/'manual' の選択を守る
  * 規則は applySaleActuals 側にあるのでここでは変えない。kind・紐付けには触らない。
+ *
+ * fee が同額でも fee_source がまだ 'actual' でなければ進める（自己修復）。v32 移行で
+ * 「率と偶然一致する実額」を 'rate' と誤判定した行を、次の正常な収集で自然に 'actual' へ
+ * 直すため。fee の値自体は変えない（applySaleActuals は同じ値を書き戻すだけ）。
  * 戻り値は実際に applySaleActuals まで進んだ件数。
  */
 export function updateCollectedActuals(
@@ -2451,20 +2471,24 @@ export function updateCollectedActuals(
   let updated = 0
   for (const r of rows) {
     const sale = db.prepare(
-      'SELECT id, sold_at, status, fee, shipping_fee, source FROM sale WHERE mercari_item_id = ?',
+      'SELECT id, sold_at, status, fee, fee_source, shipping_fee, source FROM sale WHERE mercari_item_id = ?',
     ).get(r.mercariItemId) as
-      | { id: string; sold_at: string; status: SaleStatus | null; fee: number; shipping_fee: number; source: SaleSource }
+      | {
+          id: string; sold_at: string; status: SaleStatus | null; fee: number; fee_source: FeeSource
+          shipping_fee: number; source: SaleSource
+        }
       | undefined
     if (!sale) continue
 
     const feeChanged = r.fee != null && r.fee !== sale.fee
+    const feeSourceStale = r.fee != null && sale.fee_source !== 'actual'
     const shippingChanged = r.shippingFee != null && r.shippingFee !== sale.shipping_fee
     // status に関わらず、source='collector' の販売は完了観測で sold_at が完了日へ動く
     // （applySaleActuals の規則）ので、それだけを見る
     const soldAtChanged = sale.source === 'collector' && sale.sold_at !== r.soldAt
     const statusChanged = sale.status !== 'completed'
 
-    if (!feeChanged && !shippingChanged && !soldAtChanged && !statusChanged) continue
+    if (!feeChanged && !feeSourceStale && !shippingChanged && !soldAtChanged && !statusChanged) continue
 
     applySaleActuals(
       sale.id,
@@ -3256,6 +3280,11 @@ function subtractDaysLocal(base: string, days: number): string {
  * listed_at（出品日の推定）：updatedText から経過日数 n を出し、候補 = today − n日。
  * 新規は候補（取れなければ today）。既存は候補と現在値の min（＝より古い方）に更新する
  * （一覧の「更新順」表示の揺れで出品日が新しく巻き戻るのを防ぐ）。likes は毎回上書きする。
+ *
+ * listedAt（絶対的な出品日時。例：Yahoo!フリマの opentime）が渡っていれば、updatedText
+ * からの相対推定より優先して使う。ただし使うのは**新規行だけ**。既存行の更新では
+ * 触らない＝出品日は後から変わらないはずなので、一度入った値を新しい値（推定に限らず
+ * listedAt も含む）で上書きしない方が安全という判断（詳細は呼び出し側の報告を参照）。
  */
 export function upsertListings(
   rows: Array<{
@@ -3268,6 +3297,12 @@ export function upsertListings(
     updatedText?: string | null
     /** いいね数。取れなければ null */
     likes?: number | null
+    /**
+     * 絶対的な出品日時（取れるチャンネルだけ渡す。例：Yahoo!フリマの opentime から算出した
+     * ISO風日時）。updatedText からの相対推定より精度が高いので、新規行の listed_at に優先して
+     * 使う。取れなければ従来どおり updatedText の推定 → それも無ければ today
+     */
+    listedAt?: string | null
   }>,
   /** 出品先（省略時 'mercari'）。1回の呼び出しは1チャンネル分の一覧を渡す前提 */
   channel: SalesChannel = 'mercari',
@@ -3300,9 +3335,12 @@ export function upsertListings(
       const existing = getExisting.get(r.mercariItemId) as
         | { status: ListingStatus; listed_at: string } | undefined
       if (!existing) {
-        insertStmt.run(r.mercariItemId, channel, r.title, r.price, status, today, now, candidate ?? today, likes)
+        const listedAt = r.listedAt ?? candidate ?? today
+        insertStmt.run(r.mercariItemId, channel, r.title, r.price, status, today, now, listedAt, likes)
         inserted++
       } else if (existing.status === 'active' || existing.status === 'suspended') {
+        // listedAt（絶対値）は既存行の更新では使わない（上の関数コメント参照）。
+        // 従来どおり相対推定の min 寄せだけ行う
         const listedAt = candidate !== null && candidate < existing.listed_at
           ? candidate
           : existing.listed_at

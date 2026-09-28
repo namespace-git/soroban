@@ -108,6 +108,8 @@ CREATE TABLE IF NOT EXISTS mellojoy_excluded_order (
 -- 小数を避けるため整数で持つ
 -- collect_interval_h: 2026-09-19 に 6 時間から 1 時間へ変更（既存DBは migrate() で更新）
 -- mercari_keyword: 転売と判定するキーワード（, 、 空白 区切りで複数可）。空なら型番の有無で判定する
+-- yahoo_keyword: 同じ役目の Yahoo!フリマ版。出品先ごとに扱う商品が違うことがあるため、
+--   メルカリと分けて別々に持つ（空なら全部取り込む、の既定はどちらも同じ）
 --
 -- schema_version はここに入れない。migrate() がバージョン判定に使う値なので、
 -- ここで先に既定値を入れてしまうと「未マイグレーションの既存DB」でも
@@ -120,6 +122,7 @@ INSERT OR IGNORE INTO setting (key, value) VALUES
   ('aging_warn_days',             '90'),
   ('collect_interval_h',          '1'),
   ('mercari_keyword',             ''),
+  ('yahoo_keyword',               ''),
   ('item_code_seq',               '0');
 
 -- ============================================================

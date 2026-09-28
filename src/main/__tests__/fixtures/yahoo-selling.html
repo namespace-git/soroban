@@ -1,0 +1,98 @@
+<!-- Yahoo!フリマ「出品中」 https://paypayfleamarket.yahoo.co.jp/my/item/selling
+     利用者の実物（2026-09-28 取得）から、出品数と一覧と件数だけを抜き出したもの。
+
+     ★落としたもの（テストにもリポジトリにも入れない）★
+       - ヘッダ・フッタ・広告・トラッキング
+       - __NEXT_DATA__（Yahoo ID・ニックネーム・PayPay 残高が入る）
+       - 画像 URL の中の出品者のフォルダのハッシュ → xxxx に置換
+
+     ★ opentime は信用してよい ★
+       z693337994 の opentime:1790514933 を JST にすると 2026/09/27 22:15 で、
+       商品ページの「出品日時：2026年9月27日 22:15」と**一致する**ことを確認した。
+       （壊れているのは商品ページの pageData.starttime の方。あちらは 12 時間ずれる）
+       → 出品の取り込みでは、この一覧だけ見れば足りる。商品を1件ずつ開かなくてよい。
+
+     クラス名（sc-6e979adf-N 等）は styled-components の自動生成でデプロイごとに変わる。
+     **依存しないこと。** 起点は a[href^="/item/"] と data-cl-params、画像は img[alt="商品画像"]。
+
+     data-cl-params の中身：
+       rcconid  … 商品 id
+       opentime … 出品日時（unix 秒）
+       wl       … いいね数
+       viewcnt  … 閲覧数
+       srchcnt  … 検索された数
+       tradstat … 取引状態（出品中は NONE） -->
+
+<nav id="tab"><div><a href="/my/item/selling"><span>出品中</span></a><a href="/my/item/sold"><span>取引中・取引完了</span></a></div></nav>
+
+<div class="sc-85f0b163-2 cDZDma"><p class="sc-9dbc04ce-0 kABfJt">出品数： 8/100</p></div>
+
+<div id="itm" class="sc-80e826ac-0 ihKyph">
+
+<div class="sc-6e979adf-0 hcaPPI"><a data-cl-nofollow="on" data-cl-params="_cl_link:itm;_cl_position:0;rcconid:z693775290;itmcnd:0;opentime:1790573867;wl:0;viewcnt:14;srchcnt:0;tradstat:NONE;" class="sc-6e979adf-1 johuSL" href="/item/z693775290">
+  <div class="sc-6e979adf-2 bHklBk"><img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-1790573703864gybrcd.jpg" alt="商品画像" width="60" height="60"></div>
+  <div class="sc-6e979adf-4 loPRtP"><p class="sc-6e979adf-5 bSuTfP">Mellojoy メロジョイ トーストスティック 未開封【A036】</p>
+    <div class="sc-6e979adf-10 cNdZhb"><p class="sc-9dbc04ce-0 kXaiYU">6,499円</p></div>
+    <div class="sc-6e979adf-8 kJwROQ"><div><img alt="いいね"><span>0</span></div><div><img alt="閲覧"><span>14</span></div><div><img alt="検索"><span>0</span></div></div>
+    <div class="sc-6e979adf-6 bXoYfG"><span class="sc-9dbc04ce-0 dKQjmf">2時間前に更新</span></div></div>
+</a></div>
+
+<div class="sc-6e979adf-0 hcaPPI"><a data-cl-params="_cl_link:itm;_cl_position:1;rcconid:z693772284;itmcnd:0;opentime:1790573582;wl:0;viewcnt:10;srchcnt:0;tradstat:NONE;" class="sc-6e979adf-1 johuSL" href="/item/z693772284">
+  <div><img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img1196x1200-1790573516376qxg4oj.jpg" alt="商品画像" width="60" height="60"></div>
+  <div><p class="sc-6e979adf-5 bSuTfP">Mellojoy メロジョイ 極み・鮨 PREMIUM SUSHI【A039】</p>
+    <div><p class="sc-9dbc04ce-0 kXaiYU">7,999円</p></div>
+    <div><div><span>0</span></div><div><span>10</span></div><div><span>0</span></div></div>
+    <div><span class="sc-9dbc04ce-0 dKQjmf">2時間前に出品</span></div></div>
+</a></div>
+
+<div class="sc-6e979adf-0 hcaPPI"><a data-cl-params="_cl_link:itm;_cl_position:2;rcconid:z693739380;itmcnd:0;opentime:1790570047;wl:0;viewcnt:10;srchcnt:0;tradstat:NONE;" class="sc-6e979adf-1 johuSL" href="/item/z693739380">
+  <div><img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img1200x1200-1790569959829dkon68.jpg" alt="商品画像" width="60" height="60"></div>
+  <div><p class="sc-6e979adf-5 bSuTfP">Mellojoy メロジョイ メロイアのんびりシリーズ 6箱セット【B001】</p>
+    <div><p class="sc-9dbc04ce-0 kXaiYU">5,000円</p></div>
+    <div><div><span>0</span></div><div><span>10</span></div><div><span>0</span></div></div>
+    <div><span class="sc-9dbc04ce-0 dKQjmf">3時間前に更新</span></div></div>
+</a></div>
+
+<div class="sc-6e979adf-0 hcaPPI"><a data-cl-params="_cl_link:itm;_cl_position:3;rcconid:z693609190;itmcnd:0;opentime:1790556955;wl:2;viewcnt:32;srchcnt:0;tradstat:NONE;" class="sc-6e979adf-1 johuSL" href="/item/z693609190">
+  <div><img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-1790556831379il5pe0.jpg" alt="商品画像" width="60" height="60"></div>
+  <div><p class="sc-6e979adf-5 bSuTfP">ミニランド 未開封 2個セット メロジョイ 【A035】</p>
+    <div><p class="sc-9dbc04ce-0 kXaiYU">9,300円</p></div>
+    <div><div><span>2</span></div><div><span>32</span></div><div><span>0</span></div></div>
+    <div><span class="sc-9dbc04ce-0 dKQjmf">5時間前に更新</span></div></div>
+</a></div>
+
+<div class="sc-6e979adf-0 hcaPPI"><a data-cl-params="_cl_link:itm;_cl_position:4;rcconid:z693577586;itmcnd:0;opentime:1790553188;wl:2;viewcnt:32;srchcnt:0;tradstat:NONE;" class="sc-6e979adf-1 johuSL" href="/item/z693577586">
+  <div><img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-1790553141976g8t7ce.jpg" alt="商品画像" width="60" height="60"></div>
+  <div><p class="sc-6e979adf-5 bSuTfP">メロジョイ　タロ芋　スフレ　Mサイズ【Z072-14】</p>
+    <div><p class="sc-9dbc04ce-0 kXaiYU">7,500円</p></div>
+    <div><div><span>2</span></div><div><span>32</span></div><div><span>0</span></div></div>
+    <div><span class="sc-9dbc04ce-0 dKQjmf">3時間前に更新</span></div></div>
+</a></div>
+
+<div class="sc-6e979adf-0 hcaPPI"><a data-cl-params="_cl_link:itm;_cl_position:5;rcconid:z693578904;itmcnd:0;opentime:1790553101;wl:0;viewcnt:22;srchcnt:0;tradstat:NONE;" class="sc-6e979adf-1 johuSL" href="/item/z693578904">
+  <div><img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-1790553039835uquitv.jpg" alt="商品画像" width="60" height="60"></div>
+  <div><p class="sc-6e979adf-5 bSuTfP">Mellojoy メロイアの暮らし図鑑 新品未開封【A037】</p>
+    <div><p class="sc-9dbc04ce-0 kXaiYU">6,900円</p></div>
+    <div><div><span>0</span></div><div><span>22</span></div><div><span>0</span></div></div>
+    <div><span class="sc-9dbc04ce-0 dKQjmf">3時間前に更新</span></div></div>
+</a></div>
+
+<div class="sc-6e979adf-0 hcaPPI"><a data-cl-params="_cl_link:itm;_cl_position:6;rcconid:z693541678;itmcnd:0;opentime:1790548021;wl:4;viewcnt:63;srchcnt:0;tradstat:NONE;" class="sc-6e979adf-1 johuSL" href="/item/z693541678">
+  <div><img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-1790547921506caoe2e.jpg" alt="商品画像" width="60" height="60"></div>
+  <div><p class="sc-6e979adf-5 bSuTfP">Mellojoy メロジョイ もこもこ山の野菜＆フルーツパーティー もこ山 スクイーズ 新品未開封【A040】</p>
+    <div><p class="sc-9dbc04ce-0 kXaiYU">5,800円</p></div>
+    <div><div><span>4</span></div><div><span>63</span></div><div><span>0</span></div></div>
+    <div><span class="sc-9dbc04ce-0 dKQjmf">4時間前に更新</span></div></div>
+</a></div>
+
+<div class="sc-6e979adf-0 hcaPPI"><a data-cl-params="_cl_link:itm;_cl_position:7;rcconid:z693337994;itmcnd:0;opentime:1790514933;wl:19;viewcnt:220;srchcnt:304;tradstat:NONE;" class="sc-6e979adf-1 johuSL" href="/item/z693337994">
+  <div><img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-17905717326651snizd.jpg" alt="商品画像" width="60" height="60"></div>
+  <div><p class="sc-6e979adf-5 bSuTfP">Mellojoy メロジョイ 特濃牛乳アイスS ねっとりヨーグルト スクイーズ 新品未開封【Z088-01】</p>
+    <div><p class="sc-9dbc04ce-0 kXaiYU">7,100円</p></div>
+    <div><div><span>19</span></div><div><span>220</span></div><div><span>304</span></div></div>
+    <div><span class="sc-9dbc04ce-0 dKQjmf">3時間前に更新</span></div></div>
+</a></div>
+
+</div>
+
+<nav class="sc-b9407a2c-0 fJqTog"><ul><li><button type="button"><div>1</div></button></li></ul><div><span class="sc-9dbc04ce-0 jETEop">1~8件/8件</span></div></nav>

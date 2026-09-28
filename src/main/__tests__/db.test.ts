@@ -1123,6 +1123,49 @@ describe('db（:memory:）', () => {
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it('migrate：v31相当でrawにfeeが数値で明示されていれば、率と偶然一致していてもactualになる。rawにfeeが無い行はいままでの判定のまま', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'soroban-fee-source-raw-migrate-'))
+      const path = join(dir, 'v31-raw.db')
+      try {
+        db.closeDb()
+        db.initDb(path)
+
+        // insertCollectedはsale.rawにJSON.stringify(渡した行)を残す。fee=100は率10%(既定)の
+        // 計算結果とも一致してしまう値だが、実額として明示的に渡している
+        const [rawActual] = db.insertCollected([
+          { mercariItemId: 'raw-actual', title: '率と偶然一致する実額', price: 1000, soldAt: '2026-01-05', fee: 100 },
+        ])
+        // feeを渡さない行はrawにfeeキーが残らない（従来どおりcalcFeeとの一致で判定させる）
+        const [rawNone] = db.insertCollected([
+          { mercariItemId: 'raw-none', title: 'feeを渡さない取り込み', price: 1000, soldAt: '2026-01-05' },
+        ])
+
+        db.getDb().exec(`
+          DROP VIEW IF EXISTS sale_line_share;
+          DROP VIEW IF EXISTS sale_profit;
+          DROP VIEW IF EXISTS monthly_summary;
+          DROP VIEW IF EXISTS inventory_view;
+          DROP VIEW IF EXISTS variant_summary;
+          ALTER TABLE sale DROP COLUMN fee_source;
+        `)
+        db.getDb().prepare(`UPDATE setting SET value = '31' WHERE key = 'schema_version'`).run()
+        db.closeDb()
+
+        expect(() => db.initDb(path)).not.toThrow()
+
+        const sales = db.listSales()
+        // rawにfee:100が明示 → 率(100)と一致していてもactual扱いになる。fee自体は変わらない
+        const actualSale = sales.find(s => s.id === rawActual.id)!
+        expect(actualSale.fee_source).toBe('actual')
+        expect(actualSale.fee).toBe(100)
+        // rawにfeeが無い → 従来どおり率と一致するのでrate扱い
+        expect(sales.find(s => s.id === rawNone.id)!.fee_source).toBe('rate')
+      } finally {
+        try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 
   it('updateCollectedActuals：既存の（料率計算・未確定・仮日付の）販売を実額と本当の日付に置き換える。手入力の日付は変えない', () => {
@@ -1161,6 +1204,45 @@ describe('db（:memory:）', () => {
       { mercariItemId: 'u1', soldAt: '2026-08-15', fee: 250, shippingFee: 0 },
     ])
     expect(noop).toBe(0)
+  })
+
+  it('updateCollectedActuals：fee_sourceがrateのまま（誤判定を模す）でも、同じ金額のfeeが来ればactualへ自己修復する。feeの値自体は変えない', () => {
+    db.insertCollected([
+      { mercariItemId: 'heal-1', title: '自己修復対象', price: 1000, soldAt: '2026-09-01', fee: 100 },
+    ])
+    const before = db.listSales().find(s => s.mercari_item_id === 'heal-1')!
+    expect(before.fee_source).toBe('actual')
+    // v32移行の誤判定（率と偶然一致する実額をrateにしてしまうケース）を再現する
+    db.getDb().prepare(`UPDATE sale SET fee_source = 'rate' WHERE id = ?`).run(before.id)
+    expect(db.listSales().find(s => s.id === before.id)!.fee_source).toBe('rate')
+
+    // 同じ金額のfeeが取り込みで返ってきただけでも、fee_sourceをactualへ直す
+    const updated = db.updateCollectedActuals([{ mercariItemId: 'heal-1', soldAt: before.sold_at, fee: 100 }])
+    expect(updated).toBe(1)
+    const healed = db.listSales().find(s => s.id === before.id)!
+    expect(healed.fee_source).toBe('actual')
+    expect(healed.fee).toBe(100) // feeの値自体は変わらない
+
+    // 自己修復が効いている＝以後 updateSale で価格を変えても手数料は再計算されない
+    db.updateSale(before.id, { price: 2000 })
+    const afterPriceChange = db.listSales().find(s => s.id === before.id)!
+    expect(afterPriceChange.fee).toBe(100)
+    expect(afterPriceChange.fee_source).toBe('actual')
+  })
+
+  it('updateCollectedActuals：r.feeがnullのときはfee_sourceを触らない', () => {
+    const [{ id }] = db.insertCollected([
+      { mercariItemId: 'heal-null', title: 'feeなし取り込み', price: 1000, soldAt: '2026-09-01' },
+    ])
+    const before = db.listSales().find(s => s.id === id)!
+    expect(before.fee_source).toBe('rate')
+
+    // feeはnull（未取得）のまま、status完了だけ観測させても fee_source は変わらない
+    const updated = db.updateCollectedActuals([{ mercariItemId: 'heal-null', soldAt: before.sold_at, fee: null }])
+    expect(updated).toBe(1) // status が completed へ進むので更新自体は起きる
+    const after = db.listSales().find(s => s.id === id)!
+    expect(after.fee_source).toBe('rate')
+    expect(after.fee).toBe(before.fee) // feeの値も変わらない
   })
 
   it('mellojoy_watch_dir / mellojoy_default_account_id はmigrateのたびに消される（取り込み取りやめ）', () => {
@@ -3062,6 +3144,45 @@ describe('db（:memory:）', () => {
       const listing = db.listListings().find(l => l.mercari_item_id === 'YLST-1')!
       expect(listing.channel).toBe('yahoo')
     })
+
+    it('setting.yahoo_keywordの既定は空文字（新規DB）', () => {
+      expect(db.getSettings().yahoo_keyword).toBe('')
+    })
+
+    it('setting.yahoo_keywordは保存して読み戻せる。mercari_keywordとは独立している', () => {
+      db.setSetting('mercari_keyword', 'メロジョイ')
+      db.setSetting('yahoo_keyword', 'ヤフー限定')
+
+      expect(db.getSettings().yahoo_keyword).toBe('ヤフー限定')
+      expect(db.getSettings().mercari_keyword).toBe('メロジョイ')
+
+      db.setSetting('yahoo_keyword', '別のキーワード')
+      expect(db.getSettings().yahoo_keyword).toBe('別のキーワード')
+      // yahoo_keywordを変えてもmercari_keywordは影響を受けない
+      expect(db.getSettings().mercari_keyword).toBe('メロジョイ')
+    })
+
+    it('migrate：yahoo_keywordが無い既存DBでも、マイグレーションではなくINSERT OR IGNOREで空文字が入る', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'soroban-yahoo-keyword-migrate-'))
+      const path = join(dir, 'no-yahoo-keyword.db')
+      try {
+        db.closeDb()
+        db.initDb(path) // 一旦フルスキーマで作り、yahoo_keyword設定行を消して「無い状態」を再現
+        db.getDb().prepare(`DELETE FROM setting WHERE key = 'yahoo_keyword'`).run()
+        expect(db.getSettings().yahoo_keyword).toBeUndefined()
+        db.closeDb()
+
+        expect(() => db.initDb(path)).not.toThrow()
+
+        // schema_versionは上がっていない＝migrate()の列追加ではなく、
+        // 毎回のtablesSql実行に含まれるINSERT OR IGNOREで入ったことの確認
+        expect(db.getSettings().schema_version).toBe('33')
+        expect(db.getSettings().yahoo_keyword).toBe('')
+      } finally {
+        try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 
   it('getItemTimeline：仕入（送料按分あり）→販売（まとめ売り2点）でeventsの順・detailの数字が合う', () => {
@@ -3292,6 +3413,51 @@ describe('db（:memory:）', () => {
       const noDate = db.listListings().find(x => x.mercari_item_id === 'LNoDate')!
       expect(noDate.listed_at).toBe(todayLocal())
       expect(noDate.likes).toBeNull()
+    })
+
+    it('upsertListings：listedAt（絶対的な出品日時。例：Yahoo!フリマのopentime）を渡すと新規行のlisted_atに優先して使われる', () => {
+      db.upsertListings([
+        {
+          mercariItemId: 'LAbs', title: '絶対日時あり', price: 1000, suspended: false, thumbUrl: null,
+          updatedText: '5時間前に更新', // 相対推定なら today になるはずの値
+          listedAt: '2026-09-01T12:34',
+        },
+      ])
+      const l = db.listListings().find(x => x.mercari_item_id === 'LAbs')!
+      expect(l.listed_at).toBe('2026-09-01T12:34')
+    })
+
+    it('upsertListings：listedAtを渡さないときは今までどおり（updatedTextからの相対推定）', () => {
+      db.upsertListings([
+        {
+          mercariItemId: 'LNoAbs', title: '絶対日時なし', price: 1000, suspended: false, thumbUrl: null,
+          updatedText: '5時間前に更新',
+        },
+      ])
+      const l = db.listListings().find(x => x.mercari_item_id === 'LNoAbs')!
+      expect(l.listed_at).toBe(todayLocal())
+    })
+
+    it('upsertListings：既存行の更新ではlistedAtを渡しても上書きしない（出品日は後から変わらないはずという判断）', () => {
+      db.upsertListings([
+        {
+          mercariItemId: 'LAbsKeep', title: '絶対日時あり', price: 1000, suspended: false, thumbUrl: null,
+          listedAt: '2026-09-01T12:34',
+        },
+      ])
+      let l = db.listListings().find(x => x.mercari_item_id === 'LAbsKeep')!
+      expect(l.listed_at).toBe('2026-09-01T12:34')
+
+      // 2回目の収集で別のlistedAt（本来変わらないはずの値）が来ても、既存行は上書きしない
+      db.upsertListings([
+        {
+          mercariItemId: 'LAbsKeep', title: '絶対日時あり', price: 1200, suspended: false, thumbUrl: null,
+          listedAt: '2026-09-05T09:00',
+        },
+      ])
+      l = db.listListings().find(x => x.mercari_item_id === 'LAbsKeep')!
+      expect(l.listed_at).toBe('2026-09-01T12:34') // 上書きされない
+      expect(l.price).toBe(1200) // price等の通常フィールドは今までどおり更新される
     })
 
     it('reserveInventory：他の出品への引き当ては外れてこちらへ移る。売却済み在庫の引き当ては拒否する', () => {

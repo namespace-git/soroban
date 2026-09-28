@@ -163,6 +163,12 @@ export interface YahooSalesRow {
    * 中身は未知。推測で送料として扱わず、ラベルと金額をそのまま残す（将来行が増えたときに気づける形）
    */
   otherBreakdown: Array<{ label: string; amount: number | null }>
+  /**
+   * `決済金額 − 販売手数料 = 受取額` が成り立つか。パーサは成り立たない行も推測で捨てずに
+   * そのまま返す（例えば送料の内訳行が増えて式が崩れたとき）。false の行をどう扱うか
+   * （捨てる・要確認として印を付ける等）は呼び出し側が決めること
+   */
+  amountsConsistent: boolean
 }
 
 /** 'YYYY/M/D' → 'YYYY-MM-DD'。読めなければ null */
@@ -207,7 +213,8 @@ export function parseYahooSalesHtml(html: string): YahooSalesRow[] {
   if (!tableHtml) return []
 
   const rows: YahooSalesRow[] = []
-  const trRe = /<tr>([\s\S]*?)<\/tr>/g
+  // 属性の有無に依存しない（Yahoo が <tr class="..."> を足しただけで0件になる罠を踏んだ）
+  const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/g
   let trMatch: RegExpExecArray | null
   while ((trMatch = trRe.exec(tableHtml))) {
     const rowHtml = trMatch[1]
@@ -247,9 +254,13 @@ export function parseYahooSalesHtml(html: string): YahooSalesRow[] {
     const settleIdMatch = detailHtml ? /_settle_id=(\d+)/.exec(detailHtml) : null
     const settleId = settleIdMatch ? settleIdMatch[1] : null
 
+    // 送料などの行が増えて式が崩れていないかを呼び出し側が判断できるように、ここでは
+    // 落とさず印だけ付ける（推測で送料として扱わない）
+    const amountsConsistent = settlementAmount - feeAmount === receivedAmount
+
     rows.push({
       yahooItemId, handledDate, statusText, receivedAmount,
-      settlementAmount, feeAmount, settleId, otherBreakdown,
+      settlementAmount, feeAmount, settleId, otherBreakdown, amountsConsistent,
     })
   }
   return rows
@@ -403,4 +414,146 @@ export function parseYahooItemHtml(html: string): YahooScrapedItem | null {
     shippingMethod, condition, shippingDays, shippingArea,
     likes, views, thumbUrl,
   }
+}
+
+// ============================================================
+// ④ 出品中一覧（https://paypayfleamarket.yahoo.co.jp/my/item/selling）
+//
+// 1件から取るものは全部 data-cl-params（<a> の属性1つ）の中にある。
+// opentime（出品日時。unix秒）は実物で確かめた値が商品ページの「出品日時：」と
+// 一致する（yahoo-item.html 参照。商品ページ pageData.starttime の12時間ずれとは別物）。
+// だからこの一覧だけで出品の取り込みが完結し、商品ページを1件ずつ開く必要がない。
+// ============================================================
+
+/** 「出品中」（`/my/item/selling`）の1件（parseYahooSellingHtml の要素） */
+export interface YahooScrapedListing {
+  yahooItemId: string
+  title: string
+  price: number
+  /**
+   * 出品日時。data-cl-params の `opentime`（unix秒）を JST（UTC+9固定。夏時間なし）に
+   * 変換した 'YYYY-MM-DDTHH:mm'。実行環境のタイムゾーン設定には依存しない。読めなければ null
+   */
+  listedAt: string | null
+  /** いいね数（`wl`）。読めなければ null */
+  likes: number | null
+  /** 閲覧数（`viewcnt`）。読めなければ null */
+  views: number | null
+  /** 検索された数（`srchcnt`）。読めなければ null */
+  searchCount: number | null
+  /** data-cl-params の tradstat の生の値。出品中は 'NONE' */
+  tradstat: string
+  /** 商品サムネイルのURL。取れなければ null */
+  thumbUrl: string | null
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
+/**
+ * unix秒として妥当とみなす範囲。Yahoo!フリマ（前身の PayPayフリマ含む）のサービス開始（2019年）
+ * より十分前の 2015-01-01T00:00:00Z を下限、壊れた巨大な値をはじくための 2100-01-01T00:00:00Z を
+ * 上限とする。実物の出品日時がこの範囲を超えることは想定しない
+ */
+const MIN_REASONABLE_UNIX_SECONDS = 1420070400 // 2015-01-01T00:00:00Z
+const MAX_REASONABLE_UNIX_SECONDS = 4102444800 // 2100-01-01T00:00:00Z
+
+/**
+ * unix秒（UTC）を JST の 'YYYY-MM-DDTHH:mm' に変換する。JST は UTC+9 固定（夏時間なし）
+ * なのでオフセットを直接足して UTC のフィールドを読む。実行環境のシステム時刻帯には依存しない。
+ *
+ * 「読めなければ null」を徹底する：安全な整数（`Number.isSafeInteger`）でない・妥当な範囲
+ * （上記）外・変換した Date が無効（`Number.isNaN(d.getTime())`）のどれかに当たれば null を返す。
+ * さもないと DOM が壊れて巨大な値が来たときに 'NaN-NaN-NaNTNaN:NaN' のような壊れた日時文字列が
+ * できてしまう（実際に踏んだ）。
+ */
+function unixSecondsToJstIso(unixSeconds: number): string | null {
+  if (!Number.isSafeInteger(unixSeconds)) return null
+  if (unixSeconds < MIN_REASONABLE_UNIX_SECONDS || unixSeconds > MAX_REASONABLE_UNIX_SECONDS) return null
+  const d = new Date(unixSeconds * 1000 + 9 * 60 * 60 * 1000)
+  if (Number.isNaN(d.getTime())) return null
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}T${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`
+}
+
+/**
+ * 「出品中」一覧の HTML から行を抜く。商品リンクは `data-cl-params` に `rcconid` を持つ
+ * `<a>` を起点にする（クラス名には依存しない）。商品 id はその `rcconid`
+ * （無ければ href の `/item/<id>`）、タイトルは最初の `<p>`、価格はタイトルより後ろの
+ * 「n,nnn円」、いいね・閲覧・検索された数・取引状態・出品日時はすべて data-cl-params から、
+ * サムネイルは `img[alt="商品画像"]` の `src` から拾う。
+ */
+export function parseYahooSellingHtml(html: string): YahooScrapedListing[] {
+  const rows: YahooScrapedListing[] = []
+  const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/g
+  let am: RegExpExecArray | null
+  while ((am = anchorRe.exec(html))) {
+    const attrs = am[1]
+    const content = am[2]
+
+    const paramsMatch = /data-cl-params="([^"]*)"/.exec(attrs)
+    const params = paramsMatch ? paramsMatch[1] : null
+    if (!params || !params.includes('rcconid:')) continue
+
+    const hrefMatch = /href="([^"]*)"/.exec(attrs)
+    const hrefIdMatch = hrefMatch ? /\/item\/([a-z]\d{8,})/.exec(hrefMatch[1]) : null
+    const yahooItemId = readClParam(params, 'rcconid') || hrefIdMatch?.[1] || null
+    if (!yahooItemId) continue
+
+    const titleMatch = /<p\b[^>]*>([\s\S]*?)<\/p>/.exec(content)
+    const title = titleMatch ? stripTags(titleMatch[1]) : ''
+    if (!title) continue
+
+    const afterTitle = content.slice(titleMatch!.index + titleMatch![0].length)
+    const price = parseYenAmount(afterTitle)
+    if (price === null) continue
+
+    const tradstat = readClParam(params, 'tradstat') ?? ''
+
+    const opentimeText = readClParam(params, 'opentime')
+    const listedAt = opentimeText && /^\d+$/.test(opentimeText)
+      ? unixSecondsToJstIso(parseInt(opentimeText, 10))
+      : null
+
+    const wlText = readClParam(params, 'wl')
+    const likes = wlText !== null && /^\d+$/.test(wlText) ? parseInt(wlText, 10) : null
+    const viewcntText = readClParam(params, 'viewcnt')
+    const views = viewcntText !== null && /^\d+$/.test(viewcntText) ? parseInt(viewcntText, 10) : null
+    const srchcntText = readClParam(params, 'srchcnt')
+    const searchCount = srchcntText !== null && /^\d+$/.test(srchcntText) ? parseInt(srchcntText, 10) : null
+
+    // サムネイルは img[alt="商品画像"] の src（属性の並び順には依存しない）
+    let thumbUrl: string | null = null
+    const imgRe = /<img\b([^>]*)>/g
+    let im: RegExpExecArray | null
+    while ((im = imgRe.exec(content))) {
+      if (/\balt="商品画像"/.test(im[1])) {
+        const srcMatch = /\bsrc="([^"]*)"/.exec(im[1])
+        thumbUrl = srcMatch ? srcMatch[1] : null
+        break
+      }
+    }
+
+    rows.push({ yahooItemId, title, price, listedAt, likes, views, searchCount, tradstat, thumbUrl })
+  }
+  return rows
+}
+
+/** `extractYahooSellingCounts` の返り値 */
+export interface YahooSellingCounts {
+  /** 出品数（「出品数： 8/100」の 8）。読めなければ null */
+  listingCount: number | null
+  /** 出品数の上限（同上の 100）。読めなければ null */
+  listingLimit: number | null
+  /** 一覧の総件数（「1~8件/8件」の 8）。extractYahooSoldTotal と同じ形なのでそのまま使う */
+  totalCount: number | null
+}
+
+/** 「出品中」一覧の出品数（n/上限）と総件数を抜く */
+export function extractYahooSellingCounts(html: string): YahooSellingCounts {
+  const m = /出品数[：:]\s*([\d,]+)\s*\/\s*([\d,]+)/.exec(html)
+  const listingCount = m ? parseInt(m[1].replace(/,/g, ''), 10) : null
+  const listingLimit = m ? parseInt(m[2].replace(/,/g, ''), 10) : null
+  const totalCount = extractYahooSoldTotal(html)
+  return { listingCount, listingLimit, totalCount }
 }

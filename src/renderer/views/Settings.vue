@@ -746,7 +746,7 @@ const runLabel: Record<string, string> = {
         </div>
         <div class="fields">
           <label class="field">
-            <span>転売と判定するキーワード（カンマ区切りで複数可）</span>
+            <span>{{ CHANNEL_LABEL.mercari }}で転売と判定するキーワード（カンマ区切りで複数可）</span>
             <input
               style="width:320px"
               placeholder="例：メロジョイ, Mellojoy"
@@ -755,6 +755,31 @@ const runLabel: Record<string, string> = {
             />
           </label>
         </div>
+        <p class="faint hint">
+          空なら型番の有無で判定します。
+        </p>
+      </div>
+
+      <!-- Yahoo!フリマ -->
+      <div class="panel">
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
+          <h2 class="section-head-title">{{ CHANNEL_LABEL.yahoo }}</h2>
+        </div>
+        <div class="fields">
+          <label class="field">
+            <span>{{ CHANNEL_LABEL.yahoo }}で転売と判定するキーワード（カンマ区切りで複数可）</span>
+            <input
+              style="width:320px"
+              placeholder="例：メロジョイ, Mellojoy"
+              :value="settings.yahoo_keyword ?? ''"
+              @change="saveSetting('yahoo_keyword', ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+        </div>
+        <p class="faint hint">
+          空なら全部取り込みます。{{ CHANNEL_LABEL.mercari }}のキーワードとは別に判定します。
+        </p>
       </div>
 
       <!-- 仕入先 -->
