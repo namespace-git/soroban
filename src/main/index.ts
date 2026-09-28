@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url'
 import { writeFileSync } from 'node:fs'
 import * as db from './db'
 import * as collector from './collector'
+import * as collectorYahoo from './collector-yahoo'
 import * as collectorMellojoy from './collector-mellojoy'
 import * as collectorTracking from './collector-tracking'
 import * as updater from './updater'
@@ -95,6 +96,23 @@ async function collectMercari(silent: boolean): Promise<CollectorRun[]> {
   }
 }
 
+/** Yahoo!フリマを1回収集する。失敗しても reject しない（[] を返す） */
+async function collectYahoo(silent: boolean): Promise<CollectorRun[]> {
+  try {
+    const run = await collectorYahoo.collect(silent)
+    applog.log('collector', 'yahoo', `Yahoo!フリマ: ${run.status}`, {
+      fetched: run.fetched, inserted: run.inserted, message: run.message,
+    })
+    return [run]
+  } catch (e) {
+    console.error('Yahoo!フリマの収集に失敗しました', e)
+    applog.log('collector', 'yahoo', 'Yahoo!フリマの収集に失敗しました', undefined, {
+      error: e instanceof Error ? e.message : String(e),
+    })
+    return []
+  }
+}
+
 /**
  * 有効な仕入先アカウント（メロジョイ）を順に直列で収集する。同じサイトを2窓で
  * 叩くと頻度が倍になるため、口座同士は並列にしない。1件失敗しても次へ進む。
@@ -152,15 +170,16 @@ async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
   const shopAccounts = db.listShopAccounts()
     .filter(a => a.is_active && a.kind === 'mellojoy')
 
-  // 別サイトの3グループを同時に走らせる。同じサイト（メロジョイの口座同士）は直列。
+  // 別サイトの4グループを同時に走らせる。同じサイト（メロジョイの口座同士）は直列。
   // どのグループも内側で例外を畳むので reject しない（Promise.all で安全に待てる）
-  const [mercariRuns, shopRuns] = await Promise.all([
+  const [mercariRuns, yahooRuns, shopRuns] = await Promise.all([
     collectMercari(silent),
+    collectYahoo(silent),
     collectShopAccountsSerially(shopAccounts, silent),
     checkShippingIfEnabled(),
   ])
 
-  return [...mercariRuns, ...shopRuns]
+  return [...mercariRuns, ...yahooRuns, ...shopRuns]
 }
 
 // ------------------------------------------------------------
@@ -357,6 +376,7 @@ function registerIpc(): void {
 
   handle('collect', () => collectAll(db.getSettings().collect_show_window !== '1'))
   handle('openLogin', () => collector.openLoginWindow())
+  handle('openYahooLogin', () => collectorYahoo.openYahooLogin())
   handle('estimateSaleProfit', (input) => db.estimateSaleProfit(input))
   handle('listSaleExclusions', () => db.listSaleExclusions())
   handle('removeSaleExclusion', (id) => db.removeSaleExclusion(id))
@@ -456,6 +476,7 @@ app.whenReady().then(async () => {
   }
   applog.initAppLog()
   collector.ensureSession()
+  collectorYahoo.ensureSession()
   registerThumbProtocol()
   registerIpc()
   createMainWindow()

@@ -3,16 +3,23 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join, dirname } from 'node:path'
 import {
+  combineYahooSales,
   extractYahooSalesCsvForm,
   extractYahooSellingCounts,
   extractYahooSoldTotal,
+  isYahooCollectEmpty,
   mapYahooTradstat,
   parseYahooItemHtml,
   parseYahooSalesHtml,
   parseYahooSellingHtml,
   parseYahooSoldHtml,
+  splitYahooCombinedSales,
+  type YahooCombinedSale,
+  type YahooSalesRow,
+  type YahooScrapedSale,
 } from '../collector-yahoo'
 import { CODE_RE, extractCodes } from '../code'
+import { matchesAnyKeyword, parseKeywords } from '../db'
 
 /** クラス名（class="..."）を全部同じダミーに置換する（クラス名に依存していないことの証明用） */
 function replaceAllClasses(html: string): string {
@@ -427,6 +434,293 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         listingLimit: null,
         totalCount: null,
       })
+    })
+  })
+
+  describe('combineYahooSales（②取引中・取引完了 と ③売上金管理 の結合。実行部の心臓）', () => {
+    const soldHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-sold.html'), 'utf-8')
+    const salesHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-salesmanagement.html'), 'utf-8')
+    const soldRows = parseYahooSoldHtml(soldHtml)
+    const salesRows = parseYahooSalesHtml(salesHtml)
+
+    function makeSoldRow(overrides: Partial<YahooScrapedSale> = {}): YahooScrapedSale {
+      return {
+        yahooItemId: 'z600000001',
+        title: 'ダミー商品タイトル全文【Z001】',
+        price: 1000,
+        tradstat: 'SELLER_SHIPPED',
+        statusText: '受け取り評価待ち',
+        thumbUrl: 'https://example.com/thumb.jpg',
+        ...overrides,
+      }
+    }
+
+    function makeSalesRow(overrides: Partial<YahooSalesRow> = {}): YahooSalesRow {
+      return {
+        yahooItemId: 'z600000001',
+        itemName: 'ダミー商品タイトル全文',
+        handledDate: '2026-09-01',
+        statusText: '受取連絡待ち',
+        receivedAmount: 1000,
+        settlementAmount: 1000,
+        feeAmount: 0,
+        settleId: '12345',
+        otherBreakdown: [],
+        amountsConsistent: true,
+        ...overrides,
+      }
+    }
+
+    it('実物2件（yahoo-sold.html・yahoo-salesmanagement.html）を商品idで結合すると、4件とも②の全文タイトル・③の日付と実額・②のtradstatから判定したstatusになる', () => {
+      const { sales, skippedInconsistent } = combineYahooSales(soldRows, salesRows)
+      expect(skippedInconsistent).toBe(0)
+      expect(sales).toHaveLength(4)
+      expect(sales).toEqual([
+        {
+          yahooItemId: 'z693579992',
+          title: 'メロジョイ ふわふわ肉球ミルクパフ ねっとりヨーグルト【Z074-4】',
+          price: 5200,
+          fee: 0,
+          soldAt: '2026-09-28',
+          status: 'shipped',
+          thumbUrl: soldRows[0].thumbUrl,
+        },
+        {
+          yahooItemId: 'z693407762',
+          title: 'Mellojoy メロジョイ 贅沢スフレ チョコレート Mサイズ 新品未開封【Z072-7】',
+          price: 6400,
+          fee: 320,
+          soldAt: '2026-09-28',
+          status: 'shipped',
+          thumbUrl: soldRows[1].thumbUrl,
+        },
+        {
+          yahooItemId: 'z693289446',
+          title: 'Mellojoy メロジョイ いちごショートケーキ ホール スクイーズ 新品未開封',
+          price: 5899,
+          fee: 294,
+          soldAt: '2026-09-28',
+          status: 'shipped',
+          thumbUrl: soldRows[2].thumbUrl,
+        },
+        {
+          yahooItemId: 'z693287844',
+          title: 'Mellojoy メロジョイ クッキークラブ クリームブロッサム もちもちもち',
+          price: 4280,
+          fee: 213,
+          soldAt: '2026-09-27',
+          status: 'shipped',
+          thumbUrl: soldRows[3].thumbUrl,
+        },
+      ])
+    })
+
+    it('売上金管理（③）にだけある行は作る：日付・実額があるので、タイトルは③の商品名（途中で切れている）で代え、statusはnull（②が無いので推測しない）', () => {
+      const sales = [makeSoldRow()] // ②はダミー1件だけ（結合先を確保するためのノイズ）
+      const salesOnly = [
+        makeSalesRow(),
+        makeSalesRow({ yahooItemId: 'z900000001', itemName: '売上金管理にしか無い商品名【Z9', handledDate: '2026-09-15', settlementAmount: 3000, feeAmount: 150, receivedAmount: 2850 }),
+      ]
+      const { sales: combined } = combineYahooSales(sales, salesOnly)
+      expect(combined).toHaveLength(2)
+      const onlyInSales = combined.find(c => c.yahooItemId === 'z900000001')
+      expect(onlyInSales).toEqual({
+        yahooItemId: 'z900000001',
+        title: '売上金管理にしか無い商品名【Z9', // 途中で切れたままでよい（型番の救済はしない）
+        price: 3000,
+        fee: 150,
+        soldAt: '2026-09-15',
+        status: null,
+        thumbUrl: null,
+      })
+    })
+
+    it('取引ページ（②）にだけある行は作らない：日付が無いので次回に持ち越す（結合結果に出てこない）', () => {
+      const soldOnly = [
+        makeSoldRow(),
+        makeSoldRow({ yahooItemId: 'z700000001', title: '取引ページにしか無い商品' }),
+      ]
+      const salesOnly = [makeSalesRow()] // z600000001 だけが③にある
+      const { sales } = combineYahooSales(soldOnly, salesOnly)
+      expect(sales).toHaveLength(1)
+      expect(sales.map(s => s.yahooItemId)).toEqual(['z600000001'])
+      expect(sales.some(s => s.yahooItemId === 'z700000001')).toBe(false)
+    })
+
+    it('amountsConsistent が false の行は販売にしない（skippedInconsistentだけ増える。受取連絡後に送料の行が増えて式が崩れたケースを想定）', () => {
+      const soldOk = [makeSoldRow(), makeSoldRow({ yahooItemId: 'z600000002' })]
+      const salesMixed = [
+        makeSalesRow(),
+        makeSalesRow({
+          yahooItemId: 'z600000002', amountsConsistent: false,
+          settlementAmount: 5000, feeAmount: 250, receivedAmount: 4000, // 送料750円ぶん合わない
+        }),
+      ]
+      const { sales, skippedInconsistent } = combineYahooSales(soldOk, salesMixed)
+      expect(skippedInconsistent).toBe(1)
+      expect(sales).toHaveLength(1)
+      expect(sales[0].yahooItemId).toBe('z600000001')
+    })
+
+    it('②のtradstatが未知の値なら status は null（mapYahooTradstatの規則どおり、推測で埋めない）', () => {
+      const sold = [makeSoldRow({ tradstat: 'SOME_UNKNOWN_STATUS' })]
+      const sales = [makeSalesRow()]
+      const { sales: combined } = combineYahooSales(sold, sales)
+      expect(combined[0].status).toBeNull()
+    })
+  })
+
+  describe('splitYahooCombinedSales（既に帳簿にある販売を updateYahooActuals に渡す配線。collect() の心臓の続き）', () => {
+    function makeCombined(overrides: Partial<YahooCombinedSale> = {}): YahooCombinedSale {
+      return {
+        yahooItemId: 'z600000001',
+        title: 'ダミー商品タイトル全文【Z001】',
+        price: 1000,
+        fee: 50,
+        soldAt: '2026-09-01',
+        status: 'shipped',
+        thumbUrl: 'https://example.com/thumb.jpg',
+        ...overrides,
+      }
+    }
+
+    it('新規（knownIdsに無い）は freshMatched、既知（knownIdsにある）は knownMatched に分かれ、混ざらない', () => {
+      const fresh = makeCombined({ yahooItemId: 'z600000001' })
+      const known = makeCombined({ yahooItemId: 'z600000002' })
+      const result = splitYahooCombinedSales(
+        [fresh, known], new Set(['z600000002']), new Set(), [],
+      )
+      expect(result.freshMatched).toEqual([fresh])
+      expect(result.knownMatched).toEqual([known])
+      // 取り違えがないこと（同じ商品が両方に入らない）
+      expect(result.freshMatched.map(c => c.yahooItemId))
+        .not.toEqual(expect.arrayContaining(result.knownMatched.map(c => c.yahooItemId)))
+    })
+
+    it('knownMatched から updateYahooActuals へ渡す行は mercariItemId/soldAt/fee/price/status の形になる', () => {
+      const known = makeCombined({
+        yahooItemId: 'z600000002', soldAt: '2026-09-15', fee: 320, price: 6400, status: 'completed',
+      })
+      const { knownMatched } = splitYahooCombinedSales(
+        [known], new Set(['z600000002']), new Set(), [],
+      )
+      const rows = knownMatched.map(c => ({
+        mercariItemId: c.yahooItemId, soldAt: c.soldAt, fee: c.fee, price: c.price, status: c.status,
+      }))
+      expect(rows).toEqual([
+        { mercariItemId: 'z600000002', soldAt: '2026-09-15', fee: 320, price: 6400, status: 'completed' },
+      ])
+    })
+
+    it('status が null（②取引ページにまだ出ていない）の行は null のまま渡る（勝手に completed 等で埋めない）', () => {
+      const known = makeCombined({ yahooItemId: 'z600000002', status: null })
+      const { knownMatched } = splitYahooCombinedSales(
+        [known], new Set(['z600000002']), new Set(), [],
+      )
+      expect(knownMatched[0].status).toBeNull()
+    })
+
+    it('キーワードが設定されていれば、既知でも不一致のタイトルは knownMatched から弾く（新規と同じ規則）', () => {
+      const knownMatch = makeCombined({ yahooItemId: 'z600000002', title: 'メロジョイ 贅沢スフレ【Z072】' })
+      const knownUnmatch = makeCombined({ yahooItemId: 'z600000003', title: '全く関係ない商品' })
+      const result = splitYahooCombinedSales(
+        [knownMatch, knownUnmatch],
+        new Set(['z600000002', 'z600000003']),
+        new Set(),
+        ['メロジョイ'],
+      )
+      expect(result.knownMatched.map(c => c.yahooItemId)).toEqual(['z600000002'])
+    })
+
+    it('削除済み（sale_exclusion）は新規側だけ弾く。既知の判定には関係しない', () => {
+      const freshDeleted = makeCombined({ yahooItemId: 'z600000001' })
+      const known = makeCombined({ yahooItemId: 'z600000002' })
+      const result = splitYahooCombinedSales(
+        [freshDeleted, known],
+        new Set(['z600000002']),
+        new Set(['z600000001']),
+        [],
+      )
+      expect(result.freshMatched).toEqual([])
+      expect(result.excludedDeleted).toBe(1)
+      expect(result.knownMatched).toEqual([known])
+    })
+
+    it('amountsConsistent=false の行は combineYahooSales の時点で既に除かれているので、既知でも更新に渡らない', () => {
+      const soldRow: YahooScrapedSale = {
+        yahooItemId: 'z600000002',
+        title: 'ダミー商品',
+        price: 1000,
+        tradstat: 'SELLER_SHIPPED',
+        statusText: '受け取り評価待ち',
+        thumbUrl: null,
+      }
+      const inconsistentSalesRow: YahooSalesRow = {
+        yahooItemId: 'z600000002',
+        itemName: 'ダミー商品',
+        handledDate: '2026-09-01',
+        statusText: '受取連絡待ち',
+        receivedAmount: 4000, // 決済金額－手数料と合わない（送料の行が増えたケースを想定）
+        settlementAmount: 5000,
+        feeAmount: 250,
+        settleId: null,
+        otherBreakdown: [{ label: '送料', amount: 750 }],
+        amountsConsistent: false,
+      }
+      const { sales: combined, skippedInconsistent } = combineYahooSales([soldRow], [inconsistentSalesRow])
+      expect(skippedInconsistent).toBe(1)
+      expect(combined).toHaveLength(0)
+
+      // z600000002 は帳簿に既にある（known）としても、combined に入っていない以上 knownMatched にも出ない
+      const result = splitYahooCombinedSales(combined, new Set(['z600000002']), new Set(), [])
+      expect(result.knownMatched).toEqual([])
+      expect(result.freshMatched).toEqual([])
+    })
+  })
+
+  describe('キーワードでの絞り込み（collect() が db.matchesAnyKeyword で行うのと同じ規則）', () => {
+    it('yahoo_keyword が空なら全部通る', () => {
+      const keywords = parseKeywords('')
+      expect(keywords).toEqual([])
+      const titles = ['メロジョイ ふわふわ肉球ミルクパフ', '無関係な商品']
+      const matched = keywords.length > 0 ? titles.filter(t => matchesAnyKeyword(t, keywords)) : titles
+      expect(matched).toEqual(titles)
+    })
+
+    it('yahoo_keyword が設定されていれば、一致するタイトルだけが残る（大小無視）', () => {
+      const keywords = parseKeywords('メロジョイ, mellojoy')
+      const titles = [
+        'メロジョイ ふわふわ肉球ミルクパフ【Z074-4】',
+        'Mellojoy メロジョイ 贅沢スフレ【Z072-7】',
+        '全く関係ない商品',
+      ]
+      const matched = titles.filter(t => matchesAnyKeyword(t, keywords))
+      expect(matched).toEqual([
+        'メロジョイ ふわふわ肉球ミルクパフ【Z074-4】',
+        'Mellojoy メロジョイ 贅沢スフレ【Z072-7】',
+      ])
+    })
+  })
+
+  describe('isYahooCollectEmpty（3ページとも0件のときだけ empty）', () => {
+    it('3ページとも0件なら true', () => {
+      expect(isYahooCollectEmpty(0, 0, 0)).toBe(true)
+    })
+
+    it('出品だけ1件以上なら false（出品を売り切ると出品0件はあり得るが、この逆は false のまま）', () => {
+      expect(isYahooCollectEmpty(1, 0, 0)).toBe(false)
+    })
+
+    it('取引中・取引完了だけ1件以上なら false', () => {
+      expect(isYahooCollectEmpty(0, 1, 0)).toBe(false)
+    })
+
+    it('売上金管理だけ1件以上なら false（出品を売り切った直後はこれだけになり得る）', () => {
+      expect(isYahooCollectEmpty(0, 0, 1)).toBe(false)
+    })
+
+    it('全部1件以上なら false', () => {
+      expect(isYahooCollectEmpty(2, 3, 4)).toBe(false)
     })
   })
 })

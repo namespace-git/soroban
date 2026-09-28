@@ -1325,9 +1325,22 @@ export interface SorobanApi {
   setSetting(key: string, value: string): Promise<void>
 
   // 収集
-  /** メルカリ→有効な仕入先アカウントの順に直列で走る。1回分がまとめて返る（先頭がメルカリ） */
+  /**
+   * メルカリ・仕入先アカウント・Yahoo!フリマを並べて走らせる。1回分がまとめて返る。
+   * サイトが違うものは並列、同じサイトの中（仕入先アカウントどうし、Yahoo の各ページ）は直列
+   */
   collect(): Promise<CollectorRun[]>
+  /** メルカリのログイン画面を開く。認証情報は保存しない（セッションのプロファイルだけ持つ） */
   openLogin(): Promise<void>
+  /**
+   * Yahoo!フリマのログイン画面を開く。メルカリと同じく**手動ログイン**で、
+   * 認証情報は保存しない（`persist:yahoo` のセッションだけ持つ）。
+   *
+   * 取り込みは 2 つのホストにまたがる（`paypayfleamarket.yahoo.co.jp` と
+   * `salesmanagement.yahoo.co.jp`）。同じ Yahoo ID のセッションなので 1 回のログインで
+   * 両方通る**はず**だが、実物で未確認。通らなければここを分ける必要がある
+   */
+  openYahooLogin(): Promise<void>
   /**
    * 粗利の見積もり（画面で再計算しないための共通計算）。手数料は現在の手数料率、送料は発送方法の料金
    * （無効化・削除済みの発送方法でも料金を引く）、原価は在庫の landed_cost の合計

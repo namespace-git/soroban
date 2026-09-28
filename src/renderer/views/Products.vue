@@ -427,7 +427,10 @@ const estimateCompare = computed(() => {
               </div>
             </div>
             <div class="karte-head-text">
-              <div class="chip-row">
+              <div
+                class="chip-row"
+                :title="[karte.summary.model_code, ...karte.summary.tags.map(t => t.name)].join(' ・ ')"
+              >
                 <CodeChip kind="model" :code="karte.summary.model_code" />
                 <StatusChip
                   v-if="karte.summary.custom_name" tone="neutral" label="表示名"

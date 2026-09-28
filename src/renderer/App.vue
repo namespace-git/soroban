@@ -19,6 +19,7 @@ import Settings from './views/Settings.vue'
 import Help from './views/Help.vue'
 import type { CollectorRun, DashboardStats, ProfitStrip, SaleStatus, SearchHit, UpdateStatus } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
+import { runSourceLabel } from './utils/collector-run'
 
 type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'expenses' | 'settings' | 'help'
 /**
@@ -273,10 +274,6 @@ const runIsWarn = computed(() => {
   return !!run && run.status !== 'ok'
 })
 
-function runLabelText(run: CollectorRun): string {
-  return run.source === 'mercari' ? 'メルカリ' : (run.shop_account_name ?? 'メロジョイ')
-}
-
 function runMessage(run: CollectorRun): string {
   const messages: Record<string, string> = {
     ok: `新規 ${run.inserted}件（取得 ${run.fetched}件）`,
@@ -287,10 +284,10 @@ function runMessage(run: CollectorRun): string {
   return messages[run.status] ?? run.status
 }
 
-// メルカリ→仕入先アカウントの順で1回分がまとめて返る。1つのトーストにまとめる
+// メルカリ→仕入先アカウント→Yahoo!フリマの順で1回分がまとめて返る。1つのトーストにまとめる
 function reportRun(runs: CollectorRun[]) {
   if (!runs.length) return
-  const text = runs.map(r => `${runLabelText(r)}: ${runMessage(r)}`).join('／')
+  const text = runs.map(r => `${runSourceLabel(r)}: ${runMessage(r)}`).join('／')
   const kind: 'ok' | 'warn' = runs.every(r => r.status === 'ok') ? 'ok' : 'warn'
   showNotice({ text, kind })
   revision.value++

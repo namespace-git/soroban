@@ -3183,6 +3183,163 @@ describe('db（:memory:）', () => {
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it('insertCollected：channel=yahooはyahoo_keywordで判定する（mercari_keywordには引きずられない）', () => {
+      db.setSetting('mercari_keyword', 'メロジョイ')
+      db.setSetting('yahoo_keyword', 'ヤフー限定')
+
+      const [y1] = db.insertCollected(
+        [{ mercariItemId: 'YK-1', title: 'ヤフー限定コラボ', price: 1000, soldAt: '2026-01-01' }],
+        'yahoo',
+      )
+      // yahoo_keywordに一致 → resale
+      expect(db.listSales().find(s => s.id === y1.id)!.kind).toBe('resale')
+
+      const [y2] = db.insertCollected(
+        [{ mercariItemId: 'YK-2', title: 'メロジョイ限定コラボ', price: 1000, soldAt: '2026-01-02' }],
+        'yahoo',
+      )
+      // mercari_keywordにだけ一致・yahoo_keywordには不一致 → personal
+      expect(db.listSales().find(s => s.id === y2.id)!.kind).toBe('personal')
+    })
+
+    it('insertCollected：channel省略（mercari）はmercari_keywordで判定する（yahoo_keywordには引きずられない）', () => {
+      db.setSetting('mercari_keyword', 'メロジョイ')
+      db.setSetting('yahoo_keyword', 'ヤフー限定')
+
+      const [m1] = db.insertCollected(
+        [{ mercariItemId: 'MK-1', title: 'メロジョイ限定コラボ', price: 1000, soldAt: '2026-01-01' }],
+      )
+      expect(db.listSales().find(s => s.id === m1.id)!.kind).toBe('resale')
+
+      const [m2] = db.insertCollected(
+        [{ mercariItemId: 'MK-2', title: 'ヤフー限定コラボ', price: 1000, soldAt: '2026-01-02' }],
+      )
+      // yahoo_keywordにだけ一致・mercari_keywordには不一致 → personal
+      expect(db.listSales().find(s => s.id === m2.id)!.kind).toBe('personal')
+    })
+
+    it('insertCollected：yahoo_keywordが空なら、channel=yahooでも型番の有無で判定する', () => {
+      const [noCode] = db.insertCollected(
+        [{ mercariItemId: 'YK-3', title: '型番なしYahoo商品', price: 1000, soldAt: '2026-01-01' }],
+        'yahoo',
+      )
+      expect(db.listSales().find(s => s.id === noCode.id)!.kind).toBe('personal')
+
+      const [withCode] = db.insertCollected(
+        [{ mercariItemId: 'YK-4', title: '【Z080-1】型番ありYahoo商品', price: 1000, soldAt: '2026-01-02' }],
+        'yahoo',
+      )
+      expect(db.listSales().find(s => s.id === withCode.id)!.kind).toBe('resale')
+    })
+
+    it('appendModelCodes：出品先(channel)ごとのキーワードで救済判定する（mercari_keywordに固定しない）', () => {
+      // mercari_keywordは設定されているが、yahoo_keywordは空 → yahoo販売の救済は
+      // 「型番が付いたか」で判定されるべき（mercari_keywordの設定に引きずられない）
+      db.setSetting('mercari_keyword', 'メロジョイ')
+
+      const [{ id }] = db.insertCollected(
+        [{ mercariItemId: 'YAM-1', title: '型番なしYahoo商品', price: 2000, soldAt: '2026-01-05' }],
+        'yahoo',
+      )
+      expect(db.listSales().find(s => s.id === id)!.kind).toBe('personal')
+
+      const changed = db.appendModelCodes(id, ['Z080-1'])
+      expect(changed).toBe(true)
+      expect(db.listSales().find(s => s.id === id)!.kind).toBe('resale')
+    })
+
+    it('updateYahooActuals：statusをそのまま使う（shippedではcompletedにしない・completed_at/sold_atを動かさない）', () => {
+      const [{ id }] = db.insertCollected(
+        [{
+          mercariItemId: 'YUA-1', title: 'Yahoo更新対象', price: 6000, soldAt: '2026-03-01',
+          status: 'waiting_shipment',
+        }],
+        'yahoo',
+      )
+
+      const updated = db.updateYahooActuals([
+        { mercariItemId: 'YUA-1', soldAt: '2026-03-05', status: 'shipped' },
+      ])
+      expect(updated).toBe(1)
+
+      const after = db.listSales().find(s => s.id === id)!
+      expect(after.status).toBe('shipped')
+      expect(after.completed_at).toBeNull()
+      expect(after.sold_at).toBe('2026-03-01') // completedを観測するまでsold_atは動かない
+    })
+
+    it('updateYahooActuals：status=completedで初めてcompleted_atが入り、sold_atが完了日へ動く', () => {
+      const [{ id }] = db.insertCollected(
+        [{ mercariItemId: 'YUA-2', title: 'Yahoo完了対象', price: 6000, soldAt: '2026-03-01', status: 'shipped' }],
+        'yahoo',
+      )
+
+      const updated = db.updateYahooActuals([
+        { mercariItemId: 'YUA-2', soldAt: '2026-03-10', status: 'completed' },
+      ])
+      expect(updated).toBe(1)
+
+      const after = db.listSales().find(s => s.id === id)!
+      expect(after.status).toBe('completed')
+      expect(after.completed_at).toBe('2026-03-10')
+      expect(after.sold_at).toBe('2026-03-10')
+    })
+
+    it('updateYahooActuals：実額のfeeが変わったら反映され、fee_sourceがactualになる', () => {
+      const [{ id }] = db.insertCollected(
+        [{
+          mercariItemId: 'YUA-3', title: 'Yahoo手数料変化', price: 6000, soldAt: '2026-03-01',
+          status: 'completed', fee: 250,
+        }],
+        'yahoo',
+      )
+      const before = db.listSales().find(s => s.id === id)!
+      expect(before.fee).toBe(250)
+      expect(before.fee_source).toBe('actual')
+
+      const updated = db.updateYahooActuals([
+        { mercariItemId: 'YUA-3', soldAt: '2026-03-01', fee: 300, status: 'completed' },
+      ])
+      expect(updated).toBe(1)
+
+      const after = db.listSales().find(s => s.id === id)!
+      expect(after.fee).toBe(300)
+      expect(after.fee_source).toBe('actual')
+    })
+
+    it('updateYahooActuals：priceの実額も反映できる', () => {
+      const [{ id }] = db.insertCollected(
+        [{ mercariItemId: 'YUA-4', title: 'Yahoo価格変化', price: 6000, soldAt: '2026-03-01', status: 'completed' }],
+        'yahoo',
+      )
+      const updated = db.updateYahooActuals([
+        { mercariItemId: 'YUA-4', soldAt: '2026-03-01', price: 5800, status: 'completed' },
+      ])
+      expect(updated).toBe(1)
+      expect(db.listSales().find(s => s.id === id)!.price).toBe(5800)
+    })
+
+    it('updateYahooActuals：差分が無ければ更新0件', () => {
+      db.insertCollected(
+        [{
+          mercariItemId: 'YUA-5', title: 'Yahoo差分なし', price: 6000, soldAt: '2026-03-01',
+          status: 'completed', fee: 300,
+        }],
+        'yahoo',
+      )
+      const updated = db.updateYahooActuals([
+        { mercariItemId: 'YUA-5', soldAt: '2026-03-01', fee: 300, status: 'completed' },
+      ])
+      expect(updated).toBe(0)
+    })
+
+    it('updateYahooActuals：知らないmercariItemIdは無視する', () => {
+      const updated = db.updateYahooActuals([
+        { mercariItemId: 'does-not-exist', soldAt: '2026-03-01', status: 'completed' },
+      ])
+      expect(updated).toBe(0)
+    })
   })
 
   it('getItemTimeline：仕入（送料按分あり）→販売（まとめ売り2点）でeventsの順・detailの数字が合う', () => {

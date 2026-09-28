@@ -726,10 +726,12 @@ async function remove(p: PurchaseSummary) {
                 </div>
                 <div class="row-title one-line" :title="rowTitle(p)">{{ rowTitle(p) }}</div>
                 <div class="row-sub" :title="rowSub(p)">{{ rowSub(p) }}</div>
-                <div v-if="p.note" class="note-row">
-                  <Icon name="note" :size="14" class="icon-note" />
-                  <span class="note-label">メモ</span>
-                  <span class="note-text">{{ p.note }}</span>
+                <div class="note-row fixed-row">
+                  <template v-if="p.note">
+                    <Icon name="note" :size="14" class="icon-note" />
+                    <span class="note-label">メモ</span>
+                    <span class="note-text" :title="p.note">{{ p.note }}</span>
+                  </template>
                 </div>
               </td>
               <td class="ship-cell">

@@ -1,16 +1,25 @@
-import type { SaleStatus } from '../shared/types'
+import { BrowserWindow, app, session } from 'electron'
+import { setTimeout as sleep } from 'node:timers/promises'
+import { mkdirSync } from 'node:fs'
+import { readdir, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import * as db from './db'
+import {
+  buildUserAgent, CHALLENGE_MESSAGE, isChallengeText, randomWait, revealForChallenge, thumbFileName,
+} from './collector'
+import type { CollectorRun, SaleStatus } from '../shared/types'
 
 // ============================================================
-// Yahoo!フリマの取り込み（パーサのみ）
+// Yahoo!フリマの取り込み（パーサ＋実行部）
 //
-// 第1歩：純粋関数のパーサだけをここに置く。実行部（BrowserWindow・session・
-// ネットワーク・DB）は次の回で別の担当が書く。ここでは一切触らない。
-//
-// 約束（src/main/collector.ts のメルカリ向けパーサと同じ）：
+// パーサ（① 〜 ④）は純粋関数。実行部（ウィンドウ・session・ネットワーク・DB）は下の
+// 「実行部」の節にまとめる。約束（src/main/collector.ts のメルカリ向けと同じ）：
 //   * クラス名（styled-components の自動生成。デプロイのたびに変わる）に依存しない。
 //     起点は a[href] と data-cl-params、画像は img[alt="商品画像"]、価格は正規表現
 //   * 取得できなかったら空配列を返す。0件を「成功」として握りつぶす判断は呼び出し側の仕事
 //   * 未知の値・未観測の値は推測で埋めず null を返す
+//   * 書き込み操作はしない・認証情報は保存しない（persist:yahoo のセッションだけ）・
+//     収集頻度は上げない（ページ間 2〜6 秒・直列）
 // ============================================================
 
 /** 「取引中・取引完了」（`/my/item/sold`）の1件（parseYahooSoldHtml の要素） */
@@ -146,6 +155,11 @@ export function extractYahooSoldTotal(html: string): number | null {
 /** 「売上金管理」一覧（`#salelst`）の1行 */
 export interface YahooSalesRow {
   yahooItemId: string
+  /**
+   * 取扱内容セルの商品名。**途中で切れている**（例：「…新品未開封【Z07」）。型番はここから
+   * 取らない。実行部（collect）が「取引ページに全文タイトルが無いとき」だけの代用に使う
+   */
+  itemName: string
   /** 取扱日（YYYY-MM-DD、正規化済み） */
   handledDate: string
   /** 状態の日本語表示（「受取連絡待ち」等） */
@@ -228,9 +242,12 @@ export function parseYahooSalesHtml(html: string): YahooSalesRow[] {
 
     const [infoHtml, dateHtml, statusHtml, amountHtml, detailHtml] = tdHtmls
 
-    const idMatch = /\(([a-z]\d{8,})\)/.exec(stripTags(infoHtml))
+    const infoText = stripTags(infoHtml)
+    const idMatch = /\(([a-z]\d{8,})\)/.exec(infoText)
     const yahooItemId = idMatch ? idMatch[1] : null
     if (!yahooItemId) continue
+
+    const itemName = idMatch ? infoText.slice(0, idMatch.index).trim() : infoText
 
     const handledDate = normalizeYahooDate(stripTags(dateHtml))
     if (!handledDate) continue
@@ -259,7 +276,7 @@ export function parseYahooSalesHtml(html: string): YahooSalesRow[] {
     const amountsConsistent = settlementAmount - feeAmount === receivedAmount
 
     rows.push({
-      yahooItemId, handledDate, statusText, receivedAmount,
+      yahooItemId, itemName, handledDate, statusText, receivedAmount,
       settlementAmount, feeAmount, settleId, otherBreakdown, amountsConsistent,
     })
   }
@@ -556,4 +573,468 @@ export function extractYahooSellingCounts(html: string): YahooSellingCounts {
   const listingLimit = m ? parseInt(m[2].replace(/,/g, ''), 10) : null
   const totalCount = extractYahooSoldTotal(html)
   return { listingCount, listingLimit, totalCount }
+}
+
+// ============================================================
+// 実行部（ウィンドウ・手動ログイン・巡回・DB書き込み）
+//
+// 巡回する3ページ（直列。ページ間は randomWait）：
+//   ① 出品中（selling）② 取引中・取引完了（sold）③ 売上金管理（salesmanagement、別ホスト）
+// 商品ページ（/item/<id>）は開かない（opentime が①にあるので不要）。
+// ============================================================
+
+const PARTITION = 'persist:yahoo'
+const SELLING_URL = 'https://paypayfleamarket.yahoo.co.jp/my/item/selling'
+const SOLD_URL = 'https://paypayfleamarket.yahoo.co.jp/my/item/sold'
+const SALES_URL = 'https://salesmanagement.yahoo.co.jp/list'
+// PayPayフリマに専用のログインページURLは無い（未確認）。マイページを開けば、
+// 未ログインなら Yahoo が自動的にログイン画面へ誘導する（メルカリの /login のような
+// 固定URLに頼らない）
+const LOGIN_URL = SELLING_URL
+
+/** 1回の収集でサムネイルを保存する上限（販売・出品合わせて）。collector.ts と同じ約束 */
+const MAX_THUMBS_PER_RUN = 30
+
+const WINDOW_TITLE = 'そろばん — Yahoo!フリマ'
+
+function createWindow(show: boolean, title: string = WINDOW_TITLE): BrowserWindow {
+  return new BrowserWindow({
+    width: 1280,
+    height: 800,
+    show,
+    title,
+    webPreferences: {
+      partition: PARTITION,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  })
+}
+
+/** ログイン用ウィンドウを開く。ユーザーが手でログインし、Cookieがプロファイルに残る */
+export function openYahooLogin(): Promise<void> {
+  return new Promise((resolve) => {
+    const win = createWindow(true, `${WINDOW_TITLE}（ログイン）`)
+    win.loadURL(LOGIN_URL)
+    win.on('closed', () => resolve())
+  })
+}
+
+/** UA・Accept-Language を通常の Chrome に合わせる（collector.ts と同じ） */
+export function ensureSession(): void {
+  const s = session.fromPartition(PARTITION)
+  const chromeMajor = process.versions.chrome.split('.')[0]
+  const ua = buildUserAgent(process.platform, chromeMajor)
+  s.setUserAgent(ua, 'ja,en-US;q=0.9,en;q=0.8')
+}
+
+/**
+ * ログイン済みかを判定する。実DOMのマーカーが未確認のため、URLがログイン画面
+ * （login.yahoo.co.jp）へ飛ばされていないか、と本文が空でないかだけで見る
+ * （メルカリの isLoggedIn より緩いが、CAPTCHA・本人確認は isChallenge が別に見る）。
+ */
+async function isLoggedIn(win: BrowserWindow): Promise<boolean> {
+  const url = win.webContents.getURL()
+  if (/login\.yahoo\.co\.jp/i.test(url)) return false
+
+  const hasBody = await win.webContents
+    .executeJavaScript(`!!document.body && document.body.innerText.length > 0`)
+    .catch(() => false) as boolean
+  return hasBody
+}
+
+/** 現在のページが CAPTCHA・本人確認を求めていないかを見る（collector.ts の isChallenge と同じ作法） */
+async function isChallenge(win: BrowserWindow): Promise<boolean> {
+  const url = win.webContents.getURL()
+  const bodyText = await win.webContents
+    .executeJavaScript(`document.body ? document.body.innerText : ''`)
+    .catch(() => '') as string
+  const hasCaptchaFrame = await win.webContents.executeJavaScript(`
+    !!document.querySelector(
+      'iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="arkose"], [data-sitekey]'
+    )
+  `).catch(() => false) as boolean
+  return isChallengeText(url, bodyText, hasCaptchaFrame)
+}
+
+async function outerHtml(win: BrowserWindow): Promise<string> {
+  return await win.webContents
+    .executeJavaScript('document.documentElement.outerHTML')
+    .catch(() => '') as string
+}
+
+// ------------------------------------------------------------
+// サムネイル保存（collector.ts と同じ作法。private ヘルパーは export されていないため
+// ここに複製する。thumbFileName だけ collector.ts から借りる）
+// ------------------------------------------------------------
+
+function ensureThumbDir(): string {
+  const dir = join(app.getPath('userData'), 'thumbs')
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+async function cleanupOldThumbFiles(dir: string, itemId: string, keepFile: string): Promise<void> {
+  try {
+    const names = await readdir(dir)
+    const stale = names.filter(n =>
+      n !== keepFile && (n === `${itemId}.jpg` || n.startsWith(`${itemId}-`)))
+    await Promise.all(stale.map(n => unlink(join(dir, n)).catch(() => {})))
+  } catch {
+    // ディレクトリが読めない等は無視
+  }
+}
+
+async function downloadThumbFile(itemId: string, url: string): Promise<{ file: string; src: string }> {
+  const res = await session.fromPartition(PARTITION).fetch(url)
+  if (!res.ok) throw new Error(`サムネイル取得に失敗しました（${res.status}）: ${url}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  const file = thumbFileName(itemId, url)
+  const src = db.normalizeThumbSrc(url)
+  const dir = ensureThumbDir()
+  await writeFile(join(dir, file), buf)
+  await cleanupOldThumbFiles(dir, itemId, file)
+  return { file, src }
+}
+
+interface ThumbSaveResult { saved: number; attempted: number }
+
+async function saveNewThumbs(
+  targets: Array<{ id: string; mercariItemId: string; thumbUrl: string }>,
+  limit: number,
+): Promise<ThumbSaveResult> {
+  const list = targets.slice(0, Math.max(0, limit))
+  let saved = 0
+  let attempted = 0
+  for (const t of list) {
+    attempted++
+    try {
+      const { file, src } = await downloadThumbFile(t.mercariItemId, t.thumbUrl)
+      db.setSaleThumb(t.id, file, src)
+      saved++
+    } catch {
+      // 失敗しても再試行しない
+    }
+    await sleep(300 + Math.floor(Math.random() * 500))
+  }
+  return { saved, attempted }
+}
+
+async function saveNewListingThumbs(
+  targets: Array<{ id: string; thumbUrl: string }>,
+  limit: number,
+): Promise<ThumbSaveResult> {
+  const list = targets.slice(0, Math.max(0, limit))
+  let saved = 0
+  let attempted = 0
+  for (const t of list) {
+    attempted++
+    try {
+      const { file, src } = await downloadThumbFile(t.id, t.thumbUrl)
+      db.setListingThumb(t.id, file, src)
+      saved++
+    } catch {
+      // 失敗しても再試行しない
+    }
+    await sleep(300 + Math.floor(Math.random() * 500))
+  }
+  return { saved, attempted }
+}
+
+// ------------------------------------------------------------
+// ②（取引中・取引完了）と③（売上金管理）の結合（純粋関数。テストで確かめる）
+// ------------------------------------------------------------
+
+/** ②と③を商品idで結合した1件（combineYahooSales の要素） */
+export interface YahooCombinedSale {
+  yahooItemId: string
+  /** タイトル。②（取引ページ）の全文があればそれ、無ければ③（売上金管理）の商品名（途中で切れている） */
+  title: string
+  /** 決済金額（③） */
+  price: number
+  /** 販売手数料の実額（③。0円もある） */
+  fee: number
+  /** 取扱日（③。計上日として使う） */
+  soldAt: string
+  /** ②のtradstatをmapYahooTradstatで判定した状態。②に無ければ null（推測で埋めない） */
+  status: SaleStatus | null
+  /** ②のサムネイルURL。②に無ければ null */
+  thumbUrl: string | null
+}
+
+/**
+ * 「取引中・取引完了」（②）と「売上金管理」（③）を商品idで結合する。
+ *
+ * ③を起点にループする（日付・実額が③にしか無いため）。②にしか無い行（まだ売上金管理に
+ * 出ていない＝日付が無い）はここでは作らない。次回の収集で③に出てから作る。
+ *
+ * amountsConsistent が false の行（決済金額－手数料≠受取額。受取連絡後に送料の行が増えて
+ * 式が崩れた等）は combine せず、skippedInconsistent の件数だけ増やして返す
+ * （黙って通すと送料が利益に残ってしまう）。
+ */
+export function combineYahooSales(
+  soldRows: YahooScrapedSale[],
+  salesRows: YahooSalesRow[],
+): { sales: YahooCombinedSale[]; skippedInconsistent: number } {
+  const soldById = new Map(soldRows.map(r => [r.yahooItemId, r]))
+  const sales: YahooCombinedSale[] = []
+  let skippedInconsistent = 0
+
+  for (const s of salesRows) {
+    if (!s.amountsConsistent) {
+      skippedInconsistent++
+      continue
+    }
+    const sold = soldById.get(s.yahooItemId)
+    sales.push({
+      yahooItemId: s.yahooItemId,
+      title: sold && sold.title ? sold.title : s.itemName,
+      price: s.settlementAmount,
+      fee: s.feeAmount,
+      soldAt: s.handledDate,
+      status: sold ? mapYahooTradstat(sold.tradstat) : null,
+      thumbUrl: sold?.thumbUrl ?? null,
+    })
+  }
+
+  return { sales, skippedInconsistent }
+}
+
+/** splitYahooCombinedSales の返り値 */
+export interface YahooCombinedSalesSplit {
+  /** 新規（db.insertCollected へ渡す） */
+  freshMatched: YahooCombinedSale[]
+  /** 既に帳簿にある（db.updateYahooActuals へ渡す） */
+  knownMatched: YahooCombinedSale[]
+  /** 新規のうちキーワード不一致で弾いた件数 */
+  excludedByKeyword: number
+  /** 新規のうち削除済み（sale_exclusion）で弾いた件数 */
+  excludedDeleted: number
+}
+
+/**
+ * combineYahooSales の結果を「新規（insertCollected へ）」と「既知（updateYahooActuals へ）」に
+ * 分ける（実行部 collect() の配線を単体でテストできるように切り出した純粋関数）。
+ *
+ * knownIds は db.existingMercariIds、excludedIds は db.isMercariItemExcluded で事前に解決した
+ * 結果を呼び出し側が渡す（この関数自体は DB に触らない）。
+ *
+ * combined は combineYahooSales が amountsConsistent=false の行をすでに除いた後のものなので、
+ * ここでは意識しなくてよい（新規・既知のどちらにも式が崩れた行は混ざらない）。
+ * 削除済み（sale_exclusion）は新規側だけ弾く（既知はすでに帳簿にある＝削除判定は関係ない）。
+ * キーワード不一致は新規・既知の両方から弾く（不一致の詳細・サムネイルを取りに行かない規則と同じ）。
+ */
+export function splitYahooCombinedSales(
+  combined: YahooCombinedSale[],
+  knownIds: Set<string>,
+  excludedIds: Set<string>,
+  keywords: string[],
+): YahooCombinedSalesSplit {
+  const freshAll = combined.filter(c => !knownIds.has(c.yahooItemId))
+  const knownCombined = combined.filter(c => knownIds.has(c.yahooItemId))
+
+  const freshNotDeleted = freshAll.filter(c => !excludedIds.has(c.yahooItemId))
+  const excludedDeleted = freshAll.length - freshNotDeleted.length
+
+  const freshMatched = keywords.length > 0
+    ? freshNotDeleted.filter(c => db.matchesAnyKeyword(c.title, keywords))
+    : freshNotDeleted
+  const excludedByKeyword = freshNotDeleted.length - freshMatched.length
+
+  const knownMatched = keywords.length > 0
+    ? knownCombined.filter(c => db.matchesAnyKeyword(c.title, keywords))
+    : knownCombined
+
+  return { freshMatched, knownMatched, excludedByKeyword, excludedDeleted }
+}
+
+/** 3ページとも0件なら true（`empty` 扱い）。1つでも取れていれば false（出品を売り切ると出品0件はあり得る） */
+export function isYahooCollectEmpty(
+  listingCount: number, soldCount: number, salesCount: number,
+): boolean {
+  return listingCount === 0 && soldCount === 0 && salesCount === 0
+}
+
+// ------------------------------------------------------------
+// collect()
+// ------------------------------------------------------------
+
+/**
+ * 収集を1回実行する。
+ * @param silent true なら画面を出さない（起動時の自動実行）
+ */
+export async function collect(silent: boolean): Promise<CollectorRun> {
+  const runId = db.startRun('yahoo')
+  const win = createWindow(!silent)
+  let keepWindowOpen = false
+
+  try {
+    // ① 出品中
+    await win.loadURL(SELLING_URL)
+    await randomWait()
+
+    if (await isChallenge(win)) {
+      keepWindowOpen = true
+      revealForChallenge(win, 'Yahoo!フリマ')
+      return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
+    }
+    if (!(await isLoggedIn(win))) {
+      return db.finishRun(
+        runId, 'auth_required', 0, 0,
+        'Yahoo!フリマにログインし直してください（出品中一覧が開けませんでした）',
+      )
+    }
+
+    const sellingHtml = await outerHtml(win)
+    const scrapedListings = parseYahooSellingHtml(sellingHtml)
+
+    // ② 取引中・取引完了
+    await win.loadURL(SOLD_URL)
+    await randomWait()
+
+    if (await isChallenge(win)) {
+      keepWindowOpen = true
+      revealForChallenge(win, 'Yahoo!フリマ')
+      return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
+    }
+    if (!(await isLoggedIn(win))) {
+      return db.finishRun(
+        runId, 'auth_required', 0, 0,
+        'Yahoo!フリマにログインし直してください（取引中・取引完了が開けませんでした）',
+      )
+    }
+
+    const soldHtml = await outerHtml(win)
+    const soldRows = parseYahooSoldHtml(soldHtml)
+
+    // ③ 売上金管理（別ホスト：salesmanagement.yahoo.co.jp）
+    await win.loadURL(SALES_URL)
+    await randomWait()
+
+    if (await isChallenge(win)) {
+      keepWindowOpen = true
+      revealForChallenge(win, 'Yahoo!フリマ')
+      return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
+    }
+    if (!(await isLoggedIn(win))) {
+      // 2つのホストにまたがるため、同じYahoo IDのセッションでもここだけ通らないことがあり得る。
+      // 黙って0件にせず、どちらで弾かれたか分かる文言にする
+      return db.finishRun(
+        runId, 'auth_required', 0, 0,
+        '売上金管理（salesmanagement.yahoo.co.jp）でログインが確認できませんでした。'
+          + 'Yahoo!フリマにログインし直してください',
+      )
+    }
+
+    const salesHtml = await outerHtml(win)
+    const salesRows = parseYahooSalesHtml(salesHtml)
+
+    if (isYahooCollectEmpty(scrapedListings.length, soldRows.length, salesRows.length)) {
+      return db.finishRun(
+        runId, 'empty', 0, 0,
+        '0件でした。画面構造が変わってセレクタが壊れている可能性があります',
+      )
+    }
+
+    // --- 販売：②と③を商品idで結合する ---
+    const { sales: combined, skippedInconsistent } = combineYahooSales(soldRows, salesRows)
+
+    const keywords = db.parseKeywords(db.getSettings().yahoo_keyword ?? '')
+
+    const known = db.existingMercariIds(combined.map(c => c.yahooItemId))
+    // 削除した販売（sale_exclusion）は再取り込みしない（新規側だけ）
+    const excludedIds = new Set(
+      combined.filter(c => !known.has(c.yahooItemId) && db.isMercariItemExcluded(c.yahooItemId))
+        .map(c => c.yahooItemId),
+    )
+
+    // キーワードが設定されていれば、不一致は insertCollected / updateYahooActuals どちらにも
+    // 渡さない（詳細・サムネイルも取りに行かない）
+    const { freshMatched, knownMatched, excludedByKeyword, excludedDeleted } =
+      splitYahooCombinedSales(combined, known, excludedIds, keywords)
+
+    const insertedRows = freshMatched.length > 0
+      ? db.insertCollected(freshMatched.map(c => ({
+          mercariItemId: c.yahooItemId,
+          title: c.title,
+          price: c.price,
+          soldAt: c.soldAt,
+          fee: c.fee,
+          status: c.status,
+        })), 'yahoo')
+      : []
+
+    // --- 既に取り込み済みの販売（キーワード一致分だけ）を実額・状態で更新する ---
+    // メルカリ用の updateCollectedActuals は status='completed' を決め打ちするため使わない
+    // （Yahoo!は受取連絡待ちの取引も出るので、渡された status（null もそのまま）を使う updateYahooActuals を使う）
+    const updatedCount = knownMatched.length > 0
+      ? db.updateYahooActuals(knownMatched.map(c => ({
+          mercariItemId: c.yahooItemId,
+          soldAt: c.soldAt,
+          fee: c.fee,
+          price: c.price,
+          status: c.status,
+        })))
+      : 0
+
+    // --- サムネイル：新規 ＋ 既知（現在のキーワードに一致するもの）。予算は出品と合算で管理 ---
+
+    const thumbTargets = db.salesNeedingThumb(
+      [...freshMatched, ...knownMatched]
+        .filter((c): c is YahooCombinedSale & { thumbUrl: string } => !!c.thumbUrl)
+        .map(c => ({ mercariItemId: c.yahooItemId, thumbUrl: c.thumbUrl })),
+    )
+    const thumbsResult = await saveNewThumbs(thumbTargets, MAX_THUMBS_PER_RUN)
+
+    // --- 出品中一覧（①）。売却済みの後に読む。キーワードで絞る ---
+    const targetListings = keywords.length > 0
+      ? scrapedListings.filter(l => db.matchesAnyKeyword(l.title, keywords))
+      : scrapedListings
+
+    const listingResult = db.upsertListings(
+      targetListings.map(l => ({
+        mercariItemId: l.yahooItemId,
+        title: l.title,
+        price: l.price,
+        // Yahoo!フリマの「公開停止中」相当の表示は未観測（tradstat=NONEのみ出品中とみなす）
+        suspended: false,
+        thumbUrl: l.thumbUrl,
+        likes: l.likes,
+        listedAt: l.listedAt,
+      })),
+      'yahoo',
+    )
+
+    const listingThumbTargets = db.listingsNeedingThumb(
+      targetListings.map(l => ({ mercariItemId: l.yahooItemId, thumbUrl: l.thumbUrl })),
+    )
+    const listingThumbsResult = await saveNewListingThumbs(
+      listingThumbTargets, MAX_THUMBS_PER_RUN - thumbsResult.attempted,
+    )
+
+    const parts = [`新規 ${insertedRows.length}・更新 ${updatedCount}`]
+    if (excludedByKeyword > 0) parts.push(`キーワード不一致で除外 ${excludedByKeyword} 件`)
+    if (excludedDeleted > 0) parts.push(`削除済み ${excludedDeleted} 件`)
+    if (skippedInconsistent > 0) parts.push(`確認が要る ${skippedInconsistent} 件（内訳の式が合いません）`)
+    const totalThumbsSaved = thumbsResult.saved + listingThumbsResult.saved
+    if (totalThumbsSaved > 0) parts.push(`サムネイル ${totalThumbsSaved} 枚`)
+    parts.push(`出品 新規 ${listingResult.inserted}・更新 ${listingResult.updated}`)
+
+    const observedIds = new Set([
+      ...scrapedListings.map(l => l.yahooItemId),
+      ...soldRows.map(r => r.yahooItemId),
+      ...salesRows.map(r => r.yahooItemId),
+    ])
+
+    return db.finishRun(runId, 'ok', observedIds.size, insertedRows.length, parts.join('。'))
+
+  } catch (e) {
+    return db.finishRun(
+      runId, 'failed', 0, 0,
+      e instanceof Error ? e.message : String(e),
+    )
+  } finally {
+    if (!keepWindowOpen && !win.isDestroyed()) win.destroy()
+  }
 }

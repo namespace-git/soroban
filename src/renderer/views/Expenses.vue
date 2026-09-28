@@ -628,7 +628,7 @@ async function deleteCurrent() {
     <div class="layout">
       <!-- 左：一覧（月で区切り） -->
       <div class="panel list-panel">
-        <div class="list-toolbar">
+        <div class="toolbar list-toolbar">
           <SearchBox v-model="searchText" placeholder="購入店・品名・メモを検索" />
           <select v-model="categoryFilter">
             <option value="">すべての項目</option>
@@ -945,11 +945,10 @@ async function deleteCurrent() {
 
 .list-panel { padding: 0; overflow: hidden; }
 
+/* 共通の .toolbar（検索 → 絞り込み → 並び替え → 件数）に、左一覧パネルの中に
+   収まる見た目（余白・下罫）だけを足す。並び・組み方は他画面と揃える */
 .list-toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  margin-bottom: 0;
   padding: 12px 14px;
   border-bottom: 1px solid var(--line-soft);
 }

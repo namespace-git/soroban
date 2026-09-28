@@ -151,6 +151,17 @@ function feeRateBpFor(channel: SalesChannel): number {
 }
 
 /**
+ * 出品先ごとの転売/私物判定キーワード。mercari は設定 mercari_keyword、yahoo は yahoo_keyword
+ * （出品先ごとに扱う商品が違うことがあるため独立。feeRateBpFor と同じ考え方）。
+ *
+ * parseKeywords はこの関数より後ろで定義されているが、関数宣言は巻き上げられるので
+ * 実行時（呼び出し時）には問題なく参照できる。
+ */
+function keywordsFor(channel: SalesChannel): string[] {
+  return parseKeywords(settingStr(channel === 'yahoo' ? 'yahoo_keyword' : 'mercari_keyword', ''))
+}
+
+/**
  * 在庫コードを1つ発行する（setting.item_code_seq を+1）。形式は `S-0001`
  * （4桁ゼロ埋め。9999を超えたら桁が増える）。呼び出し側のトランザクション内で使うこと。
  *
@@ -2390,6 +2401,8 @@ export function applySaleActuals(
   actuals: {
     fee?: number | null
     shipping_fee?: number | null
+    /** 決済金額の実額。undefined/null なら触らない（Yahoo!フリマの売上金管理向け） */
+    price?: number | null
     sold_at?: string
     status?: SaleStatus
     completedAt?: string
@@ -2403,6 +2416,10 @@ export function applySaleActuals(
     // updateSale の価格変更で率に上書きされないようにする
     sets.push('fee = ?', `fee_source = 'actual'`)
     vals.push(actuals.fee)
+  }
+  if (actuals.price !== undefined && actuals.price !== null) {
+    sets.push('price = ?')
+    vals.push(actuals.price)
   }
   if (actuals.shipping_fee !== undefined && actuals.shipping_fee !== null) {
     if (actuals.shipping_fee > 0) {
@@ -2495,6 +2512,72 @@ export function updateCollectedActuals(
       {
         fee: r.fee, shipping_fee: r.shippingFee, sold_at: r.soldAt,
         status: 'completed', completedAt: r.soldAt,
+      },
+    )
+    updated++
+  }
+  return updated
+}
+
+/**
+ * Yahoo!フリマの売上金管理ページから取れた実額・状態で、既知の取引を更新する。
+ *
+ * メルカリの販売履歴と違い、Yahoo!フリマの売上金管理には「受取連絡待ち」等、まだ完了していない
+ * 取引も出る。だから updateCollectedActuals と違い、status を 'completed' に決め打ちしない。
+ * 渡された status をそのまま使う。status='completed' のときだけ completed_at を埋め、sold_at を
+ * 完了日へ動かす（applySaleActuals の規則に揃える）。status が null/undefined（②取引ページに
+ * まだ出ていない＝状態不明）のときは status・sold_at・completed_at に一切触らない（推測で埋めない）。
+ *
+ * fee・shippingFee・price の実額判定・fee_source の自己修復、送料0円のとき
+ * shipping_source='master'/'manual' を守る規則は applySaleActuals に委譲する（updateCollectedActuals
+ * と同じ）。kind・紐付けには触らない。戻り値は実際に applySaleActuals まで進んだ件数。
+ */
+export function updateYahooActuals(
+  rows: Array<{
+    mercariItemId: string
+    soldAt: string
+    fee?: number | null
+    shippingFee?: number | null
+    /** 決済金額の実額。②③の突き合わせで金額が動くことがあれば渡す */
+    price?: number | null
+    /** ②のtradstatから判定した状態。②に出ていなければ null（推測で埋めない） */
+    status?: SaleStatus | null
+  }>,
+): number {
+  let updated = 0
+  for (const r of rows) {
+    const sale = db.prepare(
+      'SELECT id, sold_at, status, fee, fee_source, shipping_fee, price, source FROM sale WHERE mercari_item_id = ?',
+    ).get(r.mercariItemId) as
+      | {
+          id: string; sold_at: string; status: SaleStatus | null; fee: number; fee_source: FeeSource
+          shipping_fee: number; price: number; source: SaleSource
+        }
+      | undefined
+    if (!sale) continue
+
+    const isCompleted = r.status === 'completed'
+    const feeChanged = r.fee != null && r.fee !== sale.fee
+    const feeSourceStale = r.fee != null && sale.fee_source !== 'actual'
+    const shippingChanged = r.shippingFee != null && r.shippingFee !== sale.shipping_fee
+    const priceChanged = r.price != null && r.price !== sale.price
+    // 完了を観測したときだけ、source='collector' の販売の sold_at を完了日へ動かす
+    const soldAtChanged = sale.source === 'collector' && isCompleted && sale.sold_at !== r.soldAt
+    // status が不明（null）のときは状態不一致を理由に進めない（推測で埋めない）
+    const statusChanged = r.status != null && sale.status !== r.status
+
+    if (
+      !feeChanged && !feeSourceStale && !shippingChanged && !priceChanged
+      && !soldAtChanged && !statusChanged
+    ) continue
+
+    applySaleActuals(
+      sale.id,
+      {
+        fee: r.fee, shipping_fee: r.shippingFee, price: r.price,
+        sold_at: isCompleted ? r.soldAt : undefined,
+        status: r.status ?? undefined,
+        completedAt: isCompleted ? r.soldAt : undefined,
       },
     )
     updated++
@@ -3078,9 +3161,12 @@ export function autoLinkPending(): number {
  */
 export function appendModelCodes(saleId: string, codes: string[]): boolean {
   const sale = db.prepare(
-    'SELECT kind, source, model_codes, created_at, updated_at FROM sale WHERE id = ?',
+    'SELECT channel, kind, source, model_codes, created_at, updated_at FROM sale WHERE id = ?',
   ).get(saleId) as
-    | { kind: SaleKind; source: string; model_codes: string; created_at: string; updated_at: string }
+    | {
+        channel: SalesChannel; kind: SaleKind; source: string; model_codes: string
+        created_at: string; updated_at: string
+      }
     | undefined
   if (!sale) return false
 
@@ -3095,7 +3181,8 @@ export function appendModelCodes(saleId: string, codes: string[]): boolean {
   }
   if (merged.length === existing.length) return false
 
-  const keywords = parseKeywords(settingStr('mercari_keyword', ''))
+  // その販売の出品先（channel）に応じたキーワードで判定する（mercari_keyword 固定にしない）
+  const keywords = keywordsFor(sale.channel)
   // source='collector' かつ一度も更新されていない（=人が手で触っていない）ときだけ救済する
   const untouched = sale.source === 'collector' && sale.updated_at === sale.created_at
   const kind: SaleKind =
@@ -5839,9 +5926,10 @@ export function insertCollected(
   channel: SalesChannel = 'mercari',
 ): Array<{ id: string; mercariItemId: string }> {
   const rateBp = feeRateBpFor(channel)
-  // 空なら「型番が抜けるか」で転売/私物を判定。空でなければキーワード（どれか1つでも部分一致・大小無視）で判定
+  // 空なら「型番が抜けるか」で転売/私物を判定。空でなければキーワード（どれか1つでも部分一致・大小無視）で判定。
+  // キーワードは出品先（channel）ごとに独立（mercari_keyword / yahoo_keyword）。keywordsFor 参照
   // （キーワードが設定されていれば collector 側で不一致は取り込まれないので、ここに来るのは一致したものだけ）
-  const keywords = parseKeywords(settingStr('mercari_keyword', ''))
+  const keywords = keywordsFor(channel)
 
   const ins = db.prepare(
     `INSERT INTO sale

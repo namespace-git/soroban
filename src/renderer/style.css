@@ -452,6 +452,27 @@ tr.total-row.loss > td {
   margin-top: 4px;
 }
 
+/* 一覧の「行」（売上・仕入・在庫・商品カルテ）だけに付ける修飾クラス。
+   行の高さをタグ・メモの量で変えないため、1行分の高さで固定し（nowrap）、
+   収まらない分は折り返さずに省く。並び順で先に置いたボタン・状態表示
+   （型番編集・転売/私物 など）は必ず収まり、後ろに続くタグだけが省かれる形にする。
+   省いた分は呼び出し側が付ける title 属性で読める。
+   ドロワー等（PurchaseDrawer の品目チップなど）は対象外 — このクラスを付けない限り
+   今までどおり折り返す。 */
+.chip-row.fixed-row {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  /* button.sm（28px）が混じっても混じらなくても同じ高さになるよう、
+     入りうる中で一番背が高いもの（button.sm の高さ）に合わせる */
+  min-height: 28px;
+}
+/* flex-shrink の既定（1）だと幅が足りないときに先頭のボタン・チップの文字まで
+   潰れて折り返してしまう。収まらない分は後ろを隠すだけにしたいので、
+   子は縮めずコンテナごとクリップする */
+.chip-row.fixed-row > * {
+  flex-shrink: 0;
+}
+
 .note-row {
   display: flex;
   align-items: flex-start;
@@ -476,6 +497,20 @@ tr.total-row.loss > td {
   font-size: var(--fs-13);
   white-space: normal;
   word-break: break-word;
+}
+
+/* 一覧の「行」だけに付ける修飾クラス（chip-row.fixed-row と同じ理由）。
+   メモが無い行でも div ごと描画して高さを確保し（呼び出し側は v-if を外す）、
+   メモは1行に収めて全文は title 属性で読ませる。行の高さをメモの長さで変えない */
+.note-row.fixed-row {
+  /* .note-text（fs-13・行間1.6）の自然な高さと合わせる。メモが無い行だけこの
+     min-height で床上げされ、メモがある行はこの高さぴったりで収まる */
+  min-height: calc(var(--fs-13) * 1.6);
+}
+.note-row.fixed-row .note-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* --- バッジ / チップ --- */
@@ -623,6 +658,9 @@ tr.total-row.loss > td {
    ■ 行の高さは中身で変えない
      名前は 2 行（.one-line なら 1 行）、補助は 1 行でクランプし、
      その分の高さを min-height で先に確保する。全文は title 属性で読ませる。
+     .chip-row・.note-row に .fixed-row を足すと同じ考え方で1行ぶんの高さに固定できる
+     （nowrap。ドロワー等のチップは対象外なので今までどおり折り返す）。
+     .note-row.fixed-row はメモが無い行でも div ごと描画して高さを確保する。
 
    ■ ツールバーは .toolbar だけを使い（画面ごとの別名を作らない）、
      並びは 検索 → 絞り込み（状態・タグ・期間）→ 並び替え → .grow → .toolbar-count。

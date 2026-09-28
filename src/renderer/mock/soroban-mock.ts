@@ -299,6 +299,7 @@ let settings: Record<string, string> = {
   collect_interval_h: '1',
   aging_warn_days: '90',
   mercari_keyword: '【',
+  yahoo_keyword: 'メロジョイ, Mellojoy',
   track_shipping: '1',
 }
 
@@ -4065,11 +4066,28 @@ const api: SorobanApi = {
       shop_account_id: shop?.id ?? null,
       shop_account_name: shop?.name ?? null,
     }
-    runs.unshift(mellojoyRun, mercariRun)
-    return [mercariRun, mellojoyRun]
+    // メルカリと同時に並列で走る想定（メルカリ・メロジョイとはサイトが違うため）
+    const yahooRun: CollectorRun = {
+      id: uid(),
+      started_at: isoLocal(now),
+      finished_at: isoLocal(new Date(now.getTime() + 3500)),
+      status: 'ok',
+      fetched: 1,
+      inserted: 0,
+      message: null,
+      source: 'yahoo',
+      shop_account_id: null,
+      shop_account_name: null,
+    }
+    runs.unshift(mellojoyRun, yahooRun, mercariRun)
+    return [mercariRun, mellojoyRun, yahooRun]
   },
 
   async openLogin() {
+    return wait(undefined)
+  },
+
+  async openYahooLogin() {
     return wait(undefined)
   },
 

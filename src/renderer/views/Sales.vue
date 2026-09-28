@@ -838,6 +838,25 @@ function tagOriginMark(from?: Tag['from']): string {
   return from ? TAG_ORIGIN_MARK[from] : ''
 }
 
+// --- .chip-row は行の高さを一定にするため1行に収め（nowrap）、収まらない分は隠す。
+//     隠れた分も含めて全文を title で読めるようにする ---
+function saleChipRowTitle(s: SaleProfit): string {
+  return [
+    s.kind === 'personal' ? '私物' : '転売',
+    s.source === 'collector' ? '自動取得' : null,
+    ...s.model_codes,
+    ...s.tags.map(t => t.name),
+    ...s.inherited_tags.map(t => t.name),
+  ].filter((x): x is string => !!x).join(' ・ ')
+}
+function listingChipRowTitle(l: Listing): string {
+  return [
+    ...l.model_codes,
+    l.likes != null ? `いいね ${l.likes}` : null,
+    seenStale(l) ? '前回の取り込みで見えず' : null,
+  ].filter((x): x is string => !!x).join(' ・ ')
+}
+
 // --- タグ ---
 
 function openTagPicker(sale: SaleProfit, e: MouseEvent) {
@@ -1021,6 +1040,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
     </p>
 
     <div class="toolbar">
+      <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
       <select v-if="stage === 'listed'" v-model="listedFilter" title="紐付けの状態で絞り込む">
         <option value="all">すべて</option>
         <option value="unallocated">未紐付け</option>
@@ -1054,7 +1074,6 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
           <option v-for="t in inventoryTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
         </optgroup>
       </select>
-      <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
       <PeriodSelect v-model="period" />
       <button
         v-if="monthFilter"
@@ -1163,7 +1182,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 
             <template v-if="r.kind === 'sale' && r.sale">
               <div class="row-sub">{{ saleSubText(r.sale) }}</div>
-              <div class="chip-row">
+              <div class="chip-row fixed-row" :title="saleChipRowTitle(r.sale)">
                 <button
                   v-if="r.sale.kind === 'resale'"
                   class="kind-toggle"
@@ -1185,16 +1204,18 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                   <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
                 </span>
               </div>
-              <div v-if="r.sale.note" class="note-row">
-                <Icon name="note" :size="14" class="icon-note" />
-                <span class="note-label">メモ</span>
-                <span class="note-text">{{ r.sale.note }}</span>
+              <div class="note-row fixed-row">
+                <template v-if="r.sale.note">
+                  <Icon name="note" :size="14" class="icon-note" />
+                  <span class="note-label">メモ</span>
+                  <span class="note-text" :title="r.sale.note">{{ r.sale.note }}</span>
+                </template>
               </div>
             </template>
 
             <template v-else-if="r.listing">
               <div class="row-sub" title="更新日から推定">{{ listingSubText(r.listing) }}</div>
-              <div class="chip-row">
+              <div class="chip-row fixed-row" :title="listingChipRowTitle(r.listing)">
                 <CodeChip v-for="mc in r.listing.model_codes" :key="mc" kind="model" :code="mc" />
                 <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
                 <StatusChip
@@ -1204,6 +1225,8 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                   title="1ページ目に無かっただけかもしれません。売れていれば売上に出ます"
                 />
               </div>
+              <!-- 出品にはメモが無いが、販売行と高さを揃えるため同じ分だけ確保する -->
+              <div class="note-row fixed-row"></div>
             </template>
           </div>
 

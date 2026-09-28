@@ -436,6 +436,24 @@ function tagOriginMark(from?: Tag['from']): string {
   return from ? TAG_ORIGIN_MARK[from] : ''
 }
 
+// --- .chip-row は行の高さを一定にするため1行に収め（nowrap）、収まらない分は隠す。
+//     隠れた分も含めて全文を title で読めるようにする ---
+function itemTagsTitle(i: InventoryItem): string {
+  return [...i.tags.map(t => t.name), ...i.inherited_tags.map(t => t.name)].join(' ・ ')
+}
+/** 「1点ずつ」表の chip-row 全体（コード・状態・タグ）をまとめた title */
+function itemChipRowTitle(i: InventoryItem): string {
+  return [
+    i.item_code,
+    i.model_code,
+    itemPillState(i)?.label,
+    itemChipState(i)?.label,
+    i.parent_id ? '分割' : null,
+    ...i.tags.map(t => t.name),
+    ...i.inherited_tags.map(t => t.name),
+  ].filter((x): x is string => !!x).join(' ・ ')
+}
+
 const tagPickerForId = ref<string | null>(null)
 const tagPickerAnchor = ref<HTMLElement | null>(null)
 function findItem(id: string | null): InventoryItem | null {
@@ -587,11 +605,11 @@ async function editNote(item: InventoryItem) {
     <StageStrip v-else :stages="stages" :active="activeStage" @select="selectStage" />
 
     <div class="toolbar">
+      <SearchBox v-model="searchText" placeholder="名前・型番・素材・メモ・タグ・仕入先を検索" />
       <span class="seg">
         <button type="button" :class="{ on: viewMode === 'group' }" @click="viewMode = 'group'">型番ごと</button>
         <button type="button" :class="{ on: viewMode === 'flat' }" @click="viewMode = 'flat'">1点ずつ</button>
       </span>
-      <SearchBox v-model="searchText" placeholder="名前・型番・素材・メモ・タグ・仕入先を検索" />
       <select v-model="statusSelectValue">
         <option v-for="o in statusOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
       </select>
@@ -704,7 +722,7 @@ async function editNote(item: InventoryItem) {
                 @keydown.space.prevent="openTimeline(i)"
               >
                 <span>{{ i.shop_account_name ?? '—' }} ・ {{ i.acquired_at }} 仕入</span>
-                <div class="chip-row">
+                <div class="chip-row fixed-row" :title="itemTagsTitle(i)">
                   <StatusChip v-for="t in i.tags" :key="t.id" tone="info" :label="t.name" />
                   <span
                     v-for="t in i.inherited_tags" :key="'inh-' + t.id"
@@ -714,10 +732,12 @@ async function editNote(item: InventoryItem) {
                     <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
                   </span>
                 </div>
-                <div v-if="i.note" class="note-row">
-                  <Icon name="note" :size="14" class="icon-note" />
-                  <span class="note-label">メモ</span>
-                  <span class="note-text">{{ i.note }}</span>
+                <div class="note-row fixed-row">
+                  <template v-if="i.note">
+                    <Icon name="note" :size="14" class="icon-note" />
+                    <span class="note-label">メモ</span>
+                    <span class="note-text" :title="i.note">{{ i.note }}</span>
+                  </template>
                 </div>
               </div>
               <div class="git-cost num" :class="{ faint: i.status !== 'in_stock' }">{{ yen(i.landed_cost) }}</div>
@@ -825,7 +845,7 @@ async function editNote(item: InventoryItem) {
                 @keydown.enter="openTimeline(i)"
                 @keydown.space.prevent="openTimeline(i)"
               >{{ i.name }}</div>
-              <div class="chip-row">
+              <div class="chip-row fixed-row" :title="itemChipRowTitle(i)">
                 <CodeChip kind="item" :code="i.item_code" />
                 <CodeChip v-if="i.model_code" kind="model" :code="i.model_code" />
                 <button
@@ -848,10 +868,12 @@ async function editNote(item: InventoryItem) {
                   <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
                 </span>
               </div>
-              <div v-if="i.note" class="note-row">
-                <Icon name="note" :size="14" class="icon-note" />
-                <span class="note-label">メモ</span>
-                <span class="note-text">{{ i.note }}</span>
+              <div class="note-row fixed-row">
+                <template v-if="i.note">
+                  <Icon name="note" :size="14" class="icon-note" />
+                  <span class="note-label">メモ</span>
+                  <span class="note-text" :title="i.note">{{ i.note }}</span>
+                </template>
               </div>
             </td>
             <td class="faint">{{ i.shop_account_name ?? '—' }}</td>
@@ -1055,8 +1077,6 @@ async function editNote(item: InventoryItem) {
 .git-code { grid-area: code; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .split-label { font-size: var(--fs-11); }
 .git-meta { grid-area: meta; min-width: 0; }
-/* タグの段はタグが無い行でも高さを確保する。行ごとに高さが変わらないように */
-.git-meta .chip-row { margin-top: 4px; min-height: 22px; }
 .git-cost { grid-area: cost; text-align: right; font-variant-numeric: tabular-nums; }
 .git-aging { grid-area: aging; text-align: center; }
 .git-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; grid-area: state; text-align: left; }

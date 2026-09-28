@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
 import { CHANNEL_LABEL } from '../../shared/types'
 import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck } from '../../shared/types'
+import { runSourceLabel } from '../utils/collector-run'
 
 type SaleExclusion = { mercari_item_id: string; title: string; excluded_at: string }
 import Icon from '../components/Icon.vue'
@@ -354,6 +355,10 @@ function revealFolder() {
 
 function openLogin() {
   return window.soroban.openLogin()
+}
+
+function openYahooLogin() {
+  return window.soroban.openYahooLogin()
 }
 
 function openShopLogin(id: string) {
@@ -718,7 +723,7 @@ const runLabel: Record<string, string> = {
           <tbody>
             <tr v-for="r in runs" :key="r.id">
               <td class="faint">{{ dateTime(r.started_at) }}</td>
-              <td class="faint col-target">{{ r.source === 'mercari' ? 'メルカリ' : (r.shop_account_name ?? 'メロジョイ') }}</td>
+              <td class="faint col-target">{{ runSourceLabel(r) }}</td>
               <td>
                 <StatusChip
                   :tone="r.status === 'ok' ? 'ok' : 'warn'"
@@ -766,6 +771,15 @@ const runLabel: Record<string, string> = {
           <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
           <h2 class="section-head-title">{{ CHANNEL_LABEL.yahoo }}</h2>
         </div>
+        <div class="row">
+          <button @click="openYahooLogin"><Icon name="login" :size="16" /> {{ CHANNEL_LABEL.yahoo }}にログイン</button>
+          <p class="faint">初回だけ。以後はセッションを再利用します</p>
+        </div>
+        <p class="faint hint">
+          {{ CHANNEL_LABEL.yahoo }}の取り込みは 2 つのページにまたがりますが、同じ Yahoo ID なので
+          このログイン 1 回で両方に入れるはずです。取り込みが「ログインが必要です」に戻るときは、
+          もう一度ここからログインしてください。
+        </p>
         <div class="fields">
           <label class="field">
             <span>{{ CHANNEL_LABEL.yahoo }}で転売と判定するキーワード（カンマ区切りで複数可）</span>
