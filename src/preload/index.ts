@@ -116,6 +116,7 @@ const api: SorobanApi = {
   setSetting: invoke('setSetting'),
 
   collect: invoke('collect'),
+  getLastTrackingSummary: invoke('getLastTrackingSummary'),
   openLogin: invoke('openLogin'),
   openYahooLogin: invoke('openYahooLogin'),
   estimateSaleProfit: invoke('estimateSaleProfit'),

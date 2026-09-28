@@ -15,7 +15,7 @@ import * as backup from './backup'
 import * as inbox from './inbox'
 import * as views from './views'
 import * as applog from './applog'
-import type { CollectorRun, ExportKind, SalesChannel, SorobanApi } from '../shared/types'
+import type { CollectorRun, ExportKind, SalesChannel, SorobanApi, TrackingCheckSummary } from '../shared/types'
 
 // ============================================================
 // そろばん — メインプロセス
@@ -72,6 +72,13 @@ function createMainWindow(): void {
 // 起動時収集（collectInBackground）と手動収集（IPC 'collect'）が同時に走ると、メルカリ・
 // メロジョイのウィンドウが並行して開いてしまう。実行中の Promise を共有し、同時には1つだけに絞る
 let collectAllRunning: Promise<CollectorRun[]> | null = null
+
+/**
+ * 直近の配送状況（17TRACK）の確認結果。`collector_run` は作らないので画面から見えず、
+ * 「自動で確認してくれないのか」と見えてしまう分をここで覚えて getLastTrackingSummary に渡す。
+ * メモリだけ（アプリを閉じたら消えてよい）
+ */
+let lastTrackingSummary: TrackingCheckSummary | null = null
 
 export function collectAll(silent: boolean): Promise<CollectorRun[]> {
   if (collectAllRunning) return collectAllRunning
@@ -154,6 +161,7 @@ async function checkShippingIfEnabled(): Promise<void> {
     const t = await collectorTracking.checkTrackingBatch()
     if (t.registered > 0 || t.checked > 0 || t.failed > 0 || t.stopped) {
       applog.log('collector', 'tracking', '配送状況を確認しました', t)
+      lastTrackingSummary = { ...t, at: new Date().toISOString() }
     }
     if (t.stopped) console.warn('配送状況の確認を中断しました:', t.stopped)
   } catch (e) {
@@ -195,7 +203,7 @@ async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
  */
 const UNLOGGED_HANDLERS = new Set<keyof SorobanApi>([
   'logClient', 'getDashboard', 'listSales', 'listListings', 'listInventory',
-  'getAutoBackupStatus', 'getHealthChecks', 'getTrackingApiStatus',
+  'getAutoBackupStatus', 'getHealthChecks', 'getTrackingApiStatus', 'getLastTrackingSummary',
   'suggestProductInventory',
   'listPurchases', 'listMonthly', 'listExpenses', 'searchAll', 'getSettings',
   'getMonthDetail', 'listProducts', 'listTags', 'listShopAccounts', 'listShippingMethods',
@@ -375,6 +383,7 @@ function registerIpc(): void {
   handle('setSetting', (k, v) => db.setSetting(k, v))
 
   handle('collect', () => collectAll(db.getSettings().collect_show_window !== '1'))
+  handle('getLastTrackingSummary', () => lastTrackingSummary)
   handle('openLogin', () => collector.openLoginWindow())
   handle('openYahooLogin', () => collectorYahoo.openYahooLogin())
   handle('estimateSaleProfit', (input) => db.estimateSaleProfit(input))

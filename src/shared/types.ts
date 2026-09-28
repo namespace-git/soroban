@@ -14,6 +14,25 @@ export type AllocMethod = 'by_amount' | 'by_quantity'
 export type RunStatus = 'ok' | 'auth_required' | 'failed' | 'empty'
 /** 収集の対象。mercari = 販売履歴 / mellojoy = 仕入先アカウントの注文履歴 */
 export type CollectorSource = 'mercari' | 'mellojoy' | 'yahoo'
+
+/**
+ * 配送状況（17TRACK）を 1 回確認した結果。`collector_run` とは別物で、DB には残さない
+ * （直近の 1 回だけを main が覚えている。アプリを閉じると消える）
+ */
+export interface TrackingCheckSummary {
+  /** 17TRACK に新しく登録した追跡番号の数（無料枠を消費するのはここ） */
+  registered: number
+  /** 状況を見に行った追跡番号の数 */
+  checked: number
+  /** その結果、到着済みになった仕入の数 */
+  delivered: number
+  /** 読めなかった数 */
+  failed: number
+  /** 途中で打ち切った理由（APIキーが無い・制限に当たった等）。続けられたなら null */
+  stopped: string | null
+  /** 確認した時刻（ISO） */
+  at: string
+}
 /** draft = 注文履歴から積んだ下書き（価格が確定できなかったもの）。在庫は confirmed で生成 */
 /**
  * 出品先（販売した／出品しているサイト）。
@@ -1330,6 +1349,16 @@ export interface SorobanApi {
    * サイトが違うものは並列、同じサイトの中（仕入先アカウントどうし、Yahoo の各ページ）は直列
    */
   collect(): Promise<CollectorRun[]>
+  /**
+   * 直近の配送状況（17TRACK）の確認結果。取り込みのたびに更新される。
+   * まだ一度も確認していない／設定 `track_shipping` で切ってあるときは null。
+   *
+   * 配送状況の確認は `collect()` の中で他の取り込みと並列に走るが、
+   * **`collector_run` を作らない**（`collector_run.source` は取り込み先を表す列で、
+   * 配送状況は取り込み先ではないため）。そのせいで走ったことが画面に出ず、
+   * 利用者から「自動で確認してくれないのか」と見えていたので、ここで取れるようにする
+   */
+  getLastTrackingSummary(): Promise<TrackingCheckSummary | null>
   /** メルカリのログイン画面を開く。認証情報は保存しない（セッションのプロファイルだけ持つ） */
   openLogin(): Promise<void>
   /**

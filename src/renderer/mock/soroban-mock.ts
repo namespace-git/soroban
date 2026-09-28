@@ -20,7 +20,7 @@ import type {
   ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
   Listing, ListingStatus, SalesChannel, FeeSource,
   Expense, ExpenseInput, ExpenseLineInput, ExpenseLine, ExpenseCategory,
-  ReceiptDraft, ReceiptRead, AiStatus, TrackingApiStatus,
+  ReceiptDraft, ReceiptRead, AiStatus, TrackingApiStatus, TrackingCheckSummary,
   AllocMethod, MonthClose, MonthDetail, MonthSaleRow, MonthTotals,
   SearchHit,
   UpdateStatus,
@@ -313,6 +313,14 @@ let trackingKeyConfigured = true
 const TRACK17_SAFE_STORAGE = true
 const trackingUnregistered = 2
 const trackingWatching = 1
+
+/**
+ * 直近の配送状況の確認結果（main の lastTrackingSummary に相当）。collect() のたびに
+ * 3パターンを順に見せる：①届いたものがある ②何も変わらない（更新しない＝画面に出ない）
+ * ③打ち切った。画面確認用の見本
+ */
+let mockTrackingSummary: TrackingCheckSummary | null = null
+let trackingCollectCount = 0
 
 /** 実際の Gemini 呼び出しは数秒かかる想定に寄せて 1 秒待つ */
 function waitAi<T>(value: T): Promise<T> {
@@ -4080,7 +4088,26 @@ const api: SorobanApi = {
       shop_account_name: null,
     }
     runs.unshift(mellojoyRun, yahooRun, mercariRun)
+
+    // 配送状況の確認は collect() の中で並行して走る想定。3回に1回は「何も変わらない」を
+    // 見せるため、その回だけ更新しない（main も変化が無ければ書き換えない）
+    trackingCollectCount++
+    const cycle = trackingCollectCount % 3
+    // main の実装（src/main/index.ts）に合わせて new Date().toISOString()（ミリ秒まで）を使う。
+    // isoLocal は分までしか無く、短い間隔で連打すると「新しい結果」と区別できなくなる
+    const trackingAt = new Date(now.getTime() + 4500).toISOString()
+    if (cycle === 1) {
+      mockTrackingSummary = { registered: 1, checked: 2, delivered: 1, failed: 0, stopped: null, at: trackingAt }
+    } else if (cycle === 0) {
+      mockTrackingSummary = { registered: 0, checked: 1, delivered: 0, failed: 0, stopped: '回数の上限に達しました', at: trackingAt }
+    }
+    // cycle === 2 のときは何もしない（前回の結果のまま＝画面には新しく出ない）
+
     return [mercariRun, mellojoyRun, yahooRun]
+  },
+
+  async getLastTrackingSummary(): Promise<TrackingCheckSummary | null> {
+    return wait(mockTrackingSummary ? { ...mockTrackingSummary } : null)
   },
 
   async openLogin() {

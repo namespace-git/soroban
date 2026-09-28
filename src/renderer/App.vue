@@ -17,7 +17,7 @@ import Monthly from './views/Monthly.vue'
 import Expenses from './views/Expenses.vue'
 import Settings from './views/Settings.vue'
 import Help from './views/Help.vue'
-import type { CollectorRun, DashboardStats, ProfitStrip, SaleStatus, SearchHit, UpdateStatus } from '../shared/types'
+import type { CollectorRun, DashboardStats, ProfitStrip, SaleStatus, SearchHit, TrackingCheckSummary, UpdateStatus } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 import { runSourceLabel } from './utils/collector-run'
 
@@ -284,12 +284,35 @@ function runMessage(run: CollectorRun): string {
   return messages[run.status] ?? run.status
 }
 
-// メルカリ→仕入先アカウント→Yahoo!フリマの順で1回分がまとめて返る。1つのトーストにまとめる
-function reportRun(runs: CollectorRun[]) {
-  if (!runs.length) return
-  const text = runs.map(r => `${runSourceLabel(r)}: ${runMessage(r)}`).join('／')
-  const kind: 'ok' | 'warn' = runs.every(r => r.status === 'ok') ? 'ok' : 'warn'
-  showNotice({ text, kind })
+// 直近に画面へ出した配送状況の確認結果（at の値）。同じ結果を2度出さないための見張り
+const lastShownTrackingAt = ref<string | null>(null)
+
+/**
+ * 配送状況（17TRACK）の確認結果を1文にする。「17TRACK」「API」は出さない
+ * （説明を受けていない家族が読む）。届いた数が分かるのがいちばん嬉しい情報
+ */
+function trackingMessage(t: TrackingCheckSummary): string {
+  if (t.stopped) return `配送状況の確認を中断しました：${t.stopped}`
+  if (t.delivered > 0) return `配送状況：${t.delivered}件届いたのを確認しました`
+  return '配送状況を確認しました'
+}
+
+// メルカリ→仕入先アカウント→Yahoo!フリマの順で1回分がまとめて返る。1つのトーストにまとめる。
+// 配送状況の確認は collect() の中で並行して走るが collector_run を作らないため、
+// 「走ったのか分からない」と見えないよう、変化があったときだけ同じトーストに添える
+async function reportRun(runs: CollectorRun[]) {
+  const parts = runs.map(r => `${runSourceLabel(r)}: ${runMessage(r)}`)
+  let kind: 'ok' | 'warn' = runs.some(r => r.status !== 'ok') ? 'warn' : 'ok'
+
+  const t = await window.soroban.getLastTrackingSummary()
+  if (t && t.at !== lastShownTrackingAt.value) {
+    lastShownTrackingAt.value = t.at
+    parts.push(trackingMessage(t))
+    if (t.stopped) kind = 'warn'
+  }
+
+  if (!parts.length) return
+  showNotice({ text: parts.join('／'), kind })
   revision.value++
 }
 
@@ -305,7 +328,7 @@ async function collect() {
   collecting.value = true
   showNotice(null)
   try {
-    reportRun(await window.soroban.collect())
+    await reportRun(await window.soroban.collect())
   } finally {
     collecting.value = false
   }
