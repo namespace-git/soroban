@@ -1544,7 +1544,19 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 
 .clickable { cursor: pointer; }
 
-.fee-line { font-size: var(--fs-12); margin-top: 2px; }
+/* 「実額」チップは .cell-price の80px幅に収まらないことがある（Yahoo!フリマ）。
+   .num の white-space: nowrap を継承すると折り返せず隣の発送方法セレクトに重なるため、
+   ここだけ折り返しを許し、チップは右寄せのまま2行目に落ちる */
+.fee-line {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 2px 4px;
+  white-space: normal;
+  font-size: var(--fs-12);
+  margin-top: 2px;
+}
 
 .chip-row .fade-btn { padding: 3px 6px; }
 
