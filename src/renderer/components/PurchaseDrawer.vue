@@ -24,6 +24,8 @@ const emit = defineEmits<{
   editTag: [purchase: PurchaseDetail, event: MouseEvent]
   editNote: [purchase: PurchaseDetail]
   editFulfillment: [purchase: PurchaseDetail]
+  /** ここで直接 API を叩いて自分の detail だけ読み直した（＝一覧の行はまだ古いまま）ときに出す */
+  changed: []
 }>()
 
 // ホームの型番ランキング・商品タブと同じ inject。売れた在庫のチップから売上タブの該当行へ飛ぶ
@@ -170,6 +172,7 @@ async function onCheckTracking() {
     }
     await load()
     changed()
+    emit('changed')
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), 'warn')
   } finally {
@@ -197,8 +200,13 @@ async function onRefetchImages() {
   refetchingImages.value = true
   try {
     const { saved } = await window.soroban.refetchPurchaseImages(detail.value.id)
-    if (saved > 0) toast(`画像を${saved}枚取り込みました`, 'ok')
-    else toast('新しく取得する画像はありません（取得済み、または画像なし）', 'warn')
+    if (saved > 0) {
+      toast(`画像を${saved}枚取り込みました`, 'ok')
+      changed()
+      emit('changed')
+    } else {
+      toast('新しく取得する画像はありません（取得済み、または画像なし）', 'warn')
+    }
     await load()
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), 'warn')

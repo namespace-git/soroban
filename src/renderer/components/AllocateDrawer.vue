@@ -34,7 +34,8 @@ const search = ref('')
 const loading = ref(false)
 const productInfo = ref(new Map<string, ProductSummary>())
 const failedProductImages = ref(new Set<string>())
-const selectionMode = ref<'inventory' | 'product'>('inventory')
+// 毎日ここで紐付けるので、開いた瞬間から「商品から選ぶ（先入れ先出し）」になっている
+const selectionMode = ref<'inventory' | 'product'>('product')
 const productQuantity = ref(1)
 const pickingProduct = ref(false)
 let productPickRequest = 0
@@ -86,7 +87,7 @@ watch(
     loadRequest++
     picked.value = new Set()
     search.value = ''
-    selectionMode.value = 'inventory'
+    selectionMode.value = 'product'
     productQuantity.value = 1
     productPickRequest++
     pickingProduct.value = false

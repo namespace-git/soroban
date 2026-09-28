@@ -406,6 +406,12 @@ async function onDrawerConfirmDraft(p: PurchaseSummary) {
   await confirmDraft(p)
 }
 
+// ドロワーが自分の中だけで直接 API を叩いた（配送状況の確認・画像の取り直し）ときは、
+// 一覧の行がまだ古いままなので読み直す（ドロワー自身はすでに reload 済み）
+async function onDrawerChanged() {
+  await load()
+}
+
 // --- 到着状態：チップ・行の「配送」ボタン・ドロワーの「配送」ボタン共通 ---
 
 function fulfillmentAutoTitle(p: PurchaseSummary): string | undefined {
@@ -808,6 +814,7 @@ async function remove(p: PurchaseSummary) {
       @edit-tag="onDrawerEditTag"
       @edit-note="onDrawerEditNote"
       @edit-fulfillment="onDrawerEditFulfillment"
+      @changed="onDrawerChanged"
     />
 
     <PurchaseCsvDrawer

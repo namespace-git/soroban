@@ -2081,11 +2081,12 @@ export function purchaseDetailRevisitCandidates(
          OR (
            (p.fulfillment IS NULL OR p.fulfillment <> 'delivered')
            AND (p.tracking_number IS NULL OR trim(p.tracking_number) = '')
-           AND p.ordered_at >= date('now', '-90 days')
+           AND p.ordered_at >= ?
          )
        )
      ORDER BY p.ordered_at DESC, p.id
-  `).all(shopAccountId, ...importKeys) as Array<{ id: string; import_key: string; name: string }>
+  `).all(shopAccountId, ...importKeys, subtractDaysLocal(todayLocal(), 90)) as
+    Array<{ id: string; import_key: string; name: string }>
   const candidates = new Map<string, { id: string; import_key: string }>()
   for (const row of rows) {
     if (keywords.length === 0 || matchesAnyKeyword(row.name, keywords)) {
@@ -4059,10 +4060,10 @@ export function disposeInventory(
     db.prepare('DELETE FROM listing_line WHERE inventory_item_id = ?').run(id)
     db.prepare(
       `UPDATE inventory_item
-          SET status = ?, disposed_at = date('now'),
+          SET status = ?, disposed_at = ?,
               disposed_note = ?, updated_at = datetime('now')
         WHERE id = ?`,
-    ).run(status, note, id)
+    ).run(status, todayLocal(), note, id)
   })
   tx()
 }

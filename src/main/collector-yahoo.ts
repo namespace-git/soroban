@@ -692,6 +692,35 @@ async function waitForYahooRender(win: BrowserWindow): Promise<{ html: string; r
 }
 
 // ------------------------------------------------------------
+// 0件だったときの HTML 保存（原因の切り分け用。CLAUDE.md「収集頻度を上げない」に従い、
+// ここでは既に読み終えた HTML をファイルに書き出すだけで、ページを余計に開き直さない）
+//
+// 保存先は userData 配下（リポジトリの外）。Yahoo ID・ニックネーム等の個人情報を含みうる
+// ため、利用者自身のパソコンの中だけに置く。ファイルは上書き（溜めない）。
+// ------------------------------------------------------------
+
+function yahooDebugDir(): string {
+  const dir = join(app.getPath('userData'), 'debug')
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** 0件だったページの HTML を `userData/debug/yahoo-<page>.html` に上書き保存し、保存先を返す */
+async function saveYahooDebugHtml(pageKey: 'selling' | 'sold' | 'sales', html: string): Promise<string> {
+  const file = join(yahooDebugDir(), `yahoo-${pageKey}.html`)
+  await writeFile(file, html, 'utf-8')
+  return file
+}
+
+/**
+ * ページ名・件数0のときに保存した HTML の場所と特徴を実行記録用の1行にする。
+ * 件数が1件以上なら何もしない（呼び出し側が判断材料を持てるよう常に呼ぶ設計にはしない）。
+ */
+export function formatYahooDebugSavedNote(pageLabel: string, file: string, summary: YahooHtmlSummary): string {
+  return `${pageLabel}：0件のHTMLを保存しました（${file}｜${formatYahooHtmlSummary(summary)}）`
+}
+
+// ------------------------------------------------------------
 // サムネイル保存（collector.ts と同じ作法。private ヘルパーは export されていないため
 // ここに複製する。thumbFileName だけ collector.ts から借りる）
 // ------------------------------------------------------------
@@ -927,6 +956,54 @@ export function hasYahooItemLinks(html: string): boolean {
   return /<a\b[^>]*\bhref="[^"]*\/item\/[a-z]\d{8,}[^"]*"/.test(html)
 }
 
+// ------------------------------------------------------------
+// 0件だったときの切り分け用：読んだ HTML の特徴を数える（純粋関数）
+//
+// 各パーサが実際に頼っている手がかりだけを数える：
+//   parseYahooSellingHtml / parseYahooSoldHtml → data-cl-params="…rcconid:…" を持つ <a>
+//   parseYahooSalesHtml                        → id="salelst" の <table>
+//   3ページとも                                 → 商品ページへの <a href="…/item/…">
+// __NEXT_DATA__ は出品中・取引中一覧（Next.js のクライアント描画）に元々埋まっている
+// JSON の有無。無ければ「そもそも別の画面が返ってきている」可能性が高い。
+// ------------------------------------------------------------
+
+/** summarizeYahooHtml の返り値 */
+export interface YahooHtmlSummary {
+  /** HTML文字列の長さ */
+  length: number
+  /** `data-cl-params="..."` の出現数（出品中・取引中一覧の行の起点） */
+  dataClParamsCount: number
+  /** `rcconid:` の出現数（data-cl-params の中の商品id） */
+  rcconidCount: number
+  /** `href="…/item/…"` の出現数（3ページとも商品へのリンクとして出る） */
+  itemHrefCount: number
+  /** `__NEXT_DATA__` を含むか（出品中・取引中一覧が Next.js のクライアント描画であることの目印） */
+  hasNextData: boolean
+  /** `id="salelst"` を含むか（売上金管理の一覧表の起点） */
+  hasSalelstTable: boolean
+}
+
+/** 読んだ HTML の、各パーサが頼っている手がかりの有無・個数を数える（DOM を組み立てない簡易カウント） */
+export function summarizeYahooHtml(html: string): YahooHtmlSummary {
+  return {
+    length: html.length,
+    dataClParamsCount: (html.match(/data-cl-params="/g) ?? []).length,
+    rcconidCount: (html.match(/rcconid:/g) ?? []).length,
+    // ナビの固定リンク（/my/item/selling /my/item/sold）を数に含めない。hasYahooItemLinks と
+    // 同じ「商品idを持つリンク」だけを数える（描画前の空の殻との違いが分かるように）
+    itemHrefCount: (html.match(/href="[^"]*\/item\/[a-z]\d{8,}[^"]*"/g) ?? []).length,
+    hasNextData: html.includes('__NEXT_DATA__'),
+    hasSalelstTable: /id="salelst"/.test(html),
+  }
+}
+
+/** summarizeYahooHtml の結果を実行記録の1行に短くまとめる */
+export function formatYahooHtmlSummary(s: YahooHtmlSummary): string {
+  return `長さ${s.length}・data-cl-params ${s.dataClParamsCount}・rcconid ${s.rcconidCount}・`
+    + `商品リンク ${s.itemHrefCount}・__NEXT_DATA__${s.hasNextData ? '有' : '無'}・`
+    + `salelst表${s.hasSalelstTable ? '有' : '無'}`
+}
+
 /** 3ページとも0件なら true（`empty` 扱い）。1つでも取れていれば false（出品を売り切ると出品0件はあり得る） */
 export function isYahooCollectEmpty(
   listingCount: number, soldCount: number, salesCount: number,
@@ -1004,6 +1081,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
   const runId = db.startRun('yahoo')
   const win = createWindow(!silent)
   let keepWindowOpen = false
+  // 0件だったページの HTML を保存した通知（原因の切り分け用）。0件でないページは保存しない
+  const debugSavedNotes: string[] = []
 
   try {
     // ① 出品中
@@ -1027,6 +1106,10 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     const sellingRender = await waitForYahooRender(win)
     if (!sellingRender.rendered) renderTimedOutPages.push('出品中')
     const scrapedListings = parseYahooSellingHtml(sellingRender.html)
+    if (scrapedListings.length === 0) {
+      const file = await saveYahooDebugHtml('selling', sellingRender.html)
+      debugSavedNotes.push(formatYahooDebugSavedNote('出品中', file, summarizeYahooHtml(sellingRender.html)))
+    }
 
     // ② 取引中・取引完了
     await win.loadURL(SOLD_URL)
@@ -1047,6 +1130,10 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     const soldRender = await waitForYahooRender(win)
     if (!soldRender.rendered) renderTimedOutPages.push('取引中・取引完了')
     const soldRows = parseYahooSoldHtml(soldRender.html)
+    if (soldRows.length === 0) {
+      const file = await saveYahooDebugHtml('sold', soldRender.html)
+      debugSavedNotes.push(formatYahooDebugSavedNote('取引中・取引完了', file, summarizeYahooHtml(soldRender.html)))
+    }
 
     // ③ 売上金管理（別ホスト：salesmanagement.yahoo.co.jp）
     await win.loadURL(SALES_URL)
@@ -1069,14 +1156,19 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
 
     const salesHtml = await outerHtml(win)
     const salesRows = parseYahooSalesHtml(salesHtml)
+    if (salesRows.length === 0) {
+      const file = await saveYahooDebugHtml('sales', salesHtml)
+      debugSavedNotes.push(formatYahooDebugSavedNote('売上金管理', file, summarizeYahooHtml(salesHtml)))
+    }
 
     if (isYahooCollectEmpty(scrapedListings.length, soldRows.length, salesRows.length)) {
       const timeoutNote = renderTimedOutPages.length > 0
         ? `（${renderTimedOutPages.join('・')}は描画待ちの上限に達しました）`
         : ''
+      const debugNote = debugSavedNotes.length > 0 ? `。${debugSavedNotes.join('。')}` : ''
       return db.finishRun(
         runId, 'empty', 0, 0,
-        `0件でした。画面構造が変わってセレクタが壊れている可能性があります${timeoutNote}`,
+        `0件でした。画面構造が変わってセレクタが壊れている可能性があります${timeoutNote}${debugNote}`,
       )
     }
 
@@ -1181,6 +1273,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     if (zeroPages.length > 0) {
       parts.push(`0件のページ：${zeroPages.join('・')}（実際に0件か読み取りが壊れているかは、この情報だけでは判別できません）`)
     }
+    parts.push(...debugSavedNotes)
 
     const observedIds = new Set([
       ...scrapedListings.map(l => l.yahooItemId),

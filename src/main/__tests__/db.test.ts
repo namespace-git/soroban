@@ -4625,6 +4625,31 @@ describe('db（:memory:）', () => {
     })
   })
 
+  describe('disposeInventory：disposed_at は UTC ではなく日本時間の日付で入る', () => {
+    it('JST 深夜0時台（UTC ではまだ前日）でも disposed_at は当日の日付になる', () => {
+      // JST 2026-02-02 00:30 = UTC 2026-02-01 15:30。
+      // date('now') は UTC で丸めるため、この時刻に廃棄すると誤って前日（2026-02-01）が入っていた
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(Date.UTC(2026, 1, 1, 15, 30, 0)))
+      try {
+        db.createPurchase({
+          shop_account_id: shopId,
+          ordered_at: '2026-01-01',
+          shipping_fee: 0,
+          lines: [{ name: '深夜廃棄テスト', unit_price: 1000, quantity: 1 }],
+        })
+        const item = db.listInventory('in_stock')[0]
+        db.disposeInventory(item.id, '深夜に廃棄', 'disposed')
+
+        const raw = db.getDb().prepare('SELECT disposed_at FROM inventory_item WHERE id = ?')
+          .get(item.id) as { disposed_at: string | null }
+        expect(raw.disposed_at).toBe('2026-02-02')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
   describe('自動確定は抽出した型番が在庫の model_code と完全一致するときだけ（枝番の有無は問わない）', () => {
     it('枝番なしの在庫と完全一致（A037）・枝番ありの在庫と完全一致（Z078-2）は自動確定、シリーズだけの型番（A035）は候補止まり', () => {
       db.createPurchase({
@@ -5873,6 +5898,27 @@ describe('db（:memory:）', () => {
       db.upsertProductImage('D004', 'fixed.jpg')
       makeImageDoneButUndelivered('テスト【D004】', 'mellojoy:#deliv-4', daysAgo(91))
       expect(db.purchaseDetailRevisitCandidates(shopId, ['mellojoy:#deliv-4'], [])).toEqual([])
+    })
+
+    it('90日の線はJSTの暦日で引く。UTCではまだ前日にあたる時刻（JST深夜0時台）に実行しても、' +
+      'ちょうど90日前は候補に出て91日前は出ない', () => {
+      // 「いま」を JST 2026-04-10 00:15（= UTC 2026-04-09 15:15）に固定する。
+      // SQL 側が date('now') のまま（UTC基準）だと、この時間帯だけ90日の線が1日ずれていた
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(Date.UTC(2026, 3, 9, 15, 15, 0)))
+      try {
+        db.upsertProductImage('D005', 'fixed.jpg')
+        db.upsertProductImage('D006', 'fixed.jpg')
+        const exactly90 = makeImageDoneButUndelivered('テスト【D005】', 'mellojoy:#deliv-5', daysAgo(90))
+        makeImageDoneButUndelivered('テスト【D006】', 'mellojoy:#deliv-6', daysAgo(91))
+
+        const ids = db.purchaseDetailRevisitCandidates(
+          shopId, ['mellojoy:#deliv-5', 'mellojoy:#deliv-6'], [],
+        ).map(c => c.id)
+        expect(ids).toEqual([exactly90])
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 

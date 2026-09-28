@@ -7,6 +7,8 @@ import {
   extractYahooSalesCsvForm,
   extractYahooSellingCounts,
   extractYahooSoldTotal,
+  formatYahooDebugSavedNote,
+  formatYahooHtmlSummary,
   formatYahooInconsistentNote,
   formatYahooRenderTimeoutNote,
   formatYahooTruncatedTitleNote,
@@ -18,6 +20,7 @@ import {
   parseYahooSellingHtml,
   parseYahooSoldHtml,
   splitYahooCombinedSales,
+  summarizeYahooHtml,
   zeroYahooPageNames,
   type YahooCombinedSale,
   type YahooSalesRow,
@@ -178,6 +181,96 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
     it('空文字・タグだけも false（throwしない）', () => {
       expect(hasYahooItemLinks('')).toBe(false)
       expect(hasYahooItemLinks('<div><span></span></div>')).toBe(false)
+    })
+  })
+
+  describe('summarizeYahooHtml（0件だったときの切り分け用。各パーサが頼っている手がかりの有無・個数を数える）', () => {
+    it('出品中一覧（実物fixture）：data-cl-params・rcconid・商品リンクがあり、__NEXT_DATA__ あり、salelst表は無い', () => {
+      const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-selling.html'), 'utf-8')
+      const s = summarizeYahooHtml(html)
+      expect(s.length).toBe(html.length)
+      expect(s.dataClParamsCount).toBeGreaterThan(0)
+      expect(s.rcconidCount).toBeGreaterThan(0)
+      expect(s.itemHrefCount).toBeGreaterThan(0)
+      expect(s.hasSalelstTable).toBe(false)
+    })
+
+    it('取引中・取引完了一覧（実物fixture）：data-cl-params・rcconid・商品リンクがある', () => {
+      const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-sold.html'), 'utf-8')
+      const s = summarizeYahooHtml(html)
+      expect(s.dataClParamsCount).toBeGreaterThan(0)
+      expect(s.rcconidCount).toBeGreaterThan(0)
+      expect(s.itemHrefCount).toBeGreaterThan(0)
+    })
+
+    it('売上金管理（実物fixture）：salelst表があり、data-cl-params・rcconidは無い', () => {
+      const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-salesmanagement.html'), 'utf-8')
+      const s = summarizeYahooHtml(html)
+      expect(s.hasSalelstTable).toBe(true)
+      expect(s.dataClParamsCount).toBe(0)
+      expect(s.rcconidCount).toBe(0)
+    })
+
+    it('空の殻（商品リンクも data-cl-params も無い）は全部0・falseになる（throwしない）', () => {
+      const shellHtml = `
+        <html><body>
+          <div id="__next">
+            <nav>
+              <a href="/my/item/selling">出品中</a>
+              <a href="/my/item/sold">取引中・取引完了</a>
+            </nav>
+          </div>
+        </body></html>
+      `
+      const s = summarizeYahooHtml(shellHtml)
+      expect(s.dataClParamsCount).toBe(0)
+      expect(s.rcconidCount).toBe(0)
+      expect(s.itemHrefCount).toBe(0)
+      expect(s.hasNextData).toBe(false)
+      expect(s.hasSalelstTable).toBe(false)
+    })
+
+    it('空文字も throw せず全部0・falseになる', () => {
+      const s = summarizeYahooHtml('')
+      expect(s).toEqual({
+        length: 0,
+        dataClParamsCount: 0,
+        rcconidCount: 0,
+        itemHrefCount: 0,
+        hasNextData: false,
+        hasSalelstTable: false,
+      })
+    })
+  })
+
+  describe('formatYahooHtmlSummary / formatYahooDebugSavedNote（実行記録に出す文言）', () => {
+    it('summarizeYahooHtml の結果を1行にまとめる', () => {
+      const note = formatYahooHtmlSummary({
+        length: 12345,
+        dataClParamsCount: 8,
+        rcconidCount: 8,
+        itemHrefCount: 5,
+        hasNextData: true,
+        hasSalelstTable: false,
+      })
+      expect(note).toBe(
+        '長さ12345・data-cl-params 8・rcconid 8・商品リンク 5・__NEXT_DATA__有・salelst表無',
+      )
+    })
+
+    it('保存先のパスと特徴が1行になる', () => {
+      const note = formatYahooDebugSavedNote('出品中', 'C:\\Users\\x\\AppData\\Roaming\\soroban\\debug\\yahoo-selling.html', {
+        length: 100,
+        dataClParamsCount: 0,
+        rcconidCount: 0,
+        itemHrefCount: 0,
+        hasNextData: false,
+        hasSalelstTable: false,
+      })
+      expect(note).toBe(
+        '出品中：0件のHTMLを保存しました（C:\\Users\\x\\AppData\\Roaming\\soroban\\debug\\yahoo-selling.html'
+        + '｜長さ100・data-cl-params 0・rcconid 0・商品リンク 0・__NEXT_DATA__無・salelst表無）',
+      )
     })
   })
 
