@@ -5441,11 +5441,14 @@ export function getHealthChecks(): HealthCheck[] {
   }
 
   // 5. is_shipping_confirmed = 0 かつ sold_at が30日以上前の販売
+  // julianday('now') は UTC の現在時刻なので使わない（JST 0〜9時に経過日数が実際よりずれる）。
+  // JS 側でローカル日付のしきい値を作って渡す
+  const threshold30 = subtractDaysLocal(todayLocal(), 30)
   const shippingOld = one<{ c: number }>(`
     SELECT COUNT(*) AS c FROM sale
      WHERE is_shipping_confirmed = 0
-       AND julianday('now') - julianday(sold_at) >= 30
-  `).c
+       AND sold_at <= ?
+  `, threshold30).c
   if (shippingOld > 0) {
     checks.push({
       id: 'shipping-old', level: 'info', title: '送料が未入力のまま 30 日たった販売',
@@ -5459,9 +5462,9 @@ export function getHealthChecks(): HealthCheck[] {
   const unmatchedOld = one<{ c: number }>(`
     SELECT COUNT(*) AS c FROM sale s
      WHERE s.kind = 'resale'
-       AND julianday('now') - julianday(s.sold_at) >= 30
+       AND s.sold_at <= ?
        AND NOT EXISTS (SELECT 1 FROM sale_line sl WHERE sl.sale_id = s.id)
-  `).c
+  `, threshold30).c
   if (unmatchedOld > 0) {
     checks.push({
       id: 'unmatched-old', level: 'info', title: '紐付けないまま 30 日たった販売',
@@ -5472,11 +5475,12 @@ export function getHealthChecks(): HealthCheck[] {
   }
 
   // 7. purchase.status = 'draft' で ordered_at が14日以上前
+  const threshold14 = subtractDaysLocal(todayLocal(), 14)
   const draftOld = one<{ c: number }>(`
     SELECT COUNT(*) AS c FROM purchase
      WHERE status = 'draft'
-       AND julianday('now') - julianday(ordered_at) >= 14
-  `).c
+       AND ordered_at <= ?
+  `, threshold14).c
   if (draftOld > 0) {
     checks.push({
       id: 'draft-old', level: 'info', title: '下書きのまま 14 日たった仕入',

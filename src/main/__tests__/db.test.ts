@@ -6037,6 +6037,60 @@ describe('db（:memory:）', () => {
       expect(found?.goto).toEqual({ tab: 'purchases' })
     })
 
+    it('経過日数はJSTの暦日で数える。UTCでは前日にあたる時刻（JST深夜0時台）でも、' +
+      'shipping-old・unmatched-old（30日）とdraft-old（14日）のちょうどの日数の扱いが変わらない', () => {
+      // 「いま」を JST 2026-05-01 00:15（= UTC 2026-04-30 15:15）に固定する。
+      // julianday('now') のまま（UTC基準）だと、この時間帯だけ経過日数が実際より少なく出て境目が1日ずれていた
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(Date.UTC(2026, 3, 30, 15, 15, 0)))
+      try {
+        db.createSale({ title: 'ちょうど30日・未紐付け', sold_at: daysAgo(30), price: 1000 })
+        db.createSale({ title: '29日・未紐付け', sold_at: daysAgo(29), price: 1000 })
+        db.createPurchaseDraft({
+          import_key: 'draft-jst-1', shop_account_id: shopId,
+          ordered_at: daysAgo(14), lines: [],
+        })
+        db.createPurchaseDraft({
+          import_key: 'draft-jst-2', shop_account_id: shopId,
+          ordered_at: daysAgo(13), lines: [],
+        })
+
+        const checks = db.getHealthChecks()
+        expect(checks.find(c => c.id === 'shipping-old')?.count).toBe(1)
+        expect(checks.find(c => c.id === 'unmatched-old')?.count).toBe(1)
+        expect(checks.find(c => c.id === 'draft-old')?.count).toBe(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('同じ「ちょうど30日／29日／31日・14日／13日」の扱いが、JST昼間に実行しても深夜0時台と同じになる', () => {
+      // 深夜0時台と結果を比較するため、今度は UTC でも同じ日付になる JST 昼間（12:00）に固定する
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(Date.UTC(2026, 3, 30, 3, 0, 0))) // JST 2026-04-30 12:00
+      try {
+        db.createSale({ title: 'ちょうど30日・未紐付け・昼', sold_at: daysAgo(30), price: 1000 })
+        db.createSale({ title: '31日・未紐付け・昼', sold_at: daysAgo(31), price: 1000 })
+        db.createSale({ title: '29日・未紐付け・昼', sold_at: daysAgo(29), price: 1000 })
+        db.createPurchaseDraft({
+          import_key: 'draft-noon-1', shop_account_id: shopId,
+          ordered_at: daysAgo(14), lines: [],
+        })
+        db.createPurchaseDraft({
+          import_key: 'draft-noon-2', shop_account_id: shopId,
+          ordered_at: daysAgo(13), lines: [],
+        })
+
+        const checks = db.getHealthChecks()
+        // 30日・31日の2件が対象（29日は対象外）
+        expect(checks.find(c => c.id === 'unmatched-old')?.count).toBe(2)
+        expect(checks.find(c => c.id === 'shipping-old')?.count).toBe(2)
+        expect(checks.find(c => c.id === 'draft-old')?.count).toBe(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('no-model-code：型番の無いin_stock在庫が1件になる', () => {
       db.createPurchase({
         shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
@@ -6071,6 +6125,49 @@ describe('db（:memory:）', () => {
       const firstInfoIndex = checks.findIndex(c => c.level === 'info')
       const lastWarnIndex = checks.map(c => c.level).lastIndexOf('warn')
       expect(firstInfoIndex).toBeGreaterThan(lastWarnIndex)
+    })
+  })
+
+  describe('inventory_view：在庫の滞留日数（aging_days）はJSTの暦日で数える', () => {
+    // 【注意】aging_days は inventory_view の中で julianday('now') を直接使っており、
+    // これは better-sqlite3（ネイティブのSQLite）がOSの時計を読んで計算する。
+    // vi.useFakeTimers / vi.setSystemTime は JS の Date を差し替えるだけで、
+    // ネイティブ実装が読む「今」には効かない（実際に試すと、フェイクした日付ではなく
+    // 実行した実際の日付からの日数がそのまま返ってきた）。
+    //
+    // そのため、時刻を固定する代わりに、acquired_at 側も SQLite の
+    // date('now','localtime','-N days') で組み立てる。こうすると「now」がいつであっても
+    // （＝テストを実行した実際の時刻がJST何時であっても）、期待値どおりの日数になる。
+    // 逆に言うと、直し前の式（julianday('now') をそのまま引く）だと、
+    // 実行したのがちょうどJSTの0〜9時台（UTC日をまたぐ前）に当たると
+    // ここが89日など1日少なく出て、このテストが落ちていたはずの箇所
+    function localDateOffset(days: number): string {
+      return (db.getDb().prepare(
+        `SELECT date('now','localtime',?) AS d`,
+      ).get(`-${days} days`) as { d: string }).d
+    }
+
+    it('acquired_atからの経過日数は、実行した時刻（時分秒）を引きずらずちょうどの暦日数になる。ちょうど90日は長期滞留に入り、89日は入らない', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: localDateOffset(90), shipping_fee: 0,
+        lines: [{ name: 'ちょうど90日', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: localDateOffset(89), shipping_fee: 0,
+        lines: [{ name: '89日', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: localDateOffset(0), shipping_fee: 0,
+        lines: [{ name: '今日仕入れた', unit_price: 1000, quantity: 1 }],
+      })
+
+      const items = db.listInventory('in_stock')
+      expect(items.find(i => i.name === 'ちょうど90日')!.aging_days).toBe(90)
+      expect(items.find(i => i.name === '89日')!.aging_days).toBe(89)
+      expect(items.find(i => i.name === '今日仕入れた')!.aging_days).toBe(0)
+
+      // aging_warn_days は既定90（schema.sqlの初期値）。90日ちょうどの1件だけが対象
+      expect(views.getInventoryOverview().aging.count).toBe(1)
     })
   })
 

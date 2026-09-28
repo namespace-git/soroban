@@ -648,7 +648,10 @@ SELECT
   i.landed_cost,
   i.acquired_at,
   i.status,
-  CAST(julianday('now') - julianday(i.acquired_at) AS INTEGER) AS aging_days,
+  -- 日本時間の「今日」（00:00）と acquired_at（日付のみ）の日数差。
+  -- julianday('now') は UTC の時刻込みなので、そのまま引くと日本時間の 0〜9 時台で
+  -- 最大 9 時間ぶん少なく出て境目で 1 日ずれる。両方を日付に揃えてから引く
+  CAST(julianday(date('now', 'localtime')) - julianday(i.acquired_at) AS INTEGER) AS aging_days,
   p.order_no,
   sa.name AS shop_account_name,
   i.model_code,
