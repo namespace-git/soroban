@@ -10,6 +10,16 @@ build/mac/
 *.db-shm
 session/
 
+# 手動バックアップ（DBと画像が入る）。保存先は人が選ぶので、うっかりここに
+# 置かれても公開リポジトリに入らないようにしておく
+soroban-backup-*.zip
+backups/
+
+# 秘密（API キーなど）。このリポジトリは Public なので必ず無視する
+.env
+.env.*
+!.env.example
+
 .DS_Store
 *.log
 .vscode/
