@@ -318,10 +318,14 @@ async function unlink(itemId: string) {
   }
 }
 
-/** 出品側の在庫状態が変わるので「元の出品からは外れる」ことが押す前に分かる言い回しにする */
-function blockerNote(b: AutoLinkBlocker): string {
+/** 状態ラベル（①）。出品側の在庫状態が押す前に分かるよう、出品先と状態を短く出す */
+function blockerStatusLabel(b: AutoLinkBlocker): string {
   const statusWord = b.listing_status === 'suspended' ? '一時停止' : '出品中'
-  return `${CHANNEL_LABEL[b.listing_channel]}の出品「${truncate(b.listing_title, 14)}」（${statusWord}）に取ってある`
+  return `${CHANNEL_LABEL[b.listing_channel]}・${statusWord}`
+}
+/** 補助（③）。元の出品からは外れることが押す前に分かる言い回しにする */
+function blockerNote(b: AutoLinkBlocker): string {
+  return `出品「${truncate(b.listing_title, 20)}」に取ってある`
 }
 
 /**
@@ -405,10 +409,15 @@ function placeholderChar(): string {
       <p class="panel-title">在庫はあるが出品に取ってある</p>
       <p class="faint blocked-help">別の出品が押さえたままです。外すと、その場でこの販売の候補として選べます（出品はまだ売れていません）</p>
       <div v-for="b in blockers" :key="b.inventory_item_id" class="item blocked-item">
-        <CodeChip kind="item" :code="b.item_code" />
-        <CodeChip kind="model" :code="b.model_code" />
-        <StatusChip tone="warn" :label="blockerNote(b)" :title="blockerNote(b)" />
-        <span class="grow" />
+        <span class="grow name-cell">
+          <span class="row-labels">
+            <CodeChip kind="item" :code="b.item_code" />
+            <CodeChip kind="model" :code="b.model_code" />
+            <StatusChip tone="warn" :label="blockerStatusLabel(b)" />
+          </span>
+          <span class="name-main" :title="b.name">{{ b.name }}</span>
+          <span class="name-sub" :title="blockerNote(b)">{{ blockerNote(b) }}</span>
+        </span>
         <span class="num">{{ yen(b.landed_cost) }}</span>
         <button class="sm" :disabled="takingBlockerId === b.inventory_item_id" @click="takeFromListing(b)">
           {{ takingBlockerId === b.inventory_item_id ? '外しています…' : '外して選ぶ' }}

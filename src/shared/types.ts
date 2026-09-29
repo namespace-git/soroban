@@ -107,6 +107,8 @@ export interface AutoLinkBlocker {
   item_code: string
   /** 型番（A040）。販売側で抽出した型番と一致している */
   model_code: string
+  /** 在庫の表示名。product_name（人が付けた型番の表示名）があればそれ、無ければ仕入明細名（inventory_view の product_name ?? name と同じ） */
+  name: string
   landed_cost: number
   /** この在庫を握っている出品の id */
   listing_id: string

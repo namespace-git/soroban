@@ -3255,6 +3255,7 @@ export function getAutoLinkBlockers(saleId: string): AutoLinkBlocker[] {
 
   return db.prepare(`
     SELECT i.id AS inventory_item_id, i.item_code AS item_code, i.model_code AS model_code,
+           COALESCE((SELECT name FROM product_name WHERE model_code = i.model_code), i.name) AS name,
            i.landed_cost AS landed_cost,
            l.mercari_item_id AS listing_id, l.channel AS listing_channel,
            l.status AS listing_status, l.title AS listing_title

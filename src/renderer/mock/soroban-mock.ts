@@ -3059,6 +3059,7 @@ const api: SorobanApi = {
           inventory_item_id: i.id,
           item_code: i.item_code,
           model_code: i.model_code!,
+          name: i.product_name ?? i.name,
           landed_cost: i.landed_cost,
           listing_id: listing.mercari_item_id,
           listing_channel: listing.channel,

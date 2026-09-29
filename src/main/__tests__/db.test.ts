@@ -5427,12 +5427,32 @@ describe('db（:memory:）', () => {
         inventory_item_id: item.id,
         item_code: item.item_code,
         model_code: 'A040',
+        name: item.name, // product_name が無いので仕入明細名にフォールバック
         landed_cost: item.landed_cost,
         listing_id: 'm15691073401',
         listing_channel: 'mercari', // 販売はyahooだが、握っているのはmercariの出品
         listing_status: 'suspended',
         listing_title: '【A040】もこ山 スクイーズ 新品未開封',
       })
+    })
+
+    it('setProductName で表示名を付けていれば、在庫の明細名ではなくそちらを返す', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '【A049】もこ山 スクイーズ 旧パッケージ', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.setProductName('A049', 'もこ山 スクイーズ（表示名）')
+
+      db.upsertListings([
+        { mercariItemId: 'm-name-1', title: '【A049】商品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('m-name-1', [item.id])
+
+      const saleId = db.createSale({ title: '商品【A049】', sold_at: '2026-01-10', price: 3000 })
+      const blockers = db.getAutoLinkBlockers(saleId)
+      expect(blockers).toHaveLength(1)
+      expect(blockers[0].name).toBe('もこ山 スクイーズ（表示名）')
     })
 
     it('activeな出品に握られている場合も同じく返る', () => {
