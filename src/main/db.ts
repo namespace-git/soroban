@@ -1326,6 +1326,36 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 34) {
+    // updateSale がタイトルを書き換えても sale.model_codes 列を更新していなかったせいで、
+    // 列とタイトルがずれた行がある。画面のチップも自動紐付けも保存された列だけを見るので、
+    // ずれると「タイトルには型番があるのに、どちらも型番なしとして扱う」。
+    // 既存の行を足すだけ（union）で埋める。
+    // 消す方向の変更はしない（説明文から後追いで足された型番＝appendModelCodes 由来を守るため）。
+    // sale_line（紐付け済みのもの）には一切触らない。自動紐付けもここでは走らせない
+    // （人が「型番で自動紐付け」ボタンを押したときに効けばよい）
+    const staleRows = db.prepare('SELECT id, title, model_codes FROM sale').all() as
+      Array<{ id: string; title: string; model_codes: string }>
+    const setModelCodes = db.prepare('UPDATE sale SET model_codes = ? WHERE id = ?')
+    const backfillTx = db.transaction(() => {
+      for (const r of staleRows) {
+        const existing = JSON.parse(r.model_codes || '[]') as string[]
+        const seen = new Set(existing)
+        const merged = [...existing]
+        for (const c of extractCodes(r.title)) {
+          if (!seen.has(c)) { seen.add(c); merged.push(c) }
+        }
+        if (merged.length !== existing.length) setModelCodes.run(JSON.stringify(merged), r.id)
+      }
+    })
+    backfillTx()
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '34')
+         ON CONFLICT(key) DO UPDATE SET value = '34'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -2304,7 +2334,8 @@ export function createSale(input: SaleInput): string {
 
 export function updateSale(id: string, patch: SalePatch): void {
   const cur = db.prepare('SELECT * FROM sale WHERE id = ?').get(id) as
-    | { price: number; fee_rate_bp: number; fee_source: FeeSource } | undefined
+    | { price: number; fee_rate_bp: number; fee_source: FeeSource; title: string; model_codes: string }
+    | undefined
   if (!cur) throw new Error('販売が見つかりません')
 
   const sets: string[] = []
@@ -2312,7 +2343,21 @@ export function updateSale(id: string, patch: SalePatch): void {
 
   const put = (col: string, v: unknown) => { sets.push(`${col} = ?`); vals.push(v) }
 
-  if (patch.title !== undefined) put('title', patch.title)
+  if (patch.title !== undefined) {
+    put('title', patch.title)
+    // model_codes は「画面のチップ」「自動紐付け（autoLinkSale）」共通の唯一の情報源（保存された列）。
+    // タイトルを書き換えたら作り直す。ただし単純に extractCodes(新タイトル) で上書きすると、
+    // 説明文から後追いで足された型番（appendModelCodes 由来）が消えてしまうため、
+    // 「古いタイトルから来ていた型番」だけを落とし、それ以外（＝説明文由来）は残す
+    const oldCodes = new Set(extractCodes(cur.title))
+    const kept = (JSON.parse(cur.model_codes || '[]') as string[]).filter(c => !oldCodes.has(c))
+    const seen = new Set(kept)
+    const merged = [...kept]
+    for (const c of extractCodes(patch.title)) {
+      if (!seen.has(c)) { seen.add(c); merged.push(c) }
+    }
+    put('model_codes', JSON.stringify(merged))
+  }
   if (patch.sold_at !== undefined) put('sold_at', patch.sold_at)
   if (patch.kind !== undefined) put('kind', patch.kind)
   if (patch.packaging_cost !== undefined) {

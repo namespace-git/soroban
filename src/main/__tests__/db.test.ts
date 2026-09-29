@@ -813,6 +813,88 @@ describe('db（:memory:）', () => {
     expect(sale.model_codes.sort()).toEqual(['Z080-1', 'Z088-2'])
   })
 
+  describe('updateSale：タイトルを書き換えたときの model_codes 列', () => {
+    it('画面の値（listSales）と自動紐付けが使う値が食い違っていたことの再現：' +
+      'タイトルを直しても列が古いままだと在庫があるのに自動紐付けが失敗する', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'クリームわん【A040】', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+
+      // Yahoo!フリマの売上金管理のように、型番が読めない途中で切れたタイトルで取り込まれる
+      const saleId = db.createSale({ title: '素敵な商品です', sold_at: '2026-01-05', price: 2000 })
+      expect(db.listSales().find(s => s.id === saleId)!.model_codes).toEqual([])
+
+      // 修正前の挙動を裏から再現する：patch.title だけ書き換え、model_codes 列は触らない
+      // （このブロックは updateSale を直す前のバグの再現。db.ts 側の SQL を直接叩いて模している）
+      db.getDb().prepare(`UPDATE sale SET title = ? WHERE id = ?`).run('【A040】素敵な商品です', saleId)
+
+      // 「画面の値」（listSales＝保存された列）は古いまま＝空
+      const staleView = db.listSales().find(s => s.id === saleId)!
+      expect(staleView.model_codes).toEqual([])
+      // 自動紐付けも同じ古い列を読むので、型番が読めず失敗する（在庫はあるのに、である）
+      expect(db.autoLinkSale(saleId)).toBe(false)
+      expect(db.listInventory('in_stock').find(i => i.id === item.id)).toBeDefined() // 在庫は在る
+
+      // ここからが本来の直し方：updateSale 経由でタイトルを書き換えると、列も作り直される
+      db.updateSale(saleId, { title: '【A040】素敵な商品です' })
+      const fixedView = db.listSales().find(s => s.id === saleId)!
+      expect(fixedView.model_codes).toEqual(['A040'])
+      // 画面の値とautoLinkSaleが使う値は同じ列を見ているので、以後は一致して自動紐付けが効く
+      expect(db.autoLinkSale(saleId)).toBe(true)
+      expect(db.listSales().find(s => s.id === saleId)!.cost).toBe(item.landed_cost)
+    })
+
+    it('タイトルを直すと model_codes 列が追随する（型番の無いタイトル→【A040】付きに直す）', () => {
+      const saleId = db.createSale({ title: 'タイトルにはまだ型番が無い', sold_at: '2026-01-05', price: 1000 })
+      expect(db.listSales().find(s => s.id === saleId)!.model_codes).toEqual([])
+
+      db.updateSale(saleId, { title: '【A040】タイトルを直した' })
+
+      expect(db.listSales().find(s => s.id === saleId)!.model_codes).toEqual(['A040'])
+    })
+
+    it('説明文由来（appendModelCodesで足した型番）はタイトル編集で消えない', () => {
+      const saleId = db.createSale({ title: '【A040】本体', sold_at: '2026-01-05', price: 1000 })
+      // 説明文から後追いで見つかった型番（付属品など）を追記
+      db.appendModelCodes(saleId, ['A099'])
+      expect(db.listSales().find(s => s.id === saleId)!.model_codes.sort()).toEqual(['A040', 'A099'])
+
+      // タイトル自体は型番はそのままに、他の文言だけ直す
+      db.updateSale(saleId, { title: '【A040】本体（説明追記）' })
+
+      expect(db.listSales().find(s => s.id === saleId)!.model_codes.sort()).toEqual(['A040', 'A099'])
+    })
+
+    it('古いタイトルにしか無かった型番は落ちる（【A040】→【A039】に直したらA040が消える）', () => {
+      const saleId = db.createSale({ title: '【A040】本体', sold_at: '2026-01-05', price: 1000 })
+      expect(db.listSales().find(s => s.id === saleId)!.model_codes).toEqual(['A040'])
+
+      db.updateSale(saleId, { title: '【A039】本体' })
+
+      expect(db.listSales().find(s => s.id === saleId)!.model_codes).toEqual(['A039'])
+    })
+
+    it('タイトルを直しても、説明文由来は残しつつ古いタイトル由来だけを落とす（複合ケース）', () => {
+      const saleId = db.createSale({ title: '【A040】本体', sold_at: '2026-01-05', price: 1000 })
+      db.appendModelCodes(saleId, ['A099']) // 説明文由来
+      db.updateSale(saleId, { title: '【A041】本体（説明追記）' }) // タイトルをA040→A041に直す
+
+      const after = db.listSales().find(s => s.id === saleId)!
+      // A040（古いタイトル由来）は消え、A041（新しいタイトル）とA099（説明文由来）は残る
+      expect(after.model_codes.sort()).toEqual(['A041', 'A099'])
+    })
+
+    it('title以外のpatch（kind等）ではmodel_codesは変わらない', () => {
+      const saleId = db.createSale({ title: '【A040】本体', sold_at: '2026-01-05', price: 1000 })
+      db.updateSale(saleId, { kind: 'personal' })
+      expect(db.listSales().find(s => s.id === saleId)!.model_codes).toEqual(['A040'])
+    })
+  })
+
   it('下書き→確定：在庫は確定するまで作られず、按分後原価の合計が明細合計+送料と一致する', () => {
     const draftId = db.createPurchaseDraft({
       import_key: 'mellojoy-watch/2026-01-01-001',
@@ -1114,7 +1196,7 @@ describe('db（:memory:）', () => {
 
         expect(() => db.initDb(path)).not.toThrow()
 
-        expect(db.getSettings().schema_version).toBe('33')
+        expect(db.getSettings().schema_version).toBe('34')
         const sales = db.listSales()
         expect(sales.find(s => s.id === rateId)!.fee_source).toBe('rate')
         expect(sales.find(s => s.id === actualId)!.fee_source).toBe('actual')
@@ -1679,7 +1761,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('33')
+      expect(db.getSettings().schema_version).toBe('34')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1874,7 +1956,7 @@ describe('db（:memory:）', () => {
   })
 
   it('migrate：schema_versionが30になる', () => {
-    expect(db.getSettings().schema_version).toBe('33')
+    expect(db.getSettings().schema_version).toBe('34')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -1960,7 +2042,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('33')
+      expect(db.getSettings().schema_version).toBe('34')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -1994,7 +2076,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('33')
+      expect(db.getSettings().schema_version).toBe('34')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -2021,7 +2103,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('33')
+      expect(db.getSettings().schema_version).toBe('34')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       expect(expense.registration_no).toBeNull()
     } finally {
@@ -2065,7 +2147,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('33')
+      expect(db.getSettings().schema_version).toBe('34')
       // 既存の表示名はそのまま残る
       const p = db.listProducts().find(x => x.model_code === 'Z078-2')
       expect(p?.custom_name).toBe('旧表示名')
@@ -2836,7 +2918,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('33')
+      expect(db.getSettings().schema_version).toBe('34')
       const p = db.getPurchase(purchaseId)
       expect(p.tracking_carrier).toBeNull()
       expect(p.tracking_number).toBeNull()
@@ -2876,7 +2958,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('33')
+      expect(db.getSettings().schema_version).toBe('34')
       expect(db.getPurchaseTracking(purchaseId)!.tracking_registered_at).toBeNull()
 
       // 移行後は普通に登録できる
@@ -2918,7 +3000,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('33')
+      expect(db.getSettings().schema_version).toBe('34')
       expect(db.getSettings().fee_rate_bp_yahoo).toBe('500')
 
       const sale = db.listSales().find(s => s.id === saleId)!
@@ -2970,7 +3052,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('33')
+      expect(db.getSettings().schema_version).toBe('34')
 
       // 既存の実行記録が1件も減らない
       const runs = db.listRuns(10)
@@ -2992,6 +3074,72 @@ describe('db（:memory:）', () => {
       expect(indexes.map(i => i.name)).toEqual(
         expect.arrayContaining(['idx_run_started', 'idx_run_source_started']),
       )
+    } finally {
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('migrate：version33相当→34で、更新前にupdateSaleが直していなかったsale.model_codesを足すだけで埋める（sale_lineには触らない）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-model-codes-migrate-'))
+    const path = join(dir, 'v33.db')
+    try {
+      db.closeDb()
+      db.initDb(path) // 一旦フルスキーマ（最新コード）で作り、旧バージョンを装う
+      const migrateShopId = db.createShopAccount('マイグレ確認')
+      db.createPurchase({
+        shop_account_id: migrateShopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'クリームわん【A040】', unit_price: 1000, quantity: 2 }],
+      })
+
+      // s1：ずれていない正常な行（型番どおりに自動紐付け済み）。マイグレーションで変わらないはず
+      // （「1点目」等の数字+点/個は個数表記と誤認されるため使わない。CODE_RE直後の数字表記を避ける）
+      const s1 = db.createSale({ title: '【A040】ひとつめ', sold_at: '2026-01-05', price: 2000 })
+      expect(db.listSales().find(s => s.id === s1)!.unmatched).toBe(0) // 自動紐付け済み
+
+      // s2：v34直前のバグを再現。タイトルだけ書き換わり、model_codes列は古いまま（生SQLで模す）
+      const s2 = db.createSale({ title: '型番なしタイトル', sold_at: '2026-01-06', price: 2000 })
+      db.getDb().prepare(`UPDATE sale SET title = ? WHERE id = ?`).run('【A040】ふたつめ', s2)
+      expect(
+        (db.getDb().prepare('SELECT model_codes FROM sale WHERE id = ?').get(s2) as { model_codes: string })
+          .model_codes,
+      ).toBe('[]')
+
+      // s3：説明文から後追いで足された型番（appendModelCodes由来）。タイトルには出てこない
+      const s3 = db.createSale({ title: '型番なしタイトル3', sold_at: '2026-01-07', price: 1000 })
+      db.appendModelCodes(s3, ['A099'])
+
+      const saleLineCountBefore = (
+        db.getDb().prepare('SELECT COUNT(*) AS c FROM sale_line').get() as { c: number }
+      ).c
+
+      db.getDb().prepare(`UPDATE setting SET value = '33' WHERE key = 'schema_version'`).run()
+      db.closeDb()
+
+      expect(() => db.initDb(path)).not.toThrow()
+
+      expect(db.getSettings().schema_version).toBe('34')
+
+      // s1は変化なし
+      expect(db.listSales().find(s => s.id === s1)!.model_codes).toEqual(['A040'])
+      // s2：足すだけで埋まる（タイトルから拾えるA040が入る）
+      expect(db.listSales().find(s => s.id === s2)!.model_codes).toEqual(['A040'])
+      // s3：タイトルには型番が無いので追加は無く、説明文由来のA099は消えずに残る
+      expect(db.listSales().find(s => s.id === s3)!.model_codes).toEqual(['A099'])
+
+      // マイグレーションは列を直すだけで、自動紐付けは走らせない（sale_lineの件数は前後で変わらない）
+      const saleLineCountAfter = (
+        db.getDb().prepare('SELECT COUNT(*) AS c FROM sale_line').get() as { c: number }
+      ).c
+      expect(saleLineCountAfter).toBe(saleLineCountBefore)
+      expect(db.listSales().find(s => s.id === s2)!.unmatched).toBe(1) // まだ未紐付け
+
+      // 人が「型番で自動紐付け」ボタンを押したとき（autoLinkPending）には効く
+      const linked = db.autoLinkPending()
+      expect(linked).toBeGreaterThanOrEqual(1)
+      expect(db.listSales().find(s => s.id === s2)!.unmatched).toBe(0)
     } finally {
       try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
       rmSync(dir, { recursive: true, force: true })
@@ -3176,7 +3324,7 @@ describe('db（:memory:）', () => {
 
         // schema_versionは上がっていない＝migrate()の列追加ではなく、
         // 毎回のtablesSql実行に含まれるINSERT OR IGNOREで入ったことの確認
-        expect(db.getSettings().schema_version).toBe('33')
+        expect(db.getSettings().schema_version).toBe('34')
         expect(db.getSettings().yahoo_keyword).toBe('')
       } finally {
         try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
