@@ -3,7 +3,8 @@ import { isRealized } from '../../shared/recognition'
 // 在庫の引き当て／紐付け。出品（mode='listing'）と販売（mode='sale'）の両方から使う。
 // チェックした瞬間に下端の原価合計・粗利プレビューが動く。確定は「引き当てる／紐付ける」ボタンで初めて起きる。
 import { ref, computed, watch, inject } from 'vue'
-import type { Listing, InventoryItem, ListingStatus, SaleProfit, ProductSummary, SalesChannel } from '../../shared/types'
+import type { Listing, InventoryItem, ListingStatus, SaleProfit, ProductSummary, SalesChannel, AutoLinkBlocker } from '../../shared/types'
+import { CHANNEL_LABEL } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import CodeChip from './CodeChip.vue'
@@ -29,6 +30,13 @@ const choose = inject<(title: string, choices: ConfirmChoice[], opts?: { message
 
 const candidates = ref<InventoryItem[]>([])
 const matchedItems = ref<MatchedRow[]>([])
+/**
+ * 型番は合っているのに、別の出品（別の出品先のことがある）に取ってあるせいで
+ * 候補（candidates）から外れている在庫。sale モードだけで使う。「外して選ぶ」で
+ * unreserveInventory を呼んだ直後に picked へ入れる（外す→選ぶを2手にしない）
+ */
+const blockers = ref<AutoLinkBlocker[]>([])
+const takingBlockerId = ref<string | null>(null)
 const picked = ref<Set<string>>(new Set())
 const search = ref('')
 const loading = ref(false)
@@ -60,20 +68,24 @@ async function load() {
   loading.value = true
   candidates.value = []
   matchedItems.value = []
+  blockers.value = []
   try {
     if ((mode === 'listing' && !listing) || (mode === 'sale' && !sale)) return
     // 検索前に件数を切らず、どの注文の在庫も検索できるようにする。
-    const [products, suggestions, linked] = await Promise.all([
+    const [products, suggestions, linked, blockerList] = await Promise.all([
       window.soroban.listProducts(),
       mode === 'listing'
         ? window.soroban.suggestForListing(listing!.mercari_item_id, Number.MAX_SAFE_INTEGER, opts)
         : window.soroban.suggestInventory(sale!.id, Number.MAX_SAFE_INTEGER, opts),
       mode === 'listing' ? Promise.resolve(listing!.items) : window.soroban.listSaleLines(sale!.id),
+      // 「型番は合っているのに出品に取ってあるせいで候補から外れた在庫」。sale モードだけ
+      mode === 'sale' ? window.soroban.getAutoLinkBlockers(sale!.id) : Promise.resolve([]),
     ])
     if (request !== loadRequest || !props.open) return
     productInfo.value = new Map(products.map(p => [p.model_code, p]))
     candidates.value = suggestions
     matchedItems.value = linked
+    blockers.value = blockerList
   } catch (e) {
     if (request === loadRequest) toast(e instanceof Error ? e.message : String(e), 'warn')
   } finally {
@@ -92,6 +104,8 @@ watch(
     productPickRequest++
     pickingProduct.value = false
     includeSold.value = false
+    blockers.value = []
+    takingBlockerId.value = null
     if (isOpen) load()
   },
   { immediate: true },
@@ -304,6 +318,33 @@ async function unlink(itemId: string) {
   }
 }
 
+/** 出品側の在庫状態が変わるので「元の出品からは外れる」ことが押す前に分かる言い回しにする */
+function blockerNote(b: AutoLinkBlocker): string {
+  const statusWord = b.listing_status === 'suspended' ? '一時停止' : '出品中'
+  return `${CHANNEL_LABEL[b.listing_channel]}の出品「${truncate(b.listing_title, 14)}」（${statusWord}）に取ってある`
+}
+
+/**
+ * 出品に取ってある在庫を、その出品から外してこの販売の候補として選ぶ（1クリック）。
+ * まだ売れていない出品から外すだけなので、付け替え（confirmPick の takeFromSale）のような
+ * 確認ダイアログは要らない。外れた瞬間に picked へ入れ、粗利プレビューにそのまま反映させる
+ */
+async function takeFromListing(b: AutoLinkBlocker) {
+  if (!props.sale || takingBlockerId.value) return
+  takingBlockerId.value = b.inventory_item_id
+  try {
+    await window.soroban.unreserveInventory(b.listing_id, b.inventory_item_id)
+    emit('changed')
+    await load()
+    picked.value = new Set([...picked.value, b.inventory_item_id])
+    toast(`${b.item_code} を出品「${truncate(b.listing_title, 14)}」から外して選びました`, 'ok')
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    takingBlockerId.value = null
+  }
+}
+
 const thumbFailed = ref(false)
 watch(() => [props.listing?.mercari_item_id, props.sale?.id], () => { thumbFailed.value = false })
 function placeholderChar(): string {
@@ -354,6 +395,24 @@ function placeholderChar(): string {
         <span v-if="m.aging_days != null" class="faint nowrap">{{ m.aging_days }}日</span>
         <span class="num">{{ yen(m.landed_cost) }}</span>
         <button class="sm ghost" @click="unlink(m.id)">解除</button>
+      </div>
+    </div>
+
+    <!-- 型番は合っているのに、別の出品（他社サイトのこともある）に取ってあるせいで
+         候補から外れている在庫。「在庫が無い」わけではないので、ふつうの候補（picked-block等）とは
+         見た目を分け、1クリックで外して選べるようにする -->
+    <div v-if="blockers.length" class="blocked-block">
+      <p class="panel-title">在庫はあるが出品に取ってある</p>
+      <p class="faint blocked-help">別の出品が押さえたままです。外すと、その場でこの販売の候補として選べます（出品はまだ売れていません）</p>
+      <div v-for="b in blockers" :key="b.inventory_item_id" class="item blocked-item">
+        <CodeChip kind="item" :code="b.item_code" />
+        <CodeChip kind="model" :code="b.model_code" />
+        <StatusChip tone="warn" :label="blockerNote(b)" :title="blockerNote(b)" />
+        <span class="grow" />
+        <span class="num">{{ yen(b.landed_cost) }}</span>
+        <button class="sm" :disabled="takingBlockerId === b.inventory_item_id" @click="takeFromListing(b)">
+          {{ takingBlockerId === b.inventory_item_id ? '外しています…' : '外して選ぶ' }}
+        </button>
       </div>
     </div>
 
@@ -503,6 +562,17 @@ function placeholderChar(): string {
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line-soft);
 }
+
+.blocked-block {
+  margin-bottom: 14px;
+  padding: 8px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-sm);
+}
+.blocked-help { margin: 2px 0 8px; }
+.blocked-item { flex-wrap: wrap; cursor: default; }
+.blocked-item:hover { background: transparent; }
 
 .ended-note { padding: 6px 8px; }
 

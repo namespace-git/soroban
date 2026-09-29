@@ -787,12 +787,13 @@ async function editNote(sale: SaleProfit) {
 // --- 型番で自動紐付け ---
 
 /**
- * 実行前後で未紐付け（unmatched）の転売を突き合わせ、「なぜ引き当たらなかったか」を
- * model_codes（抽出した型番）の個数で仕分ける。判定ルール自体（db.ts の autoLinkSale）は
- * 変えない。ここはメッセージのための後追いの数え上げだけ：
- *   0件 → タイトルから型番が読み取れなかった（取り込みの不具合／最初から型番が無い、両方を含む）
- *   1件 → 型番は読み取れたが、在庫が無い（他の出品に引き当て済みで奪わなかった場合を含む）
- *   2件以上 → 型番が複数あって1つに絞れない
+ * 実行前後で未紐付け（unmatched）の転売を突き合わせ、「なぜ引き当たらなかったか」を仕分ける。
+ * 判定ルール自体（db.ts の autoLinkSale）は変えない。ここはメッセージのための後追いの数え上げだけ：
+ *   型番0件 → タイトルから型番が読み取れなかった（取り込みの不具合／最初から型番が無い、両方を含む）
+ *   型番2件以上 → 型番が複数あって1つに絞れない
+ *   型番1件のうち getAutoLinkBlockers が非空 → **在庫はある。** 別の出品（他社サイトのこともある）に
+ *     取ってあるせいで自動紐付けの検索から外れただけ（横取り防止のため）。「在庫が無い」と言ってはいけない
+ *   型番1件のうち上記に当たらない → 本当に在庫が無い
  */
 async function autoLinkPending() {
   const before = (await window.soroban.listSales({ kind: 'resale' })).filter(s => s.unmatched === 1)
@@ -815,16 +816,23 @@ async function autoLinkPending() {
 
   let noCode = 0
   let ambiguous = 0
+  let blocked = 0
   let noMatch = 0
+  const singleCode: SaleProfit[] = []
   for (const s of before) {
     const a = after.get(s.id)
     if (!a) continue // 引き当てられた
     if (a.model_codes.length === 0) noCode++
     else if (a.model_codes.length >= 2) ambiguous++
-    else noMatch++
+    else singleCode.push(a)
+  }
+  if (singleCode.length) {
+    const blockerLists = await Promise.all(singleCode.map(s => window.soroban.getAutoLinkBlockers(s.id)))
+    for (const list of blockerLists) { if (list.length > 0) blocked++; else noMatch++ }
   }
 
   const reasons: string[] = []
+  if (blocked > 0) reasons.push(`在庫はあるが出品に取られている${blocked}件`)
   if (noCode > 0) reasons.push(`型番が読み取れない${noCode}件`)
   if (ambiguous > 0) reasons.push(`型番が複数あって絞れない${ambiguous}件`)
   if (noMatch > 0) reasons.push(`型番はあるが在庫が無い${noMatch}件`)

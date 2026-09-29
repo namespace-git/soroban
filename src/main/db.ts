@@ -10,7 +10,8 @@ import { extractCode, extractCodeQuantities, extractCodes, extractItemCodes, ext
 import { thisMonthLocal, todayLocal } from '../shared/date'
 import { isRealized, forecastTotals, realizedTotals } from '../shared/recognition'
 import type {
-  AllocMethod, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, ExportKind, FeeSource,
+  AllocMethod, AutoLinkBlocker, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, ExportKind,
+  FeeSource,
   Fulfillment,
   HealthCheck,
   InventoryItem, InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus,
@@ -3157,6 +3158,20 @@ function findInventoryIdsByItemCodes(itemCodes: string[]): string[] {
 }
 
 /**
+ * 「在庫 i が、active/suspended な出品に引き当て済みかどうか」の EXISTS 断片。
+ * findInventoryIdsByModelCodeFifo の除外条件（NOT ${RESERVED_BY_ACTIVE_LISTING}）と
+ * getAutoLinkBlockers の抽出条件（${RESERVED_BY_ACTIVE_LISTING}）は表裏の関係。
+ * ここを変えたら両方の意味が変わるので、必ずこの断片を共有する。
+ */
+const RESERVED_BY_ACTIVE_LISTING = `
+  EXISTS (
+    SELECT 1 FROM listing_line ll
+    JOIN listing l ON l.mercari_item_id = ll.listing_id
+    WHERE ll.inventory_item_id = i.id AND l.status IN ('active','suspended')
+  )
+`
+
+/**
  * 型番が model_code と文字列として完全一致する未販売在庫を、先入先出（acquired_at 昇順）で
  * 最大 qty 点まで返す（在庫が足りなければある分だけ）。枝番の有無は問わない。
  * 他の active/suspended な出品に引き当て済みの在庫は候補から外す
@@ -3167,11 +3182,7 @@ function findInventoryIdsByModelCodeFifo(modelCode: string, qty: number, exclude
     SELECT id FROM inventory_item i
      WHERE i.model_code = ? AND i.status = 'in_stock'
        ${excludeIds.length ? `AND i.id NOT IN (${excludeIds.map(() => '?').join(',')})` : ''}
-       AND NOT EXISTS (
-         SELECT 1 FROM listing_line ll
-         JOIN listing l ON l.mercari_item_id = ll.listing_id
-         WHERE ll.inventory_item_id = i.id AND l.status IN ('active','suspended')
-       )
+       AND NOT ${RESERVED_BY_ACTIVE_LISTING}
      ORDER BY i.acquired_at ASC, i.created_at ASC
      LIMIT ?
   `).all(modelCode, ...excludeIds, qty) as Array<{ id: string }>
@@ -3222,6 +3233,37 @@ export function autoLinkSale(saleId: string): boolean {
 
   linkInventory(saleId, ids, 'auto')
   return true
+}
+
+/**
+ * その販売が自動で紐付かない理由のうち、在庫はあるのに出品に取ってあるせいで外れているものを返す。
+ * 判定条件は findInventoryIdsByModelCodeFifo の除外条件（RESERVED_BY_ACTIVE_LISTING）の裏返し。
+ * autoLinkSale と同じ前提（未紐付けの転売・型番が1つ）でないときは空配列（＝この理由ではない）。
+ * 読み取り専用。何も書き換えない。
+ */
+export function getAutoLinkBlockers(saleId: string): AutoLinkBlocker[] {
+  const sale = db.prepare('SELECT kind, model_codes FROM sale WHERE id = ?').get(saleId) as
+    | { kind: SaleKind; model_codes: string } | undefined
+  if (!sale || sale.kind !== 'resale') return []
+
+  const already = db.prepare('SELECT COUNT(*) AS c FROM sale_line WHERE sale_id = ?')
+    .get(saleId) as { c: number }
+  if (already.c > 0) return []
+
+  const codes = JSON.parse(sale.model_codes || '[]') as string[]
+  if (codes.length !== 1) return []
+
+  return db.prepare(`
+    SELECT i.id AS inventory_item_id, i.item_code AS item_code, i.model_code AS model_code,
+           i.landed_cost AS landed_cost,
+           l.mercari_item_id AS listing_id, l.channel AS listing_channel,
+           l.status AS listing_status, l.title AS listing_title
+    FROM inventory_item i
+    JOIN listing_line ll ON ll.inventory_item_id = i.id
+    JOIN listing l ON l.mercari_item_id = ll.listing_id
+    WHERE i.model_code = ? AND i.status = 'in_stock' AND l.status IN ('active','suspended')
+    ORDER BY i.acquired_at ASC, i.created_at ASC
+  `).all(codes[0]) as AutoLinkBlocker[]
 }
 
 /** 未紐付けの転売すべてに autoLinkSale を回す。戻り値は確定した件数 */
@@ -5567,6 +5609,55 @@ export function getHealthChecks(): HealthCheck[] {
       id: 'collect-empty', level: 'info', title: '取り込みが続けて0件',
       count: collectEmpty,
       detail: '画面構造が変わって取れなくなっているかもしれません',
+    })
+  }
+
+  // 10. 型番が1つに絞れる未紐付けの転売のうち、その型番の在庫が active/suspended な出品に
+  //     取られていて自動紐付けの対象から外れているもの（＝いま原価が入らず止まっている販売）。
+  //     findInventoryIdsByModelCodeFifo／getAutoLinkBlockers と同じ RESERVED_BY_ACTIVE_LISTING を
+  //     そのまま使い、条件を書き分けない。FIFOで選べる在庫が他に1点でもあれば数えない
+  const listingBlocksSale = one<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM sale s
+     WHERE s.kind = 'resale'
+       AND NOT EXISTS (SELECT 1 FROM sale_line sl WHERE sl.sale_id = s.id)
+       AND json_array_length(s.model_codes) = 1
+       AND EXISTS (
+         SELECT 1 FROM inventory_item i
+          WHERE i.model_code = json_extract(s.model_codes, '$[0]')
+            AND i.status = 'in_stock'
+            AND ${RESERVED_BY_ACTIVE_LISTING}
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM inventory_item i
+          WHERE i.model_code = json_extract(s.model_codes, '$[0]')
+            AND i.status = 'in_stock'
+            AND NOT ${RESERVED_BY_ACTIVE_LISTING}
+       )
+  `).c
+  if (listingBlocksSale > 0) {
+    checks.push({
+      id: 'listing-blocks-sale', level: 'warn', title: '出品に取ってある在庫のせいで紐付けられない販売',
+      count: listingBlocksSale,
+      detail: '売れた商品の在庫が、別の出品に取ってあります。その出品から外すと紐付けられます',
+      goto: { tab: 'sales', stage: 'all' },
+    })
+  }
+
+  // 11. status='suspended' の出品が in_stock の在庫を押さえている件数（出品の件数）。
+  //     active（出品中）は在庫を押さえているのが正常なので数えない
+  const suspendedReserved = one<{ c: number }>(`
+    SELECT COUNT(DISTINCT l.mercari_item_id) AS c
+      FROM listing l
+      JOIN listing_line ll ON ll.listing_id = l.mercari_item_id
+      JOIN inventory_item i ON i.id = ll.inventory_item_id
+     WHERE l.status = 'suspended' AND i.status = 'in_stock'
+  `).c
+  if (suspendedReserved > 0) {
+    checks.push({
+      id: 'suspended-listing-reserved', level: 'info', title: '出品を止めたまま在庫を押さえている出品',
+      count: suspendedReserved,
+      detail: '止めた出品に在庫が取ってあります。取ってあるあいだ、その在庫は他の販売に紐付けられません',
+      goto: { tab: 'sales', stage: 'listed' },
     })
   }
 

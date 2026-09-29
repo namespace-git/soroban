@@ -5400,6 +5400,175 @@ describe('db（:memory:）', () => {
     })
   })
 
+  describe('getAutoLinkBlockers：在庫はあるのに出品に取ってあるせいで自動紐付けから外れているのを見せる', () => {
+    it('実データの再現：Yahooの販売がsuspendedのメルカリ出品に握られた在庫を見つける', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '【A040】もこ山 スクイーズ 新品未開封', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      expect(item.model_code).toBe('A040')
+
+      db.upsertListings([
+        { mercariItemId: 'm15691073401', title: '【A040】もこ山 スクイーズ 新品未開封', price: 3000, suspended: true, thumbUrl: null },
+      ])
+      db.reserveInventory('m15691073401', [item.id])
+
+      const saleId = db.createSale({
+        title: '… もこ山 スクイーズ 新品未開封【A040】', sold_at: '2026-01-10', price: 5750, channel: 'yahoo',
+      })
+      const sale = db.listSales().find(s => s.id === saleId)!
+      // FIFOでは0点（在庫はあるのに「型番はあるが在庫が無い」と嘘をついていた）
+      expect(sale.unmatched).toBe(1)
+
+      const blockers = db.getAutoLinkBlockers(saleId)
+      expect(blockers).toHaveLength(1)
+      expect(blockers[0]).toMatchObject({
+        inventory_item_id: item.id,
+        item_code: item.item_code,
+        model_code: 'A040',
+        landed_cost: item.landed_cost,
+        listing_id: 'm15691073401',
+        listing_channel: 'mercari', // 販売はyahooだが、握っているのはmercariの出品
+        listing_status: 'suspended',
+        listing_title: '【A040】もこ山 スクイーズ 新品未開封',
+      })
+    })
+
+    it('activeな出品に握られている場合も同じく返る', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '【A041】商品', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+
+      db.upsertListings([
+        { mercariItemId: 'm-active-1', title: '【A041】商品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('m-active-1', [item.id])
+
+      const saleId = db.createSale({ title: '商品【A041】', sold_at: '2026-01-10', price: 3000, channel: 'yahoo' })
+      const blockers = db.getAutoLinkBlockers(saleId)
+      expect(blockers).toHaveLength(1)
+      expect(blockers[0].listing_status).toBe('active')
+      expect(blockers[0].listing_id).toBe('m-active-1')
+    })
+
+    it('sold/endedの出品に引き当てられていた在庫は返らない（FIFOが除外しないので理由ではない）', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '【A042】商品', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+
+      db.upsertListings([
+        { mercariItemId: 'm-sold-1', title: '【A042】商品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('m-sold-1', [item.id])
+      // 通常はtakeOverListingがlisting_lineを先に消してからsoldにする（trg_listing_line_guardは
+      // INSERTだけを見ているのでUPDATEは通る）。万一listing_lineが残ったままstatusだけ変わっても、
+      // blockersはそれを理由にしないことを確かめる
+      db.getDb().prepare(`UPDATE listing SET status = 'sold' WHERE mercari_item_id = ?`).run('m-sold-1')
+
+      // autoLinkSaleを経由せず、blockersのSQL条件だけを検証する（未紐付けのsaleを直接作る）
+      const saleId = 'sale-sold-test'
+      db.getDb().prepare(
+        `INSERT INTO sale (id, title, sold_at, price, kind, model_codes) VALUES (?, ?, ?, ?, 'resale', ?)`,
+      ).run(saleId, '商品【A042】', '2026-01-10', 3000, JSON.stringify(['A042']))
+
+      expect(db.getAutoLinkBlockers(saleId)).toEqual([])
+    })
+
+    it('FIFOが選べる在庫がある販売では空配列になる（理由が別なので）', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '【A043】商品', unit_price: 1000, quantity: 1 }],
+      })
+      const saleId = db.createSale({ title: '商品【A043】', sold_at: '2026-01-10', price: 3000 })
+      const sale = db.listSales().find(s => s.id === saleId)!
+      expect(sale.unmatched).toBe(0) // 通常どおり自動確定できている
+
+      expect(db.getAutoLinkBlockers(saleId)).toEqual([])
+    })
+
+    it('型番が0個のときは空配列', () => {
+      const saleId = db.createSale({ title: '型番なしの商品', sold_at: '2026-01-10', price: 1000 })
+      expect(db.getAutoLinkBlockers(saleId)).toEqual([])
+    })
+
+    it('型番が2個以上のときは空配列（A044は出品に握られているが対象外）', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '【A044】商品X', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'm-multi-1', title: '【A044】商品X', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('m-multi-1', [item.id])
+
+      const saleId = db.createSale({ title: '【A044】と【A045】のセット', sold_at: '2026-01-10', price: 2000 })
+      expect(db.getAutoLinkBlockers(saleId)).toEqual([])
+    })
+
+    it('私物のときは空配列', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '【A046】商品', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings([
+        { mercariItemId: 'm-personal-1', title: '【A046】商品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('m-personal-1', [item.id])
+
+      const saleId = db.createSale({ title: '【A046】商品', sold_at: '2026-01-10', price: 1000, kind: 'personal' })
+      expect(db.getAutoLinkBlockers(saleId)).toEqual([])
+    })
+
+    it('既に紐付き済みのときは空配列', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '【A047】商品', unit_price: 1000, quantity: 1 }],
+      })
+      // 出品には握らせない → FIFOで即自動確定する
+      const saleId = db.createSale({ title: '【A047】商品', sold_at: '2026-01-10', price: 1000 })
+      expect(db.listSales().find(s => s.id === saleId)!.unmatched).toBe(0)
+      expect(db.getAutoLinkBlockers(saleId)).toEqual([])
+    })
+
+    it('除外条件が対になっている：同じ在庫がFIFOで選べないときだけblockersが非空になる', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '【A048】商品1', unit_price: 1000, quantity: 1 }],
+      })
+      const item1 = db.listInventory('in_stock')[0]
+
+      // 1. まだどこにも引き当てていない → FIFOで選べる（autoLinkSaleが成功）→ blockersは空
+      const saleOk = db.createSale({ title: '商品1【A048】', sold_at: '2026-01-10', price: 3000 })
+      expect(db.listSales().find(s => s.id === saleOk)!.unmatched).toBe(0)
+      expect(db.getAutoLinkBlockers(saleOk)).toEqual([])
+
+      // 2. 別の在庫を出品へ引き当ててからFIFOを試す → 選べない → blockersが非空（同じ在庫を指す）
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-02', shipping_fee: 0,
+        lines: [{ name: '【A048】商品2', unit_price: 1000, quantity: 1 }],
+      })
+      const item2 = db.listInventory('in_stock').find(i => i.id !== item1.id)!
+      db.upsertListings([
+        { mercariItemId: 'm-pair-1', title: '【A048】商品2', price: 3000, suspended: false, thumbUrl: null },
+      ])
+      db.reserveInventory('m-pair-1', [item2.id])
+
+      const saleBlocked = db.createSale({ title: '商品2【A048】', sold_at: '2026-01-11', price: 3000 })
+      const saleBlockedRow = db.listSales().find(s => s.id === saleBlocked)!
+      expect(saleBlockedRow.unmatched).toBe(1) // FIFOで0点
+      const blockers = db.getAutoLinkBlockers(saleBlocked)
+      expect(blockers).toHaveLength(1)
+      expect(blockers[0].inventory_item_id).toBe(item2.id)
+    })
+  })
+
   describe('nextItemCode：カウンタが既存コードより後ろにずれていても衝突しない', () => {
     it('開始番号は max(カウンタ, 既存コードの最大番号) から採番する', () => {
       db.createPurchase({
@@ -6273,6 +6442,134 @@ describe('db（:memory:）', () => {
       const firstInfoIndex = checks.findIndex(c => c.level === 'info')
       const lastWarnIndex = checks.map(c => c.level).lastIndexOf('warn')
       expect(firstInfoIndex).toBeGreaterThan(lastWarnIndex)
+    })
+
+    describe('listing-blocks-sale／suspended-listing-reserved：出品に取られたままの在庫', () => {
+      it('実データの再現：suspendedな出品が握った在庫と同じ型番のYahoo販売が未紐付けだと、両方1件ずつ出る', () => {
+        db.createPurchase({
+          shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+          lines: [{ name: '【A040】もこ山 スクイーズ', unit_price: 1000, quantity: 1 }],
+        })
+        const item = db.listInventory('in_stock')[0]
+        db.upsertListings([
+          { mercariItemId: 'm-blk-1', title: '【A040】もこ山 スクイーズ', price: 3000, suspended: true, thumbUrl: null },
+        ])
+        db.reserveInventory('m-blk-1', [item.id])
+
+        const saleId = db.createSale({
+          title: 'もこ山 スクイーズ【A040】', sold_at: '2026-01-10', price: 5750, channel: 'yahoo',
+        })
+        const sale = db.listSales().find(s => s.id === saleId)!
+        expect(sale.unmatched).toBe(1)
+
+        const checks = db.getHealthChecks()
+        expect(checks.find(c => c.id === 'listing-blocks-sale')).toMatchObject({
+          level: 'warn', count: 1, goto: { tab: 'sales', stage: 'all' },
+        })
+        expect(checks.find(c => c.id === 'suspended-listing-reserved')).toMatchObject({
+          level: 'info', count: 1, goto: { tab: 'sales', stage: 'listed' },
+        })
+      })
+
+      it('同じ型番の在庫がもう1点、引き当てられずに残っていればlisting-blocks-saleは出ない（FIFOで紐付くので）。suspended-listing-reservedは出る', () => {
+        db.createPurchase({
+          shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+          lines: [{ name: '【A050】在庫2点', unit_price: 1000, quantity: 2 }],
+        })
+        const [item1, item2] = db.listInventory('in_stock')
+        db.upsertListings([
+          { mercariItemId: 'm-blk-2', title: '【A050】在庫2点', price: 3000, suspended: true, thumbUrl: null },
+        ])
+        db.reserveInventory('m-blk-2', [item1.id]) // item2は未引き当てのまま残す
+
+        const saleId = db.createSale({ title: '在庫2点【A050】', sold_at: '2026-01-10', price: 3000, channel: 'yahoo' })
+        const sale = db.listSales().find(s => s.id === saleId)!
+        expect(sale.unmatched).toBe(0) // item2で普通に自動紐付けできている
+        void item2
+
+        const checks = db.getHealthChecks()
+        expect(checks.find(c => c.id === 'listing-blocks-sale')).toBeUndefined()
+        expect(checks.find(c => c.id === 'suspended-listing-reserved')).toMatchObject({ count: 1 })
+      })
+
+      it('activeな出品が握っている場合：listing-blocks-saleは出るが、suspended-listing-reservedは出ない（出品中は正常）', () => {
+        db.createPurchase({
+          shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+          lines: [{ name: '【A051】商品', unit_price: 1000, quantity: 1 }],
+        })
+        const item = db.listInventory('in_stock')[0]
+        db.upsertListings([
+          { mercariItemId: 'm-blk-3', title: '【A051】商品', price: 3000, suspended: false, thumbUrl: null },
+        ])
+        db.reserveInventory('m-blk-3', [item.id])
+
+        const saleId = db.createSale({ title: '商品【A051】', sold_at: '2026-01-10', price: 3000, channel: 'yahoo' })
+        const sale = db.listSales().find(s => s.id === saleId)!
+        expect(sale.unmatched).toBe(1)
+
+        const checks = db.getHealthChecks()
+        expect(checks.find(c => c.id === 'listing-blocks-sale')).toMatchObject({ count: 1 })
+        expect(checks.find(c => c.id === 'suspended-listing-reserved')).toBeUndefined()
+      })
+
+      it('sold/endedの出品が握っていた在庫は、どちらも数えない', () => {
+        db.createPurchase({
+          shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+          lines: [{ name: '【A052】商品', unit_price: 1000, quantity: 1 }],
+        })
+        const item = db.listInventory('in_stock')[0]
+        db.upsertListings([
+          { mercariItemId: 'm-blk-4', title: '【A052】商品', price: 3000, suspended: false, thumbUrl: null },
+        ])
+        db.reserveInventory('m-blk-4', [item.id])
+        // 通常はtakeOverListingがlisting_lineを先に消してからsoldにするが、万一残っていても
+        // 数えないことを確かめる（既存のgetAutoLinkBlockersのテストと同じやり方）
+        db.getDb().prepare(`UPDATE listing SET status = 'sold' WHERE mercari_item_id = ?`).run('m-blk-4')
+
+        const saleId = db.createSale({ title: '商品【A052】', sold_at: '2026-01-10', price: 3000, channel: 'yahoo' })
+        const sale = db.listSales().find(s => s.id === saleId)!
+        expect(sale.unmatched).toBe(0) // soldな出品は横取りにならないのでFIFOで紐付く
+
+        const checks = db.getHealthChecks()
+        expect(checks.find(c => c.id === 'listing-blocks-sale')).toBeUndefined()
+        expect(checks.find(c => c.id === 'suspended-listing-reserved')).toBeUndefined()
+      })
+
+      it('私物・型番なし・型番2つ・紐付け済みの販売はlisting-blocks-saleに数えない', () => {
+        db.createPurchase({
+          shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+          lines: [{ name: '【A053】商品', unit_price: 1000, quantity: 1 }],
+        })
+        const item = db.listInventory('in_stock')[0]
+        db.upsertListings([
+          { mercariItemId: 'm-blk-5', title: '【A053】商品', price: 3000, suspended: true, thumbUrl: null },
+        ])
+        db.reserveInventory('m-blk-5', [item.id])
+
+        // 私物
+        db.createSale({ title: '商品【A053】', sold_at: '2026-01-10', price: 3000, kind: 'personal' })
+        // 型番なし
+        db.createSale({ title: '型番なしの商品', sold_at: '2026-01-10', price: 1000 })
+        // 型番2つ
+        db.createSale({ title: '【A053】と【A054】のセット', sold_at: '2026-01-10', price: 2000 })
+        // 紐付け済み（別の型番の在庫を明示的に紐付ける）
+        db.createPurchase({
+          shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+          lines: [{ name: '【A055】別商品', unit_price: 1000, quantity: 1 }],
+        })
+        const item55 = db.listInventory('in_stock').find(i => i.model_code === 'A055')!
+        const linkedSaleId = db.createSale({ title: '別商品【A055】', sold_at: '2026-01-10', price: 3000 })
+        db.linkInventory(linkedSaleId, [item55.id])
+
+        const checks = db.getHealthChecks()
+        expect(checks.find(c => c.id === 'listing-blocks-sale')).toBeUndefined()
+      })
+
+      it('該当が無いとき、どちらもリストに出てこない', () => {
+        const checks = db.getHealthChecks()
+        expect(checks.find(c => c.id === 'listing-blocks-sale')).toBeUndefined()
+        expect(checks.find(c => c.id === 'suspended-listing-reserved')).toBeUndefined()
+      })
     })
   })
 

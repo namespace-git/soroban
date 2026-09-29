@@ -97,6 +97,26 @@ export type LinkSource = 'auto' | 'manual' | 'listing'
  */
 export type ListingStatus = 'active' | 'suspended' | 'sold' | 'ended'
 
+/**
+ * 「型番は合っているのに、出品に取ってあるせいで自動紐付けから外れた在庫」1点。
+ * `getAutoLinkBlockers` が返す。画面で「在庫が無い」と誤って言わないための情報。
+ */
+export interface AutoLinkBlocker {
+  inventory_item_id: string
+  /** 在庫コード（S-0029） */
+  item_code: string
+  /** 型番（A040）。販売側で抽出した型番と一致している */
+  model_code: string
+  landed_cost: number
+  /** この在庫を握っている出品の id */
+  listing_id: string
+  /** その出品の出品先。**販売とは違う出品先のことがある**（それがこの問題の主因） */
+  listing_channel: SalesChannel
+  /** active か suspended（それ以外は除外の対象外なので返らない） */
+  listing_status: ListingStatus
+  listing_title: string
+}
+
 // ------------------------------------------------------------
 // 型番（メロジョイの商品コード）
 //   【Z078-2】= model_code 'Z078-2', series_code 'Z078'
@@ -1153,6 +1173,18 @@ export interface SorobanApi {
   /** 未紐付けの転売のうち型番が完全一致するものを先入先出で自動確定する。戻り値は確定した販売数 */
   autoLinkPending(): Promise<number>
   unlinkInventory(saleId: string, inventoryItemId: string): Promise<void>
+  /**
+   * その販売が自動で紐付かない理由のうち、**在庫はあるのに出品に取ってあるせいで外れているもの**を返す。
+   *
+   * 自動紐付けの在庫検索は、出品中（active／suspended）に引き当て済みの在庫をわざと除外する
+   * （出品中の商品に取ってある在庫を、別の販売が横取りしないため）。本来はその出品が売れたときに
+   * `takeOverListing` が引き継ぐが、**別の出品先で売れた**ときは引き継ぎ先が見つからず、
+   * 在庫があるのに候補ゼロになる（実データで踏んだ：メルカリに出して止めた在庫が Yahoo で売れた）。
+   *
+   * これが空でないとき、画面は「在庫が無い」と言ってはいけない。**どの出品が握っているか**を見せ、
+   * `unreserveInventory` で外せるようにすること。空配列＝この理由ではない。
+   */
+  getAutoLinkBlockers(saleId: string): Promise<AutoLinkBlocker[]>
   /** 商品名の類似度で在庫の候補を返す（確定はしない） */
   /** includeSold: 販売済み（他の販売に紐付いた）在庫も候補に含める（sold_to 付き）。既定は未販売だけ */
   suggestInventory(saleId: string, limit?: number, opts?: { includeSold?: boolean }): Promise<InventoryItem[]>

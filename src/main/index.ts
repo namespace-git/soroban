@@ -204,7 +204,7 @@ async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
 const UNLOGGED_HANDLERS = new Set<keyof SorobanApi>([
   'logClient', 'getDashboard', 'listSales', 'listListings', 'listInventory',
   'getAutoBackupStatus', 'getHealthChecks', 'getTrackingApiStatus', 'getLastTrackingSummary',
-  'suggestProductInventory',
+  'suggestProductInventory', 'getAutoLinkBlockers',
   'listPurchases', 'listMonthly', 'listExpenses', 'searchAll', 'getSettings',
   'getMonthDetail', 'listProducts', 'listTags', 'listShopAccounts', 'listShippingMethods',
   // 引数に API キーが載るので記録しない（summarize はキー名でしか伏せられない）
@@ -287,6 +287,7 @@ function registerIpc(): void {
   handle('unlinkInventory', (saleId, id) => db.unlinkInventory(saleId, id))
   handle('suggestInventory', (saleId, limit, opts) => db.suggestInventory(saleId, limit, opts))
   handle('suggestProductInventory', (modelCode, quantity, excludeIds) => db.suggestProductInventory(modelCode, quantity, excludeIds))
+  handle('getAutoLinkBlockers', (saleId) => db.getAutoLinkBlockers(saleId))
   handle('listSaleLines', (saleId) => db.listSaleLines(saleId))
 
   handle('listPurchases', () => db.listPurchases())

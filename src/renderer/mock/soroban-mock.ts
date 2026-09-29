@@ -18,7 +18,7 @@ import type {
   MonthlySummary, DashboardStats, CollectorRun,
   Material, VariantSummary, Tag, Fulfillment,
   ProductSummary, ProductDetail, ProductMonthPoint, ItemTimeline, TimelineEvent,
-  Listing, ListingStatus, SalesChannel, FeeSource,
+  Listing, ListingStatus, SalesChannel, FeeSource, AutoLinkBlocker,
   Expense, ExpenseInput, ExpenseLineInput, ExpenseLine, ExpenseCategory,
   ReceiptDraft, ReceiptRead, AiStatus, TrackingApiStatus, TrackingCheckSummary,
   AllocMethod, MonthClose, MonthDetail, MonthSaleRow, MonthTotals,
@@ -352,6 +352,8 @@ const VARIANTS: Variant[] = [
   { model: 'Z045-2', series: 'Z045', material: 'ねっとりヨーグルト', base: 'マスカットオレ', price: 1400 },
   { model: 'Z099-1', series: 'Z099', material: 'ムースクリーム', base: 'キャラメルバナナ', price: 1100 },
   { model: 'A012', series: 'A012', material: null, base: 'パステルボックス', price: 2000 },
+  // 見本：自動紐付けブロッカー（getAutoLinkBlockers）用。実データで踏んだ事故に合わせる
+  { model: 'A040', series: 'A040', material: null, base: 'もこ山 スクイーズ', price: 1400 },
 ]
 
 function variantOf(model: string): Variant {
@@ -713,6 +715,12 @@ function buildInitialPurchasesAndInventory(): void {
     shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(20)), shippingFee: 800,
     lines: [{ model: 'Z088-2', qty: 3 }, { model: 'Z045-2', qty: 3 }, { model: 'Z056-2', qty: 3 }],
   })
+  // 見本：getAutoLinkBlockers 用。1点しか無い在庫を、この後 buildInitialListings で
+  // メルカリの一時停止中の出品に取らせる（buildInitialSales の Yahoo 販売から候補ゼロに見える）
+  addConfirmedPurchase({
+    shopId: mA.id, shopName: mA.name, orderedAt: todayLocal(daysAgo(30)), shippingFee: 300,
+    lines: [{ model: 'A040', qty: 1 }],
+  })
   addTiktokPurchase({
     shopId: tk.id, shopName: tk.name, orderedAt: todayLocal(daysAgo(60)), shippingFee: 500,
     lines: [
@@ -749,9 +757,18 @@ function buildInitialPurchasesAndInventory(): void {
     .forEach((l, i) => lineImageUrl.set(l.id, `soroban-thumb://m${8000 + i}.jpg`))
 }
 
-/** 型番一致の在庫を古い順（先入先出）に1点取る。M-06/M-09 と同じルール */
+/**
+ * 出品中（active／suspended）の出品に取ってある在庫か。自動紐付けの検索（takeOldestByModel）・
+ * 候補の検索（suggestInventory）は、この在庫をわざと除外する（横取り防止）。
+ * それ以外（売却済み扱いの見本データ・取り下げ）は除外しない
+ */
+function isReservedToOpenListing(i: InventoryItem): boolean {
+  return !!i.listing && (i.listing.status === 'active' || i.listing.status === 'suspended')
+}
+
+/** 型番一致の在庫を古い順（先入先出）に1点取る。M-06/M-09 と同じルール。出品中に取ってある分は除く */
 function takeOldestByModel(model: string): InventoryItem | undefined {
-  return inventory.find(i => i.model_code === model && i.status === 'in_stock')
+  return inventory.find(i => i.model_code === model && i.status === 'in_stock' && !isReservedToOpenListing(i))
 }
 
 // ------------------------------------------------------------
@@ -968,6 +985,22 @@ function buildInitialSales(): void {
       i, title: `【${model}】${displayName(variantOf(model))}`, kind: 'resale', items: [],
       shipping: { id: method.id, fee: method.fee, confirmed: true, source: 'master' },
       packaging: packagingFor(i),
+    }))
+  }
+
+  // --- 在庫はあるが出品に取ってある（getAutoLinkBlockers の見本。実データで踏んだ事故そのまま）：
+  //     Yahoo!フリマの販売なのに、型番が一致する唯一の在庫はメルカリの一時停止中の出品に取られている。
+  //     「型番はあるが在庫が無い」と言ってはいけないケース（buildInitialListings で A040 を予約する） ---
+  {
+    const i = idx++
+    const model = 'A040'
+    const method = sm(i)
+    out.push(buildSaleFixed({
+      i, title: `【${model}】もこ山 スクイーズ 新品未開封`, kind: 'resale', items: [],
+      shipping: { id: method.id, fee: method.fee, confirmed: true, source: 'actual' },
+      packaging: packagingFor(i),
+      channel: 'yahoo', sourceOverride: 'manual',
+      priceOverride: 5750, feeOverride: 288,
     }))
   }
 
@@ -1246,6 +1279,9 @@ function buildInitialListings(): void {
   addListing({ model: 'Z012-3', status: 'ended', daysAgoFirstSeen: 30, reserve: false })
   addListing({ model: 'Z056-2', status: 'active', daysAgoFirstSeen: 5, reserve: false, likes: 2, channel: 'yahoo' })
   addListing({ model: 'A012', status: 'active', daysAgoFirstSeen: 2, reserve: false, channel: 'yahoo' })
+  // 見本：getAutoLinkBlockers。メルカリの一時停止中の出品が唯一の在庫を握ったまま、
+  // 別サイト（Yahoo!フリマ）の販売が候補ゼロになる（buildInitialSales の A040 販売と対）
+  addListing({ model: 'A040', status: 'suspended', daysAgoFirstSeen: 15, reserve: true })
 }
 
 // ------------------------------------------------------------
@@ -3010,10 +3046,34 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
+  async getAutoLinkBlockers(saleId: string): Promise<AutoLinkBlocker[]> {
+    const sale = findSale(saleId)
+    if (sale.kind !== 'resale' || sale.model_codes.length === 0) return wait([])
+    const codes = new Set(sale.model_codes)
+    const blockers = inventory
+      .filter(i => i.model_code && codes.has(i.model_code) && i.status === 'in_stock' && isReservedToOpenListing(i))
+      .map((i): AutoLinkBlocker => {
+        const listing = i.listing!
+        const rec = listingRecords.find(r => r.mercari_item_id === listing.mercari_item_id)
+        return {
+          inventory_item_id: i.id,
+          item_code: i.item_code,
+          model_code: i.model_code!,
+          landed_cost: i.landed_cost,
+          listing_id: listing.mercari_item_id,
+          listing_channel: listing.channel,
+          listing_status: listing.status,
+          listing_title: rec?.title ?? '',
+        }
+      })
+    return wait(blockers)
+  },
+
   async suggestInventory(saleId: string, limit = 20, opts?: { includeSold?: boolean }) {
     const sale = findSale(saleId)
     const target = normalizeName(sale.title)
-    const items = inventory.filter(i => i.status === 'in_stock')
+    // 出品中の出品に取ってある在庫は候補から外す（横取り防止）。getAutoLinkBlockers で別途見せる
+    const items = inventory.filter(i => i.status === 'in_stock' && !isReservedToOpenListing(i))
     const ranked = items
       .map(item => ({ item, score: commonCharCount(target, normalizeName(item.name)) }))
       .sort((a, b) => (b.score !== a.score ? b.score - a.score : b.item.aging_days - a.item.aging_days))
