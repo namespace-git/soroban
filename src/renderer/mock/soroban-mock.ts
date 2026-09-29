@@ -30,6 +30,7 @@ import type {
   AutoBackupStatus, ExportKind,
   HealthCheck,
 } from '../../shared/types'
+import { LISTING_STATUS_LABEL } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 import { matchesSearch } from '../components/SearchBox.vue'
 
@@ -204,16 +205,12 @@ function calcFeeMock(price: number, rateBp: number): number {
 // 横断検索：種類ごとの状態表示語
 // ------------------------------------------------------------
 
-const LISTING_STATUS_LABEL: Record<ListingStatus, string> = {
-  active: '出品中', suspended: '公開停止中', sold: '売れた', ended: '取り下げ',
-}
-
 function inventorySearchStatusLabel(i: InventoryItem): string {
   if (i.status === 'sold') return '販売済'
   if (i.status === 'disposed') return '廃棄'
   if (i.status === 'personal_use') return '自家消費'
   if (i.status === 'split') return '分割済'
-  if (i.listing) return i.listing.status === 'suspended' ? '公開停止中' : '出品中'
+  if (i.listing) return LISTING_STATUS_LABEL[i.listing.status]
   return '未出品'
 }
 
@@ -3013,9 +3010,12 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
-  async autoLinkPending(): Promise<number> {
+  async autoLinkPending(saleIds?: string[]): Promise<number> {
+    // saleIds を渡すと、その販売だけが対象（画面がいま表示している行の id をそのまま渡す）。
+    // 省略なら従来どおり全件、空配列なら0件（sales.filter は何にも一致しない）
+    const targets = saleIds === undefined ? sales : sales.filter(s => saleIds.includes(s.id))
     let confirmed = 0
-    for (const sale of sales) {
+    for (const sale of targets) {
       if (sale.kind !== 'resale' || sale.unmatched !== 1) continue
       if (sale.model_codes.length !== 1) continue
       const item = takeOldestByModel(sale.model_codes[0])
@@ -3934,9 +3934,12 @@ const api: SorobanApi = {
     return wait(undefined)
   },
 
-  async autoReserveListings(): Promise<number> {
+  async autoReserveListings(listingIds?: string[]): Promise<number> {
+    // listingIds を渡すと、その出品だけが対象（画面がいま表示している行の id をそのまま渡す）。
+    // 省略なら従来どおり全件、空配列なら0件
+    const targets = listingIds === undefined ? listingRecords : listingRecords.filter(r => listingIds.includes(r.mercari_item_id))
     let confirmed = 0
-    for (const rec of listingRecords) {
+    for (const rec of targets) {
       if (rec.status !== 'active' && rec.status !== 'suspended') continue
       if ((listingItems.get(rec.mercari_item_id) ?? []).length > 0) continue
       if (rec.model_codes.length !== 1) continue

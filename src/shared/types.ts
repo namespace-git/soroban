@@ -98,6 +98,17 @@ export type LinkSource = 'auto' | 'manual' | 'listing'
 export type ListingStatus = 'active' | 'suspended' | 'sold' | 'ended'
 
 /**
+ * 画面に出す出品の状態の名前。**出品先で言い分けない**（メルカリも Yahoo!フリマも同じ言葉）。
+ * 以前は同じ `suspended` が「公開停止中」「一時停止」の 2 通りで出ていた。ここに一本化する。
+ */
+export const LISTING_STATUS_LABEL: Record<ListingStatus, string> = {
+  active: '出品中',
+  suspended: '出品停止中',
+  sold: '売れた',
+  ended: '取り下げ',
+}
+
+/**
  * 「型番は合っているのに、出品に取ってあるせいで自動紐付けから外れた在庫」1点。
  * `getAutoLinkBlockers` が返す。画面で「在庫が無い」と誤って言わないための情報。
  */
@@ -1172,8 +1183,14 @@ export interface SorobanApi {
   // 紐付け
   /** takeFromSale: 販売済みの在庫を、今の販売から外してこの販売に付け替える（メンテ用。画面で警告してから呼ぶ） */
   linkInventory(saleId: string, inventoryItemIds: string[], opts?: { takeFromSale?: boolean }): Promise<void>
-  /** 未紐付けの転売のうち型番が完全一致するものを先入先出で自動確定する。戻り値は確定した販売数 */
-  autoLinkPending(): Promise<number>
+  /**
+   * 未紐付けの転売のうち型番が完全一致するものを先入先出で自動確定する。戻り値は確定した販売数。
+   *
+   * `saleIds` を渡すと**その販売だけ**が対象。画面は**いま表示している行の id をそのまま渡す**こと
+   * （出品先・検索・タグなどの絞り込みを main 側で作り直さない。二重に書くと必ず食い違う）。
+   * 省略すると従来どおり全件。
+   */
+  autoLinkPending(saleIds?: string[]): Promise<number>
   unlinkInventory(saleId: string, inventoryItemId: string): Promise<void>
   /**
    * その販売が自動で紐付かない理由のうち、**在庫はあるのに出品に取ってあるせいで外れているもの**を返す。
@@ -1355,9 +1372,12 @@ export interface SorobanApi {
   /**
    * 未引き当ての出品（active／suspended）に、型番の枝番まで完全一致する未販売・未引き当ての在庫を
    * 先入先出で 1 点ずつ引き当てる（販売の autoLinkPending と同じ規則。型番が 1 つで枝番ありのものだけ）。
-   * 引き当てた出品の数を返す。1 クリックで解除できること
+   * 引き当てた出品の数を返す。1 クリックで解除できること。
+   *
+   * `listingIds` を渡すと**その出品だけ**が対象。画面は**いま表示している行の id をそのまま渡す**こと
+   * （絞り込みを main 側で作り直さない）。省略すると従来どおり全件。
    */
-  autoReserveListings(): Promise<number>
+  autoReserveListings(listingIds?: string[]): Promise<number>
   /** 出品時に発送方法を決めておく（null で外す） */
   setListingShipping(mercariItemId: string, shippingMethodId: string | null): Promise<void>
 

@@ -3146,6 +3146,112 @@ describe('db（:memory:）', () => {
     }
   })
 
+  describe('autoLinkPending：saleIds で対象を絞る（画面の絞り込みを無視して全件に走らないこと）', () => {
+    it('saleIds を渡すと、その販売だけが紐付く（渡していない未紐付けの販売はそのまま残る）', () => {
+      // タイトルに型番はあるが、この時点では在庫が無いので createSale 内の自動紐付けは失敗し未紐付けのまま残る
+      const saleA = db.createSale({ title: '【A040】りんご', sold_at: '2026-01-05', price: 2000 })
+      const saleB = db.createSale({ title: '【A041】みかん', sold_at: '2026-01-05', price: 2000 })
+      expect(db.listSales().find(s => s.id === saleA)!.unmatched).toBe(1)
+      expect(db.listSales().find(s => s.id === saleB)!.unmatched).toBe(1)
+
+      // ここで在庫を作る（両方とも紐付け可能な状態にする）
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'りんご【A040】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'みかん【A041】', unit_price: 1000, quantity: 1 }],
+      })
+
+      const linked = db.autoLinkPending([saleA])
+      expect(linked).toBe(1)
+      expect(db.listSales().find(s => s.id === saleA)!.unmatched).toBe(0)
+      // 渡していないsaleBは在庫があっても紐付かない
+      expect(db.listSales().find(s => s.id === saleB)!.unmatched).toBe(1)
+    })
+
+    it('空配列を渡すと0件で、未紐付けの販売は1件も紐付かない', () => {
+      const saleA = db.createSale({ title: '【A050】くり', sold_at: '2026-01-05', price: 2000 })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'くり【A050】', unit_price: 1000, quantity: 1 }],
+      })
+
+      expect(db.autoLinkPending([])).toBe(0)
+      expect(db.listSales().find(s => s.id === saleA)!.unmatched).toBe(1)
+    })
+
+    it('省略すると従来どおり全件が対象になる', () => {
+      const saleA = db.createSale({ title: '【A051】もも', sold_at: '2026-01-05', price: 2000 })
+      const saleB = db.createSale({ title: '【A052】ぶどう', sold_at: '2026-01-05', price: 2000 })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'もも【A051】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'ぶどう【A052】', unit_price: 1000, quantity: 1 }],
+      })
+
+      expect(db.autoLinkPending()).toBe(2)
+      expect(db.listSales().find(s => s.id === saleA)!.unmatched).toBe(0)
+      expect(db.listSales().find(s => s.id === saleB)!.unmatched).toBe(0)
+    })
+
+    it('渡した id に、既に紐付いている・私物・型番が2個以上の販売が混ざっていてもエラーにならず、条件を満たすものだけ紐付く', () => {
+      // 在庫が無い状態でsaleを作る（createSale内の自動紐付けを空振りさせ、未紐付けのまま残す）
+      const target = db.createSale({ title: '【A060】たいしょう', sold_at: '2026-01-05', price: 2000 })
+      const alreadyLinked = db.createSale({ title: '【A060】すでに紐付済', sold_at: '2026-01-05', price: 2000 })
+      const personal = db.createSale({
+        title: '【A060】私物', sold_at: '2026-01-05', price: 500, kind: 'personal',
+      })
+      const twoCodesSale = db.createSale({
+        title: '【A060】【A040】ふたつ型番', sold_at: '2026-01-05', price: 3000,
+      })
+
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '対象【A060】', unit_price: 1000, quantity: 2 }],
+      })
+
+      // alreadyLinkedだけ先に確定させ、A060の在庫2点のうち1点を消費しておく
+      expect(db.autoLinkSale(alreadyLinked)).toBe(true)
+      expect(db.listSales().find(s => s.id === alreadyLinked)!.unmatched).toBe(0)
+      expect(db.listSales().find(s => s.id === target)!.unmatched).toBe(1)
+
+      const linked = db.autoLinkPending([target, alreadyLinked, personal, twoCodesSale])
+      // targetだけが残り1点のA060で紐付く。alreadyLinked（既にsale_lineあり）・personal（kind不一致）・
+      // twoCodesSale（型番2つ）はautoLinkSale内で弾かれ、エラーにならず静かに飛ばされる
+      expect(linked).toBe(1)
+      expect(db.listSales().find(s => s.id === target)!.unmatched).toBe(0)
+      expect(db.listSales().find(s => s.id === personal)!.kind).toBe('personal')
+      expect(db.listSales().find(s => s.id === twoCodesSale)!.unmatched).toBe(1)
+    })
+
+    it('出品先（channel）が混ざった状態で、片方の出品先の id だけ渡したらもう片方は紐付かない', () => {
+      const saleMercari = db.createSale({
+        title: '【A070】めるかり', sold_at: '2026-01-05', price: 2000, channel: 'mercari',
+      })
+      const saleYahoo = db.createSale({
+        title: '【A071】やふー', sold_at: '2026-01-05', price: 2000, channel: 'yahoo',
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'めるかり【A070】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'やふー【A071】', unit_price: 1000, quantity: 1 }],
+      })
+
+      const linked = db.autoLinkPending([saleMercari])
+      expect(linked).toBe(1)
+      expect(db.listSales().find(s => s.id === saleMercari)!.unmatched).toBe(0)
+      expect(db.listSales().find(s => s.id === saleYahoo)!.unmatched).toBe(1)
+    })
+  })
+
   describe('出品先（channel）：メルカリ / Yahoo!フリマ', () => {
     it('setting.fee_rate_bp_yahooの既定は500（5.00%）', () => {
       expect(db.getSettings().fee_rate_bp_yahoo).toBe('500')
@@ -4885,6 +4991,93 @@ describe('db（:memory:）', () => {
     })
   })
 
+  describe('autoReserveListings：listingIds で対象を絞る（画面の絞り込みを無視して全件に走らないこと）', () => {
+    it('listingIds を渡すと、その出品だけが引き当たる（渡していない未引き当ての出品はそのまま残る）', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'りんご【A080】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'みかん【A081】', unit_price: 1000, quantity: 1 }],
+      })
+      db.upsertListings([
+        { mercariItemId: 'LFilterA', title: 'りんご【A080】', price: 2000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'LFilterB', title: 'みかん【A081】', price: 2000, suspended: false, thumbUrl: null },
+      ])
+
+      const count = db.autoReserveListings(['LFilterA'])
+      expect(count).toBe(1)
+      expect(db.listListings().find(l => l.mercari_item_id === 'LFilterA')!.items).toHaveLength(1)
+      // 渡していないLFilterBは在庫があっても引き当たらない
+      expect(db.listListings().find(l => l.mercari_item_id === 'LFilterB')!.items).toEqual([])
+    })
+
+    it('空配列を渡すと0件で、未引き当ての出品は1件も引き当たらない', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'くり【A082】', unit_price: 1000, quantity: 1 }],
+      })
+      db.upsertListings([
+        { mercariItemId: 'LFilterC', title: 'くり【A082】', price: 2000, suspended: false, thumbUrl: null },
+      ])
+
+      expect(db.autoReserveListings([])).toBe(0)
+      expect(db.listListings().find(l => l.mercari_item_id === 'LFilterC')!.items).toEqual([])
+    })
+
+    it('渡した id に、既に引き当て済み・型番が2個以上の出品が混ざっていてもエラーにならず、条件を満たすものだけ引き当たる', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '対象【A083】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: '対象【A084】', unit_price: 1000, quantity: 1 }],
+      })
+      db.upsertListings([
+        { mercariItemId: 'LFilterD', title: '対象【A083】', price: 2000, suspended: false, thumbUrl: null },
+        { mercariItemId: 'LFilterAlready', title: '既に引当済み', price: 2000, suspended: false, thumbUrl: null },
+        {
+          mercariItemId: 'LFilterTwo', title: '対象【A083】【A084】', price: 2000,
+          suspended: false, thumbUrl: null,
+        },
+      ])
+      const already = db.listInventory('in_stock').find(i => i.model_code === 'A084')!
+      db.reserveInventory('LFilterAlready', [already.id])
+      expect(db.listListings().find(l => l.mercari_item_id === 'LFilterAlready')!.items).toHaveLength(1)
+
+      const count = db.autoReserveListings(['LFilterD', 'LFilterAlready', 'LFilterTwo'])
+      expect(count).toBe(1)
+      expect(db.listListings().find(l => l.mercari_item_id === 'LFilterD')!.items).toHaveLength(1)
+      expect(db.listListings().find(l => l.mercari_item_id === 'LFilterTwo')!.items).toEqual([])
+    })
+
+    it('出品先（channel）が混ざった状態で、片方の出品先の id だけ渡したらもう片方は引き当たらない', () => {
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'めるかり【A085】', unit_price: 1000, quantity: 1 }],
+      })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+        lines: [{ name: 'やふー【A086】', unit_price: 1000, quantity: 1 }],
+      })
+      db.upsertListings(
+        [{ mercariItemId: 'LMercari1', title: 'めるかり【A085】', price: 2000, suspended: false, thumbUrl: null }],
+        'mercari',
+      )
+      db.upsertListings(
+        [{ mercariItemId: 'z10000001', title: 'やふー【A086】', price: 2000, suspended: false, thumbUrl: null }],
+        'yahoo',
+      )
+
+      const count = db.autoReserveListings(['LMercari1'])
+      expect(count).toBe(1)
+      expect(db.listListings().find(l => l.mercari_item_id === 'LMercari1')!.items).toHaveLength(1)
+      expect(db.listListings().find(l => l.mercari_item_id === 'z10000001')!.items).toEqual([])
+    })
+  })
+
   describe('期間費用（経費の明細・計上月・振込手数料の自動計上は撤去）', () => {
     it('createExpense：明細があれば合計・代表項目を明細から導く。明細が無ければinput.amount/categoryをそのまま使う', () => {
       const id = db.createExpense({
@@ -5274,7 +5467,7 @@ describe('db（:memory:）', () => {
       expect(db.searchAll('ラベル在庫F').find(h => h.id === f.id)!.status_label).toBe('分割済')
     })
 
-    it('listing の status_label：出品中/公開停止中/売れた/取り下げ', () => {
+    it('listing の status_label：出品中/出品停止中/売れた/取り下げ', () => {
       db.upsertListings([
         { mercariItemId: 'LBLA', title: 'リストA', price: 1000, suspended: false, thumbUrl: null },
         { mercariItemId: 'LBLB', title: 'リストB', price: 1000, suspended: true, thumbUrl: null },
@@ -5285,7 +5478,7 @@ describe('db（:memory:）', () => {
       db.endListing('LBLD')
 
       expect(db.searchAll('リストA')[0].status_label).toBe('出品中')
-      expect(db.searchAll('リストB')[0].status_label).toBe('公開停止中')
+      expect(db.searchAll('リストB')[0].status_label).toBe('出品停止中')
       expect(db.searchAll('リストC').find(h => h.kind === 'listing')!.status_label).toBe('売れた')
       expect(db.searchAll('リストD')[0].status_label).toBe('取り下げ')
     })

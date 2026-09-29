@@ -4,7 +4,7 @@ import { isRealized } from '../../shared/recognition'
 // チェックした瞬間に下端の原価合計・粗利プレビューが動く。確定は「引き当てる／紐付ける」ボタンで初めて起きる。
 import { ref, computed, watch, inject } from 'vue'
 import type { Listing, InventoryItem, ListingStatus, SaleProfit, ProductSummary, SalesChannel, AutoLinkBlocker } from '../../shared/types'
-import { CHANNEL_LABEL } from '../../shared/types'
+import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import CodeChip from './CodeChip.vue'
@@ -50,9 +50,6 @@ let productPickRequest = 0
 // メンテ用：販売済み（他の販売に紐付いた）在庫も候補に出す。ドロワーを開き直すたびに off に戻す
 const includeSold = ref(false)
 
-const STATUS_LABEL: Record<ListingStatus, string> = {
-  active: '出品中', suspended: '公開停止中', sold: '売れた', ended: '取り下げ',
-}
 const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = {
   active: 'info', suspended: 'neutral', sold: 'ok', ended: 'neutral',
 }
@@ -320,8 +317,7 @@ async function unlink(itemId: string) {
 
 /** 状態ラベル（①）。出品側の在庫状態が押す前に分かるよう、出品先と状態を短く出す */
 function blockerStatusLabel(b: AutoLinkBlocker): string {
-  const statusWord = b.listing_status === 'suspended' ? '一時停止' : '出品中'
-  return `${CHANNEL_LABEL[b.listing_channel]}・${statusWord}`
+  return `${CHANNEL_LABEL[b.listing_channel]}・${LISTING_STATUS_LABEL[b.listing_status]}`
 }
 /** 補助（③）。元の出品からは外れることが押す前に分かる言い回しにする */
 function blockerNote(b: AutoLinkBlocker): string {
@@ -375,7 +371,7 @@ function placeholderChar(): string {
         <span v-else class="thumb-placeholder">{{ placeholderChar() }}</span>
         <span class="faint">出品価格 {{ yen(listing.price) }}</span>
         <span v-if="listing.shipping_method_name" class="faint">{{ listing.shipping_method_name }}</span>
-        <StatusChip :tone="STATUS_TONE[listing.status]" :label="STATUS_LABEL[listing.status]" />
+        <StatusChip :tone="STATUS_TONE[listing.status]" :label="LISTING_STATUS_LABEL[listing.status]" />
       </div>
       <div v-else-if="mode === 'sale'" class="head-sub">
         <img v-if="sale?.thumb_url && !thumbFailed" class="thumb" :src="sale.thumb_url" alt="" @error="thumbFailed = true" />

@@ -4,7 +4,7 @@ import { isRealized } from '../../shared/recognition'
 // 編集はしない。開くたびに getItemTimeline を呼び直す（購入元の詳細は「いっしょに買ったもの」用に別途取る）。
 import { ref, computed, inject, watch } from 'vue'
 import type { ItemTimeline, SaleStatus, PurchaseDetail, PurchaseLine, PurchaseLineItem, SalesChannel } from '../../shared/types'
-import { CHANNEL_LABEL } from '../../shared/types'
+import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../../shared/types'
 import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import StatusPill from './StatusPill.vue'
@@ -108,7 +108,7 @@ const nowPill = computed<{ tone: PillTone; label: string } | null>(() => {
     if (item.listing) {
       return {
         tone: item.listing.status === 'suspended' ? 'neutral' : 'brand',
-        label: `${item.listing.status === 'suspended' ? '公開停止中' : '出品中'} ${yen(item.listing.price)}`,
+        label: `${LISTING_STATUS_LABEL[item.listing.status]} ${yen(item.listing.price)}`,
       }
     }
     return { tone: 'neutral', label: '未出品' }

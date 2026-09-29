@@ -3,6 +3,7 @@ import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue
 import type {
   InventoryItem, InventoryGroup, InventoryOverview, InventoryGroupFilter, Tag,
 } from '../../shared/types'
+import { LISTING_STATUS_LABEL } from '../../shared/types'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
@@ -392,7 +393,7 @@ function itemPillState(i: InventoryItem): { tone: PillTone; label: string } | nu
   if (i.listing) {
     return {
       tone: i.listing.status === 'suspended' ? 'neutral' : 'info',
-      label: `${i.listing.status === 'suspended' ? '公開停止中' : '出品中'} ${yen(i.listing.price)}`,
+      label: `${LISTING_STATUS_LABEL[i.listing.status]} ${yen(i.listing.price)}`,
     }
   }
   return { tone: 'neutral', label: '未出品' }

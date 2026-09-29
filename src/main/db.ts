@@ -23,6 +23,7 @@ import type {
   SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, ShopAccountStats, Tag, TimelineEvent, VariantSummary,
   CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
+import { LISTING_STATUS_LABEL } from '../shared/types'
 
 // ============================================================
 // ローカルSQLite
@@ -3267,14 +3268,25 @@ export function getAutoLinkBlockers(saleId: string): AutoLinkBlocker[] {
   `).all(codes[0]) as AutoLinkBlocker[]
 }
 
-/** 未紐付けの転売すべてに autoLinkSale を回す。戻り値は確定した件数 */
-export function autoLinkPending(): number {
+/**
+ * 未紐付けの転売すべてに autoLinkSale を回す。戻り値は確定した件数。
+ *
+ * saleIds を渡すと、その id に絞る（画面の絞り込みに合わせる用）。**省略時は従来どおり全件**。
+ * 空配列を渡したときは「対象0件」として何もしない（全件と取り違えない）。
+ * SQL 側は絞り込まず、常に unmatched な全件を読んでから JS 側で id を突き合わせる
+ * （SQLite の IN プレースホルダ上限を気にせずに済み、対象外の id は黙って無視できる）。
+ */
+export function autoLinkPending(saleIds?: string[]): number {
   const pending = db.prepare(
     `SELECT id FROM sale_profit WHERE unmatched = 1 AND kind = 'resale'`,
   ).all() as Array<{ id: string }>
 
+  const targets = saleIds === undefined
+    ? pending
+    : (() => { const allow = new Set(saleIds); return pending.filter(p => allow.has(p.id)) })()
+
   let count = 0
-  for (const p of pending) {
+  for (const p of targets) {
     if (autoLinkSale(p.id)) count++
   }
   return count
@@ -3772,16 +3784,24 @@ export function endListing(mercariItemId: string): void {
  *   3. 型番が2つ以上なら候補止まり
  * 引き当てた出品の数を返す。reserveInventory で引き当てるので、1クリック（unreserveInventory）
  * で解除できる。
+ *
+ * listingIds を渡すと、その mercari_item_id に絞る（画面の絞り込みに合わせる用）。
+ * **省略時は従来どおり全件**。空配列を渡したときは「対象0件」として何もしない。
+ * autoLinkPending と同じ理由で、SQL 側は絞り込まず JS 側で突き合わせる。
  */
-export function autoReserveListings(): number {
+export function autoReserveListings(listingIds?: string[]): number {
   const pending = db.prepare(`
     SELECT mercari_item_id, title FROM listing l
      WHERE l.status IN ('active','suspended')
        AND NOT EXISTS (SELECT 1 FROM listing_line WHERE listing_id = l.mercari_item_id)
   `).all() as Array<{ mercari_item_id: string; title: string }>
 
+  const targets = listingIds === undefined
+    ? pending
+    : (() => { const allow = new Set(listingIds); return pending.filter(p => allow.has(p.mercari_item_id)) })()
+
   let count = 0
-  for (const p of pending) {
+  for (const p of targets) {
     const itemCodes = extractItemCodes(p.title)
     if (itemCodes.length > 0) {
       const ids = findInventoryIdsByItemCodes(itemCodes)
@@ -5700,13 +5720,11 @@ function inventoryStatusLabel(item: InventoryItem): string {
   }
 }
 
+// 出品の状態の表示名は shared/types.ts の LISTING_STATUS_LABEL が唯一の正。
+// ここで別の言葉を持つと、検索結果と画面で呼び名が食い違う（実際に「公開停止中」と
+// 「一時停止」が混在していた）。main でも renderer でも同じものを使う
 function listingStatusLabel(status: ListingStatus): string {
-  switch (status) {
-    case 'active': return '出品中'
-    case 'suspended': return '公開停止中'
-    case 'sold': return '売れた'
-    case 'ended': return '取り下げ'
-  }
+  return LISTING_STATUS_LABEL[status]
 }
 
 /** 優先はこの順、複数なら先頭：送料未入力 → 未紐付け（転売のみ） → 私物 → 完了 */

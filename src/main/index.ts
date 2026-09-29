@@ -283,7 +283,7 @@ function registerIpc(): void {
   handle('deleteSale', (id) => db.deleteSale(id))
 
   handle('linkInventory', (saleId, ids, opts) => db.linkInventory(saleId, ids, 'manual', opts))
-  handle('autoLinkPending', () => db.autoLinkPending())
+  handle('autoLinkPending', (saleIds) => db.autoLinkPending(saleIds))
   handle('unlinkInventory', (saleId, id) => db.unlinkInventory(saleId, id))
   handle('suggestInventory', (saleId, limit, opts) => db.suggestInventory(saleId, limit, opts))
   handle('suggestProductInventory', (modelCode, quantity, excludeIds) => db.suggestProductInventory(modelCode, quantity, excludeIds))
@@ -363,7 +363,7 @@ function registerIpc(): void {
   handle('unreserveInventory', (mercariItemId, id) => db.unreserveInventory(mercariItemId, id))
   handle('suggestForListing', (mercariItemId, limit, opts) => db.suggestForListing(mercariItemId, limit, opts))
   handle('endListing', (mercariItemId) => db.endListing(mercariItemId))
-  handle('autoReserveListings', () => db.autoReserveListings())
+  handle('autoReserveListings', (listingIds) => db.autoReserveListings(listingIds))
   handle('setListingShipping', (mercariItemId, shippingMethodId) =>
     db.setListingShipping(mercariItemId, shippingMethodId))
 

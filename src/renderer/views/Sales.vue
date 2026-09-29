@@ -8,7 +8,7 @@ import type {
   SaleProfit, ShippingMethod, SaleKind, SaleInput, SaleFilter, SaleTotals, Tag,
   Listing, ListingStatus, CollectorRun, SaleStatus, SalesProgress, SalesChannel,
 } from '../../shared/types'
-import { CHANNEL_LABEL } from '../../shared/types'
+import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
@@ -60,9 +60,6 @@ const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const gotoPayload = inject<Ref<SalesGotoPayload | null>>('gotoPayload', ref(null))
 
-const STATUS_LABEL: Record<ListingStatus, string> = {
-  active: '出品中', suspended: '公開停止中', sold: '売れた', ended: '取り下げ',
-}
 const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = {
   active: 'info', suspended: 'neutral', sold: 'ok', ended: 'neutral',
 }
@@ -80,6 +77,9 @@ const SALE_STATUS_PILL: Record<SaleStatus, { tone: 'solid-info' | 'info' | 'soli
 const stage = ref<Stage>('to_ship')
 type ListedFilter = 'all' | 'unallocated' | 'allocated'
 const listedFilter = ref<ListedFilter>('all')
+/** 出品の状態で絞り込む（すべて／出品中／出品停止中）。「すべて」は出品中タブの守備範囲のまま（sold・endedは含めない） */
+type ListingStatusFilter = 'all' | 'active' | 'suspended'
+const listingStatusFilter = ref<ListingStatusFilter>('all')
 const tagFilter = ref('')
 /** 出品先で絞り込む（すべて／メルカリ／Yahoo!フリマ）。出品・販売の両方に効く */
 const channelFilter = ref<SalesChannel | ''>('')
@@ -383,7 +383,7 @@ async function load() {
   loaded.value = false
   if (stage.value === 'listed') {
     const base = await window.soroban.listListings({
-      status: ['active', 'suspended'],
+      status: listingStatusFilter.value === 'all' ? ['active', 'suspended'] : [listingStatusFilter.value],
       onlyUnallocated: listedFilter.value === 'unallocated' || undefined,
     })
     // 「引き当て済み」はAPI側に絞り込みが無いためここで足す
@@ -522,7 +522,7 @@ onMounted(async () => {
 })
 watch(revision, loadTags)
 watch(revision, loadProgress)
-watch([revision, stage, listedFilter, tagFilter], load)
+watch([revision, stage, listedFilter, listingStatusFilter, tagFilter], load)
 
 // --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
 const thumbFailed = ref<Set<string>>(new Set())
@@ -794,24 +794,36 @@ async function editNote(sale: SaleProfit) {
  *   型番1件のうち getAutoLinkBlockers が非空 → **在庫はある。** 別の出品（他社サイトのこともある）に
  *     取ってあるせいで自動紐付けの検索から外れただけ（横取り防止のため）。「在庫が無い」と言ってはいけない
  *   型番1件のうち上記に当たらない → 本当に在庫が無い
+ *
+ * **絞り込みの外までは効かせない**：main へ渡す id は、いま画面に見えている行（filteredRows）から
+ * そのまま取る。絞り込みを main 側で作り直さない（二重に書くと必ず食い違う）
  */
+const visibleSaleIds = computed(() => filteredRows.value.filter(r => r.kind === 'sale').map(r => r.id))
+const visibleListingIds = computed(() => filteredRows.value.filter(r => r.kind === 'listing').map(r => r.id))
+
 async function autoLinkPending() {
-  const before = (await window.soroban.listSales({ kind: 'resale' })).filter(s => s.unmatched === 1)
+  const targetIds = visibleSaleIds.value
+  if (targetIds.length === 0) {
+    toast('表示中の販売はありません', 'warn')
+    return
+  }
+  const targetIdSet = new Set(targetIds)
+  const before = filteredRows.value
+    .filter((r): r is Row & { sale: SaleProfit } => r.kind === 'sale' && !!r.sale && r.sale.kind === 'resale' && r.sale.unmatched === 1)
+    .map(r => r.sale)
   if (before.length === 0) {
-    toast('未紐付けの販売はありません', 'ok')
+    toast('表示中に未紐付けの販売はありません', 'ok')
     return
   }
 
-  const n = await window.soroban.autoLinkPending()
+  const n = await window.soroban.autoLinkPending(targetIds)
 
   await load()
   await loadProgress()
   changed()
 
   const after = new Map(
-    (await window.soroban.listSales({ kind: 'resale' }))
-      .filter(s => s.unmatched === 1)
-      .map(s => [s.id, s]),
+    sales.value.filter(s => targetIdSet.has(s.id) && s.unmatched === 1).map(s => [s.id, s]),
   )
 
   let noCode = 0
@@ -839,20 +851,25 @@ async function autoLinkPending() {
   const detail = reasons.length ? `${reasons.join('、')}は手で選んでください` : ''
 
   if (n > 0) {
-    toast(detail ? `${n}件を自動で紐付けました。${detail}` : `${n}件を自動で紐付けました`, 'ok')
+    toast(detail ? `表示中の${n}件を紐付けました。${detail}` : `表示中の${n}件を紐付けました`, 'ok')
   } else {
-    toast(detail ? `型番が一致する在庫がありませんでした。${detail}` : '型番が一致する在庫はありませんでした', 'warn')
+    toast(detail ? `表示中に型番が一致する在庫がありませんでした。${detail}` : '表示中に型番が一致する在庫はありませんでした', 'warn')
   }
 }
 
 // --- 型番で自動引き当て（出品中） ---
 
 async function autoReserveListings() {
-  const n = await window.soroban.autoReserveListings()
+  const targetIds = visibleListingIds.value
+  if (targetIds.length === 0) {
+    toast('表示中の出品はありません', 'warn')
+    return
+  }
+  const n = await window.soroban.autoReserveListings(targetIds)
   if (n > 0) {
-    toast(`${n}件を紐付けました`, 'ok')
+    toast(`表示中の${targetIds.length}件のうち${n}件を紐付けました`, 'ok')
   } else {
-    toast('紐付けられる出品はありません', 'warn')
+    toast('表示中に紐付けられる出品はありません', 'warn')
   }
   await load()
   await loadProgress()
@@ -1088,8 +1105,13 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 
     <div class="toolbar">
       <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
+      <select v-if="stage === 'listed'" v-model="listingStatusFilter" title="出品の状態で絞り込む">
+        <option value="all">すべての出品状態</option>
+        <option value="active">{{ LISTING_STATUS_LABEL.active }}</option>
+        <option value="suspended">{{ LISTING_STATUS_LABEL.suspended }}</option>
+      </select>
       <select v-if="stage === 'listed'" v-model="listedFilter" title="紐付けの状態で絞り込む">
-        <option value="all">すべて</option>
+        <option value="all">すべての紐付け</option>
         <option value="unallocated">未紐付け</option>
         <option value="allocated">紐付け済み</option>
       </select>
@@ -1131,8 +1153,8 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
       >
         <StatusChip tone="brand" :label="`${monthFilter} ×`" />
       </button>
-      <button v-if="stage === 'listed'" class="sm" @click="autoReserveListings">型番で自動紐付け</button>
-      <button v-if="stage !== 'listed'" class="sm" @click="autoLinkPending">型番で自動紐付け</button>
+      <button v-if="stage === 'listed'" class="sm" :disabled="!visibleListingIds.length" @click="autoReserveListings">型番で自動紐付け</button>
+      <button v-if="stage !== 'listed'" class="sm" :disabled="!visibleSaleIds.length" @click="autoLinkPending">型番で自動紐付け</button>
       <select v-model="sortOption" title="並び替え">
         <option value="default">既定（未確定が先）</option>
         <option value="date_desc">日付が新しい順</option>
@@ -1213,7 +1235,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
               <StatusPill v-if="r.kind === 'sale' && r.sale?.status && SALE_STATUS_PILL[r.sale.status]"
                 :tone="SALE_STATUS_PILL[r.sale.status].tone" :label="SALE_STATUS_PILL[r.sale.status].label"
                 :title="SALE_STATUS_PILL[r.sale.status].title" />
-              <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="STATUS_LABEL[r.listing.status]" />
+              <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="LISTING_STATUS_LABEL[r.listing.status]" />
               <StatusChip v-if="r.sale && !r.sale.status" tone="neutral" :label="r.sale.source === 'manual' ? '手入力' : '状態未取得'" />
             </div>
             <span
@@ -1403,7 +1425,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
       </div>
 
       <EmptyState
-        v-else-if="searchText || monthFilter || statusFilter || inputFilter || period !== 'all'"
+        v-else-if="searchText || monthFilter || statusFilter || inputFilter || period !== 'all' || listingStatusFilter !== 'all' || listedFilter !== 'all'"
         :title="filteredEmptyTitle"
       />
       <EmptyState
