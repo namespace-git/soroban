@@ -231,17 +231,17 @@ describe('channelPageUrl（出品先のURL組み立て・別サイトのidは弾
   })
 
   it('Yahoo!フリマの商品ページのURLを組み立てる', () => {
-    expect(channelPageUrl('yahoo', 'item', 'z693579992'))
-      .toBe('https://paypayfleamarket.yahoo.co.jp/item/z693579992')
+    expect(channelPageUrl('yahoo', 'item', 'z999999999'))
+      .toBe('https://paypayfleamarket.yahoo.co.jp/item/z999999999')
   })
 
   it('Yahoo!フリマの取引画面は別ホスト（-sec）で末尾が /trade/seller', () => {
-    expect(channelPageUrl('yahoo', 'transaction', 'z693579992'))
-      .toBe('https://paypayfleamarket-sec.yahoo.co.jp/item/z693579992/trade/seller')
+    expect(channelPageUrl('yahoo', 'transaction', 'z999999999'))
+      .toBe('https://paypayfleamarket-sec.yahoo.co.jp/item/z999999999/trade/seller')
   })
 
   it('メルカリにYahooのidを渡すとError（別サイトのidで開かせない）', () => {
-    expect(() => channelPageUrl('mercari', 'item', 'z693579992')).toThrow('メルカリの商品IDではありません')
+    expect(() => channelPageUrl('mercari', 'item', 'z999999999')).toThrow('メルカリの商品IDではありません')
   })
 
   // 【重要な既知の穴・実装は直さず報告のみ】yahoo の正規表現 /^[a-z]\d{8,}$/ は「先頭1文字が

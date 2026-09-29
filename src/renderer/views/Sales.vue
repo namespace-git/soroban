@@ -1028,7 +1028,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
         </label>
         <label class="field">
           <span>商品ID（任意）</span>
-          <input v-model="itemIdInput" :placeholder="form.channel === 'yahoo' ? '例: z693579992' : '例: m123456789'" />
+          <input v-model="itemIdInput" :placeholder="form.channel === 'yahoo' ? '例: z999999999' : '例: m123456789'" />
         </label>
         <label class="field field-wide">
           <span>メモ</span>

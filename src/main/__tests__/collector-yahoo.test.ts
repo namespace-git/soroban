@@ -37,82 +37,97 @@ function replaceAllClasses(html: string): string {
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 describe('collector-yahoo（electronに依存しない部分）', () => {
-  describe('parseYahooSoldHtml（実DOM抜粋のfixture）', () => {
+  describe('parseYahooSoldHtml（実機の出力そのままのfixture。<!-- --> を含む）', () => {
     const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-sold.html'), 'utf-8')
     const rows = parseYahooSoldHtml(html)
 
-    it('4件取れる', () => {
-      expect(rows).toHaveLength(4)
+    it('6件取れる', () => {
+      expect(rows).toHaveLength(6)
     })
 
-    it('id・タイトル・価格・tradstat を4件とも固定で確かめる', () => {
-      expect(rows[0].yahooItemId).toBe('z693579992')
-      expect(rows[0].price).toBe(5200)
-      expect(rows[0].title).toContain('メロジョイ ふわふわ肉球ミルクパフ ねっとりヨーグルト【Z074-4】')
+    it('id・タイトル・価格・tradstat を6件とも固定で確かめる', () => {
+      expect(rows[0].yahooItemId).toBe('z100000008')
+      expect(rows[0].price).toBe(7100)
+      expect(rows[0].title).toBe('Mellojoy メロジョイ 特濃牛乳アイスS ねっとりヨーグルト スクイーズ 新品未開封【Z088-01】')
+      expect(rows[0].tradstat).toBe('WAIT_FOR_SELLER_SHIP')
 
-      expect(rows[1].yahooItemId).toBe('z693407762')
+      expect(rows[1].yahooItemId).toBe('z100000009')
       expect(rows[1].price).toBe(6400)
-      expect(rows[1].title).toContain('Mellojoy メロジョイ 贅沢スフレ チョコレート Mサイズ 新品未開封【Z072-7】')
+      expect(rows[1].title).toBe('Mellojoy メロジョイ トーストスティック 未開封【A036】')
+      expect(rows[1].tradstat).toBe('WAIT_FOR_SELLER_SHIP')
 
-      expect(rows[2].yahooItemId).toBe('z693289446')
-      expect(rows[2].price).toBe(5899)
-      expect(rows[2].title).toContain('Mellojoy メロジョイ いちごショートケーキ ホール スクイーズ 新品未開封')
+      expect(rows[2].yahooItemId).toBe('z100000010')
+      expect(rows[2].price).toBe(5200)
+      expect(rows[2].title).toBe('メロジョイ ふわふわ肉球ミルクパフ ねっとりヨーグルト【Z074-4】')
+      expect(rows[2].tradstat).toBe('SELLER_SHIPPED')
 
-      expect(rows[3].yahooItemId).toBe('z693287844')
-      expect(rows[3].price).toBe(4280)
-      expect(rows[3].title).toContain('Mellojoy メロジョイ クッキークラブ クリームブロッサム もちもちもち')
+      expect(rows[3].yahooItemId).toBe('z100000011')
+      expect(rows[3].price).toBe(6400)
+      expect(rows[3].title).toBe('Mellojoy メロジョイ 贅沢スフレ チョコレート Mサイズ 新品未開封【Z072-7】')
+      expect(rows[3].tradstat).toBe('SELLER_SHIPPED')
+
+      expect(rows[4].yahooItemId).toBe('z100000012')
+      expect(rows[4].price).toBe(5899)
+      expect(rows[4].title).toBe('Mellojoy メロジョイ いちごショートケーキ ホール スクイーズ 新品未開封')
+      expect(rows[4].tradstat).toBe('SELLER_SHIPPED')
+
+      expect(rows[5].yahooItemId).toBe('z100000013')
+      expect(rows[5].price).toBe(4280)
+      expect(rows[5].title).toBe('Mellojoy メロジョイ クッキークラブ クリームブロッサム もちもちもち')
+      expect(rows[5].tradstat).toBe('SELLER_SHIPPED')
     })
 
-    it('価格は integer で返る（"5,200円" → 5200）', () => {
+    it('価格は integer で返る（HTML中は "7,100<!-- -->円" という形）', () => {
       for (const r of rows) {
         expect(Number.isInteger(r.price)).toBe(true)
       }
-      expect(rows[0].price).toBe(5200)
+      expect(rows[0].price).toBe(7100)
     })
 
-    it('tradstat は4件とも SELLER_SHIPPED', () => {
+    it('コメントを消してから数字を読むので、隣り合う数字がくっつかない（"7,100<!-- -->円" が "7100円" にならず、7100 と正しく読める）', () => {
+      expect(html).toContain('7,100<!-- -->円')
+      expect(rows[0].price).toBe(7100)
+    })
+
+    it('tradstat は WAIT_FOR_SELLER_SHIP が2件・SELLER_SHIPPED が4件', () => {
       expect(rows.map(r => r.tradstat)).toEqual([
+        'WAIT_FOR_SELLER_SHIP', 'WAIT_FOR_SELLER_SHIP',
         'SELLER_SHIPPED', 'SELLER_SHIPPED', 'SELLER_SHIPPED', 'SELLER_SHIPPED',
       ])
     })
 
-    it('statusText は「受け取り評価待ち」', () => {
-      for (const r of rows) {
+    it('statusText はWAIT_FOR_SELLER_SHIPが「商品を発送したら発送連絡をしてください」、SELLER_SHIPPEDが「受け取り評価待ち」', () => {
+      expect(rows[0].statusText).toBe('商品を発送したら発送連絡をしてください')
+      expect(rows[1].statusText).toBe('商品を発送したら発送連絡をしてください')
+      for (const r of rows.slice(2)) {
         expect(r.statusText).toBe('受け取り評価待ち')
       }
     })
 
     it('サムネイルURLを img[alt="商品画像"] から拾う', () => {
       expect(rows[0].thumbUrl).toBe(
-        'https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-1790553267931ognab8.jpg',
+        'https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/deadbeefcafebabe0123456789abcdef01234567/i-img900x1200-17905717326651snizd.jpg',
       )
     })
 
-    it('総数（1~4件/4件）を4と取る', () => {
-      expect(extractYahooSoldTotal(html)).toBe(4)
+    it('総数（1~6件/6件）を6と取る（HTML中は "1<!-- -->~<!-- -->6<!-- -->件/<!-- -->6<!-- -->件" という形）', () => {
+      expect(html).toContain('1<!-- -->~<!-- -->6<!-- -->件/<!-- -->6<!-- -->件')
+      expect(extractYahooSoldTotal(html)).toBe(6)
     })
 
-    it('型番：タイトルに【Z074-4】【Z072-7】があれば CODE_RE で取れ、型番の無い2件では取れない', () => {
-      expect(extractCodes(rows[0].title)).toEqual(['Z074-4'])
-      expect(extractCodes(rows[1].title)).toEqual(['Z072-7'])
-      expect(CODE_RE.exec(rows[2].title)).toBeNull()
-      expect(extractCodes(rows[2].title)).toEqual([])
-      expect(CODE_RE.exec(rows[3].title)).toBeNull()
-      expect(extractCodes(rows[3].title)).toEqual([])
+    it('型番：タイトルに【Z088-01】【A036】【Z074-4】【Z072-7】があれば CODE_RE で取れ、型番の無い2件では取れない', () => {
+      expect(extractCodes(rows[0].title)).toEqual(['Z088-01'])
+      expect(extractCodes(rows[1].title)).toEqual(['A036'])
+      expect(extractCodes(rows[2].title)).toEqual(['Z074-4'])
+      expect(extractCodes(rows[3].title)).toEqual(['Z072-7'])
+      expect(CODE_RE.exec(rows[4].title)).toBeNull()
+      expect(extractCodes(rows[4].title)).toEqual([])
+      expect(CODE_RE.exec(rows[5].title)).toBeNull()
+      expect(extractCodes(rows[5].title)).toEqual([])
     })
 
     it('クラス名（sc-）を別の文字列に置換しても同じ結果になる（クラス名に依存していないことの証明）', () => {
-      // fixture 自体にはクラス名が無いので、実DOMに近づけるために a/p/span/div に
-      // sc- 始まりのクラス名を足してから、それを丸ごと別の文字列に置換する
-      const withClasses = html
-        .replace(/<a\b/g, '<a class="sc-a1b2c3d4-0" ')
-        .replace(/<div>/g, '<div class="sc-e5f6a7b8-1">')
-        .replace(/<p>/g, '<p class="sc-c9d0e1f2-2">')
-        .replace(/<span>/g, '<span class="sc-a3b4c5d6-3">')
-        .replace(/<img\b/g, '<img class="sc-b7c8d9e0-4" ')
-      const renamed = withClasses.replace(/sc-[a-z0-9]{8}-\d/g, 'zz-changed-name')
-
-      expect(parseYahooSoldHtml(renamed)).toEqual(rows)
+      expect(parseYahooSoldHtml(replaceAllClasses(html))).toEqual(rows)
     })
 
     it('壊れた HTML（空文字・タグだけ・data-cl-params が無い）は throw せず空配列', () => {
@@ -241,6 +256,14 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         hasSalelstTable: false,
       })
     })
+
+    it('summarizeYahooHtml は <!-- --> を消さずに length を数える（意図的。0件だったときに「実際に何文字受信できたか」を切り分けるための関数なので、他のパーサのようにコメントを除去してから数えると受信量が分からなくなる）', () => {
+      const withComment = '<p>7,500<!-- -->円</p>'
+      const s = summarizeYahooHtml(withComment)
+      expect(s.length).toBe(withComment.length)
+      // 比較：他のパーサの起点として使う stripHtmlComments 相当の処理をした場合より長い
+      expect(s.length).toBeGreaterThan(withComment.replace(/<!--[\s\S]*?-->/g, '').length)
+    })
   })
 
   describe('formatYahooHtmlSummary / formatYahooDebugSavedNote（実行記録に出す文言）', () => {
@@ -290,10 +313,10 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         feeAmount: r.feeAmount,
         receivedAmount: r.receivedAmount,
       }))).toEqual([
-        { yahooItemId: 'z693579992', handledDate: '2026-09-28', settlementAmount: 5200, feeAmount: 0, receivedAmount: 5200 },
-        { yahooItemId: 'z693407762', handledDate: '2026-09-28', settlementAmount: 6400, feeAmount: 320, receivedAmount: 6080 },
-        { yahooItemId: 'z693289446', handledDate: '2026-09-28', settlementAmount: 5899, feeAmount: 294, receivedAmount: 5605 },
-        { yahooItemId: 'z693287844', handledDate: '2026-09-27', settlementAmount: 4280, feeAmount: 213, receivedAmount: 4067 },
+        { yahooItemId: 'z100000010', handledDate: '2026-09-28', settlementAmount: 5200, feeAmount: 0, receivedAmount: 5200 },
+        { yahooItemId: 'z100000011', handledDate: '2026-09-28', settlementAmount: 6400, feeAmount: 320, receivedAmount: 6080 },
+        { yahooItemId: 'z100000012', handledDate: '2026-09-28', settlementAmount: 5899, feeAmount: 294, receivedAmount: 5605 },
+        { yahooItemId: 'z100000013', handledDate: '2026-09-27', settlementAmount: 4280, feeAmount: 213, receivedAmount: 4067 },
       ])
     })
 
@@ -314,9 +337,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       ])
     })
 
-    it('決済ID（_settle_id）が4件とも取れる', () => {
+    it('決済ID（_settle_id）が4件とも取れる（架空の値。実物の決済記録の番号はテストに書かない）', () => {
       expect(rows.map(r => r.settleId)).toEqual([
-        '26092882071555', '26092881969171', '26092881911392', '26092781753104',
+        '10000000000001', '10000000000002', '10000000000003', '10000000000004',
       ])
     })
 
@@ -418,7 +441,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
     const item = parseYahooItemHtml(html)
 
     it('商品 id・タイトル・価格・配送の方法が取れる', () => {
-      expect(item?.yahooItemId).toBe('z693337994')
+      expect(item?.yahooItemId).toBe('z100000008')
       expect(item?.title).toBe('Mellojoy メロジョイ 特濃牛乳アイスS ねっとりヨーグルト スクイーズ 新品未開封【Z088-01】')
       expect(item?.price).toBe(7100)
       expect(Number.isInteger(item?.price)).toBe(true)
@@ -441,7 +464,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
 
     it('画像URLは img[alt] がタイトルと一致するものから取れる', () => {
       expect(item?.thumbUrl).toBe(
-        'https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-17905717326651snizd.jpg',
+        'https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/deadbeefcafebabe0123456789abcdef01234567/i-img900x1200-17905717326651snizd.jpg',
       )
     })
 
@@ -458,18 +481,26 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(parseYahooItemHtml('<div><span></span></div>')).toBeNull()
       expect(parseYahooItemHtml('<h1></h1>')).toBeNull()
     })
+
+    it('商品ページ（yahoo-item.html）と取引中一覧（yahoo-sold.html）は実物2つの別々の取得だが、同じ商品（同じid・タイトル・価格）を指す（整合性の確認）', () => {
+      const soldHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-sold.html'), 'utf-8')
+      const soldRows = parseYahooSoldHtml(soldHtml)
+      const soldRow = soldRows.find(r => r.yahooItemId === item?.yahooItemId)
+      expect(soldRow).toBeTruthy()
+      expect(soldRow?.title).toBe(item?.title)
+      expect(soldRow?.price).toBe(item?.price)
+    })
   })
 
-  describe('parseYahooSellingHtml（出品中。実物のfixture 2026-09-28）', () => {
+  describe('parseYahooSellingHtml（出品中。実機の出力そのままのfixture。<!-- --> を含む）', () => {
     const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-selling.html'), 'utf-8')
-    const itemHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-item.html'), 'utf-8')
     const rows = parseYahooSellingHtml(html)
 
-    it('8件取れる', () => {
-      expect(rows).toHaveLength(8)
+    it('7件取れる', () => {
+      expect(rows).toHaveLength(7)
     })
 
-    it('id・出品日時・価格・いいね・閲覧が8件とも実物の数字と一致する', () => {
+    it('id・出品日時・価格・いいね・閲覧が7件とも実物の数字と一致する', () => {
       expect(rows.map(r => ({
         yahooItemId: r.yahooItemId,
         listedAt: r.listedAt,
@@ -477,60 +508,67 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         likes: r.likes,
         views: r.views,
       }))).toEqual([
-        { yahooItemId: 'z693775290', listedAt: '2026-09-28T14:37', price: 6499, likes: 0, views: 14 },
-        { yahooItemId: 'z693772284', listedAt: '2026-09-28T14:33', price: 7999, likes: 0, views: 10 },
-        { yahooItemId: 'z693739380', listedAt: '2026-09-28T13:34', price: 5000, likes: 0, views: 10 },
-        { yahooItemId: 'z693609190', listedAt: '2026-09-28T09:55', price: 9300, likes: 2, views: 32 },
-        { yahooItemId: 'z693577586', listedAt: '2026-09-28T08:53', price: 7500, likes: 2, views: 32 },
-        { yahooItemId: 'z693578904', listedAt: '2026-09-28T08:51', price: 6900, likes: 0, views: 22 },
-        { yahooItemId: 'z693541678', listedAt: '2026-09-28T07:27', price: 5800, likes: 4, views: 63 },
-        { yahooItemId: 'z693337994', listedAt: '2026-09-27T22:15', price: 7100, likes: 19, views: 220 },
+        { yahooItemId: 'z100000001', listedAt: '2026-09-28T22:24', price: 7500, likes: 0, views: 13 },
+        { yahooItemId: 'z100000002', listedAt: '2026-09-28T14:33', price: 7999, likes: 0, views: 17 },
+        { yahooItemId: 'z100000003', listedAt: '2026-09-28T13:34', price: 4800, likes: 1, views: 33 },
+        { yahooItemId: 'z100000004', listedAt: '2026-09-28T09:55', price: 9100, likes: 6, views: 80 },
+        { yahooItemId: 'z100000005', listedAt: '2026-09-28T08:53', price: 7350, likes: 5, views: 71 },
+        { yahooItemId: 'z100000006', listedAt: '2026-09-28T08:51', price: 6900, likes: 0, views: 29 },
+        { yahooItemId: 'z100000007', listedAt: '2026-09-28T07:27', price: 5750, likes: 7, views: 121 },
       ])
     })
 
-    it('価格は integer で返る（"6,499円" → 6499）', () => {
+    it('価格は integer で返る（HTML中は "7,500<!-- -->円" という形）', () => {
       for (const r of rows) {
         expect(Number.isInteger(r.price)).toBe(true)
       }
     })
 
-    it('検索された数（srchcnt）が取れる。0件の行も0、z693337994だけ304', () => {
-      expect(rows.map(r => r.searchCount)).toEqual([0, 0, 0, 0, 0, 0, 0, 304])
+    it('コメントを消してから数字を読むので、隣り合う数字がくっつかない（"出品数： <!-- -->7<!-- -->/<!-- -->100" が "710100" のような形にならず、7・100 と正しく読める）', () => {
+      expect(html).toContain('出品数： <!-- -->7<!-- -->/<!-- -->100')
+      expect(extractYahooSellingCounts(html)).toEqual({ listingCount: 7, listingLimit: 100, totalCount: 7 })
     })
 
-    it('tradstat は8件とも NONE（出品中）', () => {
+    it('検索された数（srchcnt）が取れる。7件とも実物の値は0', () => {
+      expect(rows.map(r => r.searchCount)).toEqual([0, 0, 0, 0, 0, 0, 0])
+    })
+
+    it('tradstat は7件とも NONE（出品中）', () => {
       expect(rows.every(r => r.tradstat === 'NONE')).toBe(true)
     })
 
     it('サムネイルURLを img[alt="商品画像"] から拾う', () => {
       expect(rows[0].thumbUrl).toBe(
-        'https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-1790573703864gybrcd.jpg',
+        'https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/deadbeefcafebabe0123456789abcdef01234567/i-img900x1200-1790601766052nqgzoq.jpg',
       )
     })
 
-    it('出品日時：z693337994 が 2026-09-27 22:15（日本時間）になる', () => {
-      expect(rows[7].yahooItemId).toBe('z693337994')
-      expect(rows[7].listedAt).toBe('2026-09-27T22:15')
+    it('出品日時：z100000001 が 2026-09-28 22:24（日本時間）になる', () => {
+      expect(rows[0].yahooItemId).toBe('z100000001')
+      expect(rows[0].listedAt).toBe('2026-09-28T22:24')
     })
 
-    it('出品日時：opentime から作った値が、商品ページ（yahoo-item.html）のパーサが返す出品日時と一致する', () => {
-      const item = parseYahooItemHtml(itemHtml)
-      expect(item?.yahooItemId).toBe('z693337994')
-      const row = rows.find(r => r.yahooItemId === item?.yahooItemId)
-      expect(row?.listedAt).toBe(item?.listedAt)
-      expect(row?.listedAt).toBe('2026-09-27T22:15')
-    })
-
-    it('型番：8件とも CODE_RE で取れ、B001・Z072-14・Z088-01 が正しく出る', () => {
+    it('型番：7件のうち6件は CODE_RE で取れ、1件（z100000001。閉じ括弧が無い）は取れない', () => {
       const codes = rows.map(r => CODE_RE.exec(r.title)?.[1] ?? null)
-      expect(codes).toEqual(['A036', 'A039', 'B001', 'A035', 'Z072-14', 'A037', 'A040', 'Z088-01'])
+      expect(codes).toEqual([null, 'A039', 'B001', 'A035', 'Z072-14', 'A037', 'A040'])
+    })
+
+    it('】が無い出品（z100000001。実物でもタイトルの型番の閉じ括弧が無いまま）は、【】厳密一致の CODE_RE では型番を取れない（自動確定①「型番が1つで在庫の model_code と完全一致」の対象にならず、候補止まりになるのが正しい挙動。直さない）', () => {
+      expect(rows[0].yahooItemId).toBe('z100000001')
+      expect(rows[0].title).toBe('ミニランド 未開封 1つ&のんびりシリーズセット メロジョイ 【A035')
+      expect(rows[0].title).not.toContain('】')
+      expect(CODE_RE.exec(rows[0].title)).toBeNull()
+      // extractCodes は【】無し（CODE_LOOSE_RE）でも拾う候補表示用の関数なので、
+      // 裸の "A035" は拾える。「候補止まり」になるのは CODE_RE 側（自動確定の判定）の話であって、
+      // 候補としてすら出せなくなるわけではない
+      expect(extractCodes(rows[0].title)).toEqual(['A035'])
     })
 
     it('opentime が壊れている（空・文字・巨大な値・負数・小数）と listedAt は null で、NaN を含む文字列にならない（行自体は返る）', () => {
-      for (const broken of ['', 'abc', '9999999999999999', '-1234567890', '1790573867.5']) {
-        const brokenHtml = html.replace('opentime:1790573867', `opentime:${broken}`)
+      for (const broken of ['', 'abc', '9999999999999999', '-1234567890', '1790601874.5']) {
+        const brokenHtml = html.replace('opentime:1790601874', `opentime:${broken}`)
         const brokenRows = parseYahooSellingHtml(brokenHtml)
-        const row = brokenRows.find(r => r.yahooItemId === 'z693775290')
+        const row = brokenRows.find(r => r.yahooItemId === 'z100000001')
         expect(row).toBeTruthy()
         expect(row?.listedAt).toBeNull()
       }
@@ -550,11 +588,11 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
   describe('extractYahooSellingCounts（出品中一覧の出品数・総件数）', () => {
     const html = readFileSync(join(__dirname, 'fixtures', 'yahoo-selling.html'), 'utf-8')
 
-    it('出品数（8/100）と総件数（1~8件/8件 → 8）が取れる', () => {
+    it('出品数（7/100）と総件数（1~7件/7件 → 7）が取れる', () => {
       expect(extractYahooSellingCounts(html)).toEqual({
-        listingCount: 8,
+        listingCount: 7,
         listingLimit: 100,
-        totalCount: 8,
+        totalCount: 7,
       })
     })
 
@@ -601,50 +639,50 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       }
     }
 
-    it('実物2件（yahoo-sold.html・yahoo-salesmanagement.html）を商品idで結合すると、4件とも②の全文タイトル・③の日付と実額・②のtradstatから判定したstatusになる（titleTruncatedはすべてfalse＝②の全文がある）', () => {
+    it('実物2件（yahoo-sold.html・yahoo-salesmanagement.html）を商品idで結合すると、4件とも②の全文タイトル・③の日付と実額・②のtradstatから判定したstatusになる（titleTruncatedはすべてfalse＝②の全文がある）。まだ売上金管理に出ていない2件（WAIT_FOR_SELLER_SHIP）は結合結果に出てこない', () => {
       const { sales, inconsistent } = combineYahooSales(soldRows, salesRows)
       expect(inconsistent).toEqual([])
       expect(sales).toHaveLength(4)
       expect(sales).toEqual([
         {
-          yahooItemId: 'z693579992',
+          yahooItemId: 'z100000010',
           title: 'メロジョイ ふわふわ肉球ミルクパフ ねっとりヨーグルト【Z074-4】',
           titleTruncated: false,
           price: 5200,
           fee: 0,
           soldAt: '2026-09-28',
           status: 'shipped',
-          thumbUrl: soldRows[0].thumbUrl,
+          thumbUrl: soldRows[2].thumbUrl,
         },
         {
-          yahooItemId: 'z693407762',
+          yahooItemId: 'z100000011',
           title: 'Mellojoy メロジョイ 贅沢スフレ チョコレート Mサイズ 新品未開封【Z072-7】',
           titleTruncated: false,
           price: 6400,
           fee: 320,
           soldAt: '2026-09-28',
           status: 'shipped',
-          thumbUrl: soldRows[1].thumbUrl,
+          thumbUrl: soldRows[3].thumbUrl,
         },
         {
-          yahooItemId: 'z693289446',
+          yahooItemId: 'z100000012',
           title: 'Mellojoy メロジョイ いちごショートケーキ ホール スクイーズ 新品未開封',
           titleTruncated: false,
           price: 5899,
           fee: 294,
           soldAt: '2026-09-28',
           status: 'shipped',
-          thumbUrl: soldRows[2].thumbUrl,
+          thumbUrl: soldRows[4].thumbUrl,
         },
         {
-          yahooItemId: 'z693287844',
+          yahooItemId: 'z100000013',
           title: 'Mellojoy メロジョイ クッキークラブ クリームブロッサム もちもちもち',
           titleTruncated: false,
           price: 4280,
           fee: 213,
           soldAt: '2026-09-27',
           status: 'shipped',
-          thumbUrl: soldRows[3].thumbUrl,
+          thumbUrl: soldRows[5].thumbUrl,
         },
       ])
     })
@@ -1007,7 +1045,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(formatYahooInconsistentNote([])).toBe('')
     })
 
-    it('商品idと金額の内訳（決済・手数料・受取）がメッセージに出る', () => {
+    it('商品idと金額の内訳がメッセージに出る', () => {
       const note = formatYahooInconsistentNote([makeInconsistent()])
       expect(note).toBe('確認が要る 1 件（内訳の式が合いません）：z600000002（決済5000－手数料250≠受取4000）')
     })

@@ -1,10 +1,14 @@
-<!-- Yahoo!フリマ 商品ページ https://paypayfleamarket.yahoo.co.jp/item/z693337994
+<!-- Yahoo!フリマ 商品ページ https://paypayfleamarket.yahoo.co.jp/item/z100000008
      利用者の実物（2026-09-28 取得）から、商品の情報の部分だけを抜き出したもの。
 
      ★落としたもの（テストにもリポジトリにも入れない）★
        - 出品者ブロック（ニックネーム・Yahoo ID・アイコンの URL）
        - 「この商品をみている人にオススメ」（他の出品者の id が大量に入る）
        - PayPay 残高・ポイント、__NEXT_DATA__、広告・トラッキング
+
+     ★匿名化（このリポジトリは Public）★
+       - 商品id（実在id）→ z100000008（yahoo-sold.html と同じ商品を指す架空id）
+       - 画像URLの出品者フォルダのハッシュ → deadbeefcafebabe0123456789abcdef01234567（架空）
 
      ⚠⚠ 罠：ページ下部の `pageData` の `starttime` は **12 時間ずれる**。
         画面に見えるのは「出品日時：2026年9月27日 22:15」なのに starttime は "2026-09-27 10:15:33"。
@@ -14,12 +18,12 @@
      クラス名（sc-xxxxx）は styled-components の自動生成でデプロイごとに変わる。依存しないこと。
      引くなら「商品ID」「配送の方法」などの**ラベルの文字**と、h1・meta が安定している。 -->
 
-<meta property="og:url" content="https://paypayfleamarket.yahoo.co.jp/item/z693337994">
-<link rel="canonical" href="https://paypayfleamarket.yahoo.co.jp/item/z693337994">
+<meta property="og:url" content="https://paypayfleamarket.yahoo.co.jp/item/z100000008">
+<link rel="canonical" href="https://paypayfleamarket.yahoo.co.jp/item/z100000008">
 
 <main>
   <div class="sc-778d4aff-0 godGgR">
-    <img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/xxxx/i-img900x1200-17905717326651snizd.jpg"
+    <img src="https://auctions.c.yimg.jp/images.auctions.yahoo.co.jp/image/dr000/auc0209/users/deadbeefcafebabe0123456789abcdef01234567/i-img900x1200-17905717326651snizd.jpg"
          alt="Mellojoy メロジョイ 特濃牛乳アイスS ねっとりヨーグルト スクイーズ 新品未開封【Z088-01】" loading="eager">
   </div>
 
@@ -45,9 +49,9 @@
     <tr><th><span>配送の方法</span></th><td><span>おてがる配送（ヤマト運輸）</span></td></tr>
     <tr><th><span>発送までの日数</span></th><td><span>2〜3日で発送</span></td></tr>
     <tr><th><span>発送元の地域</span></th><td><span>福岡県</span></td></tr>
-    <tr><th><span>商品ID</span></th><td><span>z693337994</span></td></tr>
+    <tr><th><span>商品ID</span></th><td><span>z100000008</span></td></tr>
   </tbody></table>
 </main>
 
 <!-- ⚠ これが 12 時間ずれる方。テストで「使っていないこと」を固定するために残してある -->
-<script>var pageData ={"navigation":{"pageName":"PRODUCT","isLogin":1,"isSeller":1,"device":"PC"},"items":{"productID":"z693337994","productName":"Mellojoy メロジョイ 特濃牛乳アイスS ねっとりヨーグルト スクイーズ 新品未開封【Z088-01】","productCategoryID":"2158","price":"7100","starttime":"2026-09-27 10:15:33","hasWinner":"0","isAuction":"0"}};</script>
+<script>var pageData ={"navigation":{"pageName":"PRODUCT","isLogin":1,"isSeller":1,"device":"PC"},"items":{"productID":"z100000008","productName":"Mellojoy メロジョイ 特濃牛乳アイスS ねっとりヨーグルト スクイーズ 新品未開封【Z088-01】","productCategoryID":"2158","price":"7100","starttime":"2026-09-27 10:15:33","hasWinner":"0","isAuction":"0"}};</script>
