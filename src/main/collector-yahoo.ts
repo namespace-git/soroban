@@ -49,6 +49,23 @@ function stripTags(html: string): string {
   return decodeEntities(html.replace(/<[^>]+>/g, '')).trim()
 }
 
+/**
+ * React（Next.js）がテキストの境目に差し込む `<!-- -->` を取り除く。
+ *
+ * 実物（`fixtures/yahoo-selling.html` 等参照）はこうなっている：
+ *   `<p>7,500<!-- -->円</p>`
+ *   `<p>出品数： <!-- -->7<!-- -->/<!-- -->100</p>`
+ * 空文字に置き換えるだけでよい（コメントの前後にあるテキストは、コメントを挟んで
+ * 隣り合っているだけで、間に元々スペース等が入っているとは限らない）。数字と数字が
+ * コメントだけで区切られていてスペースも記号も無い形は実物で未観測（`/` 等が必ず残る）。
+ *
+ * **生の HTML を受け取る export された関数はすべて、この先頭で通すこと。**
+ * 個々の正規表現にコメントを織り込む対症療法は漏れが出るため避ける。
+ */
+function stripHtmlComments(html: string): string {
+  return html.replace(/<!--[\s\S]*?-->/g, '')
+}
+
 /** '5,200円' '¥5,200' のどちらの表記でも整数を抜く。読めなければ null */
 function parseYenAmount(text: string): number | null {
   const m = /¥\s*([\d,]+)|([\d,]+)\s*円/.exec(text)
@@ -74,7 +91,8 @@ function readClParam(params: string, key: string): string | null {
  *   `<p>`、価格はタイトルより後ろの「n,nnn円」、状態の日本語表示はその後の `<span>`、
  *   サムネイルは `img[alt="商品画像"]` の `src` から拾う。
  */
-export function parseYahooSoldHtml(html: string): YahooScrapedSale[] {
+export function parseYahooSoldHtml(rawHtml: string): YahooScrapedSale[] {
+  const html = stripHtmlComments(rawHtml)
   const rows: YahooScrapedSale[] = []
   const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/g
   let am: RegExpExecArray | null
@@ -139,7 +157,8 @@ export function mapYahooTradstat(t: string): SaleStatus | null {
 }
 
 /** 「1~4件/4件」のような表示から総件数（末尾の件数）を抜く。読めなければ null */
-export function extractYahooSoldTotal(html: string): number | null {
+export function extractYahooSoldTotal(rawHtml: string): number | null {
+  const html = stripHtmlComments(rawHtml)
   const m = /\d+\s*~\s*\d+\s*件\s*\/\s*([\d,]+)\s*件/.exec(html)
   return m ? parseInt(m[1].replace(/,/g, ''), 10) : null
 }
@@ -217,7 +236,8 @@ function extractDtDdPairs(html: string): Array<{ label: string; valueText: strin
  * 状態はその次、受取額は金額セルの中で最初に現れる「n,nnn円」（内訳より前に出る）。
  * 決済金額・販売手数料は内訳の `<dt>ラベル：</dt><dd>金額</dd>` をラベルの文字で引く。
  */
-export function parseYahooSalesHtml(html: string): YahooSalesRow[] {
+export function parseYahooSalesHtml(rawHtml: string): YahooSalesRow[] {
+  const html = stripHtmlComments(rawHtml)
   const tableRe = /<table\b([^>]*)>([\s\S]*?)<\/table>/g
   let tableHtml: string | null = null
   let tm: RegExpExecArray | null
@@ -302,7 +322,8 @@ export interface YahooSalesCsvForm {
  * CSV ダウンロードのフォーム（`name="csvdownload"`）から送信先と `.crumb` を、
  * 月指定の `<select name="i">` から選択肢を抜く。フォームが見つからなければ null。
  */
-export function extractYahooSalesCsvForm(html: string): YahooSalesCsvForm | null {
+export function extractYahooSalesCsvForm(rawHtml: string): YahooSalesCsvForm | null {
+  const html = stripHtmlComments(rawHtml)
   const formMatch = /<form\b[^>]*name="csvdownload"[^>]*action="([^"]*)"[^>]*>([\s\S]*?)<\/form>/.exec(html)
   if (!formMatch) return null
   const action = formMatch[1]
@@ -399,7 +420,8 @@ function extractThumbByAlt(html: string, title: string): string | null {
  * ⚠ 出品日時・公開日時は必ず見える文字から読む（pageData の starttime は使わない）。
  * タイトル・商品 id・価格のどれかが読めなければ null。
  */
-export function parseYahooItemHtml(html: string): YahooScrapedItem | null {
+export function parseYahooItemHtml(rawHtml: string): YahooScrapedItem | null {
+  const html = stripHtmlComments(rawHtml)
   const h1Match = /<h1\b[^>]*>([\s\S]*?)<\/h1>/.exec(html)
   const title = h1Match ? stripTags(h1Match[1]) : null
   if (!title) return null
@@ -500,7 +522,8 @@ function unixSecondsToJstIso(unixSeconds: number): string | null {
  * 「n,nnn円」、いいね・閲覧・検索された数・取引状態・出品日時はすべて data-cl-params から、
  * サムネイルは `img[alt="商品画像"]` の `src` から拾う。
  */
-export function parseYahooSellingHtml(html: string): YahooScrapedListing[] {
+export function parseYahooSellingHtml(rawHtml: string): YahooScrapedListing[] {
+  const html = stripHtmlComments(rawHtml)
   const rows: YahooScrapedListing[] = []
   const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/g
   let am: RegExpExecArray | null
@@ -567,7 +590,8 @@ export interface YahooSellingCounts {
 }
 
 /** 「出品中」一覧の出品数（n/上限）と総件数を抜く */
-export function extractYahooSellingCounts(html: string): YahooSellingCounts {
+export function extractYahooSellingCounts(rawHtml: string): YahooSellingCounts {
+  const html = stripHtmlComments(rawHtml)
   const m = /出品数[：:]\s*([\d,]+)\s*\/\s*([\d,]+)/.exec(html)
   const listingCount = m ? parseInt(m[1].replace(/,/g, ''), 10) : null
   const listingLimit = m ? parseInt(m[2].replace(/,/g, ''), 10) : null
@@ -952,7 +976,8 @@ export function splitYahooCombinedSales(
  * `loadURL` 直後に読むと**中身が描かれる前の空の殻**（ナビの `/my/item/selling` `/my/item/sold`
  * のような固定リンクだけ）を取ってしまう（実機で確認済み）。中身が描かれたかどうかの判定に使う。
  */
-export function hasYahooItemLinks(html: string): boolean {
+export function hasYahooItemLinks(rawHtml: string): boolean {
+  const html = stripHtmlComments(rawHtml)
   return /<a\b[^>]*\bhref="[^"]*\/item\/[a-z]\d{8,}[^"]*"/.test(html)
 }
 
@@ -984,7 +1009,11 @@ export interface YahooHtmlSummary {
 }
 
 /** 読んだ HTML の、各パーサが頼っている手がかりの有無・個数を数える（DOM を組み立てない簡易カウント） */
-export function summarizeYahooHtml(html: string): YahooHtmlSummary {
+export function summarizeYahooHtml(rawHtml: string): YahooHtmlSummary {
+  // ここは「受け取った HTML そのもの」を診断する関数なので、コメントを消さない。
+  // 消した後の長さを報告すると、0 件だったときの切り分けで実際の受信量が分からなくなる
+  // （数える手がかりはどれもコメントの有無に影響されない）
+  const html = rawHtml
   return {
     length: html.length,
     dataClParamsCount: (html.match(/data-cl-params="/g) ?? []).length,
