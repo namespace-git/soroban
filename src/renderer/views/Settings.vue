@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
 import { CHANNEL_LABEL } from '../../shared/types'
-import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck } from '../../shared/types'
+import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck, ListingStatus } from '../../shared/types'
 import { runSourceLabel } from '../utils/collector-run'
 
 type SaleExclusion = { mercari_item_id: string; title: string; excluded_at: string }
@@ -21,7 +21,7 @@ const choose = inject<(title: string, choices: ConfirmChoice[], opts?: { message
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
-const goto = inject<(t: string, payload?: { search?: string; status?: string; stage?: string; month?: string }) => void>('goto')!
+const goto = inject<(t: string, payload?: { search?: string; status?: string; stage?: string; month?: string; listingStatus?: ListingStatus }) => void>('goto')!
 
 const methods = ref<ShippingMethod[]>([])
 const settings = ref<Record<string, string>>({})
@@ -114,7 +114,7 @@ async function recheckHealth() {
 
 function openHealthGoto(h: HealthCheck) {
   if (!h.goto) return
-  goto(h.goto.tab, { search: h.goto.search, status: h.goto.status, stage: h.goto.stage, month: h.goto.month })
+  goto(h.goto.tab, { search: h.goto.search, status: h.goto.status, stage: h.goto.stage, month: h.goto.month, listingStatus: h.goto.listingStatus })
 }
 
 function statsFor(accountId: string): ShopAccountStats | null {
@@ -274,6 +274,12 @@ async function toggleTrackShipping(checked: boolean) {
   const value = checked ? '1' : '0'
   settings.value = { ...settings.value, track_shipping: value }
   await saveSetting('track_shipping', value)
+}
+
+async function toggleAutoReleaseSuspended(checked: boolean) {
+  const value = checked ? '1' : '0'
+  settings.value = { ...settings.value, auto_release_suspended: value }
+  await saveSetting('auto_release_suspended', value)
 }
 
 async function saveMethod(m: ShippingMethod) {
@@ -662,6 +668,22 @@ const runLabel: Record<string, string> = {
           収集は人間と同じ速度で数ページだけ読みます。普段はオフで大丈夫です。
           本人確認（CAPTCHA）が出たときはウィンドウが自動で表示されるので、
           そこで手で進めてください。
+        </p>
+
+        <!-- 出品の停止：メルカリで出品を止めた出品が、取っておいた在庫を握ったままにしない -->
+        <p class="panel-title listing-title">出品</p>
+        <label class="row hint">
+          <input
+            type="checkbox"
+            :checked="settings.auto_release_suspended !== '0'"
+            @change="toggleAutoReleaseSuspended(($event.target as HTMLInputElement).checked)"
+          />
+          出品を止めたら、その出品に取ってあった在庫の引き当てを外す
+        </label>
+        <p class="faint hint">
+          メルカリの出品が「出品停止中」になったことを取り込みで見つけたとき、その出品に取ってあった在庫を自動で解放します。
+          解放した在庫は、別の出品先で売れたときに紐付けられるようになります。
+          チェックを外すと、止めた出品が在庫を押さえたままになります（在庫と販売の記録は消えません）。
         </p>
 
         <!-- 配送状況（17TRACK API）：メロジョイは配達済みを教えてくれないので、17TRACK の API キーで
@@ -1200,7 +1222,7 @@ const runLabel: Record<string, string> = {
 .health-row > button { flex-shrink: 0; }
 
 .runs-title { margin-top: 16px; }
-.tracking-title { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+.tracking-title, .listing-title { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .auto-backup-title { margin-top: 16px; }
 .manual-backup-title { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .small { font-size: var(--fs-12); }

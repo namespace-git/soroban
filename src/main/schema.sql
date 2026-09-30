@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS mellojoy_excluded_order (
 -- mercari_keyword: 転売と判定するキーワード（, 、 空白 区切りで複数可）。空なら型番の有無で判定する
 -- yahoo_keyword: 同じ役目の Yahoo!フリマ版。出品先ごとに扱う商品が違うことがあるため、
 --   メルカリと分けて別々に持つ（空なら全部取り込む、の既定はどちらも同じ）
+-- auto_release_suspended: 出品が「出品停止中」に変わったとき、その出品の在庫の引き当てを自動で外す
+--   （'1' オン・'0' オフ。既定オン）。db.ts の upsertListings 参照
 --
 -- schema_version はここに入れない。migrate() がバージョン判定に使う値なので、
 -- ここで先に既定値を入れてしまうと「未マイグレーションの既存DB」でも
@@ -123,6 +125,7 @@ INSERT OR IGNORE INTO setting (key, value) VALUES
   ('collect_interval_h',          '1'),
   ('mercari_keyword',             ''),
   ('yahoo_keyword',               ''),
+  ('auto_release_suspended',      '1'),
   ('item_code_seq',               '0');
 
 -- ============================================================

@@ -17,7 +17,7 @@ import Monthly from './views/Monthly.vue'
 import Expenses from './views/Expenses.vue'
 import Settings from './views/Settings.vue'
 import Help from './views/Help.vue'
-import type { CollectorRun, DashboardStats, ProfitStrip, SaleStatus, SearchHit, TrackingCheckSummary, UpdateStatus } from '../shared/types'
+import type { CollectorRun, DashboardStats, ListingStatus, ProfitStrip, SaleStatus, SearchHit, TrackingCheckSummary, UpdateStatus } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 import { runSourceLabel } from './utils/collector-run'
 
@@ -36,6 +36,8 @@ export type GotoPayload = {
   focusId?: string
   /** 売上タブの取引状態の絞り込み（例：発送してください） */
   status?: SaleStatus
+  /** 売上タブの出品中の絞り込み（例：出品停止中。既定は出品中のみ） */
+  listingStatus?: ListingStatus
   /** 売上タブを月で絞る（YYYY-MM。グラフの月をクリックしたとき） */
   month?: string
   /** 在庫タブの状態（ホームの長期滞留から：'all'）と、滞留日数の下限 */

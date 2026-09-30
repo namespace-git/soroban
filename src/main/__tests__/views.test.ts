@@ -75,6 +75,35 @@ describe('views: 売上タブの進捗', () => {
     expect(progress.inputs.needs_link).toBe(0)
     expect(progress.inputs.done).toBe(2) // A・C
   })
+
+  it('出品中のカードは出品中のみを数える（停止中を足しても count・unallocated・expected_profit は動かない）。すべては停止中も含む', () => {
+    const today = todayLocal()
+    const shopId = db.createShopAccount('メロジョイ')
+    db.createPurchase({
+      shop_account_id: shopId, ordered_at: today, fulfillment: 'delivered',
+      lines: [{ name: '【K101】テスト商品', unit_price: 1000, quantity: 3 }],
+    })
+    db.upsertListings([
+      { mercariItemId: 'm-act-1', title: '【K101】出品中1', price: 2200, suspended: false, thumbUrl: null },
+      { mercariItemId: 'm-act-2', title: '【K101】出品中2', price: 2400, suspended: false, thumbUrl: null },
+    ])
+    const stock = db.listInventory('in_stock').filter(i => i.model_code === 'K101')
+    db.reserveInventory('m-act-1', [stock[0].id])
+
+    const before = views.getSalesProgress()
+    expect(before.listed).toEqual({ count: 2, expected_profit: 980, unallocated: 1 })
+    expect(before.all).toBe(2)
+
+    // 停止中の出品（在庫を押さえている）を足す
+    db.upsertListings([
+      { mercariItemId: 'm-sus-1', title: '【K101】停止中', price: 5000, suspended: true, thumbUrl: null },
+    ])
+    db.reserveInventory('m-sus-1', [stock[1].id])
+
+    const after = views.getSalesProgress()
+    expect(after.listed).toEqual(before.listed)
+    expect(after.all).toBe(3)
+  })
 })
 
 describe('views: 在庫タブの状態カードと型番グループ', () => {

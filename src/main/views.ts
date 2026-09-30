@@ -33,8 +33,12 @@ export function getSalesProgress(): SalesProgress {
   const inTransit = allSales.filter(s => s.status === 'shipped' || s.status === 'delivered')
   const completed = allSales.filter(s => s.status === 'completed' && s.sold_at.slice(0, 7) === month)
 
-  const listings = db.listListings()
+  // 「出品中」のカードは一覧の既定（出品中のみ＝active）と数を一致させる。
+  // 出品停止中まで数えると、押した先の一覧より件数が多くなり食い違う。
+  // 「すべて」の件数だけは停止中も含む（一覧も active+suspended を全部出す）
+  const listings = db.listListings({ status: ['active'] })
   const reserved = listings.filter(l => l.items.length > 0)
+  const listingsAll = db.listListings()
 
   const resaleSales = allSales.filter(s => s.kind === 'resale')
   const needs_shipping = resaleSales.filter(s => s.is_shipping_confirmed === 0).length
@@ -50,7 +54,7 @@ export function getSalesProgress(): SalesProgress {
     to_ship: { count: toShip.length, revenue: toShip.reduce((s, x) => s + x.price, 0) },
     in_transit: { count: inTransit.length, revenue: inTransit.reduce((s, x) => s + x.price, 0) },
     completed_this_month: { count: completed.length, revenue: completed.reduce((s, x) => s + x.price, 0) },
-    all: allSales.length + listings.length,
+    all: allSales.length + listingsAll.length,
     inputs: { needs_shipping, needs_link, done },
   }
 }

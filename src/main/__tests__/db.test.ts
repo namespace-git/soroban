@@ -3897,7 +3897,7 @@ describe('db（:memory:）', () => {
         { mercariItemId: 'L1', title: '商品A', price: 1000, suspended: false, thumbUrl: null },
         { mercariItemId: 'L2', title: '商品B', price: 2000, suspended: true, thumbUrl: null },
       ])
-      expect(r1).toEqual({ inserted: 2, updated: 0 })
+      expect(r1).toEqual({ inserted: 2, updated: 0, releasedListings: 0, releasedItems: 0 })
 
       const listings = db.listListings()
       expect(listings.find(l => l.mercari_item_id === 'L1')!.status).toBe('active')
@@ -3907,7 +3907,7 @@ describe('db（:memory:）', () => {
       const r2 = db.upsertListings([
         { mercariItemId: 'L1', title: '商品A', price: 1500, suspended: false, thumbUrl: null },
       ])
-      expect(r2).toEqual({ inserted: 0, updated: 1 })
+      expect(r2).toEqual({ inserted: 0, updated: 1, releasedListings: 0, releasedItems: 0 })
       expect(db.listListings().find(l => l.mercari_item_id === 'L1')!.price).toBe(1500)
 
       // 取り下げたものは一覧に出ていても active へ戻さない（1ページしか読まないため）
@@ -3915,7 +3915,7 @@ describe('db（:memory:）', () => {
       const r3 = db.upsertListings([
         { mercariItemId: 'L2', title: '商品B', price: 2000, suspended: false, thumbUrl: null },
       ])
-      expect(r3).toEqual({ inserted: 0, updated: 0 })
+      expect(r3).toEqual({ inserted: 0, updated: 0, releasedListings: 0, releasedItems: 0 })
       expect(db.listListings({ status: ['ended'] })[0].status).toBe('ended')
     })
 
@@ -6303,6 +6303,156 @@ describe('db（:memory:）', () => {
 
   })
 
+  describe('出品停止中になったら引き当てを外す（auto_release_suspended）', () => {
+    const makeItem = (code = 'A037') => {
+      const id = db.createPurchase({ shop_account_id: shopId, ordered_at: '2026-04-01',
+        lines: [{ name: `商品【${code}】`, unit_price: 1000, quantity: 1 }] })
+      return db.getPurchase(id).lines[0].items[0].id
+    }
+    const listing = (id: string, suspended: boolean, channel: 'mercari' | 'yahoo' = 'mercari') =>
+      db.upsertListings([{ mercariItemId: id, title: '止める出品', price: 3000, suspended, thumbUrl: null }], channel)
+    const heldBy = (id: string) => db.listListings().find(l => l.mercari_item_id === id)?.items.map(i => i.id) ?? []
+    const itemStatus = (id: string) =>
+      (db.getDb().prepare('SELECT status FROM inventory_item WHERE id = ?').get(id) as { status: string }).status
+    const saleLineCount = () =>
+      (db.getDb().prepare('SELECT COUNT(*) AS c FROM sale_line').get() as { c: number }).c
+
+    it('設定の既定はオン（新規DB）', () => {
+      expect(db.getSettings().auto_release_suspended).toBe('1')
+    })
+
+    it('migrate：設定行が無い既存DBでも、マイグレーションではなくINSERT OR IGNOREで既定オンが入る', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'soroban-auto-release-migrate-'))
+      const path = join(dir, 'no-auto-release.db')
+      try {
+        db.closeDb()
+        db.initDb(path)
+        db.getDb().prepare(`DELETE FROM setting WHERE key = 'auto_release_suspended'`).run()
+        expect(db.getSettings().auto_release_suspended).toBeUndefined()
+        db.closeDb()
+
+        expect(() => db.initDb(path)).not.toThrow()
+        expect(db.getSettings().schema_version).toBe('34')
+        expect(db.getSettings().auto_release_suspended).toBe('1')
+      } finally {
+        try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('active → suspended に変わった取り込みで引き当てが外れる。在庫の状態・sale_line は変わらない。件数が返る', () => {
+      const item = makeItem()
+      const soldItem = makeItem('B001')
+      const saleId = db.createSale({ title: '販売済み', sold_at: '2026-04-05', price: 2000 })
+      db.linkInventory(saleId, [soldItem])
+      listing('rel-1', false)
+      db.reserveInventory('rel-1', [item])
+      const linesBefore = saleLineCount()
+
+      const r = listing('rel-1', true)
+
+      expect(heldBy('rel-1')).toEqual([])
+      expect(r.releasedListings).toBe(1)
+      expect(r.releasedItems).toBe(1)
+      expect(itemStatus(item)).toBe('in_stock')
+      expect(itemStatus(soldItem)).toBe('sold')
+      expect(saleLineCount()).toBe(linesBefore)
+      expect(db.listListings().find(l => l.mercari_item_id === 'rel-1')?.status).toBe('suspended')
+    })
+
+    it('すでに suspended の出品に手で引き当て直しても、もう一度取り込んで suspended のままなら残る（毎回剥がさない）', () => {
+      const item = makeItem()
+      listing('keep-1', false)
+      db.reserveInventory('keep-1', [item])
+      listing('keep-1', true) // ここで外れる
+      expect(heldBy('keep-1')).toEqual([])
+
+      db.reserveInventory('keep-1', [item]) // 人が手で引き当て直す
+      const again = listing('keep-1', true)
+      const third = listing('keep-1', true)
+
+      expect(heldBy('keep-1')).toEqual([item])
+      expect(again.releasedListings).toBe(0)
+      expect(again.releasedItems).toBe(0)
+      expect(third.releasedListings).toBe(0)
+    })
+
+    it('設定がオフなら外れない', () => {
+      const item = makeItem()
+      db.setSetting('auto_release_suspended', '0')
+      listing('off-1', false)
+      db.reserveInventory('off-1', [item])
+
+      const r = listing('off-1', true)
+
+      expect(heldBy('off-1')).toEqual([item])
+      expect(r.releasedListings).toBe(0)
+      expect(r.releasedItems).toBe(0)
+    })
+
+    it('suspended → active に戻ったときは何もしない（引き当てを作らない）', () => {
+      const item = makeItem()
+      listing('back-1', false)
+      db.reserveInventory('back-1', [item])
+      listing('back-1', true)
+      expect(heldBy('back-1')).toEqual([])
+
+      const r = listing('back-1', false)
+
+      expect(heldBy('back-1')).toEqual([])
+      expect(r.releasedListings).toBe(0)
+      expect(itemStatus(item)).toBe('in_stock')
+    })
+
+    it('新規に suspended で入った出品・引き当てのない出品は0件で返る', () => {
+      expect(listing('new-susp', true)).toMatchObject({ inserted: 1, releasedListings: 0, releasedItems: 0 })
+      listing('empty-1', false)
+      expect(listing('empty-1', true)).toMatchObject({ updated: 1, releasedListings: 0, releasedItems: 0 })
+    })
+
+    it('複数点を握っていた出品は点数分が数えられ、他の出品の引き当ては残る', () => {
+      const a = makeItem()
+      const b = makeItem()
+      const c = makeItem()
+      listing('multi-1', false)
+      listing('multi-2', false)
+      db.reserveInventory('multi-1', [a, b])
+      db.reserveInventory('multi-2', [c])
+
+      const r = db.upsertListings([
+        { mercariItemId: 'multi-1', title: '止める出品', price: 3000, suspended: true, thumbUrl: null },
+        { mercariItemId: 'multi-2', title: '止める出品', price: 3000, suspended: false, thumbUrl: null },
+      ])
+
+      expect(r.releasedListings).toBe(1)
+      expect(r.releasedItems).toBe(2)
+      expect(heldBy('multi-1')).toEqual([])
+      expect(heldBy('multi-2')).toEqual([c])
+    })
+
+    it('yahoo の取り込みでは外さない', () => {
+      const item = makeItem()
+      listing('yh-1', false, 'yahoo')
+      db.reserveInventory('yh-1', [item])
+
+      const r = listing('yh-1', true, 'yahoo')
+
+      expect(heldBy('yh-1')).toEqual([item])
+      expect(r.releasedListings).toBe(0)
+    })
+
+    it('外れた在庫は、止めた出品に邪魔されず自動紐付けの候補になる', () => {
+      const item = makeItem()
+      listing('cand-1', false)
+      db.reserveInventory('cand-1', [item])
+      expect(db.suggestProductInventory('A037', 1)).toEqual([])
+
+      listing('cand-1', true)
+
+      expect(db.suggestProductInventory('A037', 1)).toEqual([item])
+    })
+  })
+
   describe('仕入明細の画像（purchase_line.image_url / image_file）', () => {
     it('画像巡回は同じ口座・対象注文・キーワード一致の自動更新商品のみ', () => {
       const id = db.createPurchase({
@@ -6732,7 +6882,7 @@ describe('db（:memory:）', () => {
           level: 'warn', count: 1, goto: { tab: 'sales', stage: 'all' },
         })
         expect(checks.find(c => c.id === 'suspended-listing-reserved')).toMatchObject({
-          level: 'info', count: 1, goto: { tab: 'sales', stage: 'listed' },
+          level: 'info', count: 1, goto: { tab: 'sales', stage: 'listed', listingStatus: 'suspended' },
         })
       })
 

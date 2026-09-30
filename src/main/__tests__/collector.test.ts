@@ -154,7 +154,9 @@ vi.mock('../db', () => ({
   parseKeywords: vi.fn(() => [] as string[]),
   getSettings: vi.fn(() => ({ mercari_keyword: '' })),
   matchesAnyKeyword: vi.fn(() => true),
-  upsertListings: vi.fn((rows: unknown[]) => ({ inserted: rows.length, updated: 0 })),
+  upsertListings: vi.fn((rows: unknown[]) => ({
+    inserted: rows.length, updated: 0, releasedListings: 0, releasedItems: 0,
+  })),
   listSales: vi.fn(() => []),
   appendModelCodes: vi.fn(() => false),
 }))
@@ -581,6 +583,23 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     expect(run.message).toContain('販売 0 件')
     expect(run.message).toContain('出品 新規 4・更新 0')
     expect(db.upsertListings).toHaveBeenCalled()
+  })
+
+  it('出品停止で引き当てを外したときだけ、noteに件数と点数を残す（statusは変えない）', async () => {
+    state.opts.scrapeResult = { sales: [], totalCount: null }
+    state.opts.listingsHtml = listingsFixtureHtml
+
+    const none = await collect(true)
+    expect(none.status).toBe('ok')
+    expect(none.message).toContain('出品 新規 4・更新 0')
+    expect(none.message).not.toContain('引き当て')
+
+    vi.mocked(db.upsertListings).mockReturnValueOnce({
+      inserted: 1, updated: 3, releasedListings: 2, releasedItems: 3,
+    })
+    const released = await collect(true)
+    expect(released.status).toBe('ok')
+    expect(released.message).toContain('出品 新規 1・更新 3。出品停止で引き当てを外した 2 件（在庫 3 点）。取引中')
   })
 
   it('販売・出品の両方が0件なら従来どおりemptyのまま', async () => {

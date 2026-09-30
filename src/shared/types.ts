@@ -935,6 +935,7 @@ export type InboxKind =
   | 'link'            // 未紐付け。sale。候補が 1 点なら candidate で 1 クリック
   | 'confirm'         // 価格未入力の仕入（下書き）。purchase
   | 'collect'         // 取り込みの問題（ログイン切れ・失敗）。run
+  | 'release'         // 止めた出品が在庫を押さえている。listing。1クリックで外せる
   | 'reminder'        // 忘れていませんか（自分で入れるもの）。reminder
 
 export type ReminderType = 'manual_purchase' | 'delivery' | 'expense' | 'close_month'
@@ -953,6 +954,18 @@ export interface InboxItem {
   candidate?: { inventory_item_id: string; item_code: string; landed_cost: number; acquired_at: string } | null
   /** 片付けたときの粗利（見込み）。null なら出さない */
   profit_hint?: { min: number; max: number } | null
+  /**
+   * kind='release' のとき。**止めた出品が在庫を押さえている**ので外してほしい、の中身。
+   * 押さえたままだと、その在庫は別の出品先で売れても自動で紐付けられない
+   * （自動紐付けの在庫検索が active／suspended の出品に引き当て済みの在庫を除外するため）。
+   * 外すのは `unreserveInventory(listing_id, inventory_item_id)` を点数ぶん呼ぶ
+   */
+  release?: {
+    listing_id: string
+    listing_channel: SalesChannel
+    /** 押さえている在庫。1 つの出品が複数点を押さえていることがある */
+    items: Array<{ inventory_item_id: string; item_code: string; name: string; landed_cost: number }>
+  } | null
   /** 仕入の下書きの場合 */
   purchase?: PurchaseSummary
   /** 取り込みの問題の場合 */
@@ -1149,7 +1162,14 @@ export interface HealthCheck {
   /** どうすればよいかの 1 行。例「分割した在庫の原価が 0 のままかもしれません」 */
   detail: string
   /** 押したときに開く画面（App.vue の goto と同じ形）。無ければ押せない */
-  goto?: { tab: string; search?: string; status?: string; stage?: string; month?: string }
+  goto?: {
+    tab: string; search?: string; status?: string; stage?: string; month?: string
+    /**
+     * 出品中タブの「出品の状態」の絞り込み。既定は `active`（出品中のみ）なので、
+     * 出品停止中のものを見せたい要対応は**これを渡さないと飛び先が空になる**
+     */
+    listingStatus?: ListingStatus
+  }
 }
 
 export interface SorobanApi {

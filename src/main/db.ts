@@ -3510,6 +3510,14 @@ function subtractDaysLocal(base: string, days: number): string {
  * 新規は候補（取れなければ today）。既存は候補と現在値の min（＝より古い方）に更新する
  * （一覧の「更新順」表示の揺れで出品日が新しく巻き戻るのを防ぐ）。likes は毎回上書きする。
  *
+ * 出品停止中への切り替え：既存の出品が active → suspended に**変わったその取り込みでだけ**、
+ * その出品の listing_line（引き当て）を外す（設定 auto_release_suspended、既定オン）。
+ * メルカリで出して止めた在庫が Yahoo で売れる使い方で、止めた出品が在庫を握ったままだと
+ * 自動紐付けの在庫検索から外れて候補ゼロになるため。すでに suspended のものは対象外
+ * （人が止めた出品に手で引き当て直しても、次の取り込みで剥がさない）。在庫（inventory_item）
+ * と sale_line には触らない。メルカリの取り込みだけ（Yahoo は停止中を観測しない）。
+ * 外した件数は releasedListings（出品数）・releasedItems（在庫の点数）で返す。
+ *
  * listedAt（絶対的な出品日時。例：Yahoo!フリマの opentime）が渡っていれば、updatedText
  * からの相対推定より優先して使う。ただし使うのは**新規行だけ**。既存行の更新では
  * 触らない＝出品日は後から変わらないはずなので、一度入った値を新しい値（推定に限らず
@@ -3535,7 +3543,7 @@ export function upsertListings(
   }>,
   /** 出品先（省略時 'mercari'）。1回の呼び出しは1チャンネル分の一覧を渡す前提 */
   channel: SalesChannel = 'mercari',
-): { inserted: number; updated: number } {
+): { inserted: number; updated: number; releasedListings: number; releasedItems: number } {
   const today = todayLocal()
   // last_seen_at は画面側で collector_run.finished_at（ISO）と比較するため、
   // SQLite の datetime('now')（'YYYY-MM-DD HH:MM:SS'）ではなく JS の ISO 文字列で保存する
@@ -3552,8 +3560,13 @@ export function upsertListings(
      WHERE mercari_item_id = ?
   `)
 
+  const releaseOnSuspend = channel === 'mercari' && settingStr('auto_release_suspended', '1') !== '0'
+  const releaseLines = db.prepare('DELETE FROM listing_line WHERE listing_id = ?')
+
   let inserted = 0
   let updated = 0
+  let releasedListings = 0
+  let releasedItems = 0
   const tx = db.transaction(() => {
     for (const r of rows) {
       const status: ListingStatus = r.suspended ? 'suspended' : 'active'
@@ -3575,12 +3588,20 @@ export function upsertListings(
           : existing.listed_at
         updateStmt.run(r.title, r.price, status, now, listedAt, likes, r.mercariItemId)
         updated++
+        // 「変わったとき」だけ。すでに suspended のものは外さない
+        if (releaseOnSuspend && existing.status === 'active' && status === 'suspended') {
+          const n = releaseLines.run(r.mercariItemId).changes
+          if (n > 0) {
+            releasedListings++
+            releasedItems += n
+          }
+        }
       }
       // sold / ended は一覧に出ていても戻さない
     }
   })
   tx()
-  return { inserted, updated }
+  return { inserted, updated, releasedListings, releasedItems }
 }
 
 type ListingRow = {
@@ -5678,7 +5699,7 @@ export function getHealthChecks(): HealthCheck[] {
       id: 'suspended-listing-reserved', level: 'info', title: '出品を止めたまま在庫を押さえている出品',
       count: suspendedReserved,
       detail: '止めた出品に在庫が取ってあります。取ってあるあいだ、その在庫は他の販売に紐付けられません',
-      goto: { tab: 'sales', stage: 'listed' },
+      goto: { tab: 'sales', stage: 'listed', listingStatus: 'suspended' },
     })
   }
 

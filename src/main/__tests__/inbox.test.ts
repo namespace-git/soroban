@@ -174,4 +174,122 @@ describe('inbox（:memory:）', () => {
     expect(result.strip.awaiting_payout).toBe(2000 - 200)
     expect(result.strip.awaiting_payout_count).toBe(1)
   })
+
+  describe('release：止めた出品が在庫を押さえている', () => {
+    function stockItems(qty: number, name = '止め出品の商品'): string[] {
+      const shopId = db.createShopAccount('メロジョイA', 'mellojoy')
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-09-01', shipping_fee: 0,
+        lines: [{ name, unit_price: 1000, quantity: qty }],
+      })
+      return db.listInventory('in_stock').map(i => i.id)
+    }
+
+    function listing(id: string, status: 'active' | 'suspended' | 'sold' | 'ended', title = '出品タイトル', channel: 'mercari' | 'yahoo' = 'mercari') {
+      db.upsertListings([{ mercariItemId: id, title, price: 2000, suspended: false, thumbUrl: null }])
+      db.getDb().prepare('UPDATE listing SET status = ?, channel = ? WHERE mercari_item_id = ?').run(status, channel, id)
+    }
+
+    function releaseGroup() {
+      return inbox.getInbox().groups.find(g => g.kind === 'release')
+    }
+
+    it('止めた出品が在庫1点を押さえている → 項目が1件。title/detail と items が入る', () => {
+      const [itemId] = stockItems(1)
+      listing('m111111111', 'active', '止めた出品')
+      db.reserveInventory('m111111111', [itemId])
+      db.getDb().prepare(`UPDATE listing SET status = 'suspended' WHERE mercari_item_id = ?`).run('m111111111')
+
+      const group = releaseGroup()!
+      expect(group.items).toHaveLength(1)
+      const it0 = group.items[0]
+      expect(it0.id).toBe('m111111111')
+      expect(it0.title).toBe('止めた出品')
+      expect(it0.profit_hint).toBeUndefined()
+      expect(it0.release!.listing_id).toBe('m111111111')
+      expect(it0.release!.listing_channel).toBe('mercari')
+      expect(it0.release!.items).toHaveLength(1)
+      expect(it0.release!.items[0].inventory_item_id).toBe(itemId)
+      expect(it0.release!.items[0].name).toBe('止め出品の商品')
+      expect(it0.release!.items[0].landed_cost).toBe(1000)
+      expect(it0.detail).toContain('メルカリで出品停止中')
+      expect(it0.detail).toContain(it0.release!.items[0].item_code)
+    })
+
+    it('1つの出品が2点押さえている → 項目は1件で items が2点', () => {
+      const ids = stockItems(2)
+      listing('m222222222', 'active', 'セット出品', 'yahoo')
+      db.reserveInventory('m222222222', ids)
+      db.getDb().prepare(`UPDATE listing SET status = 'suspended' WHERE mercari_item_id = ?`).run('m222222222')
+
+      const group = releaseGroup()!
+      expect(group.items).toHaveLength(1)
+      expect(group.items[0].release!.items.map(i => i.inventory_item_id).sort()).toEqual([...ids].sort())
+      expect(group.items[0].release!.listing_channel).toBe('yahoo')
+      expect(group.items[0].detail).toContain('Yahoo!フリマで出品停止中')
+      expect(group.items[0].detail).toContain('2 点')
+    })
+
+    it('商品名（product_name）があれば在庫名より優先する', () => {
+      const [itemId] = stockItems(1)
+      const modelCode = 'K001'
+      db.getDb().prepare('UPDATE inventory_item SET model_code = ? WHERE id = ?').run(modelCode, itemId)
+      db.getDb().prepare("INSERT INTO product_name (model_code, name, updated_at) VALUES (?, ?, datetime('now'))").run(modelCode, '登録した商品名')
+      listing('m333333333', 'active')
+      db.reserveInventory('m333333333', [itemId])
+      db.getDb().prepare(`UPDATE listing SET status = 'suspended' WHERE mercari_item_id = ?`).run('m333333333')
+
+      expect(releaseGroup()!.items[0].release!.items[0].name).toBe('登録した商品名')
+    })
+
+    it('active の出品が押さえている → 出ない', () => {
+      const [itemId] = stockItems(1)
+      listing('m444444444', 'active')
+      db.reserveInventory('m444444444', [itemId])
+      expect(releaseGroup()).toBeUndefined()
+    })
+
+    it('sold / ended の出品 → 出ない', () => {
+      const ids = stockItems(2)
+      listing('m555555551', 'active')
+      listing('m555555552', 'active')
+      db.reserveInventory('m555555551', [ids[0]])
+      db.reserveInventory('m555555552', [ids[1]])
+      db.getDb().prepare(`UPDATE listing SET status = 'sold' WHERE mercari_item_id = ?`).run('m555555551')
+      db.getDb().prepare(`UPDATE listing SET status = 'ended' WHERE mercari_item_id = ?`).run('m555555552')
+      expect(releaseGroup()).toBeUndefined()
+    })
+
+    it('在庫が売れている（in_stock でない）なら出ない', () => {
+      const [itemId] = stockItems(1)
+      listing('m666666666', 'active')
+      db.reserveInventory('m666666666', [itemId])
+      db.getDb().prepare(`UPDATE listing SET status = 'suspended' WHERE mercari_item_id = ?`).run('m666666666')
+      expect(releaseGroup()).toBeDefined()
+
+      db.getDb().prepare(`UPDATE inventory_item SET status = 'sold' WHERE id = ?`).run(itemId)
+      expect(releaseGroup()).toBeUndefined()
+    })
+
+    it('該当が無ければグループごと出ない（止めた出品だが在庫を押さえていない）', () => {
+      listing('m777777777', 'suspended')
+      expect(releaseGroup()).toBeUndefined()
+    })
+
+    it('release は link の後・confirm の前に並ぶ', () => {
+      const [itemId] = stockItems(1)
+      listing('m888888888', 'active')
+      db.reserveInventory('m888888888', [itemId])
+      db.getDb().prepare(`UPDATE listing SET status = 'suspended' WHERE mercari_item_id = ?`).run('m888888888')
+      db.createSale({ title: '未紐付けの販売', sold_at: '2026-09-10', price: 1000 })
+      db.createPurchaseDraft({
+        import_key: 'draft-2', shop_account_id: db.listShopAccounts()[0].id, ordered_at: '2026-09-13',
+        lines: [{ name: '下書き商品', quantity: 1 }],
+      })
+
+      const kinds = inbox.getInbox().groups.map(g => g.kind)
+      expect(kinds.indexOf('release')).toBeGreaterThan(kinds.indexOf('link'))
+      expect(kinds.indexOf('release')).toBeLessThan(kinds.indexOf('confirm'))
+    })
+  })
 })

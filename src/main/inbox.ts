@@ -1,8 +1,9 @@
 import * as db from './db'
 import { todayLocal, thisMonthLocal } from '../shared/date'
+import { CHANNEL_LABEL } from '../shared/types'
 import type {
   ExpenseCategory, Inbox, InboxGroup, InboxItem, InboxKind, InventoryItem, MonthlySummary,
-  PurchaseSummary, ReminderType, SaleProfit,
+  PurchaseSummary, ReminderType, SaleProfit, SalesChannel,
 } from '../shared/types'
 
 // ============================================================
@@ -171,6 +172,70 @@ function fulfillmentLabel(f: string | null): string {
 
 function buildPurchaseDetail(p: PurchaseSummary): string {
   return `${mmdd(p.ordered_at)} 注文 ・ ${p.line_count} 明細 ・ ${fulfillmentLabel(p.fulfillment)}`
+}
+
+// ------------------------------------------------------------
+// 止めた出品が在庫を押さえている
+//
+// 自動紐付けの在庫検索は active／suspended の出品に引き当て済みの在庫を除外する
+// （db.ts の RESERVED_BY_ACTIVE_LISTING）。止めたまま放置すると、その在庫は他の出品先で
+// 売れても紐付けられない。active は押さえているのが正常なので対象外。読み取りだけ。
+// ------------------------------------------------------------
+
+type ReleaseItem = NonNullable<InboxItem['release']>['items'][number]
+
+function buildReleaseDetail(channel: SalesChannel, items: ReleaseItem[]): string {
+  const state = `${CHANNEL_LABEL[channel]}で出品停止中`
+  const tail = '解除すると他の販売に紐付けられます'
+  if (items.length === 1) {
+    return `${state} ・ 在庫 ${items[0].item_code}（${items[0].name}）が紐付いたまま ・ ${tail}`
+  }
+  const codes = items.map(i => i.item_code).join('・')
+  return `${state} ・ 在庫 ${items.length} 点（${codes}）が紐付いたまま ・ ${tail}`
+}
+
+/** 1クエリ。出品1件＝1項目。在庫の名前は inventory_view と同じ（商品名があればそれ、無ければ在庫名） */
+function buildReleaseItems(): InboxItem[] {
+  const rows = db.getDb().prepare(`
+    SELECT l.mercari_item_id AS listing_id, l.channel AS listing_channel,
+           l.title AS listing_title, l.thumb_file AS thumb_file,
+           i.id AS inventory_item_id, i.item_code AS item_code,
+           COALESCE((SELECT name FROM product_name WHERE model_code = i.model_code), i.name) AS name,
+           i.landed_cost AS landed_cost
+      FROM listing l
+      JOIN listing_line ll ON ll.listing_id = l.mercari_item_id
+      JOIN inventory_item i ON i.id = ll.inventory_item_id
+     WHERE l.status = 'suspended' AND i.status = 'in_stock'
+     ORDER BY l.last_seen_at DESC, l.mercari_item_id, i.acquired_at, i.created_at
+  `).all() as Array<{
+    listing_id: string; listing_channel: SalesChannel; listing_title: string; thumb_file: string | null
+    inventory_item_id: string; item_code: string; name: string; landed_cost: number
+  }>
+
+  const byListing = new Map<string, InboxItem>()
+  for (const r of rows) {
+    const item: ReleaseItem = {
+      inventory_item_id: r.inventory_item_id, item_code: r.item_code, name: r.name, landed_cost: r.landed_cost,
+    }
+    const existing = byListing.get(r.listing_id)
+    if (existing?.release) {
+      existing.release.items.push(item)
+      continue
+    }
+    byListing.set(r.listing_id, {
+      kind: 'release',
+      id: r.listing_id,
+      title: r.listing_title,
+      detail: '',
+      thumb_url: db.toThumbUrl(r.thumb_file),
+      release: { listing_id: r.listing_id, listing_channel: r.listing_channel, items: [item] },
+    })
+  }
+  const items = [...byListing.values()]
+  for (const it of items) {
+    it.detail = buildReleaseDetail(it.release!.listing_channel, it.release!.items)
+  }
+  return items
 }
 
 // ------------------------------------------------------------
@@ -413,6 +478,9 @@ export function getInbox(): Inbox {
       run: r,
     }))
 
+  // ---- release（止めた出品が在庫を押さえている） ----
+  const releaseItems = buildReleaseItems()
+
   // ---- reminder（忘れていませんか） ----
   const reminderItems: InboxItem[] = [
     ...buildManualPurchaseReminders(settings, today),
@@ -428,6 +496,7 @@ export function getInbox(): Inbox {
   push('ship', '発送する', '売れて未発送。メルカリで発送したら次の取り込みで消えます', shipItems)
   push('shipping', '送料を入れる', '売れたが送料が決まっていない。選べば利益が出ます', shippingItems)
   push('link', '在庫を紐付ける', 'どの仕入の品か決まっていない。型番が合えば自動で入ります', linkItems)
+  push('release', '止めた出品の在庫を解除する', '出品を止めたのに在庫が紐付いたまま。解除しないと、他の販売にその在庫を紐付けられません', releaseItems)
   push('confirm', '仕入の価格を入れる', 'メロジョイの注文が下書きのまま。単価を入れると在庫ができます', confirmItems)
   push('collect', '取り込みの問題', 'ログインが切れているか、取得に失敗しています', collectItems)
   push('reminder', '忘れていませんか', '自分で入れるもの。済んでいれば「今はいい」で1週間消えます', reminderItems)

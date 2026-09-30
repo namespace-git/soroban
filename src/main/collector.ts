@@ -865,6 +865,9 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     // キーワード設定があればタイトルが一致するものだけ取り込む
     let listingInserted = 0
     let listingUpdated = 0
+    // 出品停止に変わって引き当てを外した出品数・在庫点数（黙って外れないよう note に残す）
+    let listingReleased = 0
+    let listingReleasedItems = 0
     let listingThumbsSaved = 0
     let listingThumbsAttempted = 0
     let listingsScraped = 0
@@ -913,6 +916,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
         })))
         listingInserted = result.inserted
         listingUpdated = result.updated
+        listingReleased = result.releasedListings
+        listingReleasedItems = result.releasedItems
 
         // 残りのサムネイル予算（サムネイルは1回の収集で販売・出品合わせて30枚まで。
         // 「保存できた数」ではなく「試みた数」で減らす。失敗が多いと2倍のリクエストに
@@ -1090,6 +1095,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     if (pending.length > 0) parts.push(`型番の追記 ${codesApplied}（詳細 ${detailsRead} 件）`)
     if (purchasedAtRead > 0) parts.push(`購入日時 ${purchasedAtRead} 件`)
     parts.push(`出品 新規 ${listingInserted}・更新 ${listingUpdated}`)
+    if (listingReleased > 0) parts.push(`出品停止で引き当てを外した ${listingReleased} 件（在庫 ${listingReleasedItems} 点）`)
     if (listingBrokenMessage) parts.push(listingBrokenMessage)
     parts.push(`取引中 ${inProgressScraped}件（新規 ${inProgressNew}・更新 ${inProgressUpdated}）`)
     if (inProgressUnknownStatus > 0) parts.push(`取引中の文言不明 ${inProgressUnknownStatus} 件`)

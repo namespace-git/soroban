@@ -50,6 +50,8 @@ type SalesGotoPayload = {
   modelCode?: string
   /** 月で絞り込む（YYYY-MM）。グラフの月をクリックしたとき */
   month?: string
+  /** 出品中タブの「出品の状態」。既定は 'active'。停止中を見せたい要対応だけが渡す */
+  listingStatus?: ListingStatus
 }
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
@@ -77,9 +79,10 @@ const SALE_STATUS_PILL: Record<SaleStatus, { tone: 'solid-info' | 'info' | 'soli
 const stage = ref<Stage>('to_ship')
 type ListedFilter = 'all' | 'unallocated' | 'allocated'
 const listedFilter = ref<ListedFilter>('all')
-/** 出品の状態で絞り込む（すべて／出品中／出品停止中）。「すべて」は出品中タブの守備範囲のまま（sold・endedは含めない） */
+/** 出品の状態で絞り込む（すべて／出品中／出品停止中）。既定は「出品中」（停止中は普段見なくてよい）。
+    「すべて」は出品中タブの守備範囲のまま（sold・endedは含めない） */
 type ListingStatusFilter = 'all' | 'active' | 'suspended'
-const listingStatusFilter = ref<ListingStatusFilter>('all')
+const listingStatusFilter = ref<ListingStatusFilter>('active')
 const tagFilter = ref('')
 /** 出品先で絞り込む（すべて／メルカリ／Yahoo!フリマ）。出品・販売の両方に効く */
 const channelFilter = ref<SalesChannel | ''>('')
@@ -661,6 +664,7 @@ watch(gotoPayload, async (p) => {
     monthFilter.value = p.month
   }
   if (p.onlyUnallocated) listedFilter.value = 'unallocated'
+  if (p.listingStatus === 'active' || p.listingStatus === 'suspended') listingStatusFilter.value = p.listingStatus
   if (p.status) statusFilter.value = p.status
   if (p.search) searchText.value = p.search
   if (p.mercariItemId) await openFromMercariId(p.mercariItemId)
@@ -1425,7 +1429,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
       </div>
 
       <EmptyState
-        v-else-if="searchText || monthFilter || statusFilter || inputFilter || period !== 'all' || listingStatusFilter !== 'all' || listedFilter !== 'all'"
+        v-else-if="searchText || monthFilter || statusFilter || inputFilter || period !== 'all' || listingStatusFilter !== 'active' || listedFilter !== 'all'"
         :title="filteredEmptyTitle"
       />
       <EmptyState

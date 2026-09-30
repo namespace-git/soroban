@@ -298,6 +298,7 @@ let settings: Record<string, string> = {
   mercari_keyword: '【',
   yahoo_keyword: 'メロジョイ, Mellojoy',
   track_shipping: '1',
+  auto_release_suspended: '1',
 }
 
 // --- AI 読み取り（Gemini）。キー本体は返さない。安全な保存は常に使える体で動かす ---
@@ -1271,6 +1272,15 @@ function buildInitialListings(): void {
   addListing({ model: 'A012', status: 'active', daysAgoFirstSeen: 12, reserve: true, likes: 3 })
   addListing({ model: 'Z056-1', status: 'suspended', daysAgoFirstSeen: 20, reserve: true })
   addListing({ model: 'Z056-2', status: 'suspended', daysAgoFirstSeen: 18, reserve: true })
+  // 見本：ホームの「止めた出品の在庫を外す」。こちらは 2 点を押さえている出品（1 クリックで 2 点とも外れる）
+  {
+    const rec = listingRecords[listingRecords.length - 1]
+    const extra = takeOldestByModel('Z056-2')
+    if (extra) {
+      listingItems.set(rec.mercari_item_id, [...(listingItems.get(rec.mercari_item_id) ?? []), extra.id])
+      extra.listing = { channel: rec.channel, mercari_item_id: rec.mercari_item_id, price: rec.price, status: rec.status }
+    }
+  }
   addListing({ model: 'Z001-4', status: 'sold', daysAgoFirstSeen: 25, reserve: true })
   addListing({ model: 'Z088-2', status: 'sold', daysAgoFirstSeen: 22, reserve: true })
   addListing({ model: 'Z012-3', status: 'ended', daysAgoFirstSeen: 30, reserve: false })
@@ -2387,6 +2397,35 @@ function buildInbox(): Inbox {
     })
   }
 
+  // 止めた出品（suspended）が在庫（in_stock）を押さえている。unreserveInventory で外すとこの項目は消える
+  const releaseItems: InboxItem[] = []
+  for (const rec of listingRecords.filter(r => r.status === 'suspended')) {
+    const held = (listingItems.get(rec.mercari_item_id) ?? [])
+      .map(id => inventory.find(i => i.id === id))
+      .filter((i): i is InventoryItem => !!i && i.status === 'in_stock')
+    if (held.length === 0) continue
+    releaseItems.push({
+      kind: 'release',
+      id: rec.mercari_item_id,
+      title: rec.title,
+      detail: `${CHANNEL_LABEL[rec.channel]}で出品を止めています`,
+      thumb_url: rec.thumb_url,
+      release: {
+        listing_id: rec.mercari_item_id,
+        listing_channel: rec.channel,
+        items: held.map(i => ({ inventory_item_id: i.id, item_code: i.item_code, name: i.name, landed_cost: i.landed_cost })),
+      },
+    })
+  }
+  if (releaseItems.length) {
+    groups.push({
+      kind: 'release',
+      label: '止めた出品の在庫を外す',
+      hint: '出品を止めているのに在庫が取ってあります。外さないと、その在庫は他で売れても自動で紐付きません',
+      items: releaseItems,
+    })
+  }
+
   const reminderItems: InboxItem[] = []
   const today = todayLocal()
   const dayOfMonth = Number(today.split('-')[2])
@@ -2601,25 +2640,28 @@ const api: SorobanApi = {
 
   async getSalesProgress(): Promise<SalesProgress> {
     const month = thisMonthLocal()
+    // main（views.ts の getSalesProgress）と同じ数え方。カードは一覧の既定（出品中のみ）と数を一致させる。
+    // 「すべて」の件数だけは停止中も含む
     const listedRecs = listingRecords.filter(r => r.status === 'active').map(buildListing)
-    const listedCount = listedRecs.reduce((s, l) => s + l.items.length, 0)
-    const listedProfit = listedRecs.reduce((s, l) => s + (l.expected_profit ?? 0), 0)
-    const unallocated = listedRecs.filter(l => l.items.length === 0).length
+    const listedReserved = listedRecs.filter(l => l.items.length > 0)
+    const listedProfit = listedReserved.reduce((s, l) => s + (l.expected_profit ?? 0), 0)
+    const listingsAllCount = listingRecords.filter(r => r.status === 'active' || r.status === 'suspended').length
 
     const toShip = sales.filter(s => s.status === 'waiting_shipment')
     const inTransit = sales.filter(s => s.status === 'shipped' || s.status === 'delivered')
-    const completed = sales.filter(s => s.status === 'completed' && s.completed_at?.slice(0, 7) === month)
+    const completed = sales.filter(s => s.status === 'completed' && s.sold_at.slice(0, 7) === month)
 
-    const needsShipping = sales.filter(s => !s.is_shipping_confirmed).length
-    const needsLink = sales.filter(s => s.kind === 'resale' && s.unmatched === 1).length
-    const done = sales.filter(s => s.is_shipping_confirmed && !(s.kind === 'resale' && s.unmatched === 1)).length
+    const resaleSales = sales.filter(s => s.kind === 'resale')
+    const needsShipping = resaleSales.filter(s => !s.is_shipping_confirmed).length
+    const needsLink = resaleSales.filter(s => s.unmatched === 1).length
+    const done = resaleSales.filter(s => s.is_shipping_confirmed && s.unmatched !== 1).length
 
     return wait({
-      listed: { count: listedCount, expected_profit: listedProfit, unallocated },
+      listed: { count: listedRecs.length, expected_profit: listedProfit, unallocated: listedRecs.length - listedReserved.length },
       to_ship: { count: toShip.length, revenue: toShip.reduce((s, x) => s + x.price, 0) },
       in_transit: { count: inTransit.length, revenue: inTransit.reduce((s, x) => s + x.price, 0) },
       completed_this_month: { count: completed.length, revenue: completed.reduce((s, x) => s + x.price, 0) },
-      all: sales.length,
+      all: sales.length + listingsAllCount,
       inputs: { needs_shipping: needsShipping, needs_link: needsLink, done },
     })
   },
@@ -4330,6 +4372,20 @@ const api: SorobanApi = {
         id: 'collect-empty', level: 'info', title: '取り込みが続けて0件',
         count: collectEmpty,
         detail: '画面構造が変わって取れなくなっているかもしれません',
+      })
+    }
+
+    // 11. 出品停止中の出品が在庫中の在庫を押さえている（出品の件数）。飛び先は停止中だけに絞る
+    const suspendedReserved = listingRecords.filter(r =>
+      r.status === 'suspended'
+      && (listingItems.get(r.mercari_item_id) ?? []).some(id => inventory.find(i => i.id === id)?.status === 'in_stock'),
+    ).length
+    if (suspendedReserved > 0) {
+      checks.push({
+        id: 'suspended-listing-reserved', level: 'info', title: '出品を止めたまま在庫を押さえている出品',
+        count: suspendedReserved,
+        detail: '止めた出品に在庫が取ってあります。取ってあるあいだ、その在庫は他の販売に紐付けられません',
+        goto: { tab: 'sales', stage: 'listed', listingStatus: 'suspended' },
       })
     }
 

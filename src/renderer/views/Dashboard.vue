@@ -3,7 +3,7 @@
 // 数字・文言（title/detail/profit_hint）は main（getInbox）が組み立て済みのものをそのまま出す。
 // レンダラー側では利益を再計算しない。
 import { ref, reactive, computed, onMounted, watch, inject, type Ref } from 'vue'
-import type { Inbox, InboxItem, InboxKind, ShippingMethod, DashboardStats } from '../../shared/types'
+import type { Inbox, InboxItem, InboxKind, ShippingMethod, DashboardStats, ListingStatus } from '../../shared/types'
 import { CHANNEL_LABEL } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
@@ -21,6 +21,7 @@ const groupLabels: Record<InboxKind, string> = {
   link: '在庫を紐付ける',
   confirm: '仕入の価格を入れる',
   collect: '取り込みの問題',
+  release: '止めた出品の在庫を外す',
   reminder: '忘れていませんか',
 }
 
@@ -33,6 +34,7 @@ const goto = inject<(t: string, payload?: {
   onlyUnallocated?: boolean
   focusId?: string
   month?: string
+  listingStatus?: ListingStatus
   inventoryStatus?: 'unlisted' | 'listed' | 'sold' | 'other' | 'all'
   agingMin?: number
 }) => void>('goto')!
@@ -117,6 +119,31 @@ async function markPersonal(item: InboxItem) {
 }
 function gotoSaleAll(item: InboxItem) {
   goto('sales', { stage: 'all', focusId: item.sale?.id })
+}
+
+// --- release：止めた出品が押さえている在庫を、出品から外す（在庫・販売の記録は消えない） ---
+// 1 つの出品が複数点を押さえていることがあるので、点数ぶんを 1 クリックでまとめて外す
+function releaseHeldText(item: InboxItem): string {
+  const items = item.release?.items ?? []
+  return items.map(i => `${i.item_code} ${i.name}`).join('、')
+}
+function releaseButtonLabel(item: InboxItem): string {
+  const n = item.release?.items.length ?? 0
+  return n > 1 ? `${n} 点とも出品から外す` : '在庫を出品から外す'
+}
+async function releaseListing(item: InboxItem) {
+  const r = item.release
+  if (!r || r.items.length === 0) return
+  const codes = r.items.map(i => i.item_code).join('、')
+  try {
+    await withBusy(item.id, async () => {
+      for (const it of r.items) await window.soroban.unreserveInventory(r.listing_id, it.inventory_item_id)
+    })
+    toast(`${codes} を出品から外しました（在庫は残っています）`, 'ok')
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+    await load()
+  }
 }
 
 // --- confirm：仕入の価格入力は仕入タブへ ---
@@ -229,11 +256,16 @@ function gotoTopModel() {
                 <div class="row-main">
                   <div class="row-labels">
                     <StatusChip v-if="item.sale" tone="neutral" :label="CHANNEL_LABEL[item.sale.channel]" :title="`出品先：${CHANNEL_LABEL[item.sale.channel]}`" />
+                    <StatusChip v-if="item.release" tone="neutral" :label="CHANNEL_LABEL[item.release.listing_channel]" :title="`出品先：${CHANNEL_LABEL[item.release.listing_channel]}`" />
                     <StatusPill v-if="group.kind === 'ship'" tone="solid-info" label="発送してください" />
+                    <StatusPill v-if="group.kind === 'release'" tone="solid-warn" label="出品停止中" />
                     <StatusChip v-if="group.kind === 'confirm' && item.purchase" tone="neutral" :label="item.purchase.shop_account_name" />
                   </div>
                   <div class="row-title one-line" :title="item.title">{{ item.title }}</div>
-                  <div class="row-sub">
+                  <div v-if="item.release" class="row-sub two-lines" :title="`押さえている在庫（${item.release.items.length} 点）：${releaseHeldText(item)}`">
+                    <b>押さえている在庫 {{ item.release.items.length }} 点：</b>{{ releaseHeldText(item) }}
+                  </div>
+                  <div v-else class="row-sub">
                     <span class="dim">{{ item.detail }}</span>
                     <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint" :class="profitHintClass(item.profit_hint)">
                       ・ {{ profitHintText(group.kind, item.profit_hint) }}
@@ -298,6 +330,16 @@ function gotoTopModel() {
                       @click="openLoginForRun"
                     >ログインする</button>
                     <button v-else class="sm" :disabled="busy.has(item.id)" @click="retryCollect(item)">もう一度取り込む</button>
+                  </template>
+
+                  <!-- 止めた出品の在庫を外す：1 クリックで全部。押した行はその場で消える -->
+                  <template v-else-if="group.kind === 'release'">
+                    <button
+                      class="sm"
+                      :disabled="busy.has(item.id)"
+                      title="出品から在庫を外すだけです。在庫も販売の記録も消えません。"
+                      @click="releaseListing(item)"
+                    >{{ releaseButtonLabel(item) }}</button>
                   </template>
 
                   <!-- 忘れていませんか -->
