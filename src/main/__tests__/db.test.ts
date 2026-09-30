@@ -3323,6 +3323,58 @@ describe('db（:memory:）', () => {
       expect(after.listing).toEqual({ channel: 'mercari', mercari_item_id: 'CHN-2', price: 2000, status: 'active' })
     })
 
+    it('getItemTimeline：出品先の名前が履歴に出る（Yahoo!フリマ→「Yahoo!フリマで売れた」、メルカリ→「メルカリで売れた」）', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2026-01-01',
+        shipping_fee: 0,
+        lines: [{ name: '出品先の履歴確認', unit_price: 1000, quantity: 2 }],
+      })
+      const [yahooItem, mercariItem] = db.listInventory('in_stock')
+
+      const yahooSaleId = db.createSale({
+        title: 'Yahoo販売', sold_at: '2026-01-10', price: 5000, channel: 'yahoo',
+      })
+      db.linkInventory(yahooSaleId, [yahooItem.id])
+      const mercariSaleId = db.createSale({
+        title: 'メルカリ販売', sold_at: '2026-01-10', price: 5000, channel: 'mercari',
+      })
+      db.linkInventory(mercariSaleId, [mercariItem.id])
+
+      const yahooSold = db.getItemTimeline(yahooItem.id)!.events.find(e => e.kind === 'sold')!
+      const mercariSold = db.getItemTimeline(mercariItem.id)!.events.find(e => e.kind === 'sold')!
+      expect(yahooSold.title).toBe('Yahoo!フリマで売れた')
+      expect(yahooSold.title).not.toContain('メルカリ')
+      expect(mercariSold.title).toBe('メルカリで売れた')
+    })
+
+    it('getItemTimeline：Yahoo!フリマの出品に引き当てた在庫は「Yahoo!フリマに出品」と出る（売れたあとも）', () => {
+      db.createPurchase({
+        shop_account_id: shopId,
+        ordered_at: '2020-01-01',
+        shipping_fee: 0,
+        lines: [{ name: 'Yahoo出品履歴確認', unit_price: 1000, quantity: 1 }],
+      })
+      const item = db.listInventory('in_stock')[0]
+      db.upsertListings(
+        [{ mercariItemId: 'YLT', title: 'Yahoo出品履歴確認', price: 3000, suspended: false, thumbUrl: null }],
+        'yahoo',
+      )
+      db.reserveInventory('YLT', [item.id])
+
+      const listed = db.getItemTimeline(item.id)!.events.find(e => e.kind === 'listed')!
+      expect(listed.title).toBe('Yahoo!フリマに出品')
+      expect(listed.title).not.toContain('メルカリ')
+
+      db.insertCollected(
+        [{ mercariItemId: 'YLT', title: 'Yahoo出品履歴確認', price: 3000, soldAt: '2099-01-01' }],
+        'yahoo',
+      )
+      const events = db.getItemTimeline(item.id)!.events
+      expect(events.find(e => e.kind === 'listed')!.title).toBe('Yahoo!フリマに出品')
+      expect(events.find(e => e.kind === 'sold')!.title).toBe('Yahoo!フリマで売れた')
+    })
+
     it('Yahoo!フリマの販売の粗利（sale_profit）が「販売価格－手数料－送料－梱包材費－原価」と数字で一致する', () => {
       db.createPurchase({
         shop_account_id: shopId,

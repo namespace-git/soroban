@@ -23,7 +23,7 @@ import type {
   SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, ShopAccountStats, Tag, TimelineEvent, VariantSummary,
   CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
-import { LISTING_STATUS_LABEL } from '../shared/types'
+import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../shared/types'
 
 // ============================================================
 // ローカルSQLite
@@ -5150,24 +5150,24 @@ export function getItemTimeline(inventoryItemId: string): ItemTimeline | null {
 
   // 出品への引き当て（未販売ならitem.listingから）／売れたあとも、その紐付けが
   // link_source='listing'（出品からの引き継ぎ）なら「出品」イベントを足す
-  let listingInfo: { price: number; listed_at: string } | null = null
+  let listingInfo: { channel: SalesChannel; price: number; listed_at: string } | null = null
   if (item.listing) {
-    listingInfo = db.prepare('SELECT price, listed_at FROM listing WHERE mercari_item_id = ?')
-      .get(item.listing.mercari_item_id) as { price: number; listed_at: string } | undefined ?? null
+    listingInfo = db.prepare('SELECT channel, price, listed_at FROM listing WHERE mercari_item_id = ?')
+      .get(item.listing.mercari_item_id) as { channel: SalesChannel; price: number; listed_at: string } | undefined ?? null
   } else if (sale) {
     const saleLine = db.prepare(
       'SELECT link_source FROM sale_line WHERE inventory_item_id = ? AND sale_id = ?',
     ).get(inventoryItemId, sale.id) as { link_source: LinkSource } | undefined
     if (saleLine?.link_source === 'listing' && sale.mercari_item_id) {
-      listingInfo = db.prepare('SELECT price, listed_at FROM listing WHERE mercari_item_id = ?')
-        .get(sale.mercari_item_id) as { price: number; listed_at: string } | undefined ?? null
+      listingInfo = db.prepare('SELECT channel, price, listed_at FROM listing WHERE mercari_item_id = ?')
+        .get(sale.mercari_item_id) as { channel: SalesChannel; price: number; listed_at: string } | undefined ?? null
     }
   }
   if (listingInfo) {
     events.push({
       date: listingInfo.listed_at,
       kind: 'listed',
-      title: 'メルカリに出品',
+      title: `${CHANNEL_LABEL[listingInfo.channel]}に出品`,
       detail: yenText(listingInfo.price),
       amount: listingInfo.price,
     })
@@ -5190,7 +5190,7 @@ export function getItemTimeline(inventoryItemId: string): ItemTimeline | null {
       // 購入日時が取れていればそちらを優先（sold_at は取引完了までの仮置きのことがある）
       date: sale.purchased_at ? sale.purchased_at.slice(0, 10) : sale.sold_at,
       kind: 'sold',
-      title: 'メルカリで売れた',
+      title: `${CHANNEL_LABEL[sale.channel]}で売れた`,
       detail: detailParts.join(' '),
       amount: sale.price,
     })

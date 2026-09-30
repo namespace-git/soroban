@@ -30,7 +30,7 @@ import type {
   AutoBackupStatus, ExportKind,
   HealthCheck,
 } from '../../shared/types'
-import { LISTING_STATUS_LABEL } from '../../shared/types'
+import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 import { matchesSearch } from '../components/SearchBox.vue'
 
@@ -2097,7 +2097,7 @@ function buildItemTimeline(item: InventoryItem): ItemTimeline {
     events.push({
       date: sale.sold_at,
       kind: 'sold',
-      title: `メルカリで販売：${sale.title}`,
+      title: `${CHANNEL_LABEL[sale.channel]}で売れた`,
       detail: sale.buyer ? `購入者 ${sale.buyer}` : null,
       amount: sale.price,
     })
