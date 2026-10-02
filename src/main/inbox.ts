@@ -1,5 +1,6 @@
 import * as db from './db'
 import { todayLocal, thisMonthLocal } from '../shared/date'
+import { forecastTotals } from '../shared/recognition'
 import { CHANNEL_LABEL } from '../shared/types'
 import type {
   ExpenseCategory, Inbox, InboxGroup, InboxItem, InboxKind, InventoryItem, MonthlySummary,
@@ -510,14 +511,17 @@ export function getInbox(): Inbox {
     FROM sale WHERE status IN ('shipped','delivered')
   `).get() as { c: number; total: number }
 
+  // 見込みは月で切らない。未完了の sold_at は仮置きで、完了した日に動く（awaiting_payout と同じ）
+  const pending = forecastTotals(allSales.filter(s => s.kind === 'resale'))
+
   const strip: Inbox['strip'] = {
     month,
     gross_profit: thisMonthRow?.gross_profit ?? 0,
     net_profit: thisMonthRow?.net_profit ?? 0,
     revenue: thisMonthRow?.revenue ?? 0,
     sales_count: thisMonthRow?.sales_count ?? 0,
-    pending_profit_estimate: thisMonthRow?.forecast?.gross_profit ?? 0,
-    pending_count: thisMonthRow?.forecast?.count ?? 0,
+    pending_profit_estimate: pending.gross_profit,
+    pending_count: pending.count,
     awaiting_payout: payoutRow.total,
     awaiting_payout_count: payoutRow.c,
     last_month: lastMonthRow

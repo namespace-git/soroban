@@ -57,6 +57,9 @@ describe('inbox（:memory:）', () => {
   it('発送待ち・送料未入力・未紐付け（候補1点）・下書きの4グループが順番どおりに出る。link の profit_hint は数字が合う', () => {
     // 'mellojoy' 口座は manual_purchase リマインドの対象外（取り込みがあるため）。
     // ここでの日付は「今日」から離れていない可能性があるので、他のリマインドが紛れ込まないようにする
+    // （締めのリマインドは「先月の行があり、今日が3日以降」で出るので、月の早い日に固定する。日付に左右されない）
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-05T03:00:00Z'))
     const shopId = db.createShopAccount('メロジョイA', 'mellojoy')
 
     // 発送待ち：発送方法を決めておき in_stock を紐付けて他グループに紛れ込ませない
@@ -290,6 +293,68 @@ describe('inbox（:memory:）', () => {
       const kinds = inbox.getInbox().groups.map(g => g.kind)
       expect(kinds.indexOf('release')).toBeGreaterThan(kinds.indexOf('link'))
       expect(kinds.indexOf('release')).toBeLessThan(kinds.indexOf('confirm'))
+    })
+  })
+
+  describe('ストリップ：見込みは月で切らない（月が変わった瞬間に消えない）', () => {
+    /** 受取評価待ち（shipped）の販売を n 件。価格は 1,000 円から 100 円刻み、手数料は 10%（送料・原価なし） */
+    function pendingSales(n: number, soldAt: string, prefix = 'pending') {
+      return db.insertCollected(Array.from({ length: n }, (_, i) => ({
+        mercariItemId: `${prefix}-${i}`, title: `未完了の商品【A037】${i}`, soldAt, price: 1000 + i * 100, status: 'shipped' as const,
+      })))
+    }
+
+    it('販売が全部先月で未完了が 15 件でも、今月の見込みは 15 件・合計の粗利が出る（0 にならない）', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 9, 3, 12, 0)) // 2026-10-03（ローカル）
+      pendingSales(15, '2026-09-20')
+      // 先月の実績も 1 件（今月の実績に混ざらないこと）
+      db.insertCollected([{ mercariItemId: 'done-sep', title: '完了済みの商品【A037】', soldAt: '2026-09-10', price: 5000, status: 'completed' }])
+
+      const { strip } = inbox.getInbox()
+      // 価格 1000..2400（100 刻み 15 件）= 25,500、手数料 10% = 2,550 → 粗利 22,950
+      expect(strip.month).toBe('2026-10')
+      expect(strip.pending_count).toBe(15)
+      expect(strip.pending_profit_estimate).toBe(22950)
+      // 実績は今月のまま（先月の 5,000 円は混ざらない）
+      expect(strip).toMatchObject({ gross_profit: 0, net_profit: 0, revenue: 0, sales_count: 0 })
+    })
+
+    it('見込みの合計は sale_profit の未完了分の粗利の合計と一致する（赤字も含む）', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 9, 3, 12, 0))
+      const sales = pendingSales(3, '2026-08-31')
+      db.updateSale(sales[0].id, { shipping_fee: 5000 }) // 赤字になる 1 件
+
+      const expected = db.listSales().filter(s => s.status !== 'completed').reduce((sum, s) => sum + s.gross_profit, 0)
+      const { strip } = inbox.getInbox()
+      expect(strip.pending_count).toBe(3)
+      expect(strip.pending_profit_estimate).toBe(expected)
+      expect(strip.pending_profit_estimate).toBe((1000 - 100 - 5000) + (1100 - 110) + (1200 - 120))
+    })
+
+    it('今月の実績は今月のまま。未完了は月をまたいで全部数える', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 9, 3, 12, 0))
+      pendingSales(2, '2026-09-20', 'last')
+      pendingSales(1, '2026-10-02', 'this')
+      db.insertCollected([{ mercariItemId: 'done-oct', title: '今月完了【A037】', soldAt: '2026-10-02', price: 2000, status: 'completed' }])
+      db.insertCollected([{ mercariItemId: 'done-sep2', title: '先月完了【A037】', soldAt: '2026-09-15', price: 7000, status: 'completed' }])
+
+      const { strip } = inbox.getInbox()
+      expect(strip).toMatchObject({ revenue: 2000, gross_profit: 1800, sales_count: 1 })
+      expect(strip.pending_count).toBe(3)
+      expect(strip.pending_profit_estimate).toBe((1000 - 100) + (1100 - 110) + (1000 - 100))
+    })
+
+    it('日本時間の 0 時台（UTC では前月）でも、月初に見込みが消えない', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 9, 1, 0, 5)) // ローカル 2026-10-01 00:05
+      pendingSales(4, '2026-09-30')
+
+      const { strip } = inbox.getInbox()
+      expect(strip.month).toBe('2026-10')
+      expect(strip.pending_count).toBe(4)
     })
   })
 })

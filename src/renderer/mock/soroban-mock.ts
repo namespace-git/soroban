@@ -820,6 +820,19 @@ function soldAtFor(i: number): string {
   return todayLocal(daysAgo(k))
 }
 
+/**
+ * 見本：月が変わった直後（今月の販売が 0 件、未完了は全部先月の計上）。利用者の 10 月 1 日と同じ形。
+ * 開くときに `?scenario=rollover` を付けると、今月の計上日を先月の 20 日前後へ寄せる。
+ * 先月の未完了が複数あるので、ヘッダの見込みと月次の「今月が空」を同時に確かめられる
+ */
+const ROLLOVER_SCENARIO = typeof location !== 'undefined' && new URLSearchParams(location.search).get('scenario') === 'rollover'
+
+function rolloverSoldAt(soldAt: string): string {
+  if (!ROLLOVER_SCENARIO || soldAt.slice(0, 7) !== thisMonthLocal()) return soldAt
+  const day = Number(soldAt.slice(8, 10))
+  return `${monthAgoStr(1)}-${String(15 + Math.min(day, 13)).padStart(2, '0')}`
+}
+
 function mercariId(): string {
   let s = ''
   for (let i = 0; i < 11; i++) s += Math.floor(Math.random() * 10)
@@ -905,7 +918,7 @@ function buildSaleFixed(opts: {
   // 実額が取れているのは、取り込み（取引画面から実額を読む）か、明示的に実額を指定した見本だけ。
   // 手入力は率からの見込みしか持たない
   const feeSource: FeeSource = opts.feeSourceOverride ?? (opts.feeOverride !== undefined || source === 'collector' ? 'actual' : 'rate')
-  const soldAt = opts.soldAtOverride ?? soldAtFor(opts.i)
+  const soldAt = rolloverSoldAt(opts.soldAtOverride ?? soldAtFor(opts.i))
   const statusInfo = opts.statusOverride ? statusInfoFor(opts.statusOverride, soldAt, opts.i) : saleStatusFor(source, soldAt)
 
   const sale: SaleProfit = {
@@ -1332,6 +1345,17 @@ function monthAgoStr(n: number): string {
   d.setDate(1) // 月末繰り上がりを避ける
   d.setMonth(d.getMonth() - n)
   return thisMonthLocal(d)
+}
+
+/** 今月の行（resale）が無ければ、数字が全部 0 の行を足す。main の listMonthly と同じ（月が変わった直後も帯に今月が出る） */
+function withThisMonthRow(rows: MonthlyBase[]): MonthlyBase[] {
+  const month = thisMonthLocal()
+  if (rows.some(m => m.month === month && m.kind === 'resale')) return rows
+  return [...rows, {
+    month, kind: 'resale', sales_count: 0, revenue: 0, total_fee: 0,
+    total_shipping: 0, total_packaging: 0, total_cost: 0, gross_profit: 0,
+    unconfirmed_shipping: 0,
+  }]
 }
 
 /** 直近4か月ぶん見せるため、実データが無い2か月ぶんは要約だけ合成する */
@@ -2280,12 +2304,13 @@ function computeByTag(rows: MonthSaleRow[]): { by_tag: MonthStatement['by_tag'];
 /** ホームの「今やること」を組み立てる */
 function buildInbox(): Inbox {
   const month = thisMonthLocal()
-  const monthly = withExpenses([...monthlyFromSales(sales), ...extraOlderMonths()])
+  const monthly = withExpenses(withThisMonthRow([...monthlyFromSales(sales), ...extraOlderMonths()]))
   const thisMonthRow = monthly.find(m => m.month === month && m.kind === 'resale') ?? null
   const lastMonth = monthAgoStr(1)
   const lastMonthRow = monthly.find(m => m.month === lastMonth && m.kind === 'resale') ?? null
 
-  const pendingRows = sales.filter(s => !isRealized(s) && s.kind === 'resale' && s.sold_at.slice(0, 7) === month)
+  // 見込みは月で切らない（未完了の計上日は仮置きで、完了した日に動く）
+  const pendingRows = sales.filter(s => !isRealized(s) && s.kind === 'resale')
   const awaitingRows = sales.filter(s => s.status === 'shipped' || s.status === 'delivered')
 
   const strip: ProfitStrip = {
@@ -3530,7 +3555,13 @@ const api: SorobanApi = {
   },
 
   async listMonthly() {
-    const rows = withExpenses([...monthlyFromSales(sales), ...extraOlderMonths()])
+    // 見本の「古い月」は monthAgoStr(2|3) なので、実時間が進むと販売から出た月とぶつかる
+    // （10 月になった日に 2026-08 が 2 枚並んだ）。本物の listMonthly は月×種別で畳むので
+    // 重複しない。モックがそこだけ違うと、画面の確認が嘘をつく
+    const fromSales = monthlyFromSales(sales)
+    const seen = new Set(fromSales.map(r => `${r.month}:${r.kind}`))
+    const older = extraOlderMonths().filter(r => !seen.has(`${r.month}:${r.kind}`))
+    const rows = withExpenses(withThisMonthRow([...fromSales, ...older]))
     rows.sort((a, b) => (a.month !== b.month ? (a.month < b.month ? 1 : -1) : a.kind.localeCompare(b.kind)))
     return wait(rows)
   },

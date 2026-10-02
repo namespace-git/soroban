@@ -983,8 +983,16 @@ export interface ProfitStrip {
   net_profit: number
   revenue: number
   sales_count: number
-  /** 今月の取引未完了分の見込み粗利（赤字も含む） */
+  /**
+   * **まだ取引が完了していない販売すべて**の見込み粗利（赤字も含む）。**月では切らない。**
+   *
+   * 未完了の販売の `sold_at` は購入日時の仮置きで、**完了した日に動く**（`CLAUDE.md`）。
+   * つまり計上月がまだ決まっていないので、月で切ると「月が変わった瞬間に、
+   * 飛んでいるお金が画面から消える」ことになる（実際に 10 月 1 日に踏んだ）。
+   * 隣の `awaiting_payout` も月で切っていない。そちらに揃える
+   */
   pending_profit_estimate: number
+  /** 同上。まだ完了していない販売の件数（月では切らない） */
   pending_count: number
   /** 売上金の反映待ち（発送済み・受取評価待ち・評価待ちの販売の 価格−手数料 の合計） */
   awaiting_payout: number

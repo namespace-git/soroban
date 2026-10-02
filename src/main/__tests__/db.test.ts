@@ -1,5 +1,5 @@
 import { createCompletedSale } from './completed-sale'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import BetterSqlite3 from 'better-sqlite3'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1473,7 +1473,8 @@ describe('db（:memory:）', () => {
     expect(dash.stockCount).toBe(0)
     expect(dash.stockValue).toBe(0)
     expect(dash.agingCount).toBe(0)
-    expect(dash.thisMonth).toBeNull()
+    // 今月は販売が 0 件でも 0 の行が返る（月次画面が前月のまま固まらないように）
+    expect(dash.thisMonth).toMatchObject({ kind: 'resale', sales_count: 0, revenue: 0, gross_profit: 0, net_profit: 0 })
     expect(dash.lastRun).toBeNull()
   })
 
@@ -5571,6 +5572,72 @@ describe('db（:memory:）', () => {
       expect(purchaseHit('未着商品テスト').status_label).toBe('未着')
       expect(purchaseHit('配送中商品テスト').status_label).toBe('配送中')
       expect(purchaseHit('到着済商品テスト').status_label).toBe('到着済')
+    })
+  })
+
+  describe('listMonthly：今月の行は販売が 0 件でも必ず返る', () => {
+    const zeroRow = {
+      kind: 'resale', sales_count: 0, revenue: 0, total_fee: 0, total_shipping: 0, total_packaging: 0,
+      total_cost: 0, gross_profit: 0, unconfirmed_shipping: 0, expense_total: 0, net_profit: 0,
+      closed: false, forecast: { count: 0, revenue: 0, gross_profit: 0 },
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('販売が全部先月でも、今月の行が 0 で出る。先月の行は消えず、新しい月が先頭', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 9, 3, 12, 0)) // 2026-10-03（ローカル）
+      createCompletedSale({ title: '先月の販売', sold_at: '2026-09-20', price: 1000 })
+
+      const rows = db.listMonthly()
+      expect(rows.map(r => `${r.month}:${r.kind}`)).toEqual(['2026-10:resale', '2026-09:resale'])
+      expect(rows[0]).toEqual({ month: '2026-10', ...zeroRow })
+      expect(rows[1]).toMatchObject({ month: '2026-09', sales_count: 1, revenue: 1000 })
+    })
+
+    it('空DBでも今月の行が 1 件だけ出る', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 9, 3, 12, 0))
+      expect(db.listMonthly()).toEqual([{ month: '2026-10', ...zeroRow }])
+    })
+
+    it('今月の販売があるときは二重に出ない（resale は 1 行、私物は私物の行のまま）', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 9, 3, 12, 0))
+      createCompletedSale({ title: '今月の転売', sold_at: '2026-10-02', price: 2000 })
+      db.createSale({ title: '今月の私物', sold_at: '2026-10-02', price: 500, kind: 'personal' })
+
+      const rows = db.listMonthly()
+      expect(rows.filter(r => r.month === '2026-10' && r.kind === 'resale')).toHaveLength(1)
+      expect(rows.filter(r => r.month === '2026-10' && r.kind === 'personal')).toHaveLength(1)
+      expect(rows.find(r => r.month === '2026-10' && r.kind === 'resale')).toMatchObject({ sales_count: 1, revenue: 2000 })
+    })
+
+    it('今月に経費だけあるときも二重に出ない（経費は 1 回だけ載る）', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 9, 3, 12, 0))
+      db.createExpense({ occurred_at: '2026-10-02', category: 'packaging', amount: 300 })
+
+      const rows = db.listMonthly().filter(r => r.month === '2026-10')
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ kind: 'resale', expense_total: 300, net_profit: -300 })
+    })
+
+    it('日本時間の 0〜9 時台（UTC では前日・前月）でも今月はローカルの月で判定される', () => {
+      vi.useFakeTimers()
+      // ローカル 2026-10-01 00:10。UTC に直すと 2026-09-30 になる環境がある
+      vi.setSystemTime(new Date(2026, 9, 1, 0, 10))
+      createCompletedSale({ title: '先月の販売', sold_at: '2026-09-30', price: 1000 })
+
+      const rows = db.listMonthly()
+      expect(rows[0]).toMatchObject({ month: '2026-10', kind: 'resale', sales_count: 0 })
+      expect(rows.map(r => r.month)).toEqual(['2026-10', '2026-09'])
+
+      // 月末の 23:50（ローカル）は 9 月のまま
+      vi.setSystemTime(new Date(2026, 8, 30, 23, 50))
+      expect(db.listMonthly()[0]).toMatchObject({ month: '2026-09', sales_count: 1 })
     })
   })
 

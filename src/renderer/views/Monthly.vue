@@ -3,7 +3,7 @@
 // 計算書とタグ別の集計は getMonthStatement、販売ごとの表・締め・片付けるもの・仕入先への支払いは
 // MonthDetail.vue（getMonthDetail）から。どちらも main が計算した値をそのまま出すだけで、ここでは再計算しない。
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { MonthlySummary, MonthStatement, MonthDetail as MonthDetailInfo, ExpenseCategory, ExportKind } from '../../shared/types'
+import type { MonthlySummary, MonthStatement, MonthDetail as MonthDetailInfo, ExpenseCategory, ExportKind, ProfitStrip } from '../../shared/types'
 import { thisMonthLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -19,6 +19,8 @@ const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const goto = inject<(t: string, payload?: { stage?: 'listed' | 'pending' | 'done' | 'all'; month?: string }) => void>('goto')!
 const changed = inject<() => void>('changed', () => {})
+// ヘッダの利益ピルと同じ ProfitStrip。今月が空のとき「取引中の分」を添えるのに使う
+const profitStrip = inject<Ref<ProfitStrip | null>>('profitStrip', ref(null))
 
 const CATEGORY_LABEL: Record<ExpenseCategory, string> = {
   packaging: '梱包費',
@@ -29,7 +31,8 @@ const CATEGORY_LABEL: Record<ExpenseCategory, string> = {
   other: 'その他',
 }
 
-const thisMonth = thisMonthLocal()
+// 開きっぱなしで月をまたいでも今月に追従する（load のたびに取り直す）
+const thisMonth = ref(thisMonthLocal())
 
 // --- 月の帯（listMonthly の resale 行だけ。私物は帯に出さない） ---
 
@@ -41,29 +44,38 @@ const months = computed(() =>
 )
 
 async function load() {
+  thisMonth.value = thisMonthLocal()
   monthly.value = await window.soroban.listMonthly()
   loaded.value = true
-  if (!selectedMonth.value) selectedMonth.value = months.value[0]?.month ?? null
+  // 人が月を選ぶまでは、いちばん新しい月（今月の行は main が必ず返す）に付いていく。
+  // 選んだあと・ホームから月を指定されて開いたあとは勝手に動かさない
+  if (!pickedByUser) selectedMonth.value = months.value[0]?.month ?? null
 }
 onMounted(load)
 watch(revision, () => { load(); loadStatement() })
 
 function statusTone(m: MonthlySummary): 'ok' | 'warn' | 'neutral' {
-  if (m.month === thisMonth) return 'neutral'
+  if (m.month === thisMonth.value) return 'neutral'
   return m.closed ? 'ok' : 'warn'
 }
 function statusLabel(m: MonthlySummary): string {
-  if (m.month === thisMonth) return '進行中'
+  if (m.month === thisMonth.value) return '進行中'
   return m.closed ? '締め済み' : '未締め'
 }
 
 // --- 選んだ月 ---
 
 const selectedMonth = ref<string | null>(null)
+let pickedByUser = false
+
+function pickMonth(month: string) {
+  pickedByUser = true
+  selectedMonth.value = month
+}
 
 watch(gotoPayload, (p) => {
   if (p?.month) {
-    selectedMonth.value = p.month
+    pickMonth(p.month)
     gotoPayload.value = null
   }
 }, { immediate: true })
@@ -114,7 +126,12 @@ function onDetailLoaded(d: MonthDetailInfo) {
 
 // --- 締め ---
 
-const isEnded = computed(() => !!selectedMonth.value && selectedMonth.value < thisMonth)
+const isEnded = computed(() => !!selectedMonth.value && selectedMonth.value < thisMonth.value)
+
+// 今月で、まだ実績の販売が 1 件も無い（月が変わった直後など）。見込みは月で切らないので、取引中の分を添える
+const isEmptyThisMonth = computed(() =>
+  selectedMonth.value === thisMonth.value && statementLoaded.value && statement.value?.sales_count === 0,
+)
 
 async function doClose() {
   if (!selectedMonth.value) return
@@ -154,7 +171,7 @@ async function doReopen() {
           type="button"
           class="month-card"
           :class="{ active: m.month === selectedMonth }"
-          @click="selectedMonth = m.month"
+          @click="pickMonth(m.month)"
         >
           <span class="month-card-label">{{ m.month }}{{ m.month === thisMonth ? '（今月）' : '' }}</span>
           <strong class="month-card-value" :class="m.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(m.net_profit) }}</strong>
@@ -165,6 +182,16 @@ async function doReopen() {
 
       <div v-if="selectedMonth" class="statement-layout">
         <div class="statement-main">
+          <div v-if="isEmptyThisMonth" class="panel empty-month-panel">
+            <p class="panel-title">今月はまだ実績の販売がありません</p>
+            <p class="faint empty-month-note">
+              <template v-if="profitStrip?.pending_count">
+                取引中の {{ profitStrip.pending_count }} 件（見込み粗利 {{ yen(profitStrip.pending_profit_estimate) }}）は、取引が完了した月に入ります。
+              </template>
+              <template v-else>取引が完了した販売が、完了した月に入ります。</template>
+            </p>
+          </div>
+
           <div v-if="statement?.forecast?.count || statement?.personal_forecast?.count" class="panel forecast-panel">
             <p class="panel-title">見込み（取引未完了）</p>
             <p class="faint forecast-note">実績＝取引完了分と、状態が取れていない手入力の販売。</p>
@@ -443,6 +470,11 @@ async function doReopen() {
 @media (max-width: 1099px) {
   .statement-layout { grid-template-columns: 1fr; }
 }
+
+/* --- 今月がまだ空 --- */
+.empty-month-panel { margin-bottom: 16px; }
+.empty-month-panel .panel-title { margin-bottom: 4px; }
+.empty-month-note { margin: 0; }
 
 /* --- 見込み（取引未完了） --- */
 .forecast-panel { margin-bottom: 16px; }

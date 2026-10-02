@@ -4281,6 +4281,20 @@ export function listMonthly(): MonthlySummary[] {
     })
   }
 
+  // 今月は販売が 0 件でも resale の行を必ず返す。無いと月次画面が前月のまま固まる
+  // （月の帯は listMonthly の行から作るので、今月を選べない）。私物の行は帯に出ないので補わない
+  const currentMonth = thisMonthLocal()
+  if (!result.some(r => r.month === currentMonth && r.kind === 'resale')) {
+    result.push({
+      month: currentMonth, kind: 'resale',
+      sales_count: 0, revenue: 0, total_fee: 0, total_shipping: 0, total_packaging: 0,
+      total_cost: 0, gross_profit: 0,
+      unconfirmed_shipping: 0, expense_total: 0, net_profit: 0,
+      closed: closedMonths.has(currentMonth),
+      forecast: { count: 0, revenue: 0, gross_profit: 0 },
+    })
+  }
+
   result.sort((a, b) => {
     if (a.month !== b.month) return a.month < b.month ? 1 : -1 // month DESC
     return a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0 // kind ASC（personal, resale の順）

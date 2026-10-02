@@ -11,7 +11,13 @@ defineProps<{ strip: ProfitStrip | null; compact?: boolean }>()
   <div class="profit-strip-bar">
     <span v-if="compact" class="profit-mini">
       今月の実績粗利 {{ yen(strip?.gross_profit ?? 0) }} ／ 純利益 {{ yen(strip?.net_profit ?? 0) }}
-      <span v-if="strip?.pending_count"> ／ 見込み粗利 {{ yen(strip.pending_profit_estimate) }}</span>
+      <!-- 見込みは今月に限らない（未完了の販売すべて）。区切って「今月の」が掛からないようにする。
+           0 件のときは出さない（実績側は常に出る） -->
+      <span
+        v-if="strip?.pending_count"
+        class="profit-mini-pending"
+        title="取引がまだ完了していない販売すべて（月では区切りません）。受取評価が済むと実績に入ります"
+      >取引中 {{ strip.pending_count }} 件 見込み {{ yen(strip.pending_profit_estimate) }}</span>
     </span>
 
     <div v-else class="profit-strip">
@@ -25,7 +31,7 @@ defineProps<{ strip: ProfitStrip | null; compact?: boolean }>()
       <div class="p">
         <span class="p-label">確定待ちの粗利（見込み）</span>
         <span class="p-value dim">{{ yen(strip?.pending_profit_estimate ?? 0) }}</span>
-        <span class="p-sub">取引未完了 {{ strip?.pending_count ?? 0 }} 件。受取評価完了後に実績へ（未入力の原価・送料は未反映）</span>
+        <span class="p-sub">取引中 {{ strip?.pending_count ?? 0 }} 件（月に関係なく全部）。受取評価完了後に実績へ（未入力の原価・送料は未反映）</span>
       </div>
       <div class="p">
         <span class="p-label">売上金の反映待ち</span>
@@ -43,6 +49,12 @@ defineProps<{ strip: ProfitStrip | null; compact?: boolean }>()
 
 <style scoped>
 /* compact（トップバーのピル）の見た目は style.css の .topbar .profit-mini にまとめてある */
+.profit-mini-pending {
+  margin-left: 8px;
+  padding-left: 8px;
+  font-weight: 600;
+  border-left: 1px solid var(--brand-ink);
+}
 
 .profit-strip {
   display: grid;

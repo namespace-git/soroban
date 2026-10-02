@@ -33,8 +33,9 @@ describe('取引完了だけ実績・未完了は見込み', () => {
     db.applySaleActuals(id, { status: 'shipped' })
     db.updateSale(id, { shipping_fee: 300 })
     db.createExpense({ occurred_at: '2026-05-01', category: 'packaging', amount: 50 })
-    expect(db.listMonthly()[0]).toMatchObject({ revenue: 0, net_profit: -50,
-      forecast: { count: 1, revenue: 100, gross_profit: -210 } })
+    expect(db.listMonthly().find(r => r.month === '2026-05' && r.kind === 'resale'))
+      .toMatchObject({ revenue: 0, net_profit: -50,
+        forecast: { count: 1, revenue: 100, gross_profit: -210 } })
     expect(getMonthStatement('2026-05')).toMatchObject({ revenue: 0, net_profit: -50,
       forecast: { count: 1, revenue: 100, gross_profit: -210 } })
   })
@@ -42,10 +43,13 @@ describe('取引完了だけ実績・未完了は見込み', () => {
   it('月をまたいで完了した取引は完了月の実績に一度だけ移る', () => {
     const [sale] = db.insertCollected([{ mercariItemId: 'recognition-month', title: '商品【A037】', price: 2000,
       soldAt: '2026-05-30', status: 'shipped' }])
-    expect(db.listMonthly()[0]).toMatchObject({ month: '2026-05', revenue: 0, forecast: { revenue: 2000 } })
+    expect(db.listMonthly().find(r => r.month === '2026-05' && r.kind === 'resale'))
+      .toMatchObject({ month: '2026-05', revenue: 0, forecast: { revenue: 2000 } })
     db.applySaleActuals(sale.id, { status: 'completed', completedAt: '2026-06-02', sold_at: '2026-06-02' })
-    expect(db.listMonthly()).toHaveLength(1)
-    expect(db.listMonthly()[0]).toMatchObject({ month: '2026-06', revenue: 2000, forecast: { count: 0, revenue: 0 } })
+    // 5月と6月の両方に残っていない＝一度だけ移ったこと（listMonthly は今月の0行も返すので月で絞る）
+    expect(db.listMonthly().filter(r => r.month === '2026-05' || r.month === '2026-06')).toHaveLength(1)
+    expect(db.listMonthly().find(r => r.month === '2026-06' && r.kind === 'resale'))
+      .toMatchObject({ month: '2026-06', revenue: 2000, forecast: { count: 0, revenue: 0 } })
     db.applySaleActuals(sale.id, { status: 'completed', completedAt: '2026-06-02', sold_at: '2026-06-02' })
     expect(db.saleTotals()).toMatchObject({ count: 1, revenue: 2000 })
   })
