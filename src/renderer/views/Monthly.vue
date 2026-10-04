@@ -1,16 +1,17 @@
 <script setup lang="ts">
 // 月次タブ：上に月の帯（月を選ぶ）、下に選んだ月の計算書・販売ごとの表・締め／タグ別の集計／仕入先への支払い。
 // 計算書とタグ別の集計は getMonthStatement、販売ごとの表・締め・片付けるもの・仕入先への支払いは
-// MonthDetail.vue（getMonthDetail）から。どちらも main が計算した値をそのまま出すだけで、ここでは再計算しない。
+// MonthDetail.vue（getMonthDetail）から。右の「お金の出入り」は getCashMonth（損益とは別の層）。
+// どれも main が計算した値をそのまま出すだけで、ここでは再計算しない。
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { MonthlySummary, MonthStatement, MonthDetail as MonthDetailInfo, ExpenseCategory, ExportKind, ProfitStrip } from '../../shared/types'
+import type { MonthlySummary, MonthStatement, MonthDetail as MonthDetailInfo, ExpenseCategory, ExportKind, ProfitStrip, CashMonth, LiabilityKind } from '../../shared/types'
 import { thisMonthLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import StatusChip from '../components/StatusChip.vue'
 import MonthDetail from './MonthDetail.vue'
-import { yen, percent, dateTime } from '../format'
+import { yen, percent, dateTime, shortDate } from '../format'
 
 const revision = inject<Ref<number>>('revision')!
 // ホーム等から goto('monthly', { month }) で開かれたときに読む
@@ -52,7 +53,7 @@ async function load() {
   if (!pickedByUser) selectedMonth.value = months.value[0]?.month ?? null
 }
 onMounted(load)
-watch(revision, () => { load(); loadStatement() })
+watch(revision, () => { load(); loadStatement(); loadCash() })
 
 function statusTone(m: MonthlySummary): 'ok' | 'warn' | 'neutral' {
   if (m.month === thisMonth.value) return 'neutral'
@@ -96,6 +97,35 @@ watch(selectedMonth, loadStatement, { immediate: true })
 const expenseSubLabel = computed(() =>
   (statement.value?.expenses ?? []).map(e => `${CATEGORY_LABEL[e.category]} ${yen(e.amount)}`).join(' ・ '),
 )
+
+// --- お金の出入り（損益とは別。口座に実際に入った・出ていったお金） ---
+
+const cash = ref<CashMonth | null>(null)
+const cashLoaded = ref(false)
+
+async function loadCash() {
+  const month = selectedMonth.value
+  if (!month) { cash.value = null; return }
+  cashLoaded.value = false
+  const c = await window.soroban.getCashMonth(month)
+  // 読み込み中に別の月へ移ったら、古い月の答えで上書きしない
+  if (selectedMonth.value !== month) return
+  cash.value = c
+  cashLoaded.value = true
+}
+watch(selectedMonth, loadCash, { immediate: true })
+
+// まだ何も入力していない月（入出金も払う予定も月初の残りも無い）。0 円を「使えるお金 ¥0」と見せない
+const cashIsEmpty = computed(() => {
+  const c = cash.value
+  return !!c && c.incoming.length === 0 && c.outgoing.length === 0 && c.upcoming.length === 0 && c.opening === 0
+})
+
+const UPCOMING_LABEL: Record<LiabilityKind, (counterparty: string) => string> = {
+  loan: (c) => `${c}への返済`,
+  tool_share: () => 'ツール分',
+  purchase: (c) => `仕入の支払い（${c}）`,
+}
 
 function onAllocChanged() {
   loadStatement()
@@ -329,6 +359,92 @@ async function doReopen() {
         </div>
 
         <aside class="statement-side">
+          <!-- お金の出入り：損益（左の計算書）とは別の数字。「今月いくら使えるか」を見る -->
+          <div class="panel cash-panel">
+            <div class="section-head">
+              <span class="section-head-icon"><Icon name="inbox" :size="16" /></span>
+              <h2 class="section-head-title">{{ selectedMonth }} のお金の出入り</h2>
+            </div>
+            <p class="faint cash-note">口座に実際に入った・出ていったお金です。左の粗利・純利益（儲けの計算）とは別の数字です。</p>
+
+            <Skeleton v-if="!cashLoaded" :rows="6" />
+            <EmptyState
+              v-else-if="cashIsEmpty"
+              title="この月のお金の出入りは、まだ入力されていません"
+              hint="入ったお金・出ていったお金が記録されると、ここに出ます"
+            />
+            <template v-else-if="cash">
+              <div class="cash-hero" :class="cash.free_cash < 0 ? 'minus' : cash.free_cash > 0 ? 'plus' : ''">
+                <span class="cash-hero-label">使えるお金</span>
+                <strong class="cash-hero-value num">{{ yen(cash.free_cash) }}</strong>
+                <span class="cash-hero-sub">
+                  月末に残るお金 {{ yen(cash.closing) }} − これから払う予定 {{ yen(cash.upcoming_total) }}
+                </span>
+                <span v-if="cash.free_cash < 0" class="cash-hero-warn">
+                  <Icon name="alert" :size="14" />
+                  これから払う予定に足りません
+                </span>
+              </div>
+
+              <div class="cash-block">
+                <div class="cash-block-title">入ってきたお金</div>
+                <div v-for="r in cash.incoming" :key="r.category" class="cash-row">
+                  <span class="cash-row-name">{{ r.label }}</span>
+                  <span class="num">{{ yen(r.amount) }}</span>
+                </div>
+                <div v-if="!cash.incoming.length" class="cash-row faint"><span class="cash-row-name">なし</span></div>
+                <div class="cash-row cash-total">
+                  <span class="cash-row-name">合計</span>
+                  <span class="num">{{ yen(cash.incoming_total) }}</span>
+                </div>
+              </div>
+
+              <div class="cash-block">
+                <div class="cash-block-title">出ていったお金</div>
+                <div v-for="r in cash.outgoing" :key="r.category" class="cash-row">
+                  <span class="cash-row-name">{{ r.label }}</span>
+                  <span class="num">{{ yen(r.amount) }}</span>
+                </div>
+                <div v-if="!cash.outgoing.length" class="cash-row faint"><span class="cash-row-name">なし</span></div>
+                <div class="cash-row cash-total">
+                  <span class="cash-row-name">合計</span>
+                  <span class="num">{{ yen(cash.outgoing_total) }}</span>
+                </div>
+              </div>
+
+              <div class="cash-block cash-flow">
+                <div class="cash-row">
+                  <span class="cash-row-name">月のはじめにあったお金</span>
+                  <span class="num">{{ yen(cash.opening) }}</span>
+                </div>
+                <div class="cash-row">
+                  <span class="cash-row-name">この月の差引（入った − 出た）</span>
+                  <span class="num" :class="{ loss: cash.net < 0 }">{{ yen(cash.net) }}</span>
+                </div>
+                <div class="cash-row cash-total">
+                  <span class="cash-row-name">月末に残るお金</span>
+                  <span class="num" :class="{ loss: cash.closing < 0 }">{{ yen(cash.closing) }}</span>
+                </div>
+              </div>
+
+              <div class="cash-block">
+                <div class="cash-block-title">これから払う予定</div>
+                <div v-for="u in cash.upcoming" :key="u.liability_id" class="cash-row">
+                  <span class="cash-row-name" :title="UPCOMING_LABEL[u.kind](u.counterparty)">
+                    {{ UPCOMING_LABEL[u.kind](u.counterparty) }}
+                    <span v-if="u.due_at" class="cash-due">期限 {{ shortDate(u.due_at) }}</span>
+                  </span>
+                  <span class="num">{{ yen(u.remaining) }}</span>
+                </div>
+                <div v-if="!cash.upcoming.length" class="cash-row faint"><span class="cash-row-name">なし</span></div>
+                <div class="cash-row cash-total">
+                  <span class="cash-row-name">合計</span>
+                  <span class="num">{{ yen(cash.upcoming_total) }}</span>
+                </div>
+              </div>
+            </template>
+          </div>
+
           <div class="panel close-card">
             <template v-if="monthDetail?.close">
               <StatusChip tone="ok" :label="'締め済み ' + dateTime(monthDetail.close.closed_at)" />
@@ -584,6 +700,52 @@ async function doReopen() {
   border-radius: var(--radius-sm);
   font-size: var(--fs-13);
 }
+
+/* --- 右：お金の出入り（損益とは別の層。「使えるお金」が主役） --- */
+.cash-panel .section-head { margin-bottom: 4px; }
+.cash-note { margin: 0 0 14px; font-size: var(--fs-12); }
+.cash-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  background: var(--line-soft);
+}
+.cash-hero.plus { background: var(--profit-bg); color: var(--profit); }
+.cash-hero.minus { background: var(--loss-bg); color: var(--loss); }
+.cash-hero-label { font-size: var(--fs-14); font-weight: 700; }
+.cash-hero-value {
+  font-size: var(--fs-36);
+  line-height: 1.2;
+  font-weight: 700;
+  text-align: left;
+}
+.cash-hero-sub { font-size: var(--fs-12); color: var(--text-dim); }
+.cash-hero-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: var(--fs-12);
+  font-weight: 600;
+}
+.cash-block { margin-top: 14px; }
+.cash-block-title { font-size: var(--fs-13); font-weight: 600; color: var(--text-dim); margin-bottom: 2px; }
+.cash-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  font-size: var(--fs-14);
+  border-bottom: 1px solid var(--line-soft);
+}
+.cash-row-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cash-due { display: block; font-size: var(--fs-12); color: var(--text-faint); }
+.cash-total { font-weight: 700; border-bottom: 2px solid var(--line); }
+.cash-flow { padding-top: 2px; }
 
 /* --- 右：仕入先への支払い --- */
 .table-panel { padding: 0; overflow: hidden; }

@@ -10,11 +10,13 @@ import { extractCode, extractCodeQuantities, extractCodes, extractItemCodes, ext
 import { thisMonthLocal, todayLocal } from '../shared/date'
 import { isRealized, forecastTotals, realizedTotals } from '../shared/recognition'
 import type {
-  AllocMethod, AutoLinkBlocker, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, ExportKind,
+  AllocMethod, AutoLinkBlocker, CashAccount, CashAccountInput, CashAccountKind, CashAccountPatch, CashCategory,
+  CashEntry, CashEntryInput, CashMonth, DashboardStats, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, ExportKind,
   FeeSource,
   Fulfillment,
   HealthCheck,
   InventoryItem, InventoryPatch, InventoryStatus, ItemTimeline, LinkSource, Listing, ListingStatus,
+  Liability, LiabilityInput, LiabilityKind, LiabilityPatch,
   Material, MonthClose, MonthDetail, MonthlySummary, MonthSaleRow, MonthTotals, ProductDetail,
   ProductMonthPoint, ProductSummary, PurchaseDetail,
   PurchaseDraftInput, PurchaseImportResult, PurchaseInput, PurchaseLine, PurchaseLineInput, PurchaseStatus,
@@ -6542,4 +6544,445 @@ export function resetData(): void {
   })
   tx()
   db.pragma('wal_checkpoint(TRUNCATE)')
+}
+
+// ============================================================
+// お金の出入り（資金繰り）
+//
+// 損益（sale_profit / monthly_summary / month_book）とは別の層。sale / sale_line /
+// inventory_item / expense / month_book は書き換えない（債務を作るときの basis_sale_id の
+// 存在確認で sale を引くだけ）。
+//
+//   * 残高は持たない。cash_account.opening_balance（opening_date の朝の残高）に
+//     cash_entry を積んで出す。opening_date より前の入出金は作れない（残高に数えないため）
+//   * 消込は liability_settlement（1回の振込で複数の債務を払える）。
+//     債務ごとの消込合計 ≤ 債務の額、入出金ごとの消込合計 ≤ 入出金の額
+//   * tool_share は根拠（basis_*）を作るときに固定する。タグから再計算しない
+//   * transfer（口座間の移動）は出す側と入れる側の2件を作る。両方で全体の残高は動かない
+// ============================================================
+
+const CASH_ACCOUNT_KINDS: CashAccountKind[] = ['bank', 'flea', 'cash', 'other']
+
+/** 画面に出す順。月の明細の小計もこの順で並べる */
+const CASH_CATEGORY_ORDER: CashCategory[] = [
+  'sale_payout', 'purchase_payment', 'loan_in', 'loan_repay', 'tool_share',
+  'allowance', 'expense', 'transfer', 'other',
+]
+
+const CASH_CATEGORY_LABEL: Record<CashCategory, string> = {
+  sale_payout: 'フリマの売上金',
+  purchase_payment: '仕入の支払い',
+  loan_in: '借りた',
+  loan_repay: '返した',
+  tool_share: 'ツール分',
+  allowance: 'お小遣い',
+  expense: '経費',
+  transfer: '口座間の移動',
+  other: 'その他',
+}
+
+/** 区分ごとの向き。null＝どちらでもよい */
+const CASH_CATEGORY_DIRECTION: Record<CashCategory, 'in' | 'out' | null> = {
+  sale_payout: 'in',
+  purchase_payment: 'out',
+  loan_in: 'in',
+  loan_repay: 'out',
+  tool_share: 'out',
+  allowance: 'out',
+  expense: 'out',
+  transfer: null,
+  other: null,
+}
+
+const LIABILITY_KINDS: LiabilityKind[] = ['loan', 'tool_share', 'purchase']
+
+function assertDateText(name: string, v: unknown): asserts v is string {
+  const m = typeof v === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(v) : null
+  const ok = m !== null && (() => {
+    const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+    const dt = new Date(Date.UTC(y, mo - 1, d))
+    return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d
+  })()
+  if (!ok) throw new Error(`${name}はYYYY-MM-DDの形式で入力してください`)
+}
+
+function assertMonthText(name: string, v: unknown): asserts v is string {
+  if (typeof v !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(v)) {
+    throw new Error(`${name}はYYYY-MMの形式で入力してください`)
+  }
+}
+
+/** 0 円は入出金にも債務にも意味がないので、assertYen（0 以上）に加えて 1 以上を求める */
+function assertPositiveYen(name: string, v: unknown): asserts v is number {
+  if (typeof v !== 'number') throw new Error(`${name}は整数で入力してください`)
+  assertYen(name, v)
+  if (v < 1) throw new Error(`${name}は1円以上で入力してください`)
+}
+
+function trimOrNull(v: string | null | undefined): string | null {
+  const t = (v ?? '').trim()
+  return t ? t : null
+}
+
+// ---- 口座 ----
+
+const CASH_ACCOUNT_SELECT = `
+  SELECT a.id, a.name, a.kind, a.opening_balance, a.opening_date, a.sort_order, a.is_active,
+         a.opening_balance + COALESCE((
+           SELECT SUM(CASE e.direction WHEN 'in' THEN e.amount ELSE -e.amount END)
+             FROM cash_entry e
+            WHERE e.account_id = a.id AND e.occurred_at >= a.opening_date
+         ), 0) AS balance
+    FROM cash_account a
+`
+
+export function listCashAccounts(): CashAccount[] {
+  return db.prepare(`${CASH_ACCOUNT_SELECT} ORDER BY a.sort_order, a.created_at, a.rowid`).all() as CashAccount[]
+}
+
+export function createCashAccount(input: CashAccountInput): string {
+  const name = (input.name ?? '').trim()
+  if (!name) throw new Error('口座の名前を入力してください')
+  if (!CASH_ACCOUNT_KINDS.includes(input.kind)) throw new Error(`不正な口座の種類です: ${input.kind}`)
+  assertYen('はじめの残高', input.opening_balance)
+  assertDateText('残高の日付', input.opening_date)
+
+  const id = randomUUID()
+  const next = db.prepare('SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM cash_account').get() as { n: number }
+  db.prepare(`
+    INSERT INTO cash_account (id, name, kind, opening_balance, opening_date, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(id, name, input.kind, input.opening_balance, input.opening_date, next.n)
+  return id
+}
+
+/**
+ * 残高の列は無い。直せるのは「どの日のいくらから積み始めるか」（opening_*）だけ。
+ * その日より前の入出金が残っているときは断る（残高に数えられなくなるため）
+ */
+export function updateCashAccount(id: string, patch: CashAccountPatch): void {
+  const cur = db.prepare('SELECT * FROM cash_account WHERE id = ?').get(id) as
+    { name: string; kind: CashAccountKind; opening_balance: number; opening_date: string; sort_order: number; is_active: number } | undefined
+  if (!cur) throw new Error('口座が見つかりません')
+
+  const name = patch.name !== undefined ? patch.name.trim() : cur.name
+  if (!name) throw new Error('口座の名前を入力してください')
+  const kind = patch.kind ?? cur.kind
+  if (!CASH_ACCOUNT_KINDS.includes(kind)) throw new Error(`不正な口座の種類です: ${kind}`)
+  const openingBalance = patch.opening_balance ?? cur.opening_balance
+  assertYen('はじめの残高', openingBalance)
+  const openingDate = patch.opening_date ?? cur.opening_date
+  assertDateText('残高の日付', openingDate)
+  const sortOrder = patch.sort_order ?? cur.sort_order
+  if (!Number.isSafeInteger(sortOrder)) throw new Error('並び順は整数で入力してください')
+  const isActive = patch.is_active === undefined ? cur.is_active : (patch.is_active ? 1 : 0)
+
+  const earlier = db.prepare(
+    'SELECT COUNT(*) AS c FROM cash_entry WHERE account_id = ? AND occurred_at < ?',
+  ).get(id, openingDate) as { c: number }
+  if (earlier.c > 0) {
+    throw new Error(`${openingDate} より前の入出金が ${earlier.c} 件あります。先にそれらを消すか、日付を前にしてください`)
+  }
+
+  db.prepare(`
+    UPDATE cash_account
+       SET name = ?, kind = ?, opening_balance = ?, opening_date = ?, sort_order = ?, is_active = ?
+     WHERE id = ?
+  `).run(name, kind, openingBalance, openingDate, sortOrder, isActive, id)
+}
+
+// ---- 債務 ----
+
+const LIABILITY_SELECT = `
+  SELECT l.id, l.kind, l.counterparty, l.occurred_at, l.due_at, l.amount,
+         COALESCE((SELECT SUM(s.amount) FROM liability_settlement s WHERE s.liability_id = l.id), 0) AS settled,
+         l.note, l.basis_sale_id, l.basis_amount, l.basis_rate_bp, l.month, l.created_at
+    FROM liability l
+`
+
+function mapLiability(r: Omit<Liability, 'remaining'>): Liability {
+  return { ...r, remaining: r.amount - r.settled }
+}
+
+export function listLiabilities(opts?: { kind?: LiabilityKind; onlyOpen?: boolean }): Liability[] {
+  const rows = (opts?.kind
+    ? db.prepare(`${LIABILITY_SELECT} WHERE l.kind = ? ORDER BY l.due_at IS NULL, l.due_at, l.occurred_at, l.rowid`).all(opts.kind)
+    : db.prepare(`${LIABILITY_SELECT} ORDER BY l.due_at IS NULL, l.due_at, l.occurred_at, l.rowid`).all()
+  ) as Array<Omit<Liability, 'remaining'>>
+  const all = rows.map(mapLiability)
+  return opts?.onlyOpen ? all.filter(l => l.remaining > 0) : all
+}
+
+function getLiabilityOrThrow(id: string): Liability {
+  const row = db.prepare(`${LIABILITY_SELECT} WHERE l.id = ?`).get(id) as Omit<Liability, 'remaining'> | undefined
+  if (!row) throw new Error('債務が見つかりません')
+  return mapLiability(row)
+}
+
+/** ツール分の額。根拠（粗利 × 割合）から floor で決める。円未満は払わない側に寄せて整数にする */
+function toolShareAmount(basisAmount: number, rateBp: number): number {
+  return Math.floor(basisAmount * rateBp / 10000)
+}
+
+export function createLiability(input: LiabilityInput): string {
+  if (!LIABILITY_KINDS.includes(input.kind)) throw new Error(`不正な債務の種類です: ${input.kind}`)
+  const counterparty = (input.counterparty ?? '').trim()
+  if (!counterparty) throw new Error('相手を入力してください')
+  assertDateText('発生日', input.occurred_at)
+  const dueAt = input.due_at ?? null
+  if (dueAt !== null) assertDateText('支払期限', dueAt)
+
+  let amount: number
+  let basisSaleId: string | null = null
+  let basisAmount: number | null = null
+  let basisRateBp: number | null = null
+  let month: string | null = null
+
+  if (input.kind === 'tool_share') {
+    if (!input.basis_sale_id) throw new Error('ツール分は、もとにした販売が必要です')
+    if (typeof input.basis_amount !== 'number' || !Number.isSafeInteger(input.basis_amount)) {
+      throw new Error('もとにした粗利は整数で入力してください')
+    }
+    if (typeof input.basis_rate_bp !== 'number' || !Number.isSafeInteger(input.basis_rate_bp)
+      || input.basis_rate_bp < 1 || input.basis_rate_bp > 10000) {
+      throw new Error('割合は 0.01〜100%（1〜10000）の範囲で入力してください')
+    }
+    const sale = db.prepare('SELECT id FROM sale WHERE id = ?').get(input.basis_sale_id)
+    if (!sale) throw new Error('もとにした販売が見つかりません')
+    amount = toolShareAmount(input.basis_amount, input.basis_rate_bp)
+    if (amount < 1) throw new Error('ツール分が0円になります（粗利がプラスの販売だけ対象です）')
+    if (input.amount !== undefined && input.amount !== null && input.amount !== amount) {
+      throw new Error(`ツール分は根拠から ${yenText(amount)} に決まります（渡された額: ${yenText(input.amount)}）`)
+    }
+    basisSaleId = input.basis_sale_id
+    basisAmount = input.basis_amount
+    basisRateBp = input.basis_rate_bp
+  } else {
+    if (input.basis_sale_id || input.basis_amount != null || input.basis_rate_bp != null) {
+      throw new Error('根拠（販売・粗利・割合）はツール分だけに付けられます')
+    }
+    assertPositiveYen('金額', input.amount)
+    amount = input.amount
+    if (input.kind === 'purchase') {
+      month = input.month ?? input.occurred_at.slice(0, 7)
+      assertMonthText('どの月ぶんか', month)
+    }
+  }
+
+  const id = randomUUID()
+  db.prepare(`
+    INSERT INTO liability (id, kind, counterparty, occurred_at, due_at, amount, note,
+                           basis_sale_id, basis_amount, basis_rate_bp, month)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, input.kind, counterparty, input.occurred_at, dueAt, amount, trimOrNull(input.note),
+    basisSaleId, basisAmount, basisRateBp, month)
+  return id
+}
+
+export function updateLiability(id: string, patch: LiabilityPatch): void {
+  const cur = getLiabilityOrThrow(id)
+
+  const counterparty = patch.counterparty !== undefined ? patch.counterparty.trim() : cur.counterparty
+  if (!counterparty) throw new Error('相手を入力してください')
+  const occurredAt = patch.occurred_at ?? cur.occurred_at
+  assertDateText('発生日', occurredAt)
+  const dueAt = patch.due_at === undefined ? cur.due_at : patch.due_at
+  if (dueAt !== null) assertDateText('支払期限', dueAt)
+  const note = patch.note === undefined ? cur.note : trimOrNull(patch.note)
+
+  let amount = cur.amount
+  if (patch.amount !== undefined && patch.amount !== cur.amount) {
+    if (cur.kind === 'tool_share') throw new Error('ツール分の額は根拠から決まるので変えられません')
+    assertPositiveYen('金額', patch.amount)
+    if (patch.amount < cur.settled) {
+      throw new Error(`すでに ${yenText(cur.settled)} 消し込み済みなので、それより小さくできません`)
+    }
+    amount = patch.amount
+  }
+
+  let month = cur.month
+  if (patch.month !== undefined) {
+    if (cur.kind !== 'purchase') {
+      if (patch.month !== null) throw new Error('月を持てるのは仕入だけです')
+    } else {
+      month = patch.month ?? occurredAt.slice(0, 7)
+      assertMonthText('どの月ぶんか', month)
+    }
+  }
+
+  db.prepare(`
+    UPDATE liability
+       SET counterparty = ?, occurred_at = ?, due_at = ?, amount = ?, note = ?, month = ?
+     WHERE id = ?
+  `).run(counterparty, occurredAt, dueAt, amount, note, month, id)
+}
+
+/** 消し込みのある債務は消さない（払った記録の行き先が無くなる）。先にその入出金を消す */
+export function deleteLiability(id: string): void {
+  const cur = getLiabilityOrThrow(id)
+  const used = db.prepare('SELECT COUNT(*) AS c FROM liability_settlement WHERE liability_id = ?').get(id) as { c: number }
+  if (used.c > 0) {
+    throw new Error(`すでに ${yenText(cur.settled)} 消し込み済みなので消せません。先にその入出金を消してください`)
+  }
+  db.prepare('DELETE FROM liability WHERE id = ?').run(id)
+}
+
+// ---- 入出金 ----
+
+export function listCashEntries(month?: string): CashEntry[] {
+  if (month !== undefined) assertMonthText('月', month)
+  const rows = db.prepare(`
+    SELECT e.id, e.account_id, a.name AS account_name, e.occurred_at, e.direction, e.amount,
+           e.category, e.note, e.sale_id, e.created_at
+      FROM cash_entry e
+      JOIN cash_account a ON a.id = e.account_id
+     ${month ? 'WHERE e.occurred_at >= ? AND e.occurred_at <= ?' : ''}
+     ORDER BY e.occurred_at DESC, e.created_at DESC, e.rowid DESC
+  `).all(...(month ? [`${month}-01`, `${month}-31`] : [])) as Array<Omit<CashEntry, 'settles'>>
+
+  const settleRows = db.prepare(`
+    SELECT s.entry_id, s.liability_id, s.amount FROM liability_settlement s ORDER BY s.rowid
+  `).all() as Array<{ entry_id: string; liability_id: string; amount: number }>
+  const byEntry = new Map<string, Array<{ liability_id: string; amount: number }>>()
+  for (const s of settleRows) {
+    const list = byEntry.get(s.entry_id) ?? []
+    list.push({ liability_id: s.liability_id, amount: s.amount })
+    byEntry.set(s.entry_id, list)
+  }
+  return rows.map(r => ({ ...r, settles: byEntry.get(r.id) ?? [] }))
+}
+
+export function createCashEntry(input: CashEntryInput): string {
+  const account = db.prepare('SELECT id, opening_date FROM cash_account WHERE id = ?')
+    .get(input.account_id) as { id: string; opening_date: string } | undefined
+  if (!account) throw new Error('口座が見つかりません')
+  assertDateText('日付', input.occurred_at)
+  if (input.occurred_at < account.opening_date) {
+    throw new Error(`この口座は ${account.opening_date} から数えています。それより前の日付は入れられません`)
+  }
+  if (input.direction !== 'in' && input.direction !== 'out') throw new Error('入金か出金かを選んでください')
+  assertPositiveYen('金額', input.amount)
+  if (!CASH_CATEGORY_ORDER.includes(input.category)) throw new Error(`不正な区分です: ${input.category}`)
+  const fixedDirection = CASH_CATEGORY_DIRECTION[input.category]
+  if (fixedDirection && fixedDirection !== input.direction) {
+    throw new Error(`「${CASH_CATEGORY_LABEL[input.category]}」は${fixedDirection === 'in' ? '入金' : '出金'}の区分です`)
+  }
+
+  const settles = input.settles ?? []
+  const seen = new Set<string>()
+  let settleTotal = 0
+  for (const s of settles) {
+    assertPositiveYen('消し込む額', s.amount)
+    if (seen.has(s.liability_id)) throw new Error('同じ債務を2回消し込めません。1行にまとめてください')
+    seen.add(s.liability_id)
+    settleTotal += s.amount
+  }
+  if (settles.length > 0 && input.direction !== 'out') {
+    throw new Error('債務を消し込めるのは出金だけです')
+  }
+  if (settleTotal > input.amount) {
+    throw new Error(`消し込みの合計（${yenText(settleTotal)}）が入出金の額（${yenText(input.amount)}）を超えています`)
+  }
+
+  const id = randomUUID()
+  const tx = db.transaction(() => {
+    for (const s of settles) {
+      const l = getLiabilityOrThrow(s.liability_id)
+      if (s.amount > l.remaining) {
+        throw new Error(`${l.counterparty}の債務は残り ${yenText(l.remaining)} です。${yenText(s.amount)} は消し込めません`)
+      }
+    }
+    db.prepare(`
+      INSERT INTO cash_entry (id, account_id, occurred_at, direction, amount, category, note)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, input.account_id, input.occurred_at, input.direction, input.amount, input.category, trimOrNull(input.note))
+    const ins = db.prepare(
+      'INSERT INTO liability_settlement (id, entry_id, liability_id, amount) VALUES (?, ?, ?, ?)',
+    )
+    for (const s of settles) ins.run(randomUUID(), id, s.liability_id, s.amount)
+  })
+  tx()
+  return id
+}
+
+/** 消し込みも一緒に外れる（債務は残りが元に戻る） */
+export function deleteCashEntry(id: string): void {
+  const exists = db.prepare('SELECT id FROM cash_entry WHERE id = ?').get(id)
+  if (!exists) throw new Error('入出金が見つかりません')
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM liability_settlement WHERE entry_id = ?').run(id)
+    db.prepare('DELETE FROM cash_entry WHERE id = ?').run(id)
+  })
+  tx()
+}
+
+// ---- 月の明細 ----
+
+/**
+ * 月の入出金明細。opening + 入金 − 出金 = closing が必ず成り立つ（closing は積んで出す）。
+ *
+ *   * opening … 月初に持っていた額。月の途中（〜末日）から数え始める口座は、その起点の残高を
+ *     月初に持っていたことにする（そうしないと opening + net = closing が崩れる）
+ *   * upcoming … 月末時点でまだ残っている債務（期限が来ていないものも含む）。
+ *     発生日が月末より後のもの・月末より後の入出金で消し込んだ分は数えない（過去の月が後から動かない）
+ *   * free_cash … closing − upcoming_total。払うべきものを払った後に残る額
+ */
+export function getCashMonth(month: string): CashMonth {
+  assertMonthText('月', month)
+  const start = `${month}-01`
+  const end = `${month}-31`
+
+  const openingRow = db.prepare(`
+    SELECT COALESCE(SUM(
+             a.opening_balance + COALESCE((
+               SELECT SUM(CASE e.direction WHEN 'in' THEN e.amount ELSE -e.amount END)
+                 FROM cash_entry e
+                WHERE e.account_id = a.id AND e.occurred_at >= a.opening_date AND e.occurred_at < ?
+             ), 0)
+           ), 0) AS opening
+      FROM cash_account a
+     WHERE a.opening_date <= ?
+  `).get(start, end) as { opening: number }
+
+  const sums = db.prepare(`
+    SELECT e.direction, e.category, SUM(e.amount) AS amount
+      FROM cash_entry e
+      JOIN cash_account a ON a.id = e.account_id
+     WHERE e.occurred_at >= ? AND e.occurred_at <= ? AND e.occurred_at >= a.opening_date
+     GROUP BY e.direction, e.category
+  `).all(start, end) as Array<{ direction: 'in' | 'out'; category: CashCategory; amount: number }>
+
+  const pick = (direction: 'in' | 'out') => CASH_CATEGORY_ORDER
+    .map(category => ({
+      category,
+      label: CASH_CATEGORY_LABEL[category],
+      amount: sums.find(s => s.direction === direction && s.category === category)?.amount ?? 0,
+    }))
+    .filter(r => r.amount > 0)
+
+  const incoming = pick('in')
+  const outgoing = pick('out')
+  const incomingTotal = incoming.reduce((s, r) => s + r.amount, 0)
+  const outgoingTotal = outgoing.reduce((s, r) => s + r.amount, 0)
+  const net = incomingTotal - outgoingTotal
+  const opening = openingRow.opening
+  const closing = opening + net
+
+  const upcoming = (db.prepare(`
+    SELECT l.id AS liability_id, l.kind, l.counterparty, l.due_at,
+           l.amount - COALESCE((
+             SELECT SUM(s.amount)
+               FROM liability_settlement s JOIN cash_entry e ON e.id = s.entry_id
+              WHERE s.liability_id = l.id AND e.occurred_at <= ?
+           ), 0) AS remaining
+      FROM liability l
+     WHERE l.occurred_at <= ?
+     ORDER BY l.due_at IS NULL, l.due_at, l.occurred_at, l.rowid
+  `).all(end, end) as CashMonth['upcoming']).filter(u => u.remaining > 0)
+  const upcomingTotal = upcoming.reduce((s, u) => s + u.remaining, 0)
+
+  return {
+    month, opening, incoming, incoming_total: incomingTotal, outgoing, outgoing_total: outgoingTotal,
+    net, closing, upcoming, upcoming_total: upcomingTotal, free_cash: closing - upcomingTotal,
+  }
 }

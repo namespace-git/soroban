@@ -27,6 +27,18 @@ const api: SorobanApi = {
   updateSale: invoke('updateSale'),
   deleteSale: invoke('deleteSale'),
 
+  listCashAccounts: invoke('listCashAccounts'),
+  createCashAccount: invoke('createCashAccount'),
+  updateCashAccount: invoke('updateCashAccount'),
+  listLiabilities: invoke('listLiabilities'),
+  createLiability: invoke('createLiability'),
+  updateLiability: invoke('updateLiability'),
+  deleteLiability: invoke('deleteLiability'),
+  listCashEntries: invoke('listCashEntries'),
+  createCashEntry: invoke('createCashEntry'),
+  deleteCashEntry: invoke('deleteCashEntry'),
+  getCashMonth: invoke('getCashMonth'),
+
   linkInventory: invoke('linkInventory'),
   autoLinkPending: invoke('autoLinkPending'),
   unlinkInventory: invoke('unlinkInventory'),

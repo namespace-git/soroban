@@ -207,6 +207,7 @@ const UNLOGGED_HANDLERS = new Set<keyof SorobanApi>([
   'suggestProductInventory', 'getAutoLinkBlockers',
   'listPurchases', 'listMonthly', 'listExpenses', 'searchAll', 'getSettings',
   'getMonthDetail', 'listProducts', 'listTags', 'listShopAccounts', 'listShippingMethods',
+  'listCashAccounts', 'listLiabilities', 'listCashEntries', 'getCashMonth',
   // 引数に API キーが載るので記録しない（summarize はキー名でしか伏せられない）
   'setGeminiApiKey', 'setTrack17ApiKey',
 ])
@@ -281,6 +282,18 @@ function registerIpc(): void {
   handle('createSale', (input) => db.createSale(input))
   handle('updateSale', (id, patch) => db.updateSale(id, patch))
   handle('deleteSale', (id) => db.deleteSale(id))
+
+  handle('listCashAccounts', () => db.listCashAccounts())
+  handle('createCashAccount', (input) => db.createCashAccount(input))
+  handle('updateCashAccount', (id, patch) => db.updateCashAccount(id, patch))
+  handle('listLiabilities', (opts) => db.listLiabilities(opts))
+  handle('createLiability', (input) => db.createLiability(input))
+  handle('updateLiability', (id, patch) => db.updateLiability(id, patch))
+  handle('deleteLiability', (id) => db.deleteLiability(id))
+  handle('listCashEntries', (month) => db.listCashEntries(month))
+  handle('createCashEntry', (input) => db.createCashEntry(input))
+  handle('deleteCashEntry', (id) => db.deleteCashEntry(id))
+  handle('getCashMonth', (month) => db.getCashMonth(month))
 
   handle('linkInventory', (saleId, ids, opts) => db.linkInventory(saleId, ids, 'manual', opts))
   handle('autoLinkPending', (saleIds) => db.autoLinkPending(saleIds))

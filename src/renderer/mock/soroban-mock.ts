@@ -29,6 +29,8 @@ import type {
   ProductKarte, MonthStatement, PurchaseAccountCard,
   AutoBackupStatus, ExportKind,
   HealthCheck,
+  CashAccount, CashAccountInput, CashAccountPatch, Liability, LiabilityKind, LiabilityInput, LiabilityPatch,
+  CashEntry, CashEntryInput, CashCategory, CashMonth,
 } from '../../shared/types'
 import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
@@ -2630,6 +2632,156 @@ function buildExportCsv(kind: ExportKind, month?: string): string | null {
   }
 }
 
+// ------------------------------------------------------------
+// お金の出入り（資金繰り）。損益とは別の層。main の getCashMonth と同じ考え方で、
+// 口座の起点の残高から入出金を積み、月末に残っている債務を「これから払う予定」にする
+// ------------------------------------------------------------
+
+const CASH_CATEGORY_ORDER_MOCK: CashCategory[] = [
+  'sale_payout', 'purchase_payment', 'loan_in', 'loan_repay', 'tool_share',
+  'allowance', 'expense', 'transfer', 'other',
+]
+const CASH_CATEGORY_LABEL_MOCK: Record<CashCategory, string> = {
+  sale_payout: 'フリマの売上金',
+  purchase_payment: '仕入の支払い',
+  loan_in: '借りた',
+  loan_repay: '返した',
+  tool_share: 'ツール分',
+  allowance: 'お小遣い',
+  expense: '経費',
+  transfer: '口座間の移動',
+  other: 'その他',
+}
+
+let cashAccounts: Array<Omit<CashAccount, 'balance'>> = []
+let liabilityRows: Array<Omit<Liability, 'settled' | 'remaining'>> = []
+let cashEntryRows: Array<Omit<CashEntry, 'account_name' | 'settles'>> = []
+let liabilitySettles: Array<{ entry_id: string; liability_id: string; amount: number }> = []
+
+function cashEntrySigned(e: { direction: 'in' | 'out'; amount: number }): number {
+  return e.direction === 'in' ? e.amount : -e.amount
+}
+
+function liabilityWithRemaining(l: Omit<Liability, 'settled' | 'remaining'>, asOf?: string): Liability {
+  const settled = liabilitySettles
+    .filter(s => s.liability_id === l.id)
+    .filter(s => !asOf || (cashEntryRows.find(e => e.id === s.entry_id)?.occurred_at ?? '') <= asOf)
+    .reduce((sum, s) => sum + s.amount, 0)
+  return { ...l, settled, remaining: l.amount - settled }
+}
+
+function buildInitialCash(): void {
+  const thisM = thisMonthLocal()
+  const m1 = monthAgoStr(1)
+  const m2 = monthAgoStr(2)
+  const accountId = uid()
+  // 口座は 1 つ、0 円スタート（2 か月前の月初から数える）。3 か月前は何も無い月の見本
+  cashAccounts = [{
+    id: accountId, name: 'ゆうちょ銀行', kind: 'bank', opening_balance: 0, opening_date: `${m2}-01`,
+    sort_order: 0, is_active: 1,
+  }]
+  liabilityRows = []
+  cashEntryRows = []
+  liabilitySettles = []
+
+  const addLiability = (l: {
+    kind: LiabilityKind; counterparty: string; occurred_at: string; due_at: string | null; amount: number
+    note?: string | null; month?: string | null; basis_amount?: number | null; basis_rate_bp?: number | null
+  }): string => {
+    const id = uid()
+    liabilityRows.push({
+      id, kind: l.kind, counterparty: l.counterparty, occurred_at: l.occurred_at, due_at: l.due_at,
+      amount: l.amount, note: l.note ?? null,
+      basis_sale_id: null, basis_amount: l.basis_amount ?? null, basis_rate_bp: l.basis_rate_bp ?? null,
+      month: l.month ?? null, created_at: `${l.occurred_at}T09:00`,
+    })
+    return id
+  }
+  const addEntry = (e: {
+    occurred_at: string; direction: 'in' | 'out'; amount: number; category: CashCategory
+    settles?: Array<{ liability_id: string; amount: number }>
+  }): void => {
+    const id = uid()
+    cashEntryRows.push({
+      id, account_id: accountId, occurred_at: e.occurred_at, direction: e.direction, amount: e.amount,
+      category: e.category, note: null, sale_id: null, created_at: `${e.occurred_at}T12:00`,
+    })
+    for (const x of e.settles ?? []) liabilitySettles.push({ entry_id: id, ...x })
+  }
+
+  // 夫からの借入（立替）。返済が残っている
+  const loan = addLiability({ kind: 'loan', counterparty: '夫', occurred_at: `${m2}-03`, due_at: null, amount: 80000, note: '仕入の立替' })
+  // 仕入の未払い（末締め・翌月中旬払い）。額は大きい
+  const purchaseM2 = addLiability({ kind: 'purchase', counterparty: 'メロジョイ', occurred_at: `${m2}-28`, due_at: `${m1}-15`, amount: 70000, month: m2 })
+  addLiability({ kind: 'purchase', counterparty: 'メロジョイ', occurred_at: `${m1}-28`, due_at: `${thisM}-15`, amount: 161505, month: m1 })
+  // ツール分（粗利の 3 割）
+  const tool1 = addLiability({ kind: 'tool_share', counterparty: '夫', occurred_at: `${m1}-20`, due_at: null, amount: 3540, basis_amount: 11800, basis_rate_bp: 3000 })
+  addLiability({ kind: 'tool_share', counterparty: '夫', occurred_at: `${m1}-28`, due_at: null, amount: 2130, basis_amount: 7100, basis_rate_bp: 3000 })
+  const tool3 = addLiability({ kind: 'tool_share', counterparty: '夫', occurred_at: `${thisM}-01`, due_at: null, amount: 1421, basis_amount: 4737, basis_rate_bp: 3000 })
+
+  // 2 か月前：借りて、売上金が入り、直接払いの仕入とお小遣い
+  addEntry({ occurred_at: `${m2}-03`, direction: 'in', amount: 80000, category: 'loan_in' })
+  addEntry({ occurred_at: `${m2}-12`, direction: 'in', amount: 18400, category: 'sale_payout' })
+  addEntry({ occurred_at: `${m2}-21`, direction: 'in', amount: 9800, category: 'sale_payout' })
+  addEntry({ occurred_at: `${m2}-28`, direction: 'in', amount: 14200, category: 'sale_payout' })
+  addEntry({ occurred_at: `${m2}-15`, direction: 'out', amount: 60000, category: 'purchase_payment' })
+  addEntry({ occurred_at: `${m2}-29`, direction: 'out', amount: 10000, category: 'allowance' })
+  // 先月：売上金が数件、仕入の支払い・返済・ツール分・お小遣い
+  addEntry({ occurred_at: `${m1}-05`, direction: 'in', amount: 24300, category: 'sale_payout' })
+  addEntry({ occurred_at: `${m1}-14`, direction: 'in', amount: 31500, category: 'sale_payout' })
+  addEntry({ occurred_at: `${m1}-23`, direction: 'in', amount: 12900, category: 'sale_payout' })
+  addEntry({ occurred_at: `${m1}-15`, direction: 'out', amount: 70000, category: 'purchase_payment', settles: [{ liability_id: purchaseM2, amount: 70000 }] })
+  addEntry({ occurred_at: `${m1}-16`, direction: 'out', amount: 20000, category: 'loan_repay', settles: [{ liability_id: loan, amount: 20000 }] })
+  addEntry({ occurred_at: `${m1}-25`, direction: 'out', amount: 3540, category: 'tool_share', settles: [{ liability_id: tool1, amount: 3540 }] })
+  addEntry({ occurred_at: `${m1}-28`, direction: 'out', amount: 10000, category: 'allowance' })
+  // 今月（まだ数日）：売上金が入り、返済・ツール分・お小遣い。仕入の支払いは 15 日期限でこれから
+  addEntry({ occurred_at: `${thisM}-02`, direction: 'in', amount: 21400, category: 'sale_payout' })
+  addEntry({ occurred_at: `${thisM}-04`, direction: 'in', amount: 23220, category: 'sale_payout' })
+  addEntry({ occurred_at: `${thisM}-03`, direction: 'out', amount: 20000, category: 'loan_repay', settles: [{ liability_id: loan, amount: 20000 }] })
+  addEntry({ occurred_at: `${thisM}-03`, direction: 'out', amount: 1421, category: 'tool_share', settles: [{ liability_id: tool3, amount: 1421 }] })
+  addEntry({ occurred_at: `${thisM}-04`, direction: 'out', amount: 5000, category: 'allowance' })
+}
+
+function buildCashMonth(month: string): CashMonth {
+  const start = `${month}-01`
+  const end = `${month}-31`
+  let opening = 0
+  for (const a of cashAccounts) {
+    if (a.opening_date > end) continue
+    opening += a.opening_balance + cashEntryRows
+      .filter(e => e.account_id === a.id && e.occurred_at >= a.opening_date && e.occurred_at < start)
+      .reduce((sum, e) => sum + cashEntrySigned(e), 0)
+  }
+  const inMonth = cashEntryRows.filter(e => {
+    const a = cashAccounts.find(x => x.id === e.account_id)
+    return e.occurred_at >= start && e.occurred_at <= end && !!a && e.occurred_at >= a.opening_date
+  })
+  const pick = (direction: 'in' | 'out') => CASH_CATEGORY_ORDER_MOCK
+    .map(category => ({
+      category,
+      label: CASH_CATEGORY_LABEL_MOCK[category],
+      amount: inMonth.filter(e => e.direction === direction && e.category === category).reduce((sum, e) => sum + e.amount, 0),
+    }))
+    .filter(r => r.amount > 0)
+  const incoming = pick('in')
+  const outgoing = pick('out')
+  const incomingTotal = incoming.reduce((sum, r) => sum + r.amount, 0)
+  const outgoingTotal = outgoing.reduce((sum, r) => sum + r.amount, 0)
+  const net = incomingTotal - outgoingTotal
+  const closing = opening + net
+  const upcoming = liabilityRows
+    .filter(l => l.occurred_at <= end)
+    .map(l => liabilityWithRemaining(l, end))
+    .filter(l => l.remaining > 0)
+    .sort((a, b) => (a.due_at === null ? 1 : 0) - (b.due_at === null ? 1 : 0) || (a.due_at ?? '').localeCompare(b.due_at ?? '') || a.occurred_at.localeCompare(b.occurred_at))
+    .map(l => ({ liability_id: l.id, kind: l.kind, counterparty: l.counterparty, due_at: l.due_at, remaining: l.remaining }))
+  const upcomingTotal = upcoming.reduce((sum, u) => sum + u.remaining, 0)
+  return {
+    month, opening, incoming, incoming_total: incomingTotal, outgoing, outgoing_total: outgoingTotal,
+    net, closing, upcoming, upcoming_total: upcomingTotal, free_cash: closing - upcomingTotal,
+  }
+}
+
 const api: SorobanApi = {
   async getDashboard(): Promise<DashboardStats> {
     const needsShipment = sales.filter(s => s.status === 'waiting_shipment').length
@@ -2834,6 +2986,96 @@ const api: SorobanApi = {
         shipping_method_id: lastLinkedSale?.shipping_method_id ?? null,
       },
     })
+  },
+
+  async listCashAccounts(): Promise<CashAccount[]> {
+    return wait(cashAccounts.map(a => ({
+      ...a,
+      balance: a.opening_balance + cashEntryRows
+        .filter(e => e.account_id === a.id && e.occurred_at >= a.opening_date)
+        .reduce((sum, e) => sum + cashEntrySigned(e), 0),
+    })))
+  },
+
+  async createCashAccount(input: CashAccountInput): Promise<string> {
+    const id = uid()
+    cashAccounts.push({ id, ...input, sort_order: cashAccounts.length, is_active: 1 })
+    return wait(id)
+  },
+
+  async updateCashAccount(id: string, patch: CashAccountPatch): Promise<void> {
+    const a = cashAccounts.find(x => x.id === id)
+    if (!a) throw new Error('口座が見つかりません')
+    Object.assign(a, patch)
+    return wait(undefined)
+  },
+
+  async listLiabilities(opts?: { kind?: LiabilityKind; onlyOpen?: boolean }): Promise<Liability[]> {
+    return wait(liabilityRows
+      .filter(l => !opts?.kind || l.kind === opts.kind)
+      .map(l => liabilityWithRemaining(l))
+      .filter(l => !opts?.onlyOpen || l.remaining > 0))
+  },
+
+  async createLiability(input: LiabilityInput): Promise<string> {
+    const id = uid()
+    const amount = input.kind === 'tool_share'
+      ? Math.floor((input.basis_amount ?? 0) * (input.basis_rate_bp ?? 0) / 10000)
+      : (input.amount ?? 0)
+    liabilityRows.push({
+      id, kind: input.kind, counterparty: input.counterparty, occurred_at: input.occurred_at,
+      due_at: input.due_at ?? null, amount, note: input.note ?? null,
+      basis_sale_id: input.basis_sale_id ?? null, basis_amount: input.basis_amount ?? null,
+      basis_rate_bp: input.basis_rate_bp ?? null,
+      month: input.kind === 'purchase' ? (input.month ?? input.occurred_at.slice(0, 7)) : null,
+      created_at: input.occurred_at + 'T09:00',
+    })
+    return wait(id)
+  },
+
+  async updateLiability(id: string, patch: LiabilityPatch): Promise<void> {
+    const l = liabilityRows.find(x => x.id === id)
+    if (!l) throw new Error('債務が見つかりません')
+    Object.assign(l, patch)
+    return wait(undefined)
+  },
+
+  async deleteLiability(id: string): Promise<void> {
+    if (liabilitySettles.some(s => s.liability_id === id)) throw new Error('消し込みがあるので消せません。先に入出金を消してください')
+    liabilityRows = liabilityRows.filter(l => l.id !== id)
+    return wait(undefined)
+  },
+
+  async listCashEntries(month?: string): Promise<CashEntry[]> {
+    return wait(cashEntryRows
+      .filter(e => !month || (e.occurred_at >= `${month}-01` && e.occurred_at <= `${month}-31`))
+      .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at) || b.created_at.localeCompare(a.created_at))
+      .map(e => ({
+        ...e,
+        account_name: cashAccounts.find(a => a.id === e.account_id)?.name ?? '',
+        settles: liabilitySettles.filter(s => s.entry_id === e.id).map(s => ({ liability_id: s.liability_id, amount: s.amount })),
+      })))
+  },
+
+  async createCashEntry(input: CashEntryInput): Promise<string> {
+    const id = uid()
+    cashEntryRows.push({
+      id, account_id: input.account_id, occurred_at: input.occurred_at, direction: input.direction,
+      amount: input.amount, category: input.category, note: input.note ?? null, sale_id: null,
+      created_at: input.occurred_at + 'T12:00',
+    })
+    for (const x of input.settles ?? []) liabilitySettles.push({ entry_id: id, ...x })
+    return wait(id)
+  },
+
+  async deleteCashEntry(id: string): Promise<void> {
+    liabilitySettles = liabilitySettles.filter(s => s.entry_id !== id)
+    cashEntryRows = cashEntryRows.filter(e => e.id !== id)
+    return wait(undefined)
+  },
+
+  async getCashMonth(month: string): Promise<CashMonth> {
+    return wait(buildCashMonth(month))
   },
 
   async getMonthStatement(month: string): Promise<MonthStatement> {
@@ -4580,6 +4822,7 @@ export function installMock(): void {
   buildInitialListings()
   buildInitialRuns()
   buildInitialExpenses()
+  buildInitialCash()
   assignInitialNote()
   assignInitialTags()
   assignInitialPurchaseTags()

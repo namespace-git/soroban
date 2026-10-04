@@ -1519,6 +1519,29 @@ export interface SorobanApi {
    */
   openChannelPage(channel: SalesChannel, kind: 'item' | 'transaction', itemId: string): Promise<void>
 
+  // お金の出入り（資金繰り）。損益とは別の層。入出金の記録・債務の消し込み
+  /** 口座の一覧（balance＝opening_balance＋入出金の積み上げ）。残高は直接書き換えられない */
+  listCashAccounts(): Promise<CashAccount[]>
+  createCashAccount(input: CashAccountInput): Promise<string>
+  /** 名前・種別・起点の残高と日付・表示（is_active／sort_order）。残高そのものは持たない */
+  updateCashAccount(id: string, patch: CashAccountPatch): Promise<void>
+  /** 債務の一覧（settled／remaining つき）。onlyOpen＝残りがあるものだけ */
+  listLiabilities(opts?: { kind?: LiabilityKind; onlyOpen?: boolean }): Promise<Liability[]>
+  /** tool_share は basis_* を固定して保存し、額は根拠から決める（後でタグが消えても動かない） */
+  createLiability(input: LiabilityInput): Promise<string>
+  /** 額は消し込み済みより小さくできない。tool_share の額と根拠は変えられない */
+  updateLiability(id: string, patch: LiabilityPatch): Promise<void>
+  /** 消し込みのある債務は消せない（先に入出金を消す） */
+  deleteLiability(id: string): Promise<void>
+  /** 入出金の一覧。month（YYYY-MM）で絞る */
+  listCashEntries(month?: string): Promise<CashEntry[]>
+  /** settles があれば債務を消し込む（合計が債務の残り・入出金の額を超えるとエラー） */
+  createCashEntry(input: CashEntryInput): Promise<string>
+  /** 消し込みも一緒に外れる */
+  deleteCashEntry(id: string): Promise<void>
+  /** 月の入出金明細（画面はこれ1つ） */
+  getCashMonth(month: string): Promise<CashMonth>
+
   // 更新（GitHub Releases）
   /** いまのアプリのバージョンと、更新の確認結果。起動時と 6 時間ごとに自動で確認し、手動でも呼べる */
   /** 画面側の出来事をログに残す（例外・操作）。DB の app_log に入り、14 日で消える */
@@ -1554,4 +1577,175 @@ declare global {
     /** preload が contextBridge で公開する生の API。画面からは直接使わない */
     sorobanBridge?: SorobanApi
   }
+}
+
+// ============================================================
+// お金の出入り（資金繰り）
+//
+// 既存の損益（sale_profit / monthly_summary）とは**別の層**。あちらは「儲かったか」、
+// こちらは「いつ誰にいくら払う義務が立ち、実際にいつ払ったか」。
+//
+// なぜ分けるか：2026-09 は粗利 ¥42,881 なのに、翌月に仕入 ¥161,505 を払う。
+// 差は在庫（¥85,097）に化けている。**粗利では「いくら使えるか」に答えられない。**
+//
+// 画面には「入ってきた／出ていった」の2列しか出さない（説明を受けずに使う人が読む）。
+// ============================================================
+
+/** お金の置き場。銀行・フリマの売上金など。残高は opening から入出金を積んで出す */
+export type CashAccountKind = 'bank' | 'flea' | 'cash' | 'other'
+
+export interface CashAccount {
+  id: string
+  name: string
+  kind: CashAccountKind
+  /** 起点の残高（円）。ここから入出金を積む。**残高を直接書き換えない** */
+  opening_balance: number
+  /** その残高がいつ時点のものか（YYYY-MM-DD） */
+  opening_date: string
+  sort_order: number
+  is_active: number
+  /** いまの残高（opening + 入金 − 出金）。main が計算して返す */
+  balance: number
+}
+
+export interface CashAccountInput {
+  name: string
+  kind: CashAccountKind
+  opening_balance: number
+  opening_date: string
+}
+
+/**
+ * 払う義務。**種別を必ず分ける**（混ぜると「今月返したのは元本か3割か」が復元できない）。
+ *   loan       … 夫からの借入（立替）
+ *   tool_share … ツール購入ぶんの分配（売れた粗利の n 割）
+ *   purchase   … 仕入の未払（末締め・翌月払い。月ごとに1本）
+ */
+export type LiabilityKind = 'loan' | 'tool_share' | 'purchase'
+
+export interface Liability {
+  id: string
+  kind: LiabilityKind
+  /** 相手（「夫」「メロジョイ」など） */
+  counterparty: string
+  occurred_at: string
+  /** 支払期限。仕入は翌月中旬など。無ければ null */
+  due_at: string | null
+  /** 元の額（円） */
+  amount: number
+  /** 消し込んだ額の合計 */
+  settled: number
+  /** 残り（amount − settled） */
+  remaining: number
+  note: string | null
+  /**
+   * tool_share の根拠。**タグから毎回計算し直さない**ための固定値。
+   * タグは派生で、紐付けを解除すると消える（CLAUDE.md）。再計算すると過去の債務が動く
+   */
+  basis_sale_id: string | null
+  /** そのときの粗利（円） */
+  basis_amount: number | null
+  /** 割合（ベーシスポイント。3000 = 30%） */
+  basis_rate_bp: number | null
+  /** purchase のとき、どの月ぶんか（YYYY-MM） */
+  month: string | null
+  created_at: string
+}
+
+/** 入出金の区分。画面はこの言葉で見せる */
+export type CashCategory =
+  | 'sale_payout'       // フリマの売上金が入った
+  | 'purchase_payment'  // 仕入の支払い
+  | 'loan_in'           // 借りた
+  | 'loan_repay'        // 返した
+  | 'tool_share'        // ツール分の支払い
+  | 'allowance'         // お小遣い
+  | 'expense'           // 経費の支払い
+  | 'transfer'          // 口座どうしの移動
+  | 'other'
+
+export interface CashEntry {
+  id: string
+  account_id: string
+  account_name: string
+  occurred_at: string
+  /** in = 入ってきた / out = 出ていった。**金額は常に正の整数** */
+  direction: 'in' | 'out'
+  amount: number
+  category: CashCategory
+  note: string | null
+  /** 自動で作った入金のとき、どの販売か */
+  sale_id: string | null
+  /** 消し込んだ債務（複数可。1回の振込で複数の債務を払える） */
+  settles: Array<{ liability_id: string; amount: number }>
+  created_at: string
+}
+
+export interface CashEntryInput {
+  account_id: string
+  occurred_at: string
+  direction: 'in' | 'out'
+  amount: number
+  category: CashCategory
+  note?: string | null
+  /** 債務を消し込むなら。合計が amount を超えてはいけない */
+  settles?: Array<{ liability_id: string; amount: number }>
+}
+
+/** 月の入出金明細。画面はこれ1枚を出す */
+export interface CashMonth {
+  month: string
+  /** 月初の残高（全口座の合計） */
+  opening: number
+  incoming: Array<{ category: CashCategory; label: string; amount: number }>
+  incoming_total: number
+  outgoing: Array<{ category: CashCategory; label: string; amount: number }>
+  outgoing_total: number
+  /** 差引（incoming_total − outgoing_total） */
+  net: number
+  /** 月末の残高 */
+  closing: number
+  /** これから払う予定（期限が来ていない債務も含む） */
+  upcoming: Array<{ liability_id: string; kind: LiabilityKind; counterparty: string; due_at: string | null; remaining: number }>
+  upcoming_total: number
+  /** 払った後に残る見込み（closing − upcoming_total）。**これが「いくら使えるか」の答え** */
+  free_cash: number
+}
+
+export interface CashAccountPatch {
+  name?: string
+  kind?: CashAccountKind
+  opening_balance?: number
+  opening_date?: string
+  sort_order?: number
+  is_active?: number
+}
+
+export interface LiabilityInput {
+  kind: LiabilityKind
+  counterparty: string
+  occurred_at: string
+  due_at?: string | null
+  /**
+   * 元の額（円）。loan・purchase は必須。**tool_share は省略**（`floor(basis_amount × basis_rate_bp ÷ 10000)`
+   * を main が決める。渡すなら一致していること）
+   */
+  amount?: number
+  note?: string | null
+  /** purchase のとき。省略すると occurred_at の月 */
+  month?: string | null
+  /** tool_share のとき必須。粗利がプラスの販売だけ */
+  basis_sale_id?: string | null
+  basis_amount?: number | null
+  basis_rate_bp?: number | null
+}
+
+/** 債務の直せる項目。kind と tool_share の根拠・額は変えられない */
+export interface LiabilityPatch {
+  counterparty?: string
+  occurred_at?: string
+  due_at?: string | null
+  amount?: number
+  note?: string | null
+  month?: string | null
 }

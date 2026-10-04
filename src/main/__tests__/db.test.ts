@@ -7484,3 +7484,357 @@ describe('db（:memory:）', () => {
     })
   })
 })
+
+// ============================================================
+// お金の出入り（現金出納帳）。損益とは別の層：残高は積んで出す／消込は別テーブル／
+// tool_share は根拠を固定する
+// ============================================================
+describe('お金の出入り（cash_account / liability / cash_entry）', () => {
+  let accountId: string
+
+  beforeEach(() => {
+    db.initDb(':memory:')
+    accountId = db.createCashAccount({
+      name: '事業用の銀行', kind: 'bank', opening_balance: 0, opening_date: '2026-09-01',
+    })
+  })
+
+  const balance = (id: string) => db.listCashAccounts().find(a => a.id === id)!.balance
+  const totalBalance = () => db.listCashAccounts().reduce((s, a) => s + a.balance, 0)
+
+  it('0円で作った口座に入金と出金を積むと残高が出る（残高の列は持たない）', () => {
+    expect(balance(accountId)).toBe(0)
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-05', direction: 'in', amount: 44620, category: 'sale_payout' })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-06', direction: 'out', amount: 1000, category: 'allowance' })
+    expect(balance(accountId)).toBe(43620)
+
+    const cols = (db.getDb().prepare('PRAGMA table_info(cash_account)').all() as Array<{ name: string }>).map(c => c.name)
+    expect(cols).not.toContain('balance')
+  })
+
+  it('はじめの残高から積む。残高の日付より前の入出金は作れない', () => {
+    const id = db.createCashAccount({ name: '現金', kind: 'cash', opening_balance: 5000, opening_date: '2026-09-10' })
+    db.createCashEntry({ account_id: id, occurred_at: '2026-09-10', direction: 'in', amount: 700, category: 'other' })
+    expect(balance(id)).toBe(5700)
+    expect(() => db.createCashEntry({
+      account_id: id, occurred_at: '2026-09-09', direction: 'in', amount: 700, category: 'other',
+    })).toThrow('それより前の日付は入れられません')
+  })
+
+  it('金額は正の整数だけ。区分と向きが合わなければ断る', () => {
+    const base = { account_id: accountId, occurred_at: '2026-09-05', direction: 'in' as const, category: 'sale_payout' as const }
+    expect(() => db.createCashEntry({ ...base, amount: 0 })).toThrow()
+    expect(() => db.createCashEntry({ ...base, amount: -5 })).toThrow()
+    expect(() => db.createCashEntry({ ...base, amount: 10.5 })).toThrow()
+    expect(() => db.createCashEntry({ ...base, direction: 'out', amount: 100 })).toThrow('入金の区分です')
+    expect(() => db.createCashEntry({ ...base, occurred_at: '2026-9-5', amount: 100 })).toThrow()
+    expect(db.listCashEntries()).toHaveLength(0)
+  })
+
+  it('月をまたいだとき、前月の closing ＝ 今月の opening。opening + 入金 − 出金 = closing', () => {
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-05', direction: 'in', amount: 44620, category: 'sale_payout' })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-30', direction: 'out', amount: 4000, category: 'expense' })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-10-01', direction: 'in', amount: 9000, category: 'sale_payout' })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-10-31', direction: 'out', amount: 2500, category: 'allowance' })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-11-01', direction: 'in', amount: 300, category: 'other' })
+
+    const sep = db.getCashMonth('2026-09')
+    const oct = db.getCashMonth('2026-10')
+    const nov = db.getCashMonth('2026-11')
+    expect(sep.opening).toBe(0)
+    expect(sep.closing).toBe(40620)
+    expect(oct.opening).toBe(sep.closing)
+    expect(oct.closing).toBe(40620 + 9000 - 2500)
+    expect(nov.opening).toBe(oct.closing)
+    for (const m of [sep, oct, nov]) {
+      expect(m.opening + m.incoming_total - m.outgoing_total).toBe(m.closing)
+      expect(m.net).toBe(m.incoming_total - m.outgoing_total)
+    }
+    // 月末の closing は、その月以降に入出金が無ければ口座残高と一致する
+    expect(nov.closing).toBe(totalBalance())
+  })
+
+  it('1回の入出金で複数の債務を消し込める（消し込んだ額が入出金に残る）', () => {
+    const purchase = db.createLiability({
+      kind: 'purchase', counterparty: 'メロジョイ', occurred_at: '2026-09-30', due_at: '2026-10-15', amount: 161505,
+    })
+    const loan = db.createLiability({ kind: 'loan', counterparty: '夫', occurred_at: '2026-09-02', amount: 30000 })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-03', direction: 'in', amount: 200000, category: 'loan_in' })
+
+    const entryId = db.createCashEntry({
+      account_id: accountId, occurred_at: '2026-10-15', direction: 'out', amount: 191505, category: 'purchase_payment',
+      settles: [{ liability_id: purchase, amount: 161505 }, { liability_id: loan, amount: 30000 }],
+    })
+
+    const byId = new Map(db.listLiabilities().map(l => [l.id, l]))
+    expect(byId.get(purchase)).toMatchObject({ settled: 161505, remaining: 0 })
+    expect(byId.get(loan)).toMatchObject({ settled: 30000, remaining: 0 })
+    expect(db.listCashEntries().find(e => e.id === entryId)!.settles).toEqual([
+      { liability_id: purchase, amount: 161505 }, { liability_id: loan, amount: 30000 },
+    ])
+    expect(db.listLiabilities({ onlyOpen: true })).toHaveLength(0)
+  })
+
+  it('部分的に消し込める（¥161,505 のうち ¥100,000 → 残り ¥61,505）。続けて残りも払える', () => {
+    const purchase = db.createLiability({
+      kind: 'purchase', counterparty: 'メロジョイ', occurred_at: '2026-09-30', amount: 161505,
+    })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-03', direction: 'in', amount: 200000, category: 'loan_in' })
+    db.createCashEntry({
+      account_id: accountId, occurred_at: '2026-10-15', direction: 'out', amount: 100000, category: 'purchase_payment',
+      settles: [{ liability_id: purchase, amount: 100000 }],
+    })
+    expect(db.listLiabilities().find(l => l.id === purchase)).toMatchObject({ settled: 100000, remaining: 61505 })
+
+    db.createCashEntry({
+      account_id: accountId, occurred_at: '2026-10-20', direction: 'out', amount: 61505, category: 'purchase_payment',
+      settles: [{ liability_id: purchase, amount: 61505 }],
+    })
+    expect(db.listLiabilities().find(l => l.id === purchase)).toMatchObject({ settled: 161505, remaining: 0 })
+  })
+
+  it('消込の合計が債務の額を超えるとエラー（入出金は作られない）', () => {
+    const purchase = db.createLiability({
+      kind: 'purchase', counterparty: 'メロジョイ', occurred_at: '2026-09-30', amount: 161505,
+    })
+    db.createCashEntry({
+      account_id: accountId, occurred_at: '2026-10-15', direction: 'out', amount: 100000, category: 'purchase_payment',
+      settles: [{ liability_id: purchase, amount: 100000 }],
+    })
+    const before = db.listCashEntries().length
+    // 残りは 61,505。61,506 は消せない
+    expect(() => db.createCashEntry({
+      account_id: accountId, occurred_at: '2026-10-20', direction: 'out', amount: 70000, category: 'purchase_payment',
+      settles: [{ liability_id: purchase, amount: 61506 }],
+    })).toThrow('残り')
+    expect(db.listCashEntries()).toHaveLength(before)
+    expect(db.listLiabilities().find(l => l.id === purchase)!.settled).toBe(100000)
+  })
+
+  it('入出金の額より多くは消し込めない。重複・入金への消込・0円も断る', () => {
+    const a = db.createLiability({ kind: 'purchase', counterparty: 'A', occurred_at: '2026-09-30', amount: 80000 })
+    const b = db.createLiability({ kind: 'purchase', counterparty: 'B', occurred_at: '2026-09-30', amount: 80000 })
+    const out = { account_id: accountId, occurred_at: '2026-10-15', direction: 'out' as const, category: 'purchase_payment' as const }
+    // 合計 100,001 > 入出金 100,000
+    expect(() => db.createCashEntry({
+      ...out, amount: 100000,
+      settles: [{ liability_id: a, amount: 50001 }, { liability_id: b, amount: 50000 }],
+    })).toThrow('超えています')
+    expect(() => db.createCashEntry({
+      ...out, amount: 100000, settles: [{ liability_id: a, amount: 100 }, { liability_id: a, amount: 100 }],
+    })).toThrow('2回')
+    expect(() => db.createCashEntry({
+      ...out, amount: 100000, settles: [{ liability_id: a, amount: 0 }],
+    })).toThrow()
+    expect(() => db.createCashEntry({
+      account_id: accountId, occurred_at: '2026-10-15', direction: 'in', amount: 1000, category: 'other',
+      settles: [{ liability_id: a, amount: 1000 }],
+    })).toThrow('出金だけ')
+    expect(db.listCashEntries()).toHaveLength(0)
+    // ちょうど入出金の額までなら通る
+    db.createCashEntry({ ...out, amount: 100000, settles: [{ liability_id: a, amount: 50000 }, { liability_id: b, amount: 50000 }] })
+    expect(db.listLiabilities().map(l => l.settled)).toEqual([50000, 50000])
+  })
+
+  it('tool_share は根拠（販売・粗利・割合）を固定して保存する。タグを外しても・販売を消しても額は動かない', () => {
+    const saleId = db.createSale({ title: 'ツール分の元になる販売', sold_at: '2026-09-10', price: 9000 })
+    const tagId = db.createTag('ツールA')
+    db.setSaleTags(saleId, [tagId])
+
+    const id = db.createLiability({
+      kind: 'tool_share', counterparty: '夫', occurred_at: '2026-09-30',
+      basis_sale_id: saleId, basis_amount: 4737, basis_rate_bp: 3000,
+    })
+    const created = db.listLiabilities().find(l => l.id === id)!
+    expect(created).toMatchObject({
+      kind: 'tool_share', amount: 1421, remaining: 1421,
+      basis_sale_id: saleId, basis_amount: 4737, basis_rate_bp: 3000,
+    })
+
+    // 紐付けの解除に相当する操作（タグを外す）と、販売そのものの削除
+    db.setSaleTags(saleId, [])
+    db.deleteSale(saleId)
+    const after = db.listLiabilities().find(l => l.id === id)!
+    expect(after.amount).toBe(1421)
+    expect(after.basis_amount).toBe(4737)
+    expect(after.basis_rate_bp).toBe(3000)
+
+    // 額と根拠は後から変えられない
+    expect(() => db.updateLiability(id, { amount: 2000 })).toThrow('変えられません')
+  })
+
+  it('tool_share は根拠が無い・額が根拠と食い違う・粗利がプラスでないと断る', () => {
+    const saleId = db.createSale({ title: '販売', sold_at: '2026-09-10', price: 9000 })
+    expect(() => db.createLiability({
+      kind: 'tool_share', counterparty: '夫', occurred_at: '2026-09-30', amount: 1421,
+    })).toThrow('もとにした販売')
+    expect(() => db.createLiability({
+      kind: 'tool_share', counterparty: '夫', occurred_at: '2026-09-30', amount: 1500,
+      basis_sale_id: saleId, basis_amount: 4737, basis_rate_bp: 3000,
+    })).toThrow('根拠から')
+    expect(() => db.createLiability({
+      kind: 'tool_share', counterparty: '夫', occurred_at: '2026-09-30',
+      basis_sale_id: saleId, basis_amount: -300, basis_rate_bp: 3000,
+    })).toThrow('0円')
+    expect(() => db.createLiability({
+      kind: 'tool_share', counterparty: '夫', occurred_at: '2026-09-30',
+      basis_sale_id: 'no-such-sale', basis_amount: 4737, basis_rate_bp: 3000,
+    })).toThrow('見つかりません')
+    expect(() => db.createLiability({
+      kind: 'loan', counterparty: '夫', occurred_at: '2026-09-30', amount: 1000, basis_amount: 1,
+    })).toThrow('ツール分だけ')
+    expect(db.listLiabilities()).toHaveLength(0)
+  })
+
+  it('債務の額は消込済みより小さくできない。消込のある債務は消せず、入出金を消すと消込も外れる', () => {
+    const purchase = db.createLiability({ kind: 'purchase', counterparty: 'メロジョイ', occurred_at: '2026-09-30', amount: 100000 })
+    const entryId = db.createCashEntry({
+      account_id: accountId, occurred_at: '2026-10-15', direction: 'out', amount: 60000, category: 'purchase_payment',
+      settles: [{ liability_id: purchase, amount: 60000 }],
+    })
+    expect(() => db.updateLiability(purchase, { amount: 59999 })).toThrow('消し込み済み')
+    db.updateLiability(purchase, { amount: 90000, due_at: '2026-10-20' })
+    expect(db.listLiabilities()[0]).toMatchObject({ amount: 90000, settled: 60000, remaining: 30000, due_at: '2026-10-20' })
+    expect(() => db.deleteLiability(purchase)).toThrow('消せません')
+
+    db.deleteCashEntry(entryId)
+    expect(db.listLiabilities()[0]).toMatchObject({ settled: 0, remaining: 90000 })
+    expect(db.getDb().prepare('SELECT COUNT(*) AS c FROM liability_settlement').get()).toEqual({ c: 0 })
+    expect(balance(accountId)).toBe(0)
+    db.deleteLiability(purchase)
+    expect(db.listLiabilities()).toHaveLength(0)
+  })
+
+  it('transfer（口座間の移動）は月の入金にも出金にも出るが、全体の残高は動かない', () => {
+    const flea = db.createCashAccount({ name: 'フリマの売上金', kind: 'flea', opening_balance: 20000, opening_date: '2026-09-01' })
+    const before = db.getCashMonth('2026-09')
+    expect(before.closing).toBe(20000)
+
+    db.createCashEntry({ account_id: flea, occurred_at: '2026-09-12', direction: 'out', amount: 15000, category: 'transfer' })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-12', direction: 'in', amount: 15000, category: 'transfer' })
+
+    const after = db.getCashMonth('2026-09')
+    expect(after.incoming).toEqual([{ category: 'transfer', label: '口座間の移動', amount: 15000 }])
+    expect(after.outgoing).toEqual([{ category: 'transfer', label: '口座間の移動', amount: 15000 }])
+    expect(after.net).toBe(0)
+    expect(after.closing).toBe(before.closing)
+    expect(totalBalance()).toBe(20000)
+    expect(balance(flea)).toBe(5000)
+    expect(balance(accountId)).toBe(15000)
+  })
+
+  it('free_cash ＝ closing − upcoming_total。期限前の債務も数える。月末より後の発生・支払いは数えない', () => {
+    const purchase = db.createLiability({
+      kind: 'purchase', counterparty: 'メロジョイ', occurred_at: '2026-09-30', due_at: '2026-10-15', amount: 161505,
+    })
+    db.createLiability({ kind: 'loan', counterparty: '夫', occurred_at: '2026-10-02', amount: 50000 })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-20', direction: 'in', amount: 200000, category: 'loan_in' })
+    db.createCashEntry({
+      account_id: accountId, occurred_at: '2026-10-15', direction: 'out', amount: 100000, category: 'purchase_payment',
+      settles: [{ liability_id: purchase, amount: 100000 }],
+    })
+
+    const sep = db.getCashMonth('2026-09')
+    expect(sep.closing).toBe(200000)
+    // 9月末の時点では 10/15 の支払いも、10/02 の借入もまだ無い
+    expect(sep.upcoming).toEqual([
+      { liability_id: purchase, kind: 'purchase', counterparty: 'メロジョイ', due_at: '2026-10-15', remaining: 161505 },
+    ])
+    expect(sep.upcoming_total).toBe(161505)
+    expect(sep.free_cash).toBe(sep.closing - sep.upcoming_total)
+    expect(sep.free_cash).toBe(38495)
+
+    const oct = db.getCashMonth('2026-10')
+    expect(oct.closing).toBe(100000)
+    expect(oct.upcoming_total).toBe(61505 + 50000)
+    expect(oct.free_cash).toBe(oct.closing - oct.upcoming_total)
+  })
+
+  it('実データに近い1か月（口座0円・入金¥44,620・仕入の債務¥161,505・ツール分¥1,421）', () => {
+    const saleId = db.createSale({ title: '9月の販売', sold_at: '2026-09-15', price: 9000 })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-25', direction: 'in', amount: 44620, category: 'sale_payout' })
+    const purchase = db.createLiability({
+      kind: 'purchase', counterparty: 'メロジョイ', occurred_at: '2026-09-30', due_at: '2026-10-15', amount: 161505,
+    })
+    const tool = db.createLiability({
+      kind: 'tool_share', counterparty: '夫', occurred_at: '2026-09-30',
+      basis_sale_id: saleId, basis_amount: 4737, basis_rate_bp: 3000,
+    })
+
+    expect(db.getCashMonth('2026-09')).toEqual({
+      month: '2026-09',
+      opening: 0,
+      incoming: [{ category: 'sale_payout', label: 'フリマの売上金', amount: 44620 }],
+      incoming_total: 44620,
+      outgoing: [],
+      outgoing_total: 0,
+      net: 44620,
+      closing: 44620,
+      upcoming: [
+        { liability_id: purchase, kind: 'purchase', counterparty: 'メロジョイ', due_at: '2026-10-15', remaining: 161505 },
+        { liability_id: tool, kind: 'tool_share', counterparty: '夫', due_at: null, remaining: 1421 },
+      ],
+      upcoming_total: 162926,
+      free_cash: 44620 - 162926,
+    })
+  })
+
+  it('月の途中から数え始める口座があっても opening + 入金 − 出金 = closing', () => {
+    const late = db.createCashAccount({ name: '現金', kind: 'cash', opening_balance: 3000, opening_date: '2026-09-15' })
+    db.createCashEntry({ account_id: late, occurred_at: '2026-09-20', direction: 'out', amount: 500, category: 'expense' })
+    const m = db.getCashMonth('2026-09')
+    expect(m.opening).toBe(3000)
+    expect(m.closing).toBe(2500)
+    expect(m.opening + m.incoming_total - m.outgoing_total).toBe(m.closing)
+    expect(m.closing).toBe(totalBalance())
+  })
+
+  it('口座の更新：起点より前の入出金が残るときは日付を後ろにできない。残高の列は書き換えられない', () => {
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-05', direction: 'in', amount: 1000, category: 'other' })
+    expect(() => db.updateCashAccount(accountId, { opening_date: '2026-09-10' })).toThrow('より前の入出金')
+    db.updateCashAccount(accountId, { name: '改名', opening_balance: 500, is_active: 0 })
+    expect(db.listCashAccounts()[0]).toMatchObject({ name: '改名', opening_balance: 500, is_active: 0, balance: 1500 })
+  })
+
+  it('マイグレーション不要：お金の4テーブルが無い既存DB（Phase1）を開くだけで揃い、使える。schema_version は動かない', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'soroban-cash-'))
+    const path = join(dir, 'legacy.db')
+    try {
+      const legacy = new BetterSqlite3(path)
+      legacy.exec(PHASE1_SCHEMA_SQL)
+      const has = (name: string) => legacy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name)
+      for (const t of ['cash_account', 'liability', 'cash_entry', 'liability_settlement']) expect(has(t)).toBeUndefined()
+      legacy.close()
+
+      db.initDb(path)
+      const id = db.createCashAccount({ name: '銀行', kind: 'bank', opening_balance: 1000, opening_date: '2026-09-01' })
+      db.createCashEntry({ account_id: id, occurred_at: '2026-09-02', direction: 'in', amount: 500, category: 'other' })
+      expect(db.getCashMonth('2026-09').closing).toBe(1500)
+      db.closeDb()
+
+      // 2回目：データが残り、テーブルの作り直しで消えない
+      db.initDb(path)
+      expect(db.listCashAccounts()[0].balance).toBe(1500)
+      expect(db.getSettings().schema_version).toBe('34')
+    } finally {
+      try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('既存の損益（sale / sale_line / expense / month_book）には触らない', () => {
+    const saleId = db.createSale({ title: '販売', sold_at: '2026-09-10', price: 9000 })
+    const snapshot = () => JSON.stringify({
+      sale: db.getDb().prepare('SELECT * FROM sale').all(),
+      line: db.getDb().prepare('SELECT * FROM sale_line').all(),
+      expense: db.getDb().prepare('SELECT * FROM expense').all(),
+      book: db.getDb().prepare('SELECT * FROM month_book').all(),
+      profit: db.getDb().prepare('SELECT * FROM sale_profit').all(),
+    })
+    const before = snapshot()
+    db.createLiability({ kind: 'tool_share', counterparty: '夫', occurred_at: '2026-09-30', basis_sale_id: saleId, basis_amount: 4737, basis_rate_bp: 3000 })
+    db.createCashEntry({ account_id: accountId, occurred_at: '2026-09-25', direction: 'in', amount: 44620, category: 'sale_payout' })
+    db.getCashMonth('2026-09')
+    expect(snapshot()).toBe(before)
+  })
+})

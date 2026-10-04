@@ -556,6 +556,80 @@ CREATE TABLE IF NOT EXISTS shop_account_tag (
   PRIMARY KEY (shop_account_id, tag_id)
 );
 
+-- ============================================================
+-- お金の出入り（資金繰り）
+--
+-- 損益（sale_profit / monthly_summary / month_book）とは別の層。あちらは「儲かったか」、
+-- こちらは「いつ誰にいくら払う義務が立ち、実際にいつ払ったか」。損益のテーブルは読むだけで、
+-- ここから書き換えない。新規テーブルなので既存DBも tablesSql の IF NOT EXISTS だけで足りる
+-- （migrate() 不要）。resetData() では消さない（お金の帳簿は仕入・販売のやり直しとは別）。
+-- ============================================================
+
+-- お金の置き場。残高の列は持たない：opening_balance（opening_date の朝の残高）に
+-- cash_entry を積んで出す。「いまの残高を上書き」はできない作りにしてある
+CREATE TABLE IF NOT EXISTS cash_account (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  kind            TEXT NOT NULL DEFAULT 'bank'
+                  CHECK (kind IN ('bank','flea','cash','other')),
+  opening_balance INTEGER NOT NULL DEFAULT 0 CHECK (opening_balance >= 0),
+  opening_date    TEXT NOT NULL,         -- YYYY-MM-DD
+  sort_order      INTEGER NOT NULL DEFAULT 0,
+  is_active       INTEGER NOT NULL DEFAULT 1,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 払う義務。tool_share は根拠（basis_*）を作るときに固定して持つ：
+-- タグは派生で、紐付けを解除すると消えるので、後から再計算すると過去の債務が動いてしまう
+CREATE TABLE IF NOT EXISTS liability (
+  id            TEXT PRIMARY KEY,
+  kind          TEXT NOT NULL CHECK (kind IN ('loan','tool_share','purchase')),
+  counterparty  TEXT NOT NULL,
+  occurred_at   TEXT NOT NULL,           -- YYYY-MM-DD
+  due_at        TEXT,                    -- YYYY-MM-DD
+  amount        INTEGER NOT NULL CHECK (amount > 0),
+  note          TEXT,
+  -- tool_share の根拠。sale への外部キーは張らない（販売を消す・作り直す操作に巻き込まれず、
+  -- 額も動かさない。id は「どの販売だったか」の控え）
+  basis_sale_id TEXT,
+  basis_amount  INTEGER,                 -- そのときの粗利（円）
+  basis_rate_bp INTEGER,                 -- 割合（3000 = 30%）
+  month         TEXT,                    -- purchase のとき、どの月ぶんか（YYYY-MM）
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_liability_due ON liability(due_at);
+
+-- 入出金。金額は常に正の整数で、向きは direction
+CREATE TABLE IF NOT EXISTS cash_entry (
+  id          TEXT PRIMARY KEY,
+  account_id  TEXT NOT NULL REFERENCES cash_account(id),
+  occurred_at TEXT NOT NULL,             -- YYYY-MM-DD
+  direction   TEXT NOT NULL CHECK (direction IN ('in','out')),
+  amount      INTEGER NOT NULL CHECK (amount > 0),
+  category    TEXT NOT NULL
+              CHECK (category IN ('sale_payout','purchase_payment','loan_in','loan_repay',
+                                  'tool_share','allowance','expense','transfer','other')),
+  note        TEXT,
+  sale_id     TEXT,                      -- 自動で作った入金のとき、どの販売か（控え。外部キーは張らない）
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cash_entry_date ON cash_entry(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_cash_entry_account ON cash_entry(account_id);
+
+-- どの入出金がどの債務をいくら消したか。1回の振込で複数の債務を払えるよう別テーブルにする。
+-- 入出金を消せば消込も一緒に外れる。消込のある債務は消せない（履歴を壊さない）
+CREATE TABLE IF NOT EXISTS liability_settlement (
+  id           TEXT PRIMARY KEY,
+  entry_id     TEXT NOT NULL REFERENCES cash_entry(id) ON DELETE CASCADE,
+  liability_id TEXT NOT NULL REFERENCES liability(id),
+  amount       INTEGER NOT NULL CHECK (amount > 0),
+  UNIQUE (entry_id, liability_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_liability_settlement_liability ON liability_settlement(liability_id);
+
 -- __VIEWS__
 -- db.ts はこのマーカーでファイルを分割し、テーブルの CREATE → migrate() での
 -- 列追加 → ここから先のビュー作成、の順で実行する（ビューが新しい列を参照するため）。
