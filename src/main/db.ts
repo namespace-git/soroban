@@ -23,7 +23,7 @@ import type {
   SearchHit, ShippingMethod, ShopAccount, ShopAccountKind, ShopAccountStats, Tag, TimelineEvent, VariantSummary,
   CollectorRun, RunStatus, CollectorSource,
 } from '../shared/types'
-import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../shared/types'
+import { CHANNEL_LABEL, LISTING_STATUS_LABEL, SALE_KIND_LABEL } from '../shared/types'
 
 // ============================================================
 // ローカルSQLite
@@ -6274,7 +6274,7 @@ export function exportRows(month?: string): string {
       sp.sold_at         AS 販売日,
       CASE WHEN sp.status = 'completed' OR (sp.source = 'manual' AND sp.status IS NULL) THEN '実績' ELSE '見込み' END AS 集計区分,
       sp.title           AS 商品名,
-      CASE sp.kind WHEN 'resale' THEN '転売' ELSE '私物' END AS 区分,
+      CASE sp.kind WHEN 'resale' THEN ? ELSE ? END AS 区分,
       CASE sp.source WHEN 'collector' THEN '自動取得' ELSE '手入力' END AS 取得元,
       sp.price           AS 販売価格,
       sp.fee             AS 販売手数料,
@@ -6292,7 +6292,7 @@ export function exportRows(month?: string): string {
     FROM sale_profit sp
     ${where}
     ORDER BY sp.sold_at
-  `).all(...(month ? [month] : [])) as Array<Record<string, unknown>>
+  `).all(SALE_KIND_LABEL.resale, SALE_KIND_LABEL.personal, ...(month ? [month] : [])) as Array<Record<string, unknown>>
 
   if (rows.length === 0) return ''
 

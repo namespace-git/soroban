@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { todayLocal } from '../../shared/date'
+import { SALE_KIND_LABEL } from '../../shared/types'
 
 // db.ts は electron の app.getPath を参照する（:memory: を使うときは呼ばれないが、
 // import 時点で electron モジュールへの依存があるため潰しておく）
@@ -7126,6 +7127,24 @@ describe('db（:memory:）', () => {
       const priceIdx = jan.headers.indexOf('販売価格')
       expect(jan.rows[0][priceIdx]).toBe('123456')
       expect(jan.rows[0][priceIdx]).not.toContain(',')
+    })
+
+    it('sales：区分の列は SALE_KIND_LABEL の言葉（販売／私物）で出る。DB の値（resale）や「転売」は出ない', () => {
+      db.createSale({ title: '販売の品', sold_at: '2026-01-05', price: 1000, kind: 'resale' })
+      db.createSale({ title: '私物の品', sold_at: '2026-01-06', price: 500, kind: 'personal' })
+
+      const csv = db.exportCsvRows('sales')
+      const parsed = parseCsv(csv)
+      const kindIdx = parsed.headers.indexOf('区分')
+      const byTitle = new Map(parsed.rows.map(r => [r[parsed.headers.indexOf('商品名')], r[kindIdx]]))
+      expect(byTitle.get('販売の品')).toBe(SALE_KIND_LABEL.resale)
+      expect(byTitle.get('販売の品')).toBe('販売')
+      expect(byTitle.get('私物の品')).toBe(SALE_KIND_LABEL.personal)
+      expect(csv).not.toContain('転売')
+
+      // month を渡してもバインドの順序が崩れない
+      const jan = parseCsv(db.exportCsvRows('sales', '2026-01'))
+      expect(jan.rows.map(r => r[kindIdx]).sort()).toEqual(['私物', '販売'])
     })
 
     it('purchases：1行=仕入の1明細。見出しと列数が一致し、monthでordered_at（注文日）を絞れる', () => {

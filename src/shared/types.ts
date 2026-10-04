@@ -6,6 +6,17 @@
 // ============================================================
 
 export type SaleKind = 'resale' | 'personal'
+
+/**
+ * 画面・CSV に出す販売の区分の名前。**ここが唯一の正**（同じ値を別の言葉で出さない）。
+ *
+ * 利用者の希望で「転売」→「販売」にした。**DB の値（`resale`）は変えていない**ので、
+ * 過去のデータも設定もそのまま使える。言葉だけの話。
+ */
+export const SALE_KIND_LABEL: Record<SaleKind, string> = {
+  resale: '販売',
+  personal: '私物',
+}
 /** 販売の出どころ。collector = 自動取得、manual = 手入力 */
 export type SaleSource = 'collector' | 'manual'
 /** split = ばらして売るために分割した親。子が在庫として残る */

@@ -8,7 +8,7 @@ import type {
   SaleProfit, ShippingMethod, SaleKind, SaleInput, SaleFilter, SaleTotals, Tag,
   Listing, ListingStatus, CollectorRun, SaleStatus, SalesProgress, SalesChannel,
 } from '../../shared/types'
-import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../../shared/types'
+import { CHANNEL_LABEL, LISTING_STATUS_LABEL, SALE_KIND_LABEL } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
@@ -769,7 +769,7 @@ async function editFee(sale: SaleProfit) {
 }
 
 async function setKind(sale: SaleProfit, kind: SaleKind) {
-  const label = kind === 'personal' ? '私物' : '転売'
+  const label = SALE_KIND_LABEL[kind]
   if (!await confirmDialog(`「${sale.title}」を${label}に変更しますか？`, { okLabel: '変更する' })) return
   await window.soroban.updateSale(sale.id, { kind })
   await load()
@@ -910,7 +910,7 @@ function tagOriginMark(from?: Tag['from']): string {
 //     隠れた分も含めて全文を title で読めるようにする ---
 function saleChipRowTitle(s: SaleProfit): string {
   return [
-    s.kind === 'personal' ? '私物' : '転売',
+    SALE_KIND_LABEL[s.kind],
     s.source === 'collector' ? '自動取得' : null,
     ...s.model_codes,
     ...s.tags.map(t => t.name),
@@ -1040,8 +1040,8 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
         <label class="field">
           <span>区分</span>
           <select v-model="form.kind">
-            <option value="resale">転売</option>
-            <option value="personal">私物</option>
+            <option value="resale">{{ SALE_KIND_LABEL.resale }}</option>
+            <option value="personal">{{ SALE_KIND_LABEL.personal }}</option>
           </select>
         </label>
         <label class="field">
@@ -1262,7 +1262,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                   title="私物に変更する（確認あり）"
                   @click="r.sale && setKind(r.sale, 'personal')"
                 >
-                  <StatusChip tone="brand" label="転売" />
+                  <StatusChip tone="brand" :label="SALE_KIND_LABEL.resale" />
                 </button>
                 <StatusChip v-else tone="neutral" label="私物" />
                 <StatusChip v-if="r.sale.source === 'collector'" tone="neutral" label="自動取得" />
@@ -1408,7 +1408,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
               <button class="sm ghost fade-btn" @click="r.sale && editNote(r.sale)" title="メモを編集する">メモ</button>
               <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editPackaging(r.sale)" title="梱包材費を編集する">梱包</button>
               <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editFee(r.sale)" title="販売手数料を実額に直す（空欄で率の計算に戻ります）">手数料</button>
-              <button v-if="r.sale.kind === 'personal'" class="sm ghost fade-btn" @click="r.sale && setKind(r.sale, 'resale')">転売にする</button>
+              <button v-if="r.sale.kind === 'personal'" class="sm ghost fade-btn" @click="r.sale && setKind(r.sale, 'resale')">{{ SALE_KIND_LABEL.resale }}にする</button>
               <button class="icon ghost" aria-label="削除" @click="r.sale && remove(r.sale)">
                 <Icon name="trash" :size="16" />
               </button>

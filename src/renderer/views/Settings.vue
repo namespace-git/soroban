@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
-import { CHANNEL_LABEL } from '../../shared/types'
+import { CHANNEL_LABEL, SALE_KIND_LABEL } from '../../shared/types'
 import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck, ListingStatus } from '../../shared/types'
 import { runSourceLabel } from '../utils/collector-run'
 
@@ -773,7 +773,7 @@ const runLabel: Record<string, string> = {
         </div>
         <div class="fields">
           <label class="field">
-            <span>{{ CHANNEL_LABEL.mercari }}で転売と判定するキーワード（カンマ区切りで複数可）</span>
+            <span>{{ CHANNEL_LABEL.mercari }}で「{{ SALE_KIND_LABEL.resale }}」（{{ SALE_KIND_LABEL.personal }}ではない）と判定するキーワード（カンマ区切りで複数可）</span>
             <input
               style="width:320px"
               placeholder="例：メロジョイ, Mellojoy"
@@ -804,7 +804,7 @@ const runLabel: Record<string, string> = {
         </p>
         <div class="fields">
           <label class="field">
-            <span>{{ CHANNEL_LABEL.yahoo }}で転売と判定するキーワード（カンマ区切りで複数可）</span>
+            <span>{{ CHANNEL_LABEL.yahoo }}で「{{ SALE_KIND_LABEL.resale }}」（{{ SALE_KIND_LABEL.personal }}ではない）と判定するキーワード（カンマ区切りで複数可）</span>
             <input
               style="width:320px"
               placeholder="例：メロジョイ, Mellojoy"

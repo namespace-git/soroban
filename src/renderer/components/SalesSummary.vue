@@ -12,6 +12,7 @@
 // 積み上げ（仕入先・タグごと）は MonthlySummary に内訳が無いため、従来どおり単色のまま
 // （無理に変えない。データが増えたら本来の積み上げに直せる）。
 import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
+import { SALE_KIND_LABEL } from '../../shared/types'
 import type { MonthlySummary, SaleKind } from '../../shared/types'
 import { thisMonthLocal } from '../../shared/date'
 import Icon from './Icon.vue'
@@ -204,8 +205,8 @@ const gridLines = computed(() => domainMin.value < 0
         </span>
         <span class="grow" />
         <select v-if="showChart" v-model="chartKind">
-          <option value="resale">転売</option>
-          <option value="personal">私物</option>
+          <option value="resale">{{ SALE_KIND_LABEL.resale }}</option>
+          <option value="personal">{{ SALE_KIND_LABEL.personal }}</option>
         </select>
         <button class="sm ghost" @click="toggleChart">{{ showChart ? 'グラフを隠す' : 'グラフを見せる' }}</button>
       </div>

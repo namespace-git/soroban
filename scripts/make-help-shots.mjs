@@ -518,6 +518,9 @@ const SHOTS = [
       { click: 'すべて' }, { wait: 400 },
       { click: '在庫を選ぶ', after: 500 },
       { waitFor: '.drawer[role="dialog"]' }, { wait: 300 },
+      // 既定は「商品から選ぶ」に変わった。チェックボックスで 1 点ずつ選べるのは
+      // 「在庫から選ぶ」側なので、そちらに切り替えてから撮る
+      { click: '在庫から選ぶ', after: 400 },
       { clickSelector: '.candidates .item input[type="checkbox"]', after: 500 },
     ],
     clip: '.drawer[role="dialog"]',
