@@ -4,12 +4,16 @@
 // MonthDetail.vue（getMonthDetail）から。右の「お金の出入り」は getCashMonth（損益とは別の層）。
 // どれも main が計算した値をそのまま出すだけで、ここでは再計算しない。
 import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import type { MonthlySummary, MonthStatement, MonthDetail as MonthDetailInfo, ExpenseCategory, ExportKind, ProfitStrip, CashMonth, LiabilityKind } from '../../shared/types'
+import type { MonthlySummary, MonthStatement, MonthDetail as MonthDetailInfo, ExpenseCategory, ExportKind, ProfitStrip, CashMonth, CashAccount, CashEntry, Liability, LiabilityKind } from '../../shared/types'
 import { thisMonthLocal } from '../../shared/date'
 import Icon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import StatusChip from '../components/StatusChip.vue'
+import StatusPill from '../components/StatusPill.vue'
+import CashAccountForm from '../components/CashAccountForm.vue'
+import CashEntryForm from '../components/CashEntryForm.vue'
+import { CASH_CATEGORY_LABEL, errorText } from '../components/cash-util'
 import MonthDetail from './MonthDetail.vue'
 import { yen, percent, dateTime, shortDate } from '../format'
 
@@ -53,7 +57,7 @@ async function load() {
   if (!pickedByUser) selectedMonth.value = months.value[0]?.month ?? null
 }
 onMounted(load)
-watch(revision, () => { load(); loadStatement(); loadCash() })
+watch(revision, () => { load(); loadStatement(); loadCash(true) })
 
 function statusTone(m: MonthlySummary): 'ok' | 'warn' | 'neutral' {
   if (m.month === thisMonth.value) return 'neutral'
@@ -103,23 +107,78 @@ const expenseSubLabel = computed(() =>
 const cash = ref<CashMonth | null>(null)
 const cashLoaded = ref(false)
 
-async function loadCash() {
+// 入力欄（お金を記録する）と履歴の元。口座・債務（全部）・この月の入出金・設定の「毎月いくら返すか」
+const cashAccounts = ref<CashAccount[]>([])
+const liabilities = ref<Liability[]>([])
+const cashEntries = ref<CashEntry[]>([])
+const monthlyRepay = ref(0)
+
+// quiet＝記録した直後などの読み直し。入力欄を作り直さない（読み込み中の表示に切り替えない）
+async function loadCash(quiet = false) {
   const month = selectedMonth.value
   if (!month) { cash.value = null; return }
-  cashLoaded.value = false
-  const c = await window.soroban.getCashMonth(month)
+  if (quiet !== true) cashLoaded.value = false
+  const [c, accounts, libs, entries, settings] = await Promise.all([
+    window.soroban.getCashMonth(month),
+    window.soroban.listCashAccounts(),
+    window.soroban.listLiabilities(),
+    window.soroban.listCashEntries(month),
+    window.soroban.getSettings(),
+  ])
   // 読み込み中に別の月へ移ったら、古い月の答えで上書きしない
   if (selectedMonth.value !== month) return
   cash.value = c
+  cashAccounts.value = accounts
+  liabilities.value = libs
+  cashEntries.value = entries
+  const repay = Number(settings.loan_repay_monthly ?? '')
+  monthlyRepay.value = Number.isSafeInteger(repay) && repay > 0 ? repay : 0
   cashLoaded.value = true
 }
-watch(selectedMonth, loadCash, { immediate: true })
+watch(selectedMonth, () => loadCash(), { immediate: true })
 
 // まだ何も入力していない月（入出金も払う予定も月初の残りも無い）。0 円を「使えるお金 ¥0」と見せない
 const cashIsEmpty = computed(() => {
   const c = cash.value
   return !!c && c.incoming.length === 0 && c.outgoing.length === 0 && c.upcoming.length === 0 && c.opening === 0
 })
+
+const hasActiveAccount = computed(() => cashAccounts.value.some(a => a.is_active))
+const openLiabilities = computed(() => liabilities.value.filter(l => l.remaining > 0))
+const hasLoan = computed(() => liabilities.value.some(l => l.kind === 'loan'))
+
+async function onCashSaved() {
+  await loadCash(true)
+}
+
+// 履歴の 1 行：消し込んだ先（あれば）を「2026-08 ぶんの仕入 ¥70,000」の形で添える
+function settledText(e: CashEntry): string {
+  return e.settles.map((s) => {
+    const l = liabilities.value.find(x => x.id === s.liability_id)
+    const name = !l ? '支払い待ち'
+      : l.kind === 'purchase' ? `${l.month ?? l.occurred_at.slice(0, 7)} ぶんの仕入`
+        : l.kind === 'loan' ? `${shortDate(l.occurred_at)} に借りた分`
+          : 'ツール分'
+    return `${name} ${yen(s.amount)}`
+  }).join('、')
+}
+
+async function deleteEntry(e: CashEntry) {
+  const label = CASH_CATEGORY_LABEL[e.category]
+  const ok = await confirmDialog(`${shortDate(e.occurred_at)} の「${label}」${yen(e.amount)} を消しますか？`, {
+    message: e.settles.length ? '消し込んだ支払い待ち（借りたお金の残りなど）は、元に戻ります' : undefined,
+    okLabel: '削除する',
+    danger: true,
+  })
+  if (!ok) return
+  try {
+    await window.soroban.deleteCashEntry(e.id)
+    toast('消しました', 'ok')
+  } catch (err) {
+    toast(errorText(err), 'warn')
+  }
+  await loadCash(true)
+}
 
 const UPCOMING_LABEL: Record<LiabilityKind, (counterparty: string) => string> = {
   loan: (c) => `${c}への返済`,
@@ -368,11 +427,35 @@ async function doReopen() {
             <p class="faint cash-note">口座に実際に入った・出ていったお金です。左の粗利・純利益（儲けの計算）とは別の数字です。</p>
 
             <Skeleton v-if="!cashLoaded" :rows="6" />
-            <EmptyState
-              v-else-if="cashIsEmpty"
-              title="この月のお金の出入りは、まだ入力されていません"
-              hint="入ったお金・出ていったお金が記録されると、ここに出ます"
-            />
+            <!-- 何も入っていない：口座 → 借りたお金 → 記録、の順に導く -->
+            <div v-else-if="!hasActiveAccount || cashIsEmpty" class="cash-start">
+              <p class="cash-start-lead">お金の出入りは、次の順に入れていきます。</p>
+              <ol class="cash-steps">
+                <li :class="hasActiveAccount ? 'done' : 'now'">
+                  <span class="cash-step-title"><Icon :name="hasActiveAccount ? 'check-circle' : 'arrow-right'" :size="16" /> 1. 口座を作る</span>
+                  <template v-if="hasActiveAccount">
+                    <span class="faint cash-step-note">{{ cashAccounts.filter(a => a.is_active).map(a => a.name).join('・') }}</span>
+                  </template>
+                  <template v-else-if="!cashAccounts.length">
+                    <span class="faint cash-step-note">お金の置き場所（銀行など）。0円から始められます</span>
+                    <CashAccountForm @saved="onCashSaved" />
+                  </template>
+                  <template v-else>
+                    <span class="faint cash-step-note">使っている口座がありません。設定で「使う」に戻してください</span>
+                    <button class="sm" @click="goto('settings')">設定を開く →</button>
+                  </template>
+                </li>
+                <li :class="hasLoan ? 'done' : hasActiveAccount ? 'now' : 'todo'">
+                  <span class="cash-step-title"><Icon :name="hasLoan ? 'check-circle' : 'arrow-right'" :size="16" /> 2. 借りたお金を入れる</span>
+                  <span class="faint cash-step-note">いつ・いくら借りたか、毎月いくら返すか</span>
+                  <button v-if="!hasLoan" class="sm" :class="{ ghost: !hasActiveAccount }" @click="goto('settings')">設定の「借りたお金」へ →</button>
+                </li>
+                <li :class="hasActiveAccount ? 'now' : 'todo'">
+                  <span class="cash-step-title"><Icon name="arrow-right" :size="16" /> 3. 入ったお金・出ていったお金を記録する</span>
+                  <span class="faint cash-step-note">下の「お金を記録する」から。仕入の支払いも、ここで消し込めます</span>
+                </li>
+              </ol>
+            </div>
             <template v-else-if="cash">
               <div class="cash-hero" :class="cash.free_cash < 0 ? 'minus' : cash.free_cash > 0 ? 'plus' : ''">
                 <span class="cash-hero-label">使えるお金</span>
@@ -443,6 +526,49 @@ async function doReopen() {
                 </div>
               </div>
             </template>
+          </div>
+
+          <!-- お金を記録する：出金は「何の支払いか」を選んで、仕入・借りたお金を消し込む -->
+          <div v-if="cashLoaded" class="panel cash-form-panel">
+            <div class="section-head">
+              <span class="section-head-icon"><Icon name="plus" :size="16" /></span>
+              <h2 class="section-head-title">お金を記録する</h2>
+            </div>
+            <CashEntryForm
+              v-if="hasActiveAccount"
+              :month="selectedMonth"
+              :accounts="cashAccounts"
+              :liabilities="openLiabilities"
+              :monthly-repay="monthlyRepay"
+              :purchase-of-month="statement?.purchase_paid ?? null"
+              @saved="onCashSaved"
+            />
+            <p v-else class="faint cash-form-wait">先に口座を作ると、ここから入れられます。</p>
+          </div>
+
+          <!-- この月の入出金（間違えたらここから消せる） -->
+          <div v-if="cashLoaded && cashEntries.length" class="panel cash-entries-panel">
+            <div class="section-head">
+              <span class="section-head-icon"><Icon name="history" :size="16" /></span>
+              <h2 class="section-head-title">この月の入出金</h2>
+              <span class="grow" />
+              <span class="faint cash-entries-count">{{ cashEntries.length }} 件</span>
+            </div>
+            <div class="entry-list">
+              <div v-for="e in cashEntries" :key="e.id" class="entry-row">
+                <StatusPill :tone="e.direction === 'in' ? 'ok' : 'neutral'" :label="e.direction === 'in' ? '入った' : '出た'" />
+                <div class="entry-main">
+                  <span class="entry-name" :title="CASH_CATEGORY_LABEL[e.category] + (e.note ? ' ・ ' + e.note : '')">
+                    {{ CASH_CATEGORY_LABEL[e.category] }}<template v-if="e.note"> ・ {{ e.note }}</template>
+                  </span>
+                  <span class="entry-sub" :title="settledText(e)">
+                    {{ shortDate(e.occurred_at) }} ・ {{ e.account_name }}<template v-if="e.settles.length"> ・ {{ settledText(e) }}</template>
+                  </span>
+                </div>
+                <span class="num entry-amount" :class="e.direction === 'in' ? 'profit' : ''">{{ e.direction === 'in' ? '+' : '−' }}{{ yen(e.amount) }}</span>
+                <button class="icon ghost" aria-label="削除" @click="deleteEntry(e)"><Icon name="trash" :size="16" /></button>
+              </div>
+            </div>
           </div>
 
           <div class="panel close-card">
@@ -746,6 +872,46 @@ async function doReopen() {
 .cash-due { display: block; font-size: var(--fs-12); color: var(--text-faint); }
 .cash-total { font-weight: 700; border-bottom: 2px solid var(--line); }
 .cash-flow { padding-top: 2px; }
+
+/* --- 右：まだ何も入っていないときの案内 --- */
+.cash-start-lead { margin: 0 0 10px; font-size: var(--fs-14); font-weight: 600; }
+.cash-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.cash-steps li {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.cash-steps li.now { border-color: var(--primary); background: var(--brand-soft); }
+.cash-steps li.done { background: var(--profit-bg); border-color: transparent; }
+.cash-steps li.todo { color: var(--text-dim); }
+.cash-step-title { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-14); font-weight: 600; }
+.cash-steps li.done .cash-step-title { color: var(--profit); }
+.cash-step-note { font-size: var(--fs-12); }
+
+/* --- 右：お金を記録する／この月の入出金 --- */
+.cash-form-panel .section-head { margin-bottom: 12px; }
+.cash-form-wait { margin: 0; font-size: var(--fs-13); }
+.cash-entries-panel .section-head { margin-bottom: 8px; }
+.cash-entries-count { font-size: var(--fs-12); }
+.entry-list { max-height: 340px; overflow-y: auto; }
+.entry-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.entry-row:last-child { border-bottom: 0; }
+.entry-row > :first-child { flex-shrink: 0; }
+.entry-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.entry-name { font-size: var(--fs-14); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry-sub { font-size: var(--fs-12); color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry-amount { flex-shrink: 0; font-size: var(--fs-14); font-variant-numeric: tabular-nums; }
+.entry-row button { flex-shrink: 0; }
 
 /* --- 右：仕入先への支払い --- */
 .table-panel { padding: 0; overflow: hidden; }

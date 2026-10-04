@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
 import { CHANNEL_LABEL, SALE_KIND_LABEL } from '../../shared/types'
-import type { ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck, ListingStatus } from '../../shared/types'
+import type { CashAccount, CashAccountKind, CashAccountPatch, Liability, LiabilityPatch, ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck, ListingStatus } from '../../shared/types'
 import { runSourceLabel } from '../utils/collector-run'
 
 type SaleExclusion = { mercari_item_id: string; title: string; excluded_at: string }
@@ -11,9 +11,12 @@ import StatusPill from '../components/StatusPill.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
+import CashAccountForm from '../components/CashAccountForm.vue'
+import { ACCOUNT_KINDS, ACCOUNT_KIND_LABEL, parseYen, parsePositiveYen, errorText } from '../components/cash-util'
 import type { PromptOptions } from '../components/InputDialog.vue'
 import type { ConfirmChoice } from '../components/ConfirmDialog.vue'
-import { yen, dateTime } from '../format'
+import { yen, dateTime, num } from '../format'
+import { todayLocal } from '../../shared/date'
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
@@ -49,6 +52,9 @@ const customModelInput = ref('')
 const autoBackup = ref<AutoBackupStatus | null>(null)
 const healthChecks = ref<HealthCheck[]>([])
 const checkingHealth = ref(false)
+const cashAccounts = ref<CashAccount[]>([])
+const loans = ref<Liability[]>([])
+const showAccountForm = ref(false)
 const healthWarnCount = computed(() => healthChecks.value.filter(h => h.level === 'warn').length)
 
 /**
@@ -72,7 +78,7 @@ const modelOptions = computed(() => {
 })
 
 async function load() {
-  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes, trackingApiStatusRes, autoBackupRes, healthRes] = await Promise.all([
+  const [methodsRes, settingsRes, runsRes, accountsRes, tagsRes, updateRes, shopStatsRes, exclusionsRes, aiStatusRes, trackingApiStatusRes, autoBackupRes, healthRes, cashAccountsRes, loansRes] = await Promise.all([
     window.soroban.listShippingMethods(),
     window.soroban.getSettings(),
     window.soroban.listRuns(10),
@@ -85,6 +91,8 @@ async function load() {
     window.soroban.getTrackingApiStatus(),
     window.soroban.getAutoBackupStatus(),
     window.soroban.getHealthChecks(),
+    window.soroban.listCashAccounts(),
+    window.soroban.listLiabilities({ kind: 'loan' }),
   ])
   methods.value = methodsRes
   settings.value = settingsRes
@@ -99,6 +107,8 @@ async function load() {
   trackingApiStatus.value = trackingApiStatusRes
   autoBackup.value = autoBackupRes
   healthChecks.value = healthRes
+  cashAccounts.value = cashAccountsRes
+  loans.value = loansRes
   loaded.value = true
 }
 onMounted(load)
@@ -513,6 +523,161 @@ async function restoreSaleExclusion(e: SaleExclusion) {
   toast('戻しました。次の取り込みで復活します', 'ok')
 }
 
+// --- お金の口座・借りたお金（月次タブの「お金の出入り」の元になる入力） ---
+
+async function reloadCash() {
+  const [a, l] = await Promise.all([
+    window.soroban.listCashAccounts(),
+    window.soroban.listLiabilities({ kind: 'loan' }),
+  ])
+  cashAccounts.value = a
+  loans.value = l
+}
+
+async function onAccountCreated() {
+  showAccountForm.value = false
+  await reloadCash()
+  changed()
+}
+
+async function patchAccount(a: CashAccount, patch: CashAccountPatch) {
+  try {
+    await window.soroban.updateCashAccount(a.id, patch)
+    flash('保存しました')
+  } catch (e) {
+    toast(errorText(e), 'warn')
+  }
+  await reloadCash()
+  changed()
+}
+
+// 入力欄の値が通らなかったときは、欄を元の値に戻す（:value は前と同じだと描き直されず、変な文字が残るため）
+function saveAccountOpeningBalance(a: CashAccount, el: HTMLInputElement) {
+  const p = el.value.trim() === '' ? { ok: true as const, value: 0 } : parseYen(el.value)
+  if (!p.ok) { toast(p.error, 'warn'); el.value = num(a.opening_balance); return }
+  return patchAccount(a, { opening_balance: p.value })
+}
+
+function saveAccountKind(a: CashAccount, kind: CashAccountKind) {
+  return patchAccount(a, { kind })
+}
+
+function saveAccountName(a: CashAccount, el: HTMLInputElement) {
+  if (!el.value.trim()) { toast('口座の名前を入力してください', 'warn'); el.value = a.name; return }
+  return patchAccount(a, { name: el.value })
+}
+
+function saveAccountOpeningDate(a: CashAccount, el: HTMLInputElement) {
+  if (!el.value) { el.value = a.opening_date; return }
+  return patchAccount(a, { opening_date: el.value })
+}
+
+function toggleAccountUse(a: CashAccount) {
+  return patchAccount(a, { is_active: a.is_active ? 0 : 1 })
+}
+
+// 借りたお金：1 件ずつ「いつ・いくら」を入れる。何回借りても 1 本にまとめない
+const loanForm = ref({ occurred_at: todayLocal(), amount: '', counterparty: '夫', note: '' })
+const addingLoan = ref(false)
+
+const loanRemainingTotal = computed(() => loans.value.reduce((s, l) => s + l.remaining, 0))
+const loanSettledTotal = computed(() => loans.value.reduce((s, l) => s + l.settled, 0))
+const loanAmountTotal = computed(() => loans.value.reduce((s, l) => s + l.amount, 0))
+// 相手ごとの残り（相手が 1 人だけなら出さない）
+const loanRemainingByPerson = computed(() => {
+  const map = new Map<string, number>()
+  for (const l of loans.value) map.set(l.counterparty, (map.get(l.counterparty) ?? 0) + l.remaining)
+  return [...map.entries()].map(([name, remaining]) => ({ name, remaining }))
+})
+
+async function addLoan() {
+  if (addingLoan.value) return
+  const f = loanForm.value
+  if (!f.occurred_at) { toast('借りた日を入力してください', 'warn'); return }
+  const amount = parsePositiveYen(f.amount, '借りた金額を入力してください')
+  if (!amount.ok) { toast(amount.error, 'warn'); return }
+  if (!f.counterparty.trim()) { toast('誰から借りたかを入力してください', 'warn'); return }
+  addingLoan.value = true
+  try {
+    await window.soroban.createLiability({
+      kind: 'loan',
+      counterparty: f.counterparty.trim(),
+      occurred_at: f.occurred_at,
+      amount: amount.value,
+      note: f.note.trim() || null,
+    })
+    loanForm.value = { ...f, amount: '', note: '' }
+    await reloadCash()
+    changed()
+    toast('借りたお金を記録しました', 'ok')
+  } catch (e) {
+    toast(errorText(e), 'warn')
+  } finally {
+    addingLoan.value = false
+  }
+}
+
+async function patchLoan(l: Liability, patch: LiabilityPatch) {
+  try {
+    await window.soroban.updateLiability(l.id, patch)
+    flash('保存しました')
+  } catch (e) {
+    toast(errorText(e), 'warn')
+  }
+  await reloadCash()
+  changed()
+}
+
+function saveLoanAmount(l: Liability, el: HTMLInputElement) {
+  const p = parsePositiveYen(el.value)
+  if (!p.ok) { toast(p.error, 'warn'); el.value = num(l.amount); return }
+  return patchLoan(l, { amount: p.value })
+}
+
+function saveLoanCounterparty(l: Liability, el: HTMLInputElement) {
+  if (!el.value.trim()) { toast('誰から借りたかを入力してください', 'warn'); el.value = l.counterparty; return }
+  return patchLoan(l, { counterparty: el.value })
+}
+
+function saveLoanDate(l: Liability, el: HTMLInputElement) {
+  if (!el.value) { el.value = l.occurred_at; return }
+  return patchLoan(l, { occurred_at: el.value })
+}
+
+function saveLoanNote(l: Liability, el: HTMLInputElement) {
+  return patchLoan(l, { note: el.value.trim() || null })
+}
+
+async function removeLoan(l: Liability) {
+  if (l.settled > 0) {
+    toast('返した記録があるので消せません。月次タブで返した記録を消してから消してください', 'warn')
+    return
+  }
+  if (!await confirmDialog(`${l.occurred_at} に借りた ${yen(l.amount)} を消しますか？`, { okLabel: '削除する', danger: true })) return
+  try {
+    await window.soroban.deleteLiability(l.id)
+  } catch (e) {
+    toast(errorText(e), 'warn')
+  }
+  await reloadCash()
+  changed()
+}
+
+// 毎月いくら返すか。債務（Liability）に返済予定の欄が無く main も触れないので、設定に 1 つだけ持つ。
+// 月次の「借りたお金を返す」を選んだときの既定額になる（空なら既定額なし）
+async function saveMonthlyRepay(el: HTMLInputElement) {
+  const trimmed = el.value.trim()
+  let stored = ''
+  if (trimmed !== '') {
+    const p = parsePositiveYen(trimmed)
+    if (!p.ok) { toast(p.error, 'warn'); el.value = settings.value.loan_repay_monthly ?? ''; return }
+    stored = String(p.value)
+  }
+  settings.value = { ...settings.value, loan_repay_monthly: stored }
+  await saveSetting('loan_repay_monthly', stored)
+  changed()
+}
+
 async function resetData() {
   const input = await ask('確認のため「初期化」と入力してください', { placeholder: '初期化' })
   if (input !== '初期化') return
@@ -615,6 +780,165 @@ const runLabel: Record<string, string> = {
           <p class="faint hint">
             送料は改定されます。出品画面の表示と食い違ったらここで直してください。
           </p>
+        </div>
+      </div>
+
+      <!-- お金の口座：月次タブの「お金の出入り」で入った・出たお金を記録する置き場。0 円から始められる -->
+      <div class="panel table-panel">
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="inbox" :size="16" /></span>
+          <h2 class="section-head-title">お金の口座</h2>
+        </div>
+        <table v-if="cashAccounts.length" class="compact accounts-cash-table">
+          <thead>
+            <tr>
+              <th>名前</th><th>種類</th>
+              <th class="num">はじめにあった金額</th><th>いつの時点</th>
+              <th class="num">いまの残高</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="a in cashAccounts" :key="a.id" :class="{ faint: !a.is_active }">
+              <td>
+                <input :value="a.name" @change="saveAccountName(a, $event.target as HTMLInputElement)" />
+                <StatusChip v-if="!a.is_active" tone="neutral" label="使っていない" />
+              </td>
+              <td>
+                <select :value="a.kind" @change="saveAccountKind(a, ($event.target as HTMLSelectElement).value as CashAccountKind)">
+                  <option v-for="k in ACCOUNT_KINDS" :key="k" :value="k">{{ ACCOUNT_KIND_LABEL[k] }}</option>
+                </select>
+              </td>
+              <td class="num">
+                <span class="num money-cell">
+                  <span class="yen">¥</span>
+                  <input
+                    :value="num(a.opening_balance)" inputmode="numeric" style="width:96px"
+                    title="この日にあった金額。0円のままでも使えます"
+                    @change="saveAccountOpeningBalance(a, $event.target as HTMLInputElement)"
+                  />
+                </span>
+              </td>
+              <td>
+                <input
+                  type="date" :value="a.opening_date" style="width:140px"
+                  title="この日より前の入出金は記録できません"
+                  @change="saveAccountOpeningDate(a, $event.target as HTMLInputElement)"
+                />
+              </td>
+              <td class="num"><strong :class="{ loss: a.balance < 0 }">{{ yen(a.balance) }}</strong></td>
+              <td class="actions">
+                <button class="sm ghost" @click="toggleAccountUse(a)">{{ a.is_active ? '使わない' : '使う' }}</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="panel-foot">
+          <template v-if="!cashAccounts.length">
+            <p class="first-step"><strong>最初の一歩：</strong>お金が出入りする口座を 1 つ作ります。0 円から始められます。</p>
+            <CashAccountForm @saved="onAccountCreated" />
+          </template>
+          <template v-else>
+            <button v-if="!showAccountForm" class="ghost sm" @click="showAccountForm = true">
+              <Icon name="plus" :size="14" /> 口座を追加
+            </button>
+            <CashAccountForm v-else @saved="onAccountCreated" />
+          </template>
+          <p class="faint hint">
+            銀行やフリマの売上金など、お金の置き場所です。入った・出たお金は月次タブで記録すると、「いまの残高」が変わります。
+          </p>
+        </div>
+      </div>
+
+      <!-- 借りたお金：いつ・いくら借りたかを 1 件ずつ。返した分は月次タブで入れると残りが減る -->
+      <div class="panel table-panel">
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="note" :size="16" /></span>
+          <h2 class="section-head-title">借りたお金</h2>
+        </div>
+        <div class="loan-summary">
+          <span class="loan-summary-label">いまの残り</span>
+          <strong class="loan-summary-value num">{{ yen(loanRemainingTotal) }}</strong>
+          <span v-if="loans.length" class="faint">借りた合計 {{ yen(loanAmountTotal) }} − 返した合計 {{ yen(loanSettledTotal) }}</span>
+          <span v-if="loanRemainingByPerson.length > 1" class="faint">
+            （{{ loanRemainingByPerson.map(p => `${p.name} ${yen(p.remaining)}`).join('・') }}）
+          </span>
+        </div>
+        <table v-if="loans.length" class="compact loans-table">
+          <thead>
+            <tr>
+              <th>借りた日</th><th>相手</th><th>メモ</th>
+              <th class="num">借りた額</th><th class="num">返した額</th><th class="num">残り</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="l in loans" :key="l.id">
+              <td><input type="date" :value="l.occurred_at" style="width:140px" @change="saveLoanDate(l, $event.target as HTMLInputElement)" /></td>
+              <td><input :value="l.counterparty" style="width:80px" @change="saveLoanCounterparty(l, $event.target as HTMLInputElement)" /></td>
+              <td><input :value="l.note ?? ''" placeholder="—" @change="saveLoanNote(l, $event.target as HTMLInputElement)" /></td>
+              <td class="num">
+                <span class="num money-cell">
+                  <span class="yen">¥</span>
+                  <input :value="num(l.amount)" inputmode="numeric" style="width:96px" @change="saveLoanAmount(l, $event.target as HTMLInputElement)" />
+                </span>
+              </td>
+              <td class="num faint">{{ yen(l.settled) }}</td>
+              <td class="num"><strong :class="{ faint: l.remaining === 0 }">{{ yen(l.remaining) }}</strong></td>
+              <td class="actions">
+                <button
+                  class="icon ghost" aria-label="削除"
+                  :title="l.settled > 0 ? '返した記録があるので消せません（月次タブで返した記録を消すと消せます）' : 'この借入を消す'"
+                  @click="removeLoan(l)"
+                >
+                  <Icon name="trash" :size="16" />
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="faint loan-empty">まだ借りたお金は記録されていません。下から「いつ・いくら借りたか」を入れてください。</p>
+        <div class="panel-foot">
+          <div class="fields">
+            <label class="field">
+              <span>借りた日</span>
+              <input v-model="loanForm.occurred_at" type="date" style="width:150px" />
+            </label>
+            <label class="field">
+              <span>借りた金額</span>
+              <span class="money-cell">
+                <span class="yen">¥</span>
+                <input v-model="loanForm.amount" inputmode="numeric" style="width:120px" placeholder="例：30000" @keydown.enter="addLoan" />
+              </span>
+            </label>
+            <label class="field">
+              <span>誰から</span>
+              <input v-model="loanForm.counterparty" style="width:90px" @keydown.enter="addLoan" />
+            </label>
+            <label class="field">
+              <span>メモ（なくてもOK）</span>
+              <input v-model="loanForm.note" style="width:200px" placeholder="例：仕入の立替" @keydown.enter="addLoan" />
+            </label>
+            <button class="primary sm loan-add-btn" :disabled="addingLoan" @click="addLoan">
+              <Icon name="plus" :size="14" /> 追加
+            </button>
+          </div>
+          <p class="faint hint">
+            借りるたびに 1 件ずつ入れます（何回借りてもかまいません）。返した分は月次タブの「お金を記録する」で入れると、ここの残りが減ります。
+          </p>
+          <div class="repay-plan">
+            <label class="field">
+              <span>毎月いくら返すか</span>
+              <span class="money-cell">
+                <span class="yen">¥</span>
+                <input
+                  :value="settings.loan_repay_monthly ?? ''" inputmode="numeric" style="width:120px" placeholder="例：20000"
+                  @change="saveMonthlyRepay($event.target as HTMLInputElement)"
+                />
+              </span>
+            </label>
+            <p class="faint hint">
+              月次タブで「借りたお金を返す」を選ぶと、この金額が最初から入ります（空のままなら入りません）。
+            </p>
+          </div>
         </div>
       </div>
 
@@ -1295,6 +1619,27 @@ const runLabel: Record<string, string> = {
 
 .ai-key-url, .track-key-url { user-select: all; font-size: var(--fs-12); background: var(--surface-hi); padding: 1px 6px; border-radius: var(--radius-sm); }
 .model-manual { gap: 6px; align-items: center; }
+
+/* --- お金の口座・借りたお金 --- */
+.first-step { margin: 0; font-size: var(--fs-14); }
+.accounts-cash-table td input:not([type="date"]):not([inputmode]) { width: 100%; min-width: 120px; }
+.accounts-cash-table td > .chip { margin-left: 6px; }
+.loan-summary {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 0 20px 12px;
+  font-size: var(--fs-13);
+}
+.loan-summary-label { font-size: var(--fs-13); font-weight: 600; color: var(--text-dim); }
+.loan-summary-value { font-size: var(--fs-28); font-weight: 700; }
+.loan-empty { margin: 0; padding: 4px 20px 0; font-size: var(--fs-13); }
+.loans-table td input:not([type="date"]):not([inputmode]) { width: 100%; min-width: 120px; }
+.loan-add-btn { align-self: flex-end; display: inline-flex; align-items: center; gap: 6px; }
+.repay-plan { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line-soft); align-self: stretch; }
+.repay-plan .field { align-items: flex-start; }
+.repay-plan .money-cell { justify-content: flex-start; }
 
 .money-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; width: auto; }
 .money-cell .yen { color: var(--text-dim); font-size: var(--fs-12); }

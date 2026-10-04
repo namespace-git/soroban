@@ -2670,7 +2670,17 @@ function liabilityWithRemaining(l: Omit<Liability, 'settled' | 'remaining'>, asO
   return { ...l, settled, remaining: l.amount - settled }
 }
 
+// ?cash=empty で開くと、口座・借入・入出金が全部空の状態から始まる（利用者の実際の初期状態の確認用）
+const CASH_EMPTY_SCENARIO = typeof location !== 'undefined' && new URLSearchParams(location.search).get('cash') === 'empty'
+
 function buildInitialCash(): void {
+  if (CASH_EMPTY_SCENARIO) {
+    cashAccounts = []
+    liabilityRows = []
+    cashEntryRows = []
+    liabilitySettles = []
+    return
+  }
   const thisM = thisMonthLocal()
   const m1 = monthAgoStr(1)
   const m2 = monthAgoStr(2)
@@ -3058,6 +3068,26 @@ const api: SorobanApi = {
   },
 
   async createCashEntry(input: CashEntryInput): Promise<string> {
+    // main の createCashEntry と同じ検査（画面が防げているかを、モックでも確かめられるように）
+    const account = cashAccounts.find(a => a.id === input.account_id)
+    if (!account) throw new Error('口座が見つかりません')
+    if (input.occurred_at < account.opening_date) {
+      throw new Error(`この口座は ${account.opening_date} から数えています。それより前の日付は入れられません`)
+    }
+    const settles = input.settles ?? []
+    const settleTotal = settles.reduce((s, x) => s + x.amount, 0)
+    if (settles.length > 0 && input.direction !== 'out') throw new Error('債務を消し込めるのは出金だけです')
+    if (settleTotal > input.amount) {
+      throw new Error(`消し込みの合計（¥${settleTotal.toLocaleString('ja-JP')}）が入出金の額（¥${input.amount.toLocaleString('ja-JP')}）を超えています`)
+    }
+    for (const x of settles) {
+      const l = liabilityRows.find(r => r.id === x.liability_id)
+      if (!l) throw new Error('債務が見つかりません')
+      const remaining = liabilityWithRemaining(l).remaining
+      if (x.amount > remaining) {
+        throw new Error(`${l.counterparty}の債務は残り ¥${remaining.toLocaleString('ja-JP')} です。¥${x.amount.toLocaleString('ja-JP')} は消し込めません`)
+      }
+    }
     const id = uid()
     cashEntryRows.push({
       id, account_id: input.account_id, occurred_at: input.occurred_at, direction: input.direction,
