@@ -33,6 +33,15 @@ export interface YahooScrapedSale {
   statusText: string
   /** 商品サムネイルのURL。取れなければ null */
   thumbUrl: string | null
+  /** タイトルが `＜まとめ買い＞` で始まるか（複数の出品を 1 回の取引で購入。まとめ買い全体で 1 つの商品 id を持つ） */
+  isBundle: boolean
+  /**
+   * まとめ買いの点数（タイトル末尾の `計n点` の n）。まとめ買いでない・`計` で切れていて数字が
+   * 読めないときは null（推測で 2 と埋めない）。中身が何かは**このページからは分からない**
+   */
+  bundleCount: number | null
+  /** `title` から `＜まとめ買い＞` と `計n点` を取り除いた形（型番の抽出用）。まとめ買いでなければ `title` と同じ */
+  titleWithoutBundle: string
 }
 
 function decodeEntities(s: string): string {
@@ -80,6 +89,38 @@ function readClParam(params: string, key: string): string | null {
   return m ? m[1] : null
 }
 
+const BUNDLE_PREFIX_RE = /^＜まとめ買い＞\s*/
+/** 末尾の `計2点`。点数が読めたときだけ一致する */
+const BUNDLE_COUNT_RE = /\s*計\s*(\d+)\s*点\s*$/
+/** 末尾が `計` で切れている形（Yahoo 側でタイトルが途中で切れる。売上金管理の取扱内容はこうなる） */
+const BUNDLE_COUNT_CUT_RE = /\s*計\s*$/
+
+/**
+ * まとめ買いのタイトル（`＜まとめ買い＞ 商品名 計2点`）から、まとめ買いか・点数・
+ * `＜まとめ買い＞` と `計n点` を取り除いた形を取る。
+ *
+ * タイトルに出るのは中の 1 つぶんの商品名だけで、残りが何かはここからは分からない（推測しない）。
+ * 点数は `計n点` が読めたときだけ。`計` だけで切れていれば null。まとめ買いでなければ何も取り除かない。
+ */
+export function parseYahooBundleTitle(title: string): {
+  isBundle: boolean
+  bundleCount: number | null
+  titleWithoutBundle: string
+} {
+  if (!BUNDLE_PREFIX_RE.test(title)) return { isBundle: false, bundleCount: null, titleWithoutBundle: title }
+  let rest = title.replace(BUNDLE_PREFIX_RE, '')
+  let bundleCount: number | null = null
+  const countMatch = BUNDLE_COUNT_RE.exec(rest)
+  if (countMatch) {
+    const n = parseInt(countMatch[1], 10)
+    bundleCount = Number.isSafeInteger(n) && n >= 1 ? n : null
+    rest = rest.slice(0, countMatch.index)
+  } else {
+    rest = rest.replace(BUNDLE_COUNT_CUT_RE, '')
+  }
+  return { isBundle: true, bundleCount, titleWithoutBundle: rest.trim() }
+}
+
 /**
  * 「取引中・取引完了」（`https://paypayfleamarket.yahoo.co.jp/my/item/sold`）の
  * HTML から行を抜く（jsdom なしの簡易パース）。
@@ -124,6 +165,12 @@ export function parseYahooSoldHtml(rawHtml: string): YahooScrapedSale[] {
     const spanRe = /<span\b[^>]*>([\s\S]*?)<\/span>/g
     let sm: RegExpExecArray | null
     while ((sm = spanRe.exec(afterTitle))) statusText = stripTags(sm[1])
+    // 取引完了の行だけ、状態の文言（「取引完了」）が <span> ではなく価格の隣の <div> に出る（実物で確認）。
+    // <span> から読めなければ、最後の価格 <p> より後ろの文字を状態として読む
+    if (!statusText) {
+      const lastP = afterTitle.lastIndexOf('</p>')
+      if (lastP >= 0) statusText = stripTags(afterTitle.slice(lastP + '</p>'.length))
+    }
 
     // サムネイルは img[alt="商品画像"] の src（属性の並び順には依存しない）
     let thumbUrl: string | null = null
@@ -137,7 +184,7 @@ export function parseYahooSoldHtml(rawHtml: string): YahooScrapedSale[] {
       }
     }
 
-    rows.push({ yahooItemId, title, price, tradstat, statusText, thumbUrl })
+    rows.push({ yahooItemId, title, price, tradstat, statusText, thumbUrl, ...parseYahooBundleTitle(title) })
   }
   return rows
 }
@@ -147,12 +194,14 @@ export function parseYahooSoldHtml(rawHtml: string): YahooScrapedSale[] {
  *   NONE（出品中。まだ売れていない）                         → null（該当する SaleStatus が無い）
  *   WAIT_FOR_SELLER_SHIP（売れて未発送。発送はこちらの番）    → waiting_shipment
  *   SELLER_SHIPPED（発送済み・受け取り評価待ち）              → shipped
- * 「取引完了」の実際の tradstat 文字列は未観測。未知の値は推測で埋めず null を返す。
+ *   COMPLETE（取引完了。`COMPLETED` ではない。実物で 8 件）    → completed（実績＝取引完了）
+ * 未知の値は推測で埋めず null を返す。
  */
 export function mapYahooTradstat(t: string): SaleStatus | null {
   if (t === 'NONE') return null
   if (t === 'WAIT_FOR_SELLER_SHIP') return 'waiting_shipment'
   if (t === 'SELLER_SHIPPED') return 'shipped'
+  if (t === 'COMPLETE') return 'completed'
   return null
 }
 
@@ -181,7 +230,7 @@ export interface YahooSalesRow {
   itemName: string
   /** 取扱日（YYYY-MM-DD、正規化済み） */
   handledDate: string
-  /** 状態の日本語表示（「受取連絡待ち」等） */
+  /** 状態の日本語表示（取引完了の行は「売上金」、未完了の行は「受取連絡待ち」） */
   statusText: string
   /** 受取額（金額欄の先頭の太字） */
   receivedAmount: number
@@ -189,17 +238,24 @@ export interface YahooSalesRow {
   settlementAmount: number
   /** 販売手数料。内訳の「販売手数料：」は負符号付き（-320円）で出るので正の整数に直す。0円もある */
   feeAmount: number
+  /**
+   * 送料（内訳の「送料：」）。手数料と同じく画面では負符号付き（-490円）で出るので**正の整数**に直す
+   * （`feeAmount` と同じ規約）。**取引完了になった行にだけ出る**（未完了の行には送料の行が無い）ので、
+   * 行が無いときは null（0円の送料と区別する）。0円の行があれば 0
+   */
+  shippingAmount: number | null
   /** 詳細リンクの _settle_id。取れなければ null */
   settleId: string | null
   /**
-   * 内訳のうち「決済金額」「販売手数料」以外のラベル（例：送料）。まだ観測できていないため
-   * 中身は未知。推測で送料として扱わず、ラベルと金額をそのまま残す（将来行が増えたときに気づける形）
+   * 内訳のうち「決済金額」「販売手数料」「送料」以外のラベル。中身は未知なので推測で扱わず、
+   * ラベルと金額をそのまま残す（将来行が増えたときに気づける形）。1 つでもあれば
+   * `amountsConsistent` は false になる
    */
   otherBreakdown: Array<{ label: string; amount: number | null }>
   /**
-   * `決済金額 − 販売手数料 = 受取額` が成り立つか。パーサは成り立たない行も推測で捨てずに
-   * そのまま返す（例えば送料の内訳行が増えて式が崩れたとき）。false の行をどう扱うか
-   * （捨てる・要確認として印を付ける等）は呼び出し側が決めること
+   * `決済金額 − 販売手数料 − 送料 = 受取額`（送料の行が無ければ送料 0）が成り立ち、かつ知らない内訳
+   * （`otherBreakdown`）が 1 つも無いか。パーサは成り立たない行も推測で捨てずにそのまま返す。
+   * false の行をどう扱うか（捨てる・要確認として印を付ける等）は呼び出し側が決めること
    */
   amountsConsistent: boolean
 }
@@ -234,7 +290,8 @@ function extractDtDdPairs(html: string): Array<{ label: string; valueText: strin
  * 表の起点は `id="salelst"`（クラス名ではなく id）。行は `<tr>` のうち `<td>` を持つもの
  * （見出し行は `<th>` のみ）。商品 id は取扱内容セルの `(z999999999)`、取扱日はその次のセル、
  * 状態はその次、受取額は金額セルの中で最初に現れる「n,nnn円」（内訳より前に出る）。
- * 決済金額・販売手数料は内訳の `<dt>ラベル：</dt><dd>金額</dd>` をラベルの文字で引く。
+ * 決済金額・販売手数料・送料（取引完了の行だけ）は内訳の `<dt>ラベル：</dt><dd>金額</dd>` を
+ * ラベルの文字で引く。
  */
 export function parseYahooSalesHtml(rawHtml: string): YahooSalesRow[] {
   const html = stripHtmlComments(rawHtml)
@@ -279,11 +336,15 @@ export function parseYahooSalesHtml(rawHtml: string): YahooSalesRow[] {
 
     let settlementAmount: number | null = null
     let feeAmount: number | null = null
+    let shippingAmount: number | null = null
     const otherBreakdown: Array<{ label: string; amount: number | null }> = []
     for (const { label, valueText } of extractDtDdPairs(amountHtml)) {
       const amount = parseYenMagnitude(valueText)
       if (label === '決済金額：') settlementAmount = amount
       else if (label === '販売手数料：') feeAmount = amount
+      // 送料は 1 行だけ読む。2 行目以降・金額が読めない行は、どちらの送料か決められないので
+      // 知らない内訳として残す（amountsConsistent が false になり、黙って通らない）
+      else if (label === '送料：' && shippingAmount === null && amount !== null) shippingAmount = amount
       else otherBreakdown.push({ label: label.replace(/：$/, ''), amount })
     }
     if (settlementAmount === null || feeAmount === null) continue
@@ -291,13 +352,14 @@ export function parseYahooSalesHtml(rawHtml: string): YahooSalesRow[] {
     const settleIdMatch = detailHtml ? /_settle_id=(\d+)/.exec(detailHtml) : null
     const settleId = settleIdMatch ? settleIdMatch[1] : null
 
-    // 送料などの行が増えて式が崩れていないかを呼び出し側が判断できるように、ここでは
-    // 落とさず印だけ付ける（推測で送料として扱わない）
-    const amountsConsistent = settlementAmount - feeAmount === receivedAmount
+    // 式が崩れた行・知らない内訳がある行は、呼び出し側が判断できるように落とさず印だけ付ける。
+    // 知らない内訳は、式が偶然合っていても false（黙って通さない）
+    const amountsConsistent = otherBreakdown.length === 0
+      && settlementAmount - feeAmount - (shippingAmount ?? 0) === receivedAmount
 
     rows.push({
       yahooItemId, itemName, handledDate, statusText, receivedAmount,
-      settlementAmount, feeAmount, settleId, otherBreakdown, amountsConsistent,
+      settlementAmount, feeAmount, shippingAmount, settleId, otherBreakdown, amountsConsistent,
     })
   }
   return rows
@@ -841,6 +903,19 @@ export interface YahooCombinedSale {
   price: number
   /** 販売手数料の実額（③。0円もある） */
   fee: number
+  /**
+   * 送料の実額（③。取引完了になった行にだけ出る）。③に送料の行が無い（未完了）ときは null
+   * （0円の送料と区別する。null のときは帳簿の送料に触れない）
+   */
+  shippingFee: number | null
+  /** まとめ買いか（②のタイトル、無ければ③の商品名が `＜まとめ買い＞` で始まる） */
+  isBundle: boolean
+  /**
+   * まとめ買いの点数。②（取引ページ）の `計n点` から取る。③の商品名は途中で `計` で切れていることが
+   * あるので、②に無いときだけ③に数字が読めたときの値を使う。どちらも読めなければ null
+   * （中身が何かはこのページからは分からない。自動では紐付けず、人が n 点選ぶ）
+   */
+  bundleCount: number | null
   /** 取扱日（③。計上日として使う） */
   soldAt: string
   /** ②のtradstatをmapYahooTradstatで判定した状態。②に無ければ null（推測で埋めない） */
@@ -849,13 +924,15 @@ export interface YahooCombinedSale {
   thumbUrl: string | null
 }
 
-/** 恒等式（決済金額－手数料＝受取額）が崩れた行（combineYahooSales の inconsistent の要素） */
+/** 恒等式（決済金額－手数料－送料＝受取額）が崩れた行（combineYahooSales の inconsistent の要素） */
 export interface YahooInconsistentSale {
   yahooItemId: string
   /** ③の商品名（途中で切れている） */
   itemName: string
   settlementAmount: number
   feeAmount: number
+  /** 送料。③に送料の行が無ければ null */
+  shippingAmount: number | null
   receivedAmount: number
   otherBreakdown: Array<{ label: string; amount: number | null }>
 }
@@ -866,7 +943,7 @@ export interface YahooInconsistentSale {
  * ③を起点にループする（日付・実額が③にしか無いため）。②にしか無い行（まだ売上金管理に
  * 出ていない＝日付が無い）はここでは作らない。次回の収集で③に出てから作る。
  *
- * amountsConsistent が false の行（決済金額－手数料≠受取額。受取連絡後に送料の行が増えて
+ * amountsConsistent が false の行（決済金額－手数料－送料≠受取額。知らない内訳が増えて
  * 式が崩れた等）は sales に混ぜず、どの商品で何が合わないかが分かる形（inconsistent）で
  * 返す（黙って通すと送料が利益に残ってしまうし、件数だけ捨てると配偶者が直しようがない）。
  */
@@ -885,6 +962,7 @@ export function combineYahooSales(
         itemName: s.itemName,
         settlementAmount: s.settlementAmount,
         feeAmount: s.feeAmount,
+        shippingAmount: s.shippingAmount,
         receivedAmount: s.receivedAmount,
         otherBreakdown: s.otherBreakdown,
       })
@@ -892,12 +970,17 @@ export function combineYahooSales(
     }
     const sold = soldById.get(s.yahooItemId)
     const hasFullTitle = !!(sold && sold.title)
+    // 点数は②から。③の商品名は途中で `計` で切れていることがある（そのときは null になる）
+    const salesBundle = parseYahooBundleTitle(s.itemName)
     sales.push({
       yahooItemId: s.yahooItemId,
       title: hasFullTitle ? sold!.title : s.itemName,
       titleTruncated: !hasFullTitle,
       price: s.settlementAmount,
       fee: s.feeAmount,
+      shippingFee: s.shippingAmount,
+      isBundle: !!sold?.isBundle || salesBundle.isBundle,
+      bundleCount: sold?.bundleCount ?? salesBundle.bundleCount,
       soldAt: s.handledDate,
       status: sold ? mapYahooTradstat(sold.tradstat) : null,
       thumbUrl: sold?.thumbUrl ?? null,
@@ -1084,7 +1167,7 @@ export function formatYahooRenderTimeoutNote(pageNames: string[]): string {
 }
 
 /**
- * 恒等式（決済金額－手数料＝受取額）が崩れた行を、商品idと金額の内訳が分かる形で
+ * 恒等式（決済金額－手数料－送料＝受取額）が崩れた行を、商品idと金額の内訳が分かる形で
  * 実行記録用の1行にする。件数が多いときに壊れないよう、先頭 MAX_LISTED 件だけ内訳を出し、
  * 残りは件数で示す。
  */
@@ -1092,7 +1175,9 @@ export function formatYahooInconsistentNote(rows: YahooInconsistentSale[]): stri
   if (rows.length === 0) return ''
   const MAX_LISTED = 3
   const shown = rows.slice(0, MAX_LISTED).map(r =>
-    `${r.yahooItemId}（決済${r.settlementAmount}－手数料${r.feeAmount}≠受取${r.receivedAmount}）`)
+    // 送料の行がある行だけ式に送料を入れる（無い行は送料を引いていないので、引いたように書かない）
+    `${r.yahooItemId}（決済${r.settlementAmount}－手数料${r.feeAmount}`
+    + `${r.shippingAmount !== null ? `－送料${r.shippingAmount}` : ''}≠受取${r.receivedAmount}）`)
   const restCount = rows.length - shown.length
   const detail = restCount > 0 ? `${shown.join('、')}、他${restCount}件` : shown.join('、')
   return `確認が要る ${rows.length} 件（内訳の式が合いません）：${detail}`
@@ -1338,6 +1423,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
           price: c.price,
           soldAt: c.soldAt,
           fee: c.fee,
+          shippingFee: c.shippingFee,
+          bundleCount: c.bundleCount,
           status: c.status,
         })), 'yahoo')
       : []
@@ -1352,6 +1439,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
           mercariItemId: c.yahooItemId,
           soldAt: c.soldAt,
           fee: c.fee,
+          shippingFee: c.shippingFee,
+          bundleCount: c.bundleCount,
           price: c.price,
           status: c.status,
           title: c.titleTruncated ? undefined : c.title,

@@ -19,6 +19,7 @@ import {
   hasYahooItemLinks,
   isYahooCollectEmpty,
   mapYahooTradstat,
+  parseYahooBundleTitle,
   parseYahooItemHtml,
   parseYahooSalesHtml,
   parseYahooSellingHtml,
@@ -379,7 +380,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       }
     })
 
-    it('恒等式が成り立たない行（決済5,000－手数料250－送料750＝受取4,000）は amountsConsistent が false で、行自体は返り、未知の内訳（送料）は otherBreakdown にそのまま残る', () => {
+    it('恒等式が成り立たない行（決済5,000－手数料250－割引750＝受取4,000）は amountsConsistent が false で、行自体は返り、知らない内訳（割引）は otherBreakdown にそのまま残る', () => {
       const brokenHtml = `
         <table id="salelst"><tbody>
           <tr><th>取扱内容</th><th>取扱日</th><th>状態</th><th>金額</th><th>詳細</th></tr>
@@ -391,7 +392,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
               <span class="u-fontSize16 u-textBold suspend">4,000円</span>
               <dl><dt>決済金額：</dt><dd>5,000円</dd></dl>
               <dl><dt>販売手数料：</dt><dd>-250円</dd></dl>
-              <dl><dt>送料：</dt><dd>-750円</dd></dl>
+              <dl><dt>割引：</dt><dd>-750円</dd></dl>
             </td>
             <td></td>
           </tr>
@@ -404,8 +405,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(r.receivedAmount).toBe(4000)
       expect(r.settlementAmount).toBe(5000)
       expect(r.feeAmount).toBe(250)
+      expect(r.shippingAmount).toBeNull()
       expect(r.amountsConsistent).toBe(false)
-      expect(r.otherBreakdown).toEqual([{ label: '送料', amount: 750 }])
+      expect(r.otherBreakdown).toEqual([{ label: '割引', amount: 750 }])
     })
 
     it('壊れた HTML（空・タグだけ・表が無い）は throw せず空配列', () => {
@@ -625,6 +627,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         tradstat: 'SELLER_SHIPPED',
         statusText: '受け取り評価待ち',
         thumbUrl: 'https://example.com/thumb.jpg',
+        isBundle: false,
+        bundleCount: null,
+        titleWithoutBundle: 'ダミー商品タイトル全文【Z001】',
         ...overrides,
       }
     }
@@ -638,6 +643,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         receivedAmount: 1000,
         settlementAmount: 1000,
         feeAmount: 0,
+        shippingAmount: null,
         settleId: '12345',
         otherBreakdown: [],
         amountsConsistent: true,
@@ -656,6 +662,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
           titleTruncated: false,
           price: 5200,
           fee: 0,
+          shippingFee: null,
+          isBundle: false,
+          bundleCount: null,
           soldAt: '2026-09-28',
           status: 'shipped',
           thumbUrl: soldRows[2].thumbUrl,
@@ -666,6 +675,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
           titleTruncated: false,
           price: 6400,
           fee: 320,
+          shippingFee: null,
+          isBundle: false,
+          bundleCount: null,
           soldAt: '2026-09-28',
           status: 'shipped',
           thumbUrl: soldRows[3].thumbUrl,
@@ -676,6 +688,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
           titleTruncated: false,
           price: 5899,
           fee: 294,
+          shippingFee: null,
+          isBundle: false,
+          bundleCount: null,
           soldAt: '2026-09-28',
           status: 'shipped',
           thumbUrl: soldRows[4].thumbUrl,
@@ -686,6 +701,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
           titleTruncated: false,
           price: 4280,
           fee: 213,
+          shippingFee: null,
+          isBundle: false,
+          bundleCount: null,
           soldAt: '2026-09-27',
           status: 'shipped',
           thumbUrl: soldRows[5].thumbUrl,
@@ -708,6 +726,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         titleTruncated: true,
         price: 3000,
         fee: 150,
+        shippingFee: null,
+        isBundle: false,
+        bundleCount: null,
         soldAt: '2026-09-15',
         status: null,
         thumbUrl: null,
@@ -743,6 +764,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
           itemName: 'ダミー商品タイトル全文（送料あり）',
           settlementAmount: 5000,
           feeAmount: 250,
+          shippingAmount: null,
           receivedAmount: 4000,
           otherBreakdown: [{ label: '送料', amount: 750 }],
         },
@@ -767,6 +789,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         titleTruncated: false,
         price: 1000,
         fee: 50,
+        shippingFee: null,
+        isBundle: false,
+        bundleCount: null,
         soldAt: '2026-09-01',
         status: 'shipped',
         thumbUrl: 'https://example.com/thumb.jpg',
@@ -899,6 +924,9 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         tradstat: 'SELLER_SHIPPED',
         statusText: '受け取り評価待ち',
         thumbUrl: null,
+        isBundle: false,
+        bundleCount: null,
+        titleWithoutBundle: 'ダミー商品',
       }
       const inconsistentSalesRow: YahooSalesRow = {
         yahooItemId: 'z600000002',
@@ -908,6 +936,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         receivedAmount: 4000, // 決済金額－手数料と合わない（送料の行が増えたケースを想定）
         settlementAmount: 5000,
         feeAmount: 250,
+        shippingAmount: null,
         settleId: null,
         otherBreakdown: [{ label: '送料', amount: 750 }],
         amountsConsistent: false,
@@ -1034,6 +1063,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
   describe('formatYahooInconsistentNote（恒等式が崩れた行の商品id・内訳の記録）', () => {
     function makeInconsistent(overrides: Partial<{
       yahooItemId: string; itemName: string; settlementAmount: number; feeAmount: number
+      shippingAmount: number | null
       receivedAmount: number; otherBreakdown: Array<{ label: string; amount: number | null }>
     }> = {}) {
       return {
@@ -1041,6 +1071,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         itemName: 'ダミー商品',
         settlementAmount: 5000,
         feeAmount: 250,
+        shippingAmount: null,
         receivedAmount: 4000,
         otherBreakdown: [{ label: '送料', amount: 750 }],
         ...overrides,
@@ -1056,6 +1087,14 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(note).toBe('確認が要る 1 件（内訳の式が合いません）：z600000002（決済5000－手数料250≠受取4000）')
     })
 
+    it('送料の行がある行は式に送料が入る（決済－手数料－送料≠受取）。送料の行が無い行は送料を引いたように書かない', () => {
+      const withShipping = makeInconsistent({ shippingAmount: 490, receivedAmount: 4000 })
+      expect(formatYahooInconsistentNote([withShipping]))
+        .toBe('確認が要る 1 件（内訳の式が合いません）：z600000002（決済5000－手数料250－送料490≠受取4000）')
+      const withoutShipping = makeInconsistent({ shippingAmount: null })
+      expect(formatYahooInconsistentNote([withoutShipping])).not.toContain('送料')
+    })
+
     it('件数が多いときはメッセージが壊れない：先頭3件の内訳＋残り件数で示す', () => {
       const rows = Array.from({ length: 5 }, (_, i) => makeInconsistent({ yahooItemId: `z${i}` }))
       const note = formatYahooInconsistentNote(rows)
@@ -1065,6 +1104,302 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         + 'z1（決済5000－手数料250≠受取4000）、'
         + 'z2（決済5000－手数料250≠受取4000）、他2件',
       )
+    })
+  })
+
+  describe('取引完了（COMPLETE）・送料・まとめ買い（実機の出力そのままのfixture 2026-10-04。取引18件・完了8件・送料8件・まとめ買い2件）', () => {
+    const soldHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-sold-complete.html'), 'utf-8')
+    const salesHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-salesmanagement-complete.html'), 'utf-8')
+    const soldRows = parseYahooSoldHtml(soldHtml)
+    const salesRows = parseYahooSalesHtml(salesHtml)
+    const salesById = new Map(salesRows.map(r => [r.yahooItemId, r]))
+
+    it('実物の確認：<!-- --> が残っている fixture である（消すと実機の形でなくなる）', () => {
+      expect((soldHtml.match(/<!-- -->/g) ?? []).length).toBe(23)
+      expect(soldHtml).toContain('4,500<!-- -->円')
+    })
+
+    it('mapYahooTradstat：COMPLETE は completed（実績＝取引完了）。COMPLETED など知らない値は今までどおり null', () => {
+      expect(mapYahooTradstat('COMPLETE')).toBe('completed')
+      expect(mapYahooTradstat('COMPLETED')).toBeNull()
+      expect(mapYahooTradstat('complete')).toBeNull()
+      expect(mapYahooTradstat('')).toBeNull()
+    })
+
+    it('取引中・取引完了：18件・COMPLETE 8件・WAIT_FOR_SELLER_SHIP 5件・SELLER_SHIPPED 5件、総数は18', () => {
+      expect(soldRows).toHaveLength(18)
+      const count = (t: string) => soldRows.filter(r => r.tradstat === t).length
+      expect(count('COMPLETE')).toBe(8)
+      expect(count('WAIT_FOR_SELLER_SHIP')).toBe(5)
+      expect(count('SELLER_SHIPPED')).toBe(5)
+      expect(extractYahooSoldTotal(soldHtml)).toBe(18)
+      expect(findUnknownYahooTradstats(soldRows)).toEqual([])
+    })
+
+    it('取引完了の行は状態の文言が「取引完了」（span ではなく div。価格の隣）で、価格・タイトルも読める', () => {
+      const completed = soldRows.filter(r => r.tradstat === 'COMPLETE')
+      for (const r of completed) {
+        expect(r.statusText).toBe('取引完了')
+        expect(mapYahooTradstat(r.tradstat)).toBe('completed')
+      }
+      const r = soldRows.find(x => x.yahooItemId === 'z100000107')!
+      expect(r.price).toBe(4500)
+      expect(r.title).toBe('Mellojoy メロジョイ メロイアのんびりシリーズ 6箱セット【B001】')
+      // 未完了の行は今までどおり span の文言
+      expect(soldRows.find(x => x.yahooItemId === 'z100000105')!.statusText).toBe('受け取り評価待ち')
+      expect(soldRows.find(x => x.yahooItemId === 'z100000101')!.statusText).toBe('商品を発送したら発送連絡をしてください')
+    })
+
+    it('売上金管理：18行。恒等式（決済金額 − 販売手数料 − 送料 = 受取額）が18行とも成り立ち、知らない内訳は無い', () => {
+      expect(salesRows).toHaveLength(18)
+      for (const r of salesRows) {
+        expect(r.amountsConsistent).toBe(true)
+        expect(r.otherBreakdown).toEqual([])
+        expect(r.settlementAmount - r.feeAmount - (r.shippingAmount ?? 0)).toBe(r.receivedAmount)
+      }
+    })
+
+    it('送料は完了8行だけに出る：状態は「売上金」、未完了10行は送料なし（null）で状態は「受取連絡待ち」', () => {
+      const withShipping = salesRows.filter(r => r.shippingAmount !== null)
+      expect(withShipping).toHaveLength(8)
+      for (const r of withShipping) expect(r.statusText).toBe('売上金')
+      const without = salesRows.filter(r => r.shippingAmount === null)
+      expect(without).toHaveLength(10)
+      for (const r of without) expect(r.statusText).toBe('受取連絡待ち')
+      // 売上金管理で送料が出る行 ＝ 取引ページで COMPLETE の行（同じ8件）
+      expect(new Set(withShipping.map(r => r.yahooItemId)))
+        .toEqual(new Set(soldRows.filter(r => r.tradstat === 'COMPLETE').map(r => r.yahooItemId)))
+    })
+
+    it('送料は正の整数で持つ（画面は -490円。feeAmount と同じ規約）。完了8行の決済・手数料・送料・受取を実物の数字で固定', () => {
+      const completed = soldRows.filter(r => r.tradstat === 'COMPLETE')
+        .map(r => {
+          const s = salesById.get(r.yahooItemId)!
+          return [r.yahooItemId, s.settlementAmount, s.feeAmount, s.shippingAmount, s.receivedAmount]
+        })
+      expect(completed).toEqual([
+        ['z100000107', 4500, 0, 490, 4010],
+        ['z100000108', 6400, 0, 490, 5910],
+        ['z100000111', 8888, 0, 210, 8678],
+        ['z100000114', 6400, 0, 210, 6190],
+        ['z100000115', 5200, 0, 210, 4990],
+        ['z100000116', 6400, 320, 490, 5590],
+        ['z100000117', 5899, 294, 210, 5395],
+        ['z100000118', 4280, 213, 210, 3857],
+      ])
+      for (const r of salesRows) {
+        if (r.shippingAmount !== null) {
+          expect(Number.isInteger(r.shippingAmount)).toBe(true)
+          expect(r.shippingAmount).toBeGreaterThanOrEqual(0)
+        }
+      }
+      expect(salesRows.reduce((sum, r) => sum + (r.shippingAmount ?? 0), 0)).toBe(2520)
+    })
+
+    it('未完了の行（送料なし）は今までどおり 決済金額 − 販売手数料 = 受取額（例：決済6,900・手数料0・受取6,900）', () => {
+      const r = salesById.get('z100000104')!
+      expect(r.shippingAmount).toBeNull()
+      expect(r.settlementAmount).toBe(6900)
+      expect(r.feeAmount).toBe(0)
+      expect(r.receivedAmount).toBe(6900)
+      expect(r.amountsConsistent).toBe(true)
+    })
+
+    it('送料があるのに恒等式に入れないと崩れる：完了8行は 決済 − 手数料 ≠ 受取（送料を読み落とすと利益が大きく出る）', () => {
+      for (const r of salesRows.filter(x => x.shippingAmount !== null)) {
+        expect(r.settlementAmount - r.feeAmount).not.toBe(r.receivedAmount)
+      }
+    })
+
+    it('結合：18件とも販売になり（inconsistent なし）、COMPLETE の8件は completed になる', () => {
+      const { sales, inconsistent } = combineYahooSales(soldRows, salesRows)
+      expect(inconsistent).toEqual([])
+      expect(sales).toHaveLength(18)
+      expect(sales.filter(s => s.status === 'completed')).toHaveLength(8)
+      expect(sales.every(s => !s.titleTruncated)).toBe(true)
+    })
+
+    it('結合：送料8件（合計2,520円）が shippingFee に乗り、未完了10件は null（0円ではない）', () => {
+      const { sales } = combineYahooSales(soldRows, salesRows)
+      const withShipping = sales.filter(s => s.shippingFee !== null)
+      expect(withShipping).toHaveLength(8)
+      expect(withShipping.reduce((a, s) => a + (s.shippingFee as number), 0)).toBe(2520)
+      expect(withShipping.every(s => s.status === 'completed')).toBe(true)
+      expect(sales.filter(s => s.shippingFee === null)).toHaveLength(10)
+    })
+
+    it('結合：まとめ買いは②の 計n点 から点数が乗る（③の商品名は「計」で切れているが、②があるので 2 / 3）。それ以外は isBundle=false・bundleCount=null', () => {
+      const { sales } = combineYahooSales(soldRows, salesRows)
+      const bundles = sales.filter(s => s.isBundle)
+      expect(bundles.map(s => [s.yahooItemId, s.bundleCount])).toEqual([
+        ['z100000102', 2],
+        ['z100000109', 3],
+      ])
+      expect(sales.filter(s => !s.isBundle).every(s => s.bundleCount === null)).toBe(true)
+    })
+
+    it('結合：②が無いまとめ買い（③の商品名が「計」で切れている）は isBundle=true・bundleCount=null（推測で埋めない）', () => {
+      const salesOnly = salesRows.filter(r => r.yahooItemId === 'z100000102')
+      const { sales } = combineYahooSales([], salesOnly)
+      expect(sales).toHaveLength(1)
+      expect(sales[0].isBundle).toBe(true)
+      expect(sales[0].bundleCount).toBeNull()
+      expect(sales[0].titleTruncated).toBe(true)
+    })
+
+    it('まとめ買い：2件（z100000102 計2点・z100000109 計3点）。それ以外の16件はまとめ買い扱いにならない', () => {
+      const bundles = soldRows.filter(r => r.isBundle)
+      expect(bundles.map(r => [r.yahooItemId, r.bundleCount, r.price])).toEqual([
+        ['z100000102', 2, 10250],
+        ['z100000109', 3, 19500],
+      ])
+      const others = soldRows.filter(r => !r.isBundle)
+      expect(others).toHaveLength(16)
+      for (const r of others) {
+        expect(r.bundleCount).toBeNull()
+        expect(r.titleWithoutBundle).toBe(r.title) // 取り除かない
+      }
+    })
+
+    it('まとめ買いのタイトル：元のタイトルは残し、＜まとめ買い＞ と 計n点 を取り除いた形も持つ。型番が素直に取れる', () => {
+      const a = soldRows.find(r => r.yahooItemId === 'z100000102')!
+      expect(a.title).toBe('＜まとめ買い＞ Mellojoy メロイアの暮らし図鑑 新品未開封 【A037】 計2点')
+      expect(a.titleWithoutBundle).toBe('Mellojoy メロイアの暮らし図鑑 新品未開封 【A037】')
+      expect(extractCodes(a.titleWithoutBundle)).toEqual(['A037'])
+      const b = soldRows.find(r => r.yahooItemId === 'z100000109')!
+      // 実物のタイトルは全角スペース（U+3000）区切り。取り除くのは前後の記号だけで中身は触らない
+      // 実物のタイトルは全角スペース（U+3000）区切り。取り除くのは前後の記号だけで中身は触らない
+      expect(b.title).toBe('＜まとめ買い＞ メロジョイ　タロ芋　スフレ　Mサイズ【Z072-14】 計3点')
+      expect(b.titleWithoutBundle).toBe('メロジョイ　タロ芋　スフレ　Mサイズ【Z072-14】')
+      expect(extractCodes(b.titleWithoutBundle)).toEqual(['Z072-14'])
+    })
+
+    it('まとめ買いの行は売上金管理では取扱内容が「…計」で切れている（数字なし）。取引ページの方に点数がある', () => {
+      const s = salesById.get('z100000102')!
+      expect(s.itemName).toBe('＜まとめ買い＞ Mellojoy メロイアの暮らし図鑑 新品未開封 【A037】 計')
+      expect(parseYahooBundleTitle(s.itemName)).toEqual({
+        isBundle: true, bundleCount: null, titleWithoutBundle: 'Mellojoy メロイアの暮らし図鑑 新品未開封 【A037】',
+      })
+      // 3点の方は売上金管理でも「計3点」まで出ている
+      const t = salesById.get('z100000109')!
+      expect(parseYahooBundleTitle(t.itemName).bundleCount).toBe(3)
+    })
+
+    it('クラス名を全置換しても同じ結果になる（<!-- --> は残したまま）', () => {
+      expect(parseYahooSoldHtml(replaceAllClasses(soldHtml))).toEqual(soldRows)
+      expect(parseYahooSalesHtml(replaceAllClasses(salesHtml))).toEqual(salesRows)
+    })
+
+    it('匿名化の確認：実在の商品id（z69…・z693…）・画像の利用者ハッシュ・実在の決済ID を含まない', () => {
+      for (const html of [soldHtml, salesHtml]) {
+        expect(html).not.toMatch(/z69\d{7}/)
+        expect(html).not.toMatch(/[0-9a-f]{40}(?<!deadbeefcafebabe0123456789abcdef01234567)/)
+        expect(html).not.toMatch(/_settle_id=(?!100000000001\d\d")/)
+      }
+      expect(salesRows.map(r => r.settleId)).toEqual(
+        Array.from({ length: 18 }, (_, i) => String(10000000000101 + i)),
+      )
+    })
+  })
+
+  describe('parseYahooSalesHtml の送料（合成HTML）', () => {
+    function row(extraDl: string, received: number, settle = 6400, fee = 320): string {
+      return `
+        <table id="salelst"><tbody>
+          <tr><th>取扱内容</th><th>取扱日</th><th>状態</th><th>金額</th><th>詳細</th></tr>
+          <tr>
+            <td>ダミー商品<br>(z600000000)</td>
+            <td>2026/10/1</td>
+            <td>売上金</td>
+            <td>
+              <span class="u-fontSize16 u-textBold">${received.toLocaleString('en-US')}円</span>
+              <dl><dt>決済金額：</dt><dd>${settle.toLocaleString('en-US')}円</dd></dl>
+              <dl><dt>販売手数料：</dt><dd>-${fee}円</dd></dl>
+              ${extraDl}
+            </td>
+            <td></td>
+          </tr>
+        </tbody></table>`
+    }
+
+    it('決済6,400－手数料320－送料490＝受取5,590 は送料が読めて amountsConsistent が true', () => {
+      const [r] = parseYahooSalesHtml(row('<dl><dt>送料：</dt><dd>-490円</dd></dl>', 5590))
+      expect(r.shippingAmount).toBe(490)
+      expect(r.amountsConsistent).toBe(true)
+      expect(r.otherBreakdown).toEqual([])
+    })
+
+    it('送料の行が無ければ shippingAmount は null で、決済 − 手数料 = 受取 で判定する', () => {
+      const [r] = parseYahooSalesHtml(row('', 6080))
+      expect(r.shippingAmount).toBeNull()
+      expect(r.amountsConsistent).toBe(true)
+    })
+
+    it('送料の行があるのに受取額が合わなければ false（送料を引かない値が受取に出ている）', () => {
+      const [r] = parseYahooSalesHtml(row('<dl><dt>送料：</dt><dd>-490円</dd></dl>', 6080))
+      expect(r.shippingAmount).toBe(490)
+      expect(r.amountsConsistent).toBe(false)
+    })
+
+    it('送料以外の知らない内訳は otherBreakdown に残り、式が偶然合っていても false（黙って通さない）', () => {
+      const [r] = parseYahooSalesHtml(row(
+        '<dl><dt>送料：</dt><dd>-490円</dd></dl><dl><dt>梱包資材：</dt><dd>-0円</dd></dl>', 5590,
+      ))
+      expect(r.shippingAmount).toBe(490)
+      expect(r.otherBreakdown).toEqual([{ label: '梱包資材', amount: 0 }])
+      expect(r.amountsConsistent).toBe(false)
+    })
+
+    it('送料が2行あるときは2行目を知らない内訳に残す（どちらの送料か決めない）。金額が読めない送料も同じ', () => {
+      const [dup] = parseYahooSalesHtml(row(
+        '<dl><dt>送料：</dt><dd>-490円</dd></dl><dl><dt>送料：</dt><dd>-100円</dd></dl>', 5590,
+      ))
+      expect(dup.shippingAmount).toBe(490)
+      expect(dup.otherBreakdown).toEqual([{ label: '送料', amount: 100 }])
+      expect(dup.amountsConsistent).toBe(false)
+
+      const [bad] = parseYahooSalesHtml(row('<dl><dt>送料：</dt><dd>未定</dd></dl>', 5590))
+      expect(bad.shippingAmount).toBeNull()
+      expect(bad.otherBreakdown).toEqual([{ label: '送料', amount: null }])
+      expect(bad.amountsConsistent).toBe(false)
+    })
+
+    it('0円の送料（-0円）は 0。null（行が無い）とは区別する', () => {
+      const [r] = parseYahooSalesHtml(row('<dl><dt>送料：</dt><dd>-0円</dd></dl>', 6080))
+      expect(r.shippingAmount).toBe(0)
+      expect(r.amountsConsistent).toBe(true)
+    })
+  })
+
+  describe('parseYahooBundleTitle（まとめ買いのタイトル）', () => {
+    it('＜まとめ買い＞ で始まり 計n点 で終わる：点数が取れ、両方を取り除いた形も返る', () => {
+      expect(parseYahooBundleTitle('＜まとめ買い＞ Mellojoy 商品【A037】 計2点')).toEqual({
+        isBundle: true, bundleCount: 2, titleWithoutBundle: 'Mellojoy 商品【A037】',
+      })
+      expect(parseYahooBundleTitle('＜まとめ買い＞商品【Z1】計10点').bundleCount).toBe(10)
+    })
+
+    it('「計」だけで数字が無い（Yahoo 側でタイトルが途中で切れる）は点数 null。推測で 2 と埋めない', () => {
+      expect(parseYahooBundleTitle('＜まとめ買い＞ Mellojoy 商品 【A037】 計')).toEqual({
+        isBundle: true, bundleCount: null, titleWithoutBundle: 'Mellojoy 商品 【A037】',
+      })
+      expect(parseYahooBundleTitle('＜まとめ買い＞ 商品 計点').bundleCount).toBeNull()
+    })
+
+    it('計n点 が無い・点数が0のまとめ買いも点数は null（まとめ買いではある）', () => {
+      expect(parseYahooBundleTitle('＜まとめ買い＞ 商品【Z1】')).toEqual({
+        isBundle: true, bundleCount: null, titleWithoutBundle: '商品【Z1】',
+      })
+      expect(parseYahooBundleTitle('＜まとめ買い＞ 商品 計0点').bundleCount).toBeNull()
+    })
+
+    it('まとめ買いでないタイトルは何も取り除かない（末尾が 計2点 でも、半角の <まとめ買い> でも）', () => {
+      expect(parseYahooBundleTitle('商品【Z1】 計2点')).toEqual({
+        isBundle: false, bundleCount: null, titleWithoutBundle: '商品【Z1】 計2点',
+      })
+      expect(parseYahooBundleTitle('<まとめ買い> 商品 計2点').isBundle).toBe(false)
+      expect(parseYahooBundleTitle('商品 ＜まとめ買い＞').isBundle).toBe(false)
+      expect(parseYahooBundleTitle('')).toEqual({ isBundle: false, bundleCount: null, titleWithoutBundle: '' })
     })
   })
 
@@ -1082,7 +1417,7 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
             <span class="u-fontSize16 u-textBold suspend">4,000円</span>
             <dl><dt>決済金額：</dt><dd>5,000円</dd></dl>
             <dl><dt>販売手数料：</dt><dd>-250円</dd></dl>
-            <dl><dt>送料：</dt><dd>-750円</dd></dl>
+            <dl><dt>割引：</dt><dd>-750円</dd></dl>
           </td>
           <td></td>
         </tr>
@@ -1134,20 +1469,20 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(calls).toHaveLength(0)
     })
 
-    it('恒等式が崩れた行（送料の行が増えた）があると、保存が呼ばれ、note に内訳のラベルが出る', async () => {
+    it('恒等式が崩れた行（知らない内訳の行が増えた）があると、保存が呼ばれ、note に内訳のラベルが出る', async () => {
       const { inconsistent } = combineYahooSales([], parseYahooSalesHtml(brokenSalesHtml))
       expect(inconsistent).toHaveLength(1)
-      expect(findUnknownYahooBreakdownLabels(inconsistent)).toEqual(['送料'])
+      expect(findUnknownYahooBreakdownLabels(inconsistent)).toEqual(['割引'])
       const { calls, save } = spySave()
       const note = await saveIfUnknownYahooBreakdown(inconsistent, brokenSalesHtml, save)
       expect(calls).toEqual([brokenSalesHtml])
-      expect(note).toContain('（送料）')
-      expect(note).toBe(formatYahooUnknownBreakdownNote(['送料'], SAVED, summarizeYahooHtml(brokenSalesHtml)))
+      expect(note).toContain('（割引）')
+      expect(note).toBe(formatYahooUnknownBreakdownNote(['割引'], SAVED, summarizeYahooHtml(brokenSalesHtml)))
     })
 
     it('内訳の項目が無いのに崩れた行は「（内訳の項目名なし）」と出る', () => {
       expect(findUnknownYahooBreakdownLabels([{
-        yahooItemId: 'z1', itemName: 'x', settlementAmount: 5000, feeAmount: 250, receivedAmount: 4000, otherBreakdown: [],
+        yahooItemId: 'z1', itemName: 'x', settlementAmount: 5000, feeAmount: 250, shippingAmount: null, receivedAmount: 4000, otherBreakdown: [],
       }])).toEqual(['（内訳の項目名なし）'])
     })
 

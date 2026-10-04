@@ -2610,6 +2610,14 @@ export function updateCollectedActuals(
  * shipping_source='master'/'manual' を守る規則は applySaleActuals に委譲する（updateCollectedActuals
  * と同じ）。kind・紐付けには触らない。戻り値は実際に applySaleActuals まで進んだ件数。
  *
+ * shippingFee：売上金管理の「送料：」（取引完了の行だけに出る実額）。メルカリ側と同じ規則で、
+ * 0 より大きければ人が選んだ発送方法（master/manual）も上書きして actual・確定にする。
+ * null（送料の行が無い＝未完了）は触らない。0 は実額として記録するが確定にはしない。
+ *
+ * bundleCount：まとめ買いの点数（②の `計n点`）。入れば expected_item_count にだけ刻む
+ * （sale_line・在庫には触らない）。null なら触らない。まとめ買いは autoLinkSale が自動確定しない
+ * ので、人が n 点選んで揃える。
+ *
  * title：切れたタイトル（売上金管理の商品名）を全文（取引ページ）に直したいときに渡す。
  * ここでの「変わっているか」は単純な文字列比較で緩く見る。「短い値で長い値を潰さない・人が
  * 直した値を上書きしない」という厳密な判定は applySaleActuals 側の役割（title を渡しても
@@ -2624,6 +2632,8 @@ export function updateYahooActuals(
     shippingFee?: number | null
     /** 決済金額の実額。②③の突き合わせで金額が動くことがあれば渡す */
     price?: number | null
+    /** まとめ買いの点数（②の `計n点`）。null/undefined なら触らない。入れば expected_item_count に刻む */
+    bundleCount?: number | null
     /** ②のtradstatから判定した状態。②に出ていなければ null（推測で埋めない） */
     status?: SaleStatus | null
     /** ②（取引ページ）の全文タイトル。切れたタイトル（title=undefined）なら渡さない */
@@ -2633,11 +2643,12 @@ export function updateYahooActuals(
   let updated = 0
   for (const r of rows) {
     const sale = db.prepare(
-      'SELECT id, sold_at, status, fee, fee_source, shipping_fee, price, title, source FROM sale WHERE mercari_item_id = ?',
+      'SELECT id, sold_at, status, fee, fee_source, shipping_fee, price, title, source, expected_item_count FROM sale WHERE mercari_item_id = ?',
     ).get(r.mercariItemId) as
       | {
           id: string; sold_at: string; status: SaleStatus | null; fee: number; fee_source: FeeSource
           shipping_fee: number; price: number; title: string; source: SaleSource
+          expected_item_count: number | null
         }
       | undefined
     if (!sale) continue
@@ -2653,11 +2664,18 @@ export function updateYahooActuals(
     const statusChanged = r.status != null && sale.status !== r.status
     // 緩い判定でよい（厳密な判定は applySaleActuals 側）
     const titleChanged = r.title != null && r.title !== sale.title
+    const bundleCountChanged = r.bundleCount != null && r.bundleCount !== sale.expected_item_count
 
     if (
       !feeChanged && !feeSourceStale && !shippingChanged && !priceChanged
-      && !soldAtChanged && !statusChanged && !titleChanged
+      && !soldAtChanged && !statusChanged && !titleChanged && !bundleCountChanged
     ) continue
+
+    // 点数だけを刻む（sale_line・在庫には触らない）。すでに紐付いていても点数が足りなければ
+    // 揃うまで未紐付け（要対応）に出る（sale_profit.unmatched）
+    if (bundleCountChanged) {
+      db.prepare('UPDATE sale SET expected_item_count = ? WHERE id = ?').run(r.bundleCount, sale.id)
+    }
 
     applySaleActuals(
       sale.id,
@@ -3198,6 +3216,17 @@ export function suggestProductInventory(modelCode: string, quantity: number, exc
 }
 
 /**
+ * Yahoo!フリマの「まとめ買い」（複数の出品を 1 回の取引で買われたもの）か。
+ * タイトルは `＜まとめ買い＞ 商品名 計2点` で、出るのは中の 1 つぶんの商品名だけ（残りが何かは
+ * 分からない。元の個々の出品はページから消えている）。型番が 1 つ取れても 1 点しか引き当てられず、
+ * 2 点以上の取引を「紐付け済み」に見せてしまう（静かに間違う）。だから自動確定の対象にしない。
+ * 人が点数ぶんの在庫を選ぶ（点数は expected_item_count に入っている）。
+ */
+function isYahooBundleSale(sale: { channel: SalesChannel; title: string }): boolean {
+  return sale.channel === 'yahoo' && sale.title.trimStart().startsWith('＜まとめ買い＞')
+}
+
+/**
  * 優先順で1回だけ自動確定を試みる：
  *   1. タイトルに在庫コードがあれば、見つかった分だけ全部（1つでも見つからない／販売済みなら
  *      その分は候補止まり。見つかった分だけ確定し、expected_item_count との差分で unmatched を残す）
@@ -3205,11 +3234,13 @@ export function suggestProductInventory(modelCode: string, quantity: number, exc
  *      FIFOで個数表記（×2 等。無ければ1）の分だけ充てる（足りなければある分だけ）
  *   3. 型番が2つ以上なら候補止まり（何もしない）
  * 条件を満たさない、またはsale_lineが既にあれば何もしない。戻り値は1点でも確定できたか。
+ * まとめ買い（isYahooBundleSale）は常に候補止まり（expected_item_count も触らない）。
  */
 export function autoLinkSale(saleId: string): boolean {
-  const sale = db.prepare('SELECT kind, title, model_codes FROM sale WHERE id = ?').get(saleId) as
-    | { kind: SaleKind; title: string; model_codes: string } | undefined
+  const sale = db.prepare('SELECT channel, kind, title, model_codes FROM sale WHERE id = ?').get(saleId) as
+    | { channel: SalesChannel; kind: SaleKind; title: string; model_codes: string } | undefined
   if (!sale || sale.kind !== 'resale') return false
+  if (isYahooBundleSale(sale)) return false
 
   const already = db.prepare('SELECT COUNT(*) AS c FROM sale_line WHERE sale_id = ?')
     .get(saleId) as { c: number }
@@ -3243,9 +3274,10 @@ export function autoLinkSale(saleId: string): boolean {
  * 読み取り専用。何も書き換えない。
  */
 export function getAutoLinkBlockers(saleId: string): AutoLinkBlocker[] {
-  const sale = db.prepare('SELECT kind, model_codes FROM sale WHERE id = ?').get(saleId) as
-    | { kind: SaleKind; model_codes: string } | undefined
+  const sale = db.prepare('SELECT channel, kind, title, model_codes FROM sale WHERE id = ?').get(saleId) as
+    | { channel: SalesChannel; kind: SaleKind; title: string; model_codes: string } | undefined
   if (!sale || sale.kind !== 'resale') return []
+  if (isYahooBundleSale(sale)) return []
 
   const already = db.prepare('SELECT COUNT(*) AS c FROM sale_line WHERE sale_id = ?')
     .get(saleId) as { c: number }
@@ -6150,6 +6182,11 @@ export function insertCollected(
      * は記録するが is_shipping_confirmed は立てない（送料未入力として要対応に出す）
      */
     shippingFee?: number | null
+    /**
+     * まとめ買いの点数（Yahoo!フリマ）。入れば expected_item_count に刻む（人が n 点選べば
+     * 紐付けが揃う）。まとめ買いそのものは autoLinkSale が自動確定しない。null/undefined なら触らない
+     */
+    bundleCount?: number | null
     /** 他費用。列は増やさない。raw に残すだけ */
     otherCost?: number | null
     /**
@@ -6208,6 +6245,10 @@ export function insertCollected(
         statusDates.shipped_at, statusDates.delivered_at, statusDates.completed_at,
       )
       inserted.push({ id, mercariItemId: r.mercariItemId })
+
+      if (typeof r.bundleCount === 'number') {
+        db.prepare('UPDATE sale SET expected_item_count = ? WHERE id = ?').run(r.bundleCount, id)
+      }
 
       // 出品への引き当てがあれば、そのままそれを引き継ぐ（人の決定が最優先）。
       // 無ければ今までどおり型番の完全一致でFIFO自動確定する

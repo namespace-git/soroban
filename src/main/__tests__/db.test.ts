@@ -3762,6 +3762,252 @@ describe('db（:memory:）', () => {
       expect(after.fee).toBe(300)
       expect(after.status).toBe('completed')
     })
+
+    describe('Yahoo!フリマの送料・取引完了・まとめ買い（updateYahooActuals / insertCollected）', () => {
+      function expectedExtra(id: string): { expected_item_count: number | null } {
+        return db.getDb().prepare('SELECT expected_item_count FROM sale WHERE id = ?').get(id) as
+          { expected_item_count: number | null }
+      }
+      function saleLineCount(id: string): number {
+        return (db.getDb().prepare('SELECT COUNT(*) AS c FROM sale_line WHERE sale_id = ?').get(id) as { c: number }).c
+      }
+      /** 粗利の式（価格－手数料－送料－梱包材－原価）を行の値から組み直す。sale_profit の gross_profit と一致する */
+      function profitOf(id: string): number {
+        const x = db.listSales().find(v => v.id === id)!
+        return x.price - x.fee - x.shipping_fee - x.packaging_cost - x.cost
+      }
+
+      function stockOne(code: string, qty = 1): void {
+        db.createPurchase({
+          shop_account_id: shopId,
+          ordered_at: '2026-01-01',
+          shipping_fee: 0,
+          lines: [{ name: `在庫【${code}】`, unit_price: 1000, quantity: qty }],
+        })
+      }
+
+      it('完了行（送料あり）：送料が実額（actual）で入り確定になり、status/completed_at/sold_atが取扱日になり、粗利が送料のぶん減る', () => {
+        stockOne('Z074-4')
+        const [{ id }] = db.insertCollected(
+          [{
+            mercariItemId: 'YSH-1', title: 'クリームわん【Z074-4】', price: 6400, soldAt: '2026-03-01',
+            fee: 320, status: 'shipped',
+          }],
+          'yahoo',
+        )
+        // 送料を入れる前（未完了・送料なし）
+        const before = db.listSales().find(s => s.id === id)!
+        expect(before.item_count).toBe(1)
+        expect(before.shipping_fee).toBe(0)
+        expect(before.is_shipping_confirmed).toBe(0)
+        expect(before.gross_profit).toBe(6400 - 320 - 0 - before.packaging_cost - 1000)
+        const profitBefore = before.gross_profit
+
+        const updated = db.updateYahooActuals([
+          {
+            mercariItemId: 'YSH-1', soldAt: '2026-03-10', fee: 320, price: 6400,
+            shippingFee: 490, status: 'completed',
+          },
+        ])
+        expect(updated).toBe(1)
+
+        const after = db.listSales().find(s => s.id === id)!
+        expect(after.shipping_fee).toBe(490)
+        expect(after.shipping_source).toBe('actual')
+        expect(after.is_shipping_confirmed).toBe(1)
+        expect(after.status).toBe('completed')
+        expect(after.completed_at).toBe('2026-03-10')
+        expect(after.sold_at).toBe('2026-03-10')
+        // 粗利（sale_profit）が送料のぶんだけ減る
+        expect(after.gross_profit).toBe(profitBefore - 490)
+        expect(after.gross_profit).toBe(profitOf(id))
+      })
+
+      it('新規で入る完了行（送料あり）も、送料が実額で確定し、completed_at・sold_atが取扱日になる', () => {
+        const [{ id }] = db.insertCollected(
+          [{
+            mercariItemId: 'YSH-2', title: '完了の新規【Z080-1】', price: 5000, soldAt: '2026-03-20',
+            fee: 250, shippingFee: 700, status: 'completed',
+          }],
+          'yahoo',
+        )
+        const sale = db.listSales().find(s => s.id === id)!
+        expect(sale.shipping_fee).toBe(700)
+        expect(sale.shipping_source).toBe('actual')
+        expect(sale.is_shipping_confirmed).toBe(1)
+        expect(sale.completed_at).toBe('2026-03-20')
+        expect(sale.sold_at).toBe('2026-03-20')
+      })
+
+      it('未完了行（送料なし）は今までどおり：送料に触れず未確定のまま・sold_at/completed_atも動かない。送料0円でも確定にしない', () => {
+        const [{ id }] = db.insertCollected(
+          [{
+            mercariItemId: 'YSH-3', title: '未完了【Z080-2】', price: 3000, soldAt: '2026-03-01',
+            fee: 150, status: 'waiting_shipment',
+          }],
+          'yahoo',
+        )
+        // 送料なし（null）：③に送料の行が無い
+        db.updateYahooActuals([
+          { mercariItemId: 'YSH-3', soldAt: '2026-03-05', fee: 150, shippingFee: null, status: 'shipped' },
+        ])
+        const a = db.listSales().find(s => s.id === id)!
+        expect(a.shipping_fee).toBe(0)
+        expect(a.shipping_source).toBeNull()
+        expect(a.is_shipping_confirmed).toBe(0)
+        expect(a.status).toBe('shipped')
+        expect(a.completed_at).toBeNull()
+        expect(a.sold_at).toBe('2026-03-01')
+
+        // 0円の送料は実額として記録するが、確定にはしない（メルカリ側と同じ規則）
+        db.updateYahooActuals([
+          { mercariItemId: 'YSH-3', soldAt: '2026-03-05', fee: 150, shippingFee: 0, status: 'shipped' },
+        ])
+        const b = db.listSales().find(s => s.id === id)!
+        expect(b.shipping_fee).toBe(0)
+        expect(b.is_shipping_confirmed).toBe(0)
+      })
+
+      it('送料の実額は、人が選んだ発送方法（master）を上書きして actual・確定にする（メルカリ側の applySaleActuals と同じ規則）', () => {
+        db.saveShippingMethod({ name: 'ネコポス', fee: 210 })
+        const method = db.listShippingMethods()[0]
+        const [{ id }] = db.insertCollected(
+          [{ mercariItemId: 'YSH-4', title: '発送方法あり【Z080-3】', price: 4000, soldAt: '2026-03-01', fee: 200, status: 'shipped' }],
+          'yahoo',
+        )
+        db.updateSale(id, { shipping_method_id: method.id })
+        const picked = db.listSales().find(s => s.id === id)!
+        expect(picked.shipping_source).toBe('master')
+        expect(picked.shipping_fee).toBe(210)
+
+        db.updateYahooActuals([
+          { mercariItemId: 'YSH-4', soldAt: '2026-03-12', shippingFee: 490, status: 'completed' },
+        ])
+        const after = db.listSales().find(s => s.id === id)!
+        expect(after.shipping_fee).toBe(490)
+        expect(after.shipping_source).toBe('actual')
+        expect(after.is_shipping_confirmed).toBe(1)
+      })
+
+      it('2回取り込んでも二重にならない：同じ行を渡すと2回目は更新0件で、値も変わらない', () => {
+        const [{ id }] = db.insertCollected(
+          [{ mercariItemId: 'YSH-5', title: '二度目【Z080-4】', price: 6400, soldAt: '2026-03-01', fee: 320, status: 'shipped' }],
+          'yahoo',
+        )
+        const row = {
+          mercariItemId: 'YSH-5', soldAt: '2026-03-10', fee: 320, price: 6400,
+          shippingFee: 490, status: 'completed' as const,
+        }
+        expect(db.updateYahooActuals([row])).toBe(1)
+        const first = db.listSales().find(s => s.id === id)!
+        expect(db.updateYahooActuals([row])).toBe(0)
+        const second = db.listSales().find(s => s.id === id)!
+        expect(second.shipping_fee).toBe(490)
+        expect(second.gross_profit).toBe(first.gross_profit)
+        expect(db.listSales().filter(x => x.mercari_item_id === 'YSH-5')).toHaveLength(1)
+      })
+
+      it('まとめ買い（新規）：点数が expected_item_count に入り（2 / 3）、在庫があっても sale_line は作られず未紐付けのまま', () => {
+        stockOne('A037', 3)
+        const [two] = db.insertCollected(
+          [{
+            mercariItemId: 'YSB-1', title: '＜まとめ買い＞ Mellojoy 暮らし図鑑 【A037】 計2点', price: 10250, soldAt: '2026-03-01',
+            fee: 0, status: 'shipped', bundleCount: 2,
+          }],
+          'yahoo',
+        )
+        const [three] = db.insertCollected(
+          [{
+            mercariItemId: 'YSB-2', title: '＜まとめ買い＞ Mellojoy 暮らし図鑑 【A037】 計3点', price: 19500, soldAt: '2026-03-01',
+            fee: 0, status: 'shipped', bundleCount: 3,
+          }],
+          'yahoo',
+        )
+        expect(expectedExtra(two.id).expected_item_count).toBe(2)
+        expect(expectedExtra(three.id).expected_item_count).toBe(3)
+        const s2 = db.listSales().find(x => x.id === two.id)!
+        expect(s2.kind).toBe('resale') // 型番があるので販売用。それでも自動では紐付けない
+        expect(s2.model_codes).toEqual(['A037'])
+        expect(saleLineCount(two.id)).toBe(0)
+        expect(saleLineCount(three.id)).toBe(0)
+        expect(s2.item_count).toBe(0)
+        expect(s2.unmatched).toBe(1)
+        expect(db.getDb().prepare('SELECT COUNT(*) AS c FROM sale_line').get()).toEqual({ c: 0 })
+        // 一括の自動紐付け・型番の追記でも、まとめ買いは紐付かない
+        expect(db.autoLinkPending()).toBe(0)
+        expect(db.autoLinkSale(two.id)).toBe(false)
+        expect(saleLineCount(two.id)).toBe(0)
+      })
+
+      it('まとめ買い（既知）：updateYahooActuals で点数が入る。点数が null なら触らない。紐付け済みの sale_line には触らず、点数が足りなければ未紐付けに出る', () => {
+        stockOne('A038', 2)
+        const [{ id }] = db.insertCollected(
+          [{
+            mercariItemId: 'YSB-3', title: '＜まとめ買い＞ 暮らし図鑑 【A038】 計', price: 8000, soldAt: '2026-03-01',
+            fee: 0, status: 'shipped',
+          }],
+          'yahoo',
+        )
+        expect(expectedExtra(id).expected_item_count).toBeNull()
+        expect(saleLineCount(id)).toBe(0)
+
+        // 点数が読めない（null）ときは触らない
+        expect(db.updateYahooActuals([
+          { mercariItemId: 'YSB-3', soldAt: '2026-03-01', fee: 0, status: 'shipped', bundleCount: null },
+        ])).toBe(0)
+        expect(expectedExtra(id).expected_item_count).toBeNull()
+
+        // 以前の版で 1 点だけ引き当ててしまった行（人の操作で作る）に点数が入る：sale_line は触らない
+        const item = db.listInventory('in_stock')[0]
+        db.linkInventory(id, [item.id], 'auto')
+        expect(db.listSales().find(x => x.id === id)!.unmatched).toBe(0)
+        expect(db.updateYahooActuals([
+          { mercariItemId: 'YSB-3', soldAt: '2026-03-01', fee: 0, status: 'shipped', bundleCount: 2 },
+        ])).toBe(1)
+        expect(expectedExtra(id).expected_item_count).toBe(2)
+        expect(saleLineCount(id)).toBe(1)
+        expect(db.listSales().find(x => x.id === id)!.unmatched).toBe(1) // 1 < 2 なので揃うまで要対応
+        // 同じ点数をもう一度渡しても二重に更新しない
+        expect(db.updateYahooActuals([
+          { mercariItemId: 'YSB-3', soldAt: '2026-03-01', fee: 0, status: 'shipped', bundleCount: 2 },
+        ])).toBe(0)
+      })
+
+      it('まとめ買いでない行は今までどおり自動紐付けが効く（型番が1つで完全一致）', () => {
+        stockOne('Z090-1')
+        const [{ id }] = db.insertCollected(
+          [{
+            mercariItemId: 'YSB-4', title: '普通の出品【Z090-1】', price: 3000, soldAt: '2026-03-01',
+            fee: 150, status: 'shipped', bundleCount: null,
+          }],
+          'yahoo',
+        )
+        const sale = db.listSales().find(x => x.id === id)!
+        expect(sale.item_count).toBe(1)
+        expect(sale.unmatched).toBe(0)
+        expect(sale.auto_linked).toBe(1)
+        expect(saleLineCount(id)).toBe(1)
+      })
+
+      it('まとめ買いのタイトルが切れた→全文に直っても、型番の追記で自動紐付けまで進まない', () => {
+        stockOne('A039', 2)
+        const [{ id }] = db.insertCollected(
+          [{
+            mercariItemId: 'YSB-5', title: '＜まとめ買い＞ 暮らし図鑑 【A039', price: 8000, soldAt: '2026-03-01',
+            fee: 0, status: 'completed',
+          }],
+          'yahoo',
+        )
+        db.updateYahooActuals([
+          { mercariItemId: 'YSB-5', soldAt: '2026-03-01', status: 'completed', title: '＜まとめ買い＞ 暮らし図鑑 【A039】 計2点', bundleCount: 2 },
+        ])
+        const after = db.listSales().find(x => x.id === id)!
+        expect(after.model_codes).toEqual(['A039'])
+        expect(after.item_count).toBe(0)
+        expect(after.unmatched).toBe(1)
+        expect(expectedExtra(id).expected_item_count).toBe(2)
+      })
+    })
   })
 
   it('getItemTimeline：仕入（送料按分あり）→販売（まとめ売り2点）でeventsの順・detailの数字が合う', () => {
