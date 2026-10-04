@@ -729,7 +729,7 @@ function yahooDebugDir(): string {
   return dir
 }
 
-/** 0件だったページの HTML を `userData/debug/yahoo-<page>.html` に上書き保存し、保存先を返す */
+/** 0件・知らない形だったページの HTML を `userData/debug/yahoo-<page>.html` に上書き保存し、保存先を返す */
 async function saveYahooDebugHtml(pageKey: 'selling' | 'sold' | 'sales', html: string): Promise<string> {
   const file = join(yahooDebugDir(), `yahoo-${pageKey}.html`)
   await writeFile(file, html, 'utf-8')
@@ -1098,6 +1098,101 @@ export function formatYahooInconsistentNote(rows: YahooInconsistentSale[]): stri
   return `確認が要る ${rows.length} 件（内訳の式が合いません）：${detail}`
 }
 
+/** 知らない値を出すときの上限（実行記録が長くなりすぎないように）。超えた分は件数で示す */
+const MAX_UNKNOWN_LISTED = 5
+
+function formatUnknownList(values: string[]): string {
+  const shown = values.slice(0, MAX_UNKNOWN_LISTED).join('・')
+  const rest = values.length - MAX_UNKNOWN_LISTED
+  return rest > 0 ? `${shown}・他${rest}件` : shown
+}
+
+/**
+ * 「取引中・取引完了」の行のうち、mapYahooTradstat が知らない tradstat（生の文字列）を重複なしで返す。
+ * 知っている値（NONE / WAIT_FOR_SELLER_SHIP / SELLER_SHIPPED）は入らない。
+ * 空文字は「属性が読めなかった」という意味で、これも知らない形として '（空）' で返す。
+ */
+export function findUnknownYahooTradstats(rows: YahooScrapedSale[]): string[] {
+  const unknown: string[] = []
+  for (const r of rows) {
+    if (r.tradstat !== 'NONE' && mapYahooTradstat(r.tradstat) === null) {
+      const v = r.tradstat === '' ? '（空）' : r.tradstat
+      if (!unknown.includes(v)) unknown.push(v)
+    }
+  }
+  return unknown
+}
+
+/**
+ * 恒等式が崩れた行の内訳のうち、決済金額・販売手数料以外のラベル（例：送料）を重複なしで返す。
+ * 内訳が1つも無いのに崩れている行があれば '（内訳の項目名なし）' を入れる。
+ */
+export function findUnknownYahooBreakdownLabels(rows: YahooInconsistentSale[]): string[] {
+  const labels: string[] = []
+  for (const r of rows) {
+    if (r.otherBreakdown.length === 0 && !labels.includes('（内訳の項目名なし）')) {
+      labels.push('（内訳の項目名なし）')
+    }
+    for (const b of r.otherBreakdown) {
+      if (!labels.includes(b.label)) labels.push(b.label)
+    }
+  }
+  return labels
+}
+
+/** 知らない tradstat が出たときの実行記録用の1行（知らない値そのものと保存先） */
+export function formatYahooUnknownTradstatNote(values: string[], file: string, summary: YahooHtmlSummary): string {
+  return `取引中・取引完了：はじめて見る取引の状態がありました（${formatUnknownList(values)}）`
+    + `→ HTMLを保存しました（確認のため開発者に渡してください：${file}｜${formatYahooHtmlSummary(summary)}）`
+}
+
+/** 恒等式が崩れた行に知らない内訳ラベルが出たときの実行記録用の1行 */
+export function formatYahooUnknownBreakdownNote(labels: string[], file: string, summary: YahooHtmlSummary): string {
+  return `売上金管理：知らない内訳がありました（${formatUnknownList(labels)}）`
+    + `→ HTMLを保存しました（確認のため開発者に渡してください：${file}｜${formatYahooHtmlSummary(summary)}）`
+}
+
+/**
+ * 取引中・取引完了で知らない tradstat が1つでもあれば、HTML を save で保存して実行記録用の1行を返す。
+ * 無ければ保存せず null。保存に失敗しても取り込みは止めない（その旨を1行にして返す）。
+ */
+export async function saveIfUnknownYahooTradstat(
+  rows: YahooScrapedSale[],
+  html: string,
+  save: (html: string) => Promise<string>,
+): Promise<string | null> {
+  const values = findUnknownYahooTradstats(rows)
+  if (values.length === 0) return null
+  try {
+    const file = await save(html)
+    return formatYahooUnknownTradstatNote(values, file, summarizeYahooHtml(html))
+  } catch (e) {
+    return `取引中・取引完了：はじめて見る取引の状態がありました（${formatUnknownList(values)}）`
+      + `→ HTMLの保存に失敗しました（${e instanceof Error ? e.message : String(e)}）`
+  }
+}
+
+/**
+ * 売上金管理で恒等式が崩れた行が1つでもあれば、HTML を save で保存して実行記録用の1行を返す
+ * （内訳のラベル＝「送料」など未知の項目名つき）。無ければ保存せず null。
+ * 保存に失敗しても取り込みは止めない。
+ */
+export async function saveIfUnknownYahooBreakdown(
+  inconsistent: YahooInconsistentSale[],
+  html: string,
+  save: (html: string) => Promise<string>,
+): Promise<string | null> {
+  if (inconsistent.length === 0) return null
+  const labels = findUnknownYahooBreakdownLabels(inconsistent)
+  try {
+    const file = await save(html)
+    return formatYahooUnknownBreakdownNote(labels, file, summarizeYahooHtml(html))
+  } catch (e) {
+    return `売上金管理：知らない内訳がありました（${formatUnknownList(labels)}）`
+      + `→ HTMLの保存に失敗しました（${e instanceof Error ? e.message : String(e)}）`
+  }
+}
+
 // ------------------------------------------------------------
 // collect()
 // ------------------------------------------------------------
@@ -1162,6 +1257,10 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     if (soldRows.length === 0) {
       const file = await saveYahooDebugHtml('sold', soldRender.html)
       debugSavedNotes.push(formatYahooDebugSavedNote('取引中・取引完了', file, summarizeYahooHtml(soldRender.html)))
+    } else {
+      // 読めてはいるが知らない tradstat（取引完了など）が出たら、押しただけで形が分かるように吐く
+      const note = await saveIfUnknownYahooTradstat(soldRows, soldRender.html, html => saveYahooDebugHtml('sold', html))
+      if (note) debugSavedNotes.push(note)
     }
 
     // ③ 売上金管理（別ホスト：salesmanagement.yahoo.co.jp）
@@ -1211,6 +1310,10 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
 
     // --- 販売：②と③を商品idで結合する ---
     const { sales: combined, inconsistent } = combineYahooSales(soldRows, salesRows)
+
+    // 式が崩れた行（送料の行が増えた等）が出たら、押しただけで形が分かるように売上金管理の HTML を吐く
+    const breakdownNote = await saveIfUnknownYahooBreakdown(inconsistent, salesHtml, html => saveYahooDebugHtml('sales', html))
+    if (breakdownNote) debugSavedNotes.push(breakdownNote)
 
     const keywords = db.parseKeywords(db.getSettings().yahoo_keyword ?? '')
 

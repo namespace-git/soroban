@@ -11,7 +11,11 @@ import {
   formatYahooHtmlSummary,
   formatYahooInconsistentNote,
   formatYahooRenderTimeoutNote,
+  findUnknownYahooBreakdownLabels,
+  findUnknownYahooTradstats,
   formatYahooTruncatedTitleNote,
+  formatYahooUnknownBreakdownNote,
+  formatYahooUnknownTradstatNote,
   hasYahooItemLinks,
   isYahooCollectEmpty,
   mapYahooTradstat,
@@ -19,6 +23,8 @@ import {
   parseYahooSalesHtml,
   parseYahooSellingHtml,
   parseYahooSoldHtml,
+  saveIfUnknownYahooBreakdown,
+  saveIfUnknownYahooTradstat,
   splitYahooCombinedSales,
   summarizeYahooHtml,
   zeroYahooPageNames,
@@ -1059,6 +1065,112 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
         + 'z1（決済5000－手数料250≠受取4000）、'
         + 'z2（決済5000－手数料250≠受取4000）、他2件',
       )
+    })
+  })
+
+  describe('知らない形に出会ったら HTML を吐く（取り込みを押しただけで形が分かるように）', () => {
+    const soldHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-sold.html'), 'utf-8')
+    const soldRows = parseYahooSoldHtml(soldHtml)
+    const brokenSalesHtml = `
+      <table id="salelst"><tbody>
+        <tr><th>取扱内容</th><th>取扱日</th><th>状態</th><th>金額</th><th>詳細</th></tr>
+        <tr>
+          <td>ダミー商品<br>(z600000000)</td>
+          <td>2026/9/1</td>
+          <td><span>受取連絡待ち</span></td>
+          <td>
+            <span class="u-fontSize16 u-textBold suspend">4,000円</span>
+            <dl><dt>決済金額：</dt><dd>5,000円</dd></dl>
+            <dl><dt>販売手数料：</dt><dd>-250円</dd></dl>
+            <dl><dt>送料：</dt><dd>-750円</dd></dl>
+          </td>
+          <td></td>
+        </tr>
+      </tbody></table>
+    `
+    const SAVED = 'C:\\x\\debug\\yahoo-test.html'
+
+    function spySave() {
+      const calls: string[] = []
+      const save = async (html: string) => { calls.push(html); return SAVED }
+      return { calls, save }
+    }
+
+    it('実物の取引中・取引完了（知っている tradstat だけ）は保存されず null', async () => {
+      expect(findUnknownYahooTradstats(soldRows)).toEqual([])
+      const { calls, save } = spySave()
+      expect(await saveIfUnknownYahooTradstat(soldRows, soldHtml, save)).toBeNull()
+      expect(calls).toHaveLength(0)
+    })
+
+    it('知らない tradstat（COMPLETED）が1行でもあれば、保存が呼ばれ、note に値そのものと保存先が出る', async () => {
+      const rows = soldRows.map((r, i) => (i === 0 ? { ...r, tradstat: 'COMPLETED' } : r))
+      expect(findUnknownYahooTradstats(rows)).toEqual(['COMPLETED'])
+      const { calls, save } = spySave()
+      const note = await saveIfUnknownYahooTradstat(rows, soldHtml, save)
+      expect(calls).toEqual([soldHtml])
+      expect(note).toContain('（COMPLETED）')
+      expect(note).toContain(SAVED)
+      expect(note).toBe(formatYahooUnknownTradstatNote(['COMPLETED'], SAVED, summarizeYahooHtml(soldHtml)))
+    })
+
+    it('知らない値は重複なしで、空文字（読めなかった）は「（空）」として出る。mapYahooTradstat の判定は変わらない', () => {
+      const base = soldRows[0]
+      const rows = [
+        { ...base, tradstat: 'COMPLETED' },
+        { ...base, tradstat: 'COMPLETED' },
+        { ...base, tradstat: '' },
+        { ...base, tradstat: 'NONE' },
+        { ...base, tradstat: 'SELLER_SHIPPED' },
+      ]
+      expect(findUnknownYahooTradstats(rows)).toEqual(['COMPLETED', '（空）'])
+      expect(mapYahooTradstat('COMPLETED')).toBeNull()
+      expect(mapYahooTradstat('SELLER_SHIPPED')).toBe('shipped')
+    })
+
+    it('0件のときは知らない値が無いので吐かない（0件の保存は collect() の既存の分岐のまま）', async () => {
+      const { calls, save } = spySave()
+      expect(await saveIfUnknownYahooTradstat([], '<html></html>', save)).toBeNull()
+      expect(calls).toHaveLength(0)
+    })
+
+    it('恒等式が崩れた行（送料の行が増えた）があると、保存が呼ばれ、note に内訳のラベルが出る', async () => {
+      const { inconsistent } = combineYahooSales([], parseYahooSalesHtml(brokenSalesHtml))
+      expect(inconsistent).toHaveLength(1)
+      expect(findUnknownYahooBreakdownLabels(inconsistent)).toEqual(['送料'])
+      const { calls, save } = spySave()
+      const note = await saveIfUnknownYahooBreakdown(inconsistent, brokenSalesHtml, save)
+      expect(calls).toEqual([brokenSalesHtml])
+      expect(note).toContain('（送料）')
+      expect(note).toBe(formatYahooUnknownBreakdownNote(['送料'], SAVED, summarizeYahooHtml(brokenSalesHtml)))
+    })
+
+    it('内訳の項目が無いのに崩れた行は「（内訳の項目名なし）」と出る', () => {
+      expect(findUnknownYahooBreakdownLabels([{
+        yahooItemId: 'z1', itemName: 'x', settlementAmount: 5000, feeAmount: 250, receivedAmount: 4000, otherBreakdown: [],
+      }])).toEqual(['（内訳の項目名なし）'])
+    })
+
+    it('崩れた行が無ければ（実物の売上金管理）保存されず null', async () => {
+      const salesHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-salesmanagement.html'), 'utf-8')
+      const { inconsistent } = combineYahooSales(soldRows, parseYahooSalesHtml(salesHtml))
+      expect(inconsistent).toEqual([])
+      const { calls, save } = spySave()
+      expect(await saveIfUnknownYahooBreakdown(inconsistent, salesHtml, save)).toBeNull()
+      expect(calls).toHaveLength(0)
+    })
+
+    it('保存に失敗しても throw しない（取り込みの成否を変えない）。その旨が note に出る', async () => {
+      const failing = async (): Promise<string> => { throw new Error('EACCES') }
+      const { inconsistent } = combineYahooSales([], parseYahooSalesHtml(brokenSalesHtml))
+      expect(await saveIfUnknownYahooBreakdown(inconsistent, brokenSalesHtml, failing)).toContain('保存に失敗しました（EACCES）')
+      const rows = [{ ...soldRows[0], tradstat: 'COMPLETED' }]
+      expect(await saveIfUnknownYahooTradstat(rows, soldHtml, failing)).toContain('保存に失敗しました（EACCES）')
+    })
+
+    it('知らない値が6つ以上あるときは先頭5つ＋他n件に収める', () => {
+      const note = formatYahooUnknownBreakdownNote(['a', 'b', 'c', 'd', 'e', 'f', 'g'], 'F', summarizeYahooHtml(''))
+      expect(note).toContain('（a・b・c・d・e・他2件）')
     })
   })
 })
