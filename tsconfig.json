@@ -23,6 +23,7 @@
     "server/**/*.ts",
     "functions/**/*.ts",
     "web/**/*.ts",
+    "tools/**/*.ts",
     "electron.vite.config.ts"
   ]
 }

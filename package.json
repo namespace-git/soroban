@@ -22,7 +22,8 @@
     "dist:win:ci": "pnpm build && electron-builder --win --publish never",
     "test:server": "cross-env TZ=UTC vitest run --config vitest.server.config.ts",
     "dev:web": "vite --config vite.config.web.ts",
-    "build:web": "vite build --config vite.config.web.ts"
+    "build:web": "vite build --config vite.config.web.ts",
+    "migrate:web": "node tools/migrate-to-web/run.mjs"
   },
   "dependencies": {
     "@fontsource-variable/m-plus-2": "^5.3.0",
