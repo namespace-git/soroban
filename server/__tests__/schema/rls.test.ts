@@ -488,10 +488,12 @@ describe('全テーブルに RLS がある', () => {
 
   it('household_id を持つ全テーブルが、既定値で app.household_id を読み、世帯への外部キー（cascade）を持つ', async () => {
     const { rows } = await db.query<{ table_name: string; column_default: string | null; is_nullable: string }>(
-      `select table_name, column_default, is_nullable
-         from information_schema.columns
-        where table_schema = 'app' and column_name = 'household_id' and table_name not in ('household_member')
-        order by table_name`,
+      `select c.table_name, c.column_default, c.is_nullable
+         from information_schema.columns c
+         join information_schema.tables t
+           on t.table_schema = c.table_schema and t.table_name = c.table_name and t.table_type = 'BASE TABLE'
+        where c.table_schema = 'app' and c.column_name = 'household_id' and c.table_name not in ('household_member')
+        order by c.table_name`,
     )
     expect(rows.length).toBeGreaterThanOrEqual(34)
     for (const r of rows) {
