@@ -106,6 +106,21 @@ registerHandler('listSales', (ctx, filter) => listSales(ctx, filter ?? undefined
 | `GROUP BY` で集約していない列 | 全部 `GROUP BY` に入れる（主キーで決まる列は不要） | |
 | `changes` | `run()` の戻り `{ changes }` | |
 
+### Wave 2a で分かったこと（必ず守る）
+
+- **文字列の並びは `collate "C"`**（`order by name collate "C"`）。Supabase の既定の照合順序は大文字小文字・かなの順が
+  SQLite のバイト順と違う
+- **`now()` は同じトランザクションの中で同じ値。** 1 リクエストで複数行を入れて `created_at` で並べると同着になる。
+  並びが要る所は `clock_timestamp()` で入れるか、identity の列（`sale_line.allocation_order`・
+  `liability_settlement.settle_order`）で決める
+- **`${month}-31` は使えない**（Postgres の `date` に 2 月 31 日は入らない）。月の範囲は `_shared.ts` の `monthBounds(month)`
+- `sum(bigint)` は numeric＝**文字列**で返る。`::bigint`（アダプタが number にする）に戻す
+- **親を指す id は先に存在を確かめる。** 確かめないと、他の世帯の id や無い id が外部キー違反（23503）で 500 になる
+  （`_shared.ts` の `assertTagsExist` と同じ要領で、無ければ `UserError(…, 'not_found')`）
+- `money.ts` の `allocate`（「按分できません」）・`assertYen`・`assertQty` は素の `Error` を投げ、API では 500 に丸められる。
+  検査は `_shared.ts` の UserError 版（`assertYen` / `assertQty`）を使い、`allocate` は呼ぶ側で包む
+- 派生タグの読み込み（`loadPurchaseTagsForInventory` など 5 本）は `_shared.ts` ではなく `derive.ts`（Wave 2b）
+
 ### 列の名前が変わったもの
 
 | SQLite | Postgres | 契約（画面）に返すとき |
