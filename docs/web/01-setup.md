@@ -76,7 +76,18 @@ insert into app.household_member (household_id, user_id, role) values
 | Build command | `pnpm build:web` |
 | Build output directory | `dist-web` |
 
-### 2-2. 環境変数
+### 2-2. 互換性フラグ
+
+**Settings → Runtime → Compatibility flags** に **`nodejs_compat`** を入れる（API が Postgres のドライバを使うため）。
+
+### 2-3. Hyperdrive（DB への接続）
+
+**Workers & Pages → Hyperdrive → Create** で、1-6 の**接続文字列（Direct connection）**を渡して作る。
+できたら Pages の **Settings → Bindings** で **`HYPERDRIVE`** という名前で結び付ける。
+
+> 接続文字列にはパスワードが入っています。Hyperdrive の中にだけ置き、ファイルに書かないこと。
+
+### 2-4. 環境変数
 
 **Settings → Variables and Secrets**。「秘密」は **Encrypt（Secret）** で入れる。
 
@@ -85,7 +96,6 @@ insert into app.household_member (household_id, user_id, role) values
 | `VITE_SUPABASE_URL` | 1-6 の Project URL | 公開 | 画面（ビルド時） |
 | `VITE_SUPABASE_ANON_KEY` | 1-6 の anon key | 公開 | 画面（ビルド時） |
 | `SUPABASE_URL` | 1-6 の Project URL | 公開 | API |
-| `HYPERDRIVE`（バインディング） | 1-6 の接続文字列で Hyperdrive を作り、Pages に結び付ける | **秘密** | API |
 
 ※ Push 通知・API キーの暗号化の値は、その機能ができた段で追記します。
 

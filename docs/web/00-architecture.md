@@ -43,7 +43,7 @@
 
 ### なぜこの形か
 
-1. **API の契約（`src/shared/types.ts` の `SorobanApi`）を変えない。** 126 本の境界がすでにきれいに切れている。
+1. **API の契約（`src/shared/types.ts` の `SorobanApi`）を変えない。** 127 本の境界がすでにきれいに切れている。
    画面は `window.soroban` の中身を差し替えるだけで動く。**モック（`soroban-mock.ts`）もそのまま使える**
 2. **業務ロジックはサーバー 1 か所。** 画面もエージェントも同じ API を叩く。按分・紐付け・金額の規則が
    2 か所に分かれない（`CLAUDE.md`：レンダラー側で利益を再計算しない、の延長）
@@ -167,7 +167,7 @@ create unique index collect_job_one_active on collect_job (household_id)
 
 ---
 
-## API メソッドの振り分け（126 本）
+## API メソッドの振り分け（127 本）
 
 | 区分 | 本数 | 例 | Web での扱い |
 |---|---|---|---|
