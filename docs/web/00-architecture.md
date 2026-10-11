@@ -88,6 +88,7 @@ create policy household_isolation on sale
 ## 認証
 
 - Supabase Auth のメール＋パスワード。**サインアップは管理画面で無効にする**
+- JWT は**非対称鍵（JWKS）だけ**を受け付ける（新しいプロジェクトなので旧来の HS256 は作らない）
 - さらに API 側で **`household_member` に載っている人だけ**を通す
   （サインアップを誤って有効にしても、世帯に属していなければ何も見えない）
 - アカウントの作成は Supabase の管理画面（または `supabase/seed` のスクリプト）で人が行う
@@ -213,6 +214,30 @@ export interface Sql {
 **Docker が無くても本物の Postgres で回せるよう、PGlite（WASM の Postgres）を使う。**
 `supabase/migrations` をそのまま流し込んで、移植した業務ロジックを vitest で叩く。
 **既存の 917 件のテスト（SQLite 版）は消さない。** デスクトップ版は切り替えの日まで生きている。
+
+---
+
+## レビューで直したこと（2026-10-12・Codex）
+
+外部レビューで、**後から直すと高くつく**指摘が出た。設計を次のとおり改める。
+
+| # | 指摘 | 直し方 |
+|---|---|---|
+| 1 | **テーブルの所有者は RLS をすり抜ける** | `soroban_api` を所有者にしない（DML の GRANT だけ）。全テーブル `force row level security`。`app` から `PUBLIC`・`anon`・`authenticated` の権限を revoke |
+| 2 | **外部キーが世帯をまたげる**（RLS は参照整合性の確認を止めない） | 親に `unique (household_id, id)`、子は**複合外部キー** `(household_id, parent_id)`。業務の一意性はすべて `unique (household_id, …)` |
+| 3 | **二重のプーラが不安定**（Hyperdrive ＋ Supavisor transaction ＋ `prepare:false`） | **Hyperdrive → Supabase の direct connection**（または session プーラ）。トランザクション中は `sql.begin` の scoped だけを使う |
+| 4 | **「await を足すだけ」ではトランザクションが割れる** | 入口から scoped な `Sql` を渡す。`tx` は中なら SAVEPOINT。**`forEach(async)` と、トランザクション内の `Promise.all` は禁止**（移植のレビューで必ず見る） |
+| 5 | **bigint と日付が契約とずれる**（`count()` が文字列、`timestamptz` が `Date`） | `Sql` の境界で正規化：int8 → number（安全な範囲を超えたら例外）、`date` → `YYYY-MM-DD`、`timestamptz` → ISO |
+| 6 | **期限切れ後の二重実行を止められない**（スリープから戻った古い PC が結果を書く） | `collect_job` に **`lease_token`**。heartbeat・完了は token で CAS 更新、失効した token は拒否。**クールダウンは「最後に開始した時刻」から、失敗の後にも適用** |
+| 7 | **`waitUntil` 1 回では通知が静かに欠ける** | outbox に `status / attempts / next_attempt_at / last_error / dedupe_key`。**Cron が正式な送信主体**、`waitUntil` は即時送信の近道だけ。404/410 は購読を無効化、429/5xx は指数バックオフ |
+| 8 | **JWT の HS256 と JWKS の両対応は攻撃面が増える** | 新しいプロジェクトなので**非対称鍵（JWKS）だけ**。`iss`・`aud`・`exp`・`nbf`・`sub`・`role` を検証、alg は ES256/RS256 に限定 |
+| 9 | **まとめ売りの端数が SQLite の `rowid` 順に依存**（`sale_line_share`） | `sale_line` に**変わらない並び順の列 `allocation_order`**。移行時に SQLite の rowid 順で埋める。**端数がどの行に寄るかが変わるとお金がずれる** |
+| 10 | **iPhone の Push は導線が要る** | 「ホーム画面に追加 → アプリとして開く → 通知を有効にする」の案内画面。許可の要求は**ボタンを押したとき**だけ |
+
+**変えなくてよいと確認できたこと**：household＋RLS を最初から入れる判断、`channel_item_id` への改名と listing の UUID 化、
+業務日を `date`・出来事を `timestamptz`・今日を `Asia/Tokyo`、`text[]` と `jsonb`、金額は円の整数、
+Pages Functions ＋ Hyperdrive（Supabase Edge Functions に移す決定的な理由は無い。あちらは CPU 2 秒の上限がある）、
+PGlite と既存の SQLite テストの併存。**ただし本番と同じドライバ・接続経路の結合テストは切り替え前に必須。**
 
 ---
 
