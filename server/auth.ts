@@ -19,7 +19,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
  * リクエストの持ち主を確かめて、世帯を引く。
  *
  *   1. `Authorization: Bearer <JWT>` を検証 … 失敗は 401
- *   2. `app.household_member` から世帯を引く … 1 件も無ければ 403
+ *   2. `app.household_of_user` で世帯を引く … 属していなければ 403
  *
  * 2 は **`set role` する前の接続ロールで行う**（`withHousehold` の外）。`root` はトランザクションの外の Sql。
  * 世帯に属さない人は、サインアップが誤って有効になっていても何も見えない。
@@ -93,14 +93,15 @@ function jwksFor(base: string): JWTVerifyGetKey {
 }
 
 /**
- * user id から世帯を引く。複数の世帯に入っている人は household_id の昇順で最初の 1 つ（並びを固定して、毎回同じ世帯にする）。
- * **1 件も無ければ 403。**
+ * user id から世帯を引く。`app.household_of_user`（security definer）を通す。
+ * 複数の世帯に入っている人は、世帯の作成日が古い方の 1 つ（毎回同じ世帯にする）。**属していなければ 403。**
+ *
+ * `app.household_member` を直接読まない理由：全テーブルが force row level security なので、接続ロールに
+ * BYPASSRLS が無い環境では直接の select が 0 件になり、全員が 403 になる。この関数は中でだけ
+ * `app.user_id` を引く相手に立てて引き、呼んだ側の値に戻す（supabase/migrations/20261012000700）。
  */
 export async function findHousehold(root: Sql, userId: string): Promise<string> {
-  const row = await root.get<{ household_id: string }>(
-    'select household_id from app.household_member where user_id = ? order by household_id limit 1',
-    userId,
-  )
+  const row = await root.get<{ household_id: string | null }>('select app.household_of_user(?) as household_id', userId)
   if (!row || typeof row.household_id !== 'string' || !UUID.test(row.household_id)) {
     throw new ApiError('forbidden', 'この帳簿を使う権限がありません')
   }

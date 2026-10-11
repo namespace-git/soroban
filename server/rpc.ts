@@ -1,6 +1,6 @@
 import type { SorobanApi } from '../src/shared/types'
 import { authenticate, type AuthEnv, type Identity } from './auth'
-import { withHousehold, type Ctx } from './context'
+import { mediaBaseFromEnv, withHousehold, type Ctx } from './context'
 import type { Sql } from './db/sql'
 import { ApiError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError } from './errors'
 
@@ -193,7 +193,7 @@ export async function handleRpc(request: Request, method: string, deps: RpcDeps)
     const identity = await authenticate(request, deps.root, deps.env)
     if (!isApiMethod(method)) throw new ApiError('not_found', `そのメソッドはありません：${method}`)
     const args = await readArgs(request)
-    return await dispatch(method, args, { root: deps.root, identity, handlers: deps.handlers })
+    return await dispatch(method, args, { root: deps.root, identity, env: deps.env, handlers: deps.handlers })
   } catch (e) {
     return errorResponse(e, method)
   }
@@ -203,6 +203,10 @@ export interface DispatchDeps {
   root: Sql
   /** `authenticate` の結果 */
   identity: Identity
+  /** 画像の URL（`Ctx.mediaBase`）を作るのに SUPABASE_URL を見る。`mediaBase` を渡したときはそちらが先 */
+  env?: AuthEnv
+  /** 画像の URL の頭を直接渡す（テスト用）。省略すると `env` から作る */
+  mediaBase?: string | null
   handlers?: Handlers
 }
 
@@ -218,7 +222,8 @@ export async function dispatch(method: string, args: unknown[], deps: DispatchDe
     // 継承されたキーを拾わない（isApiMethod で名前は絞ってあるが、差し替えたテーブルも自分のキーだけを見る）
     const handler = Object.prototype.hasOwnProperty.call(table, method) ? table[method] : undefined
     if (!handler) throw new ApiError('not_implemented', `Web 版ではまだ使えません：${method}`)
-    const result = await withHousehold(deps.root, deps.identity, (ctx) => handler(ctx, ...args))
+    const mediaBase = deps.mediaBase !== undefined ? deps.mediaBase : deps.env ? mediaBaseFromEnv(deps.env) : null
+    const result = await withHousehold(deps.root, { ...deps.identity, mediaBase }, (ctx) => handler(ctx, ...args))
     return jsonResponse(200, { result: result === undefined ? null : result })
   } catch (e) {
     return errorResponse(e, method)

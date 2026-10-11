@@ -38,6 +38,38 @@ describe('mapDbError', () => {
     expect(mapDbError({ code: 'SB003', message: '取り込みの権限が失効しています' })?.code).toBe('conflict')
   })
 
+  it('SB004（取り消せない）は 409 conflict、SB005（取り込みの要求が見つからない）は 404 not_found。メッセージは関数が出した日本語のまま', () => {
+    const cannot = mapDbError({ code: 'SB004', message: '取り込みはもう始まっているので取り消せません', detail: '状態：running' })
+    expect(cannot).toBeInstanceOf(UserError)
+    expect(cannot?.code).toBe('conflict')
+    expect(cannot?.message).toBe('取り込みはもう始まっているので取り消せません（状態：running）')
+    expect(mapDbError({ code: 'SB004', message: '取り込みはもう終わっています' })?.code).toBe('conflict')
+
+    const missing = mapDbError({ code: 'SB005', message: '取り込みの要求が見つかりません' })
+    expect(missing).toBeInstanceOf(UserError)
+    expect(missing?.code).toBe('not_found')
+    expect(missing?.message).toBe('取り込みの要求が見つかりません')
+    expect(HTTP_STATUS[missing!.code]).toBe(404)
+    // SB で始まる他の errcode は、これまでどおり 409
+    expect(mapDbError({ code: 'SB006', message: 'これから足す関数' })?.code).toBe('conflict')
+  })
+
+  it('22P02（uuid・数値・日付などの形が不正）は 400「値の形が正しくありません」。SQL の中身は出さない', () => {
+    const e = mapDbError({ code: '22P02', message: 'invalid input syntax for type uuid: "not-a-uuid"' })
+    expect(e).toBeInstanceOf(UserError)
+    expect(e?.code).toBe('bad_request')
+    expect(e?.message).toBe('値の形が正しくありません')
+    expect(e?.message).not.toContain('uuid')
+  })
+
+  it('22003（integer に入らない大きさ）と 22021（text に入れられない文字）も 400', () => {
+    expect(mapDbError({ code: '22003', message: 'integer out of range' })).toMatchObject({ code: 'bad_request', message: '数値が大きすぎます' })
+    expect(mapDbError({ code: '22021', message: 'invalid byte sequence for encoding "UTF8": 0x00' })).toMatchObject({
+      code: 'bad_request',
+      message: '使えない文字が含まれています',
+    })
+  })
+
   it('collect_job_one_active の一意制約違反は「取り込み中です」（どちらのドライバの形でも）', () => {
     expect(mapDbError({ code: '23505', message: 'duplicate key', constraint_name: 'collect_job_one_active' })?.message).toContain('取り込み中です')
     expect(mapDbError({ code: '23505', message: 'duplicate key', constraint: 'collect_job_one_active' })?.code).toBe('conflict')

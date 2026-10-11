@@ -15,7 +15,8 @@ export const USER_NOBODY = '00000000-0000-4000-8000-0000000000ff'
 /**
  * テスト用の最小のスキーマ（本物のスキーマは supabase/migrations。ここは土台の検証に要るものだけ）。
  * - `app` スキーマ、BYPASSRLS を持たない NOLOGIN の `soroban_api` ロール
- * - `app.household_member`（soroban_api には読ませない＝世帯の解決は set role の前に行うことの確認）
+ * - `app.household_member`（soroban_api には読ませない＝世帯の解決は set role の前に行うことの確認）と、
+ *   それを引くだけの `app.household_of_user`（本物は security definer。世帯の解決はこの関数だけを通る）
  * - `app.note`（RLS つき）、`public.typed`（型の読み出しの確認用）
  */
 export async function setupSchema(pg: PGlite): Promise<void> {
@@ -29,6 +30,11 @@ export async function setupSchema(pg: PGlite): Promise<void> {
       user_id uuid not null,
       primary key (household_id, user_id)
     );
+
+    -- 本物（supabase/migrations/20261012000700）の代わり。auth.ts はこの関数だけを通して世帯を引く
+    create function app.household_of_user(p_user_id uuid) returns uuid
+    language sql stable security definer set search_path = app, pg_temp
+    as $$ select household_id from app.household_member where user_id = p_user_id order by household_id limit 1 $$;
 
     create table app.note (
       id int generated always as identity primary key,

@@ -1,6 +1,8 @@
 import { createPostgresSql } from '../../../server/db/postgres'
 import { INTERNAL_MESSAGE } from '../../../server/errors'
 import { handleRpc } from '../../../server/rpc'
+// 業務ロジックの登録（registerHandler の副作用）。ドメインを足したら server/domain/index.ts に 1 行足す
+import '../../../server/domain/index'
 
 // Cloudflare Pages Functions の入口。`POST /api/rpc/<method>`。中身は server/rpc.ts にあり、ここは薄く保つ。
 //
@@ -8,7 +10,7 @@ import { handleRpc } from '../../../server/rpc'
 //   HYPERDRIVE          … Hyperdrive のバインディング（第一候補。先は Supabase の direct connection か session モード）
 //   DATABASE_URL        … HYPERDRIVE が無いときの接続文字列。transaction モードのプーラ（6543）なら DATABASE_PREPARE=false も
 //   DATABASE_PREPARE    … "false" で名前付き prepared statement を切る（既定は使う）
-//   SUPABASE_URL        … https://xxxx.supabase.co （JWT の iss と JWKS の場所）
+//   SUPABASE_URL        … https://xxxx.supabase.co （JWT の iss と JWKS の場所。商品画像の URL（Storage の media）の頭にも使う）
 // 互換性フラグ `nodejs_compat` が要る（postgres.js が Node の API を使う）。
 //
 // @cloudflare/workers-types は入れていない（tsconfig に入れると DOM の型とぶつかる）ので、使う分だけ自前で書く。

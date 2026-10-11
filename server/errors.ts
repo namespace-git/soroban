@@ -78,6 +78,11 @@ const dbErrorRules: DbErrorRule[] = [
   // 同時に同じ行を触った
   { code: '40001', message: '他の操作と重なりました。もう一度お試しください', as: 'conflict' },
   { code: '40P01', message: '他の操作と重なりました。もう一度お試しください', as: 'conflict' },
+  // 画面から来た値が uuid・数値・日付などの形になっていない。SQL まで届いてしまった分を 500 にしない
+  { code: '22P02', message: '値の形が正しくありません', as: 'bad_request' },
+  // integer 列に入らない大きさの数、NUL 文字（text に入れられない）
+  { code: '22003', message: '数値が大きすぎます', as: 'bad_request' },
+  { code: '22021', message: '使えない文字が含まれています', as: 'bad_request' },
 ]
 
 /** 制約名などから、利用者向けの日本語に写す規則を足す（業務ロジック側が起動時に呼ぶ） */
@@ -111,6 +116,9 @@ export function readDbError(e: unknown): DbErrorInfo | undefined {
  * 取り込みの排他：SB001 取り込み中・SB002 連続の取り込み・SB003 権限の失効）。メッセージ（と detail）を
  * そのまま見せて、409 `conflict` にする。DB 関数に利用者向けの文言を足すときは `SB` で始まる errcode を使うこと
  * （それ以外の SQLSTATE のメッセージは英語の内部用なので、見せない）。
+ *
+ * SB004（取り消せない：始まっている・もう終わっている）は 409 `conflict`、
+ * SB005（取り込みの要求が見つからない。他の世帯の要求も RLS で見えない）は 404 `not_found`。
  */
 export function mapDbError(e: unknown): UserError | undefined {
   const info = readDbError(e)
@@ -122,7 +130,12 @@ export function mapDbError(e: unknown): UserError | undefined {
     return new UserError(rule.message, rule.as ?? 'bad_request')
   }
   if (info.code.startsWith('SB') && info.message) {
-    return new UserError(info.detail ? `${info.message}（${info.detail}）` : info.message, 'conflict')
+    return new UserError(info.detail ? `${info.message}（${info.detail}）` : info.message, SB_CODE_AS[info.code] ?? 'conflict')
   }
   return undefined
+}
+
+/** SB で始まる SQLSTATE のうち、409 `conflict` 以外にするもの */
+const SB_CODE_AS: Record<string, 'not_found'> = {
+  SB005: 'not_found',
 }

@@ -330,6 +330,27 @@ describe('エラーの出し方', () => {
       expect(r.text).not.toContain('collect_job_one_active')
     })
 
+    it('SB004 は 409、SB005 は 404（メッセージは関数が出した日本語）', async () => {
+      const raise = (code: string, message: string) => ({
+        collect: async (ctx: import('../../context').Ctx) => void (await ctx.sql.run(`do $$ begin raise exception '${message}' using errcode = '${code}'; end $$`)),
+      })
+      const cannot = await call('collect', undefined, { handlers: raise('SB004', '取り込みはもう始まっているので取り消せません') })
+      expect(cannot.status).toBe(409)
+      expect(cannot.json.error).toEqual({ code: 'conflict', message: '取り込みはもう始まっているので取り消せません' })
+      const missing = await call('collect', undefined, { handlers: raise('SB005', '取り込みの要求が見つかりません') })
+      expect(missing.status).toBe(404)
+      expect(missing.json.error).toEqual({ code: 'not_found', message: '取り込みの要求が見つかりません' })
+    })
+
+    it('uuid の形が不正（22P02）は 400「値の形が正しくありません」。500 にしない', async () => {
+      const r = await call('collect', undefined, {
+        handlers: { collect: async (ctx) => void (await ctx.sql.get(`select 'not-a-uuid'::uuid`)) },
+      })
+      expect(r.status).toBe(400)
+      expect(r.json.error).toEqual({ code: 'bad_request', message: '値の形が正しくありません' })
+      expect(r.text).not.toContain('uuid')
+    })
+
     it('SB 以外の SQLSTATE の英語メッセージは出さない', async () => {
       vi.spyOn(console, 'error').mockImplementation(() => {})
       const r = await call('collect', undefined, {
