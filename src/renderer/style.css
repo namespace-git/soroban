@@ -68,6 +68,7 @@
 
   --nav-w:    88px;
   --topbar-h: 56px;
+  --tabbar-h: 56px;   /* スマホ幅の下のタブバー（App.vue。ホームバー分の余白は別に足す） */
   --ease:     cubic-bezier(.2,.8,.2,1);
   --dur:      180ms;
 }
@@ -728,4 +729,98 @@ tr.total-row.loss > td {
   font-size: var(--fs-12);
   color: var(--text-faint);
   white-space: nowrap;
+}
+
+/* ============================================================
+   Web 版のログイン・設定不足の画面（auth/）
+   ============================================================ */
+
+.auth-screen {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: var(--canvas);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 28px 24px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+}
+
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.auth-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 999px;
+  background: var(--brand);
+  color: var(--text);
+  font-size: var(--fs-20);
+  font-weight: 700;
+}
+
+.auth-title {
+  margin: 0;
+  font-size: var(--fs-20);
+  font-weight: 700;
+}
+
+.auth-help {
+  margin: 0;
+  text-align: center;
+  text-wrap: balance;
+  font-size: var(--fs-12);
+  color: var(--text-faint);
+}
+
+/* 上部バーの利益ピル：幅が足りないときは折り返さず省く（全文は title）。1100px 以上の見た目は変えない */
+@media (max-width: 1099px) {
+  .topbar .profit-mini {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* ============================================================
+   スマホ幅（768px 未満）の下地
+
+   外枠（下のタブバー・上のバー）は App.vue が持つ。ここは全画面に効く地の部分だけ。
+   各画面の中身（表・カードの組み替え）は画面ごとに直す。
+   デスクトップ幅（768px 以上）には一切効かせない。
+   ============================================================ */
+
+@media (max-width: 767px) {
+  /* 横向きにしたときに iOS が文字を勝手に大きくしない */
+  html { -webkit-text-size-adjust: 100%; }
+
+  /* iPhone は 16px 未満の入力欄に触れると画面を拡大してしまう */
+  input, select, textarea { font-size: var(--fs-16); }
+
+  .page { padding: 16px 12px; }
+  .page-head { flex-wrap: wrap; }
+
+  /* 上のバーの利益ピル（省略の仕方は上の 1099px 以下の規則）。狭いので文字と余白を詰める */
+  .topbar .profit-mini {
+    padding: 6px 12px;
+    font-size: var(--fs-12);
+  }
 }

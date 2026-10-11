@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch, provide } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, provide, inject, nextTick } from 'vue'
 import Icon from './components/Icon.vue'
 import InputDialog from './components/InputDialog.vue'
 import type { PromptOptions } from './components/InputDialog.vue'
@@ -20,6 +20,7 @@ import Help from './views/Help.vue'
 import type { CollectorRun, DashboardStats, ListingStatus, ProfitStrip, SaleStatus, SearchHit, TrackingCheckSummary, UpdateStatus } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
 import { runSourceLabel } from './utils/collector-run'
+import { yen } from './format'
 
 type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'expenses' | 'settings' | 'help'
 /**
@@ -108,6 +109,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
     e.preventDefault()
     focusSearch()
   }
+  if (e.key === 'Escape' && moreOpen.value) moreOpen.value = false
 }
 
 const TAB_FOR_KIND: Record<SearchHit['kind'], Tab> = {
@@ -121,6 +123,7 @@ function onSearchSelect(hit: SearchHit) {
   goto(TAB_FOR_KIND[hit.kind], payload)
   searchOpen.value = false
   searchQuery.value = ''
+  mobileSearch.value = false
 }
 
 function closeSearch() {
@@ -173,6 +176,64 @@ async function loadProfitStrip() {
 const dataRevision = ref(0)
 provide('dataRevision', dataRevision)
 provide('changed', () => { loadStats(); loadProfitStrip(); dataRevision.value++ })
+
+// --- スマホ幅（768px 未満）の外枠 ---
+// サイドナビの代わりに下のタブバー。毎日触る 5 つ（ホーム・売上・仕入・在庫・月次）を並べ、
+// 残り（商品・経費・設定・ヘルプ）は「その他」の中に置く。ホーム（今やること）は 1 タップ
+
+const tabByKey = (key: Tab) => tabs.find(t => t.key === key)!
+const barTabs = (['dashboard', 'sales', 'purchases', 'inventory', 'monthly'] as Tab[]).map(tabByKey)
+const moreTabs = (['products', 'expenses', 'settings', 'help'] as Tab[]).map(tabByKey)
+
+const MOBILE_QUERY = '(max-width: 767px)'
+const isMobile = ref(false)
+let mobileMql: MediaQueryList | undefined
+function onMobileChange(e: { matches: boolean }) {
+  isMobile.value = e.matches
+  if (!e.matches) {
+    moreOpen.value = false
+    mobileSearch.value = false
+  }
+}
+
+// 「その他」のシート。タブを選ぶ・外を押す・Esc で閉じる
+const moreOpen = ref(false)
+const moreActive = computed(() => moreTabs.some(t => t.key === tab.value))
+// 上のバーの検索は、スマホ幅では虫めがねを押すと入力欄が上のバー全体に広がる
+const mobileSearch = ref(false)
+
+// Web 版（auth/WebRoot.vue）だけが渡す。Electron 版では無く、ログアウトの口は出ない
+const webAccount = inject<{ email: string | null; logout: () => Promise<void> } | null>('webAccount', null)
+
+async function logout() {
+  moreOpen.value = false
+  await webAccount?.logout()
+}
+
+function selectTab(key: Tab) {
+  tab.value = key
+  moreOpen.value = false
+}
+
+async function openMobileSearch() {
+  mobileSearch.value = true
+  await nextTick()
+  focusSearch()
+}
+
+function closeMobileSearch() {
+  mobileSearch.value = false
+  searchQuery.value = ''
+}
+
+// 上のバーの利益ピルは 1 行に収まらないと省略されるので、全文は title で読ませる（ProfitStripBar の compact と同じ文言）
+const profitTitle = computed(() => {
+  const s = profitStrip.value
+  const lines = [`今月の実績粗利 ${yen(s?.gross_profit ?? 0)} ／ 純利益 ${yen(s?.net_profit ?? 0)}`]
+  if (s?.pending_count) lines.push(`取引中 ${s.pending_count} 件 見込み ${yen(s.pending_profit_estimate)}`)
+  lines.push('ホームで詳しく見る')
+  return lines.join('\n')
+})
 
 // window.prompt() は Electron では動かないため、入力ダイアログを共通で用意する
 type PromptState = { title: string; opts: PromptOptions; resolve: (v: string | null) => void }
@@ -243,11 +304,12 @@ provide('confirm', confirmDialog)
 provide('choose', chooseDialog)
 provide('toast', (text: string, kind: 'ok' | 'warn') => showNotice({ text, kind }))
 // main.ts の errorHandler から。処理が失敗したのに何も起きない、を防ぐ
-window.addEventListener('soroban:error', (e) => {
+function onSorobanError(e: Event) {
   // Electron の IPC が付ける "Error invoking remote method 'x': " は人には要らない
   const raw = (e as CustomEvent<string>).detail.replace(/^Error invoking remote method '[^']+': /, '').replace(/^(Sqlite)?Error: /, '')
   showNotice({ text: `エラー：${raw}`, kind: 'warn' })
-})
+}
+window.addEventListener('soroban:error', onSorobanError)
 
 const needsTotal = computed(() => pendingCount.value)
 
@@ -374,10 +436,16 @@ onMounted(() => {
     updateStatus.value = status
   })
   window.addEventListener('keydown', onGlobalKeydown)
+  mobileMql = window.matchMedia(MOBILE_QUERY)
+  onMobileChange(mobileMql)
+  mobileMql.addEventListener('change', onMobileChange)
 })
 
 onUnmounted(() => {
+  // Web 版はログアウト／ログインで App を作り直すので、外しておく（Electron 版は作り直さない）
+  window.removeEventListener('soroban:error', onSorobanError)
   window.removeEventListener('keydown', onGlobalKeydown)
+  mobileMql?.removeEventListener('change', onMobileChange)
 })
 
 // 子側の revision カウンタが動くたびに要対応件数・取り込み状態・利益ピルも更新する
@@ -409,25 +477,42 @@ watch(dataRevision, loadProfitStrip)
         </template>
       </nav>
       <div class="grow" />
-      <div class="nav-version faint">v0.1</div>
+      <!-- Web 版だけ：ここにログアウト（v0.1 の代わり。高さは変えない） -->
+      <button
+        v-if="webAccount"
+        class="ghost sm nav-logout"
+        :title="webAccount.email ? `ログアウト（${webAccount.email}）` : 'ログアウト'"
+        @click="logout"
+      >ログアウト</button>
+      <div v-else class="nav-version faint">v0.1</div>
     </aside>
 
     <div class="main-col">
-      <header class="topbar">
-        <div class="grow" />
+      <header class="topbar" :class="{ 'm-searching': mobileSearch }">
+        <div class="grow topbar-spacer" />
         <div ref="searchWrap" class="global-search">
-          <SearchBox v-model="searchQuery" placeholder="すべてから探す（Ctrl+K）" />
+          <SearchBox v-model="searchQuery" :placeholder="isMobile ? 'すべてから探す' : 'すべてから探す（Ctrl+K）'" />
         </div>
-        <button class="topbar-profit-btn" title="ホームで詳しく見る" @click="goto('dashboard')">
+        <button class="ghost topbar-search-cancel" @click="closeMobileSearch">キャンセル</button>
+        <button class="topbar-profit-btn" :title="isMobile ? profitTitle : 'ホームで詳しく見る'" @click="goto('dashboard')">
           <ProfitStripBar compact :strip="profitStrip" />
         </button>
-        <span class="run-status" :class="{ warn: runIsWarn }" :title="runStatusText">
+        <!-- スマホ幅では、要確認のときだけ警告アイコンを出す。押すと「その他」に全文が出る -->
+        <span
+          class="run-status"
+          :class="{ warn: runIsWarn }"
+          :title="runStatusText"
+          @click="isMobile && (moreOpen = true)"
+        >
           <Icon v-if="runIsWarn" name="alert" :size="14" class="run-status-icon" />
           <span class="run-status-text">{{ runStatusText }}</span>
         </span>
-        <button class="primary" :disabled="collecting" @click="collect">
+        <button class="ghost topbar-search-btn" aria-label="すべてから探す" @click="openMobileSearch">
+          <Icon name="search" :size="20" />
+        </button>
+        <button class="primary collect-btn" :class="{ busy: collecting }" :disabled="collecting" aria-label="取り込む" @click="collect">
           <Icon name="refresh" :size="16" />
-          {{ collecting ? '取り込み中…' : '取り込む' }}
+          <span class="collect-label">{{ collecting ? '取り込み中…' : '取り込む' }}</span>
         </button>
       </header>
 
@@ -464,7 +549,69 @@ watch(dataRevision, loadProfitStrip)
         <Settings v-else-if="tab === 'settings'" />
         <Help v-else />
       </main>
+
+      <!-- スマホ幅だけ：下のタブバー（デスクトップ幅では display:none） -->
+      <nav class="tabbar" aria-label="メニュー">
+        <button
+          v-for="t in barTabs"
+          :key="t.key"
+          class="tabbar-item"
+          :class="{ active: tab === t.key && !moreOpen }"
+          :aria-current="tab === t.key ? 'page' : undefined"
+          @click="selectTab(t.key)"
+        >
+          <Icon :name="t.icon" :size="22" />
+          <span class="tabbar-label">{{ t.label }}</span>
+          <span v-if="t.key === 'sales' && needsTotal > 0" class="nav-badge tabbar-badge">{{ needsTotal }}</span>
+        </button>
+        <button
+          class="tabbar-item"
+          :class="{ active: moreOpen || moreActive }"
+          aria-haspopup="dialog"
+          :aria-expanded="moreOpen"
+          @click="moreOpen = !moreOpen"
+        >
+          <svg class="tabbar-more-icon" width="22" height="22" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <circle cx="4" cy="10" r="1.6" /><circle cx="10" cy="10" r="1.6" /><circle cx="16" cy="10" r="1.6" />
+          </svg>
+          <span class="tabbar-label">その他</span>
+        </button>
+      </nav>
     </div>
+
+    <!-- 「その他」のシート（スマホ幅だけ）。タブバーは見えたまま、その上に出す -->
+    <Transition name="sheet">
+      <div v-if="moreOpen" class="more-layer" @click.self="moreOpen = false">
+        <div class="more-sheet" role="dialog" aria-label="その他のメニュー">
+          <div class="more-grid">
+            <button
+              v-for="t in moreTabs"
+              :key="t.key"
+              class="more-item"
+              :class="{ active: tab === t.key }"
+              :aria-current="tab === t.key ? 'page' : undefined"
+              @click="selectTab(t.key)"
+            >
+              <Icon :name="t.icon" :size="22" />
+              <span>{{ t.label }}</span>
+            </button>
+          </div>
+          <div class="more-foot">
+            <p class="more-status" :class="{ warn: runIsWarn }">
+              <Icon v-if="runIsWarn" name="alert" :size="14" />
+              {{ runStatusText }}
+            </p>
+            <template v-if="webAccount">
+              <p v-if="webAccount.email" class="more-account">{{ webAccount.email }}</p>
+              <button class="more-logout" @click="logout">
+                <Icon name="login" :size="20" class="flip-x" />
+                ログアウト
+              </button>
+            </template>
+          </div>
+        </div>
+      </div>
+    </Transition>
 
     <InputDialog
       :open="!!promptState"
@@ -584,6 +731,17 @@ watch(dataRevision, loadProfitStrip)
   text-align: center;
 }
 
+/* Web 版だけ。v0.1 の代わりに置くので、高さもほぼ同じ */
+.nav-logout {
+  width: 100%;
+  margin: 4px 0;
+  padding: 0;
+  font-size: var(--fs-11);
+  color: var(--text-faint);
+}
+
+.flip-x { transform: scaleX(-1); }
+
 /* --- 上部バー・本文 --- */
 
 .main-col {
@@ -609,6 +767,9 @@ watch(dataRevision, loadProfitStrip)
 
 @media (max-width: 1099px) {
   .global-search :deep(.search-box) { width: 200px; }
+  /* 利益ピルは残り幅に合わせて縮め、収まらない分は省く（768px 前後で上のバーが横にはみ出していた） */
+  .topbar .topbar-profit-btn { flex-shrink: 1; min-width: 0; }
+  .topbar-profit-btn :deep(.profit-strip-bar) { min-width: 0; max-width: 100%; }
 }
 
 .topbar-profit-btn {
@@ -651,6 +812,12 @@ main {
   overflow-y: auto;
   background: var(--canvas);
 }
+
+/* スマホ幅だけで使う部品。デスクトップ幅（768px 以上）では出さない（下の @media で出す） */
+.tabbar,
+.more-layer { display: none; }
+.topbar .topbar-search-btn,
+.topbar .topbar-search-cancel { display: none; }
 
 /* --- 通知・更新バナー（重ねて表示。文書フローに入れず、本文の位置を動かさない） --- */
 
@@ -698,9 +865,200 @@ main {
   opacity: 0;
 }
 
+@keyframes topbar-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* --- スマホ幅（768px 未満）の外枠 ---
+   サイドナビをやめて下のタブバー、上のバーは詰める。デスクトップ幅の見た目には一切効かせない。
+   各画面の中身（表・カード）は画面ごとに直す。ここは外枠だけ。
+   env(safe-area-inset-*) はノッチ・ホームバーに被らないための余白（iPhone） */
+
+@media (max-width: 767px) {
+  .shell {
+    height: 100%;
+    height: 100dvh; /* アドレスバーが出入りしても、下のタブバーが画面の外に出ない */
+  }
+  .nav { display: none; }
+
+  .topbar {
+    height: auto;
+    min-height: calc(var(--topbar-h) + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+    gap: 8px;
+  }
+  .topbar-spacer { display: none; }
+
+  /* 検索：普段は虫めがね。押すと入力欄が上のバー全体に広がる（タップ数は増えない：虫めがね→そのまま入力） */
+  .global-search { display: none; flex: 1 1 auto; min-width: 0; }
+  .global-search :deep(.search-box) { width: 100%; }
+  .global-search :deep(.search-box-input) { height: 44px; }
+  .topbar.m-searching .global-search { display: block; }
+  .topbar .topbar-search-btn { display: inline-flex; justify-content: center; width: 44px; height: 44px; padding: 0; }
+  .topbar.m-searching .topbar-search-cancel { display: inline-flex; min-height: 44px; }
+
+  /* 利益ピル：残り幅いっぱいに広げ、1 行に収まらない分は省く（全文は title） */
+  .topbar .topbar-profit-btn { display: flex; flex: 1 1 0; justify-content: flex-start; min-width: 0; min-height: 44px; text-align: left; }
+  .topbar-profit-btn :deep(.profit-strip-bar) { min-width: 0; max-width: 100%; }
+
+  /* 取り込み状態：要確認のときだけ警告アイコン（押すと「その他」に全文が出る） */
+  .run-status { flex: 0 0 auto; }
+  .run-status:not(.warn) { display: none; }
+  .run-status.warn { justify-content: center; min-width: 44px; min-height: 44px; cursor: pointer; }
+  .run-status-text { display: none; }
+
+  /* 取り込む：アイコンだけ。取り込み中は回す */
+  .topbar .collect-btn { justify-content: center; width: 44px; height: 44px; padding: 0; }
+  .collect-btn :deep(svg) { width: 20px; height: 20px; }
+  .collect-label { display: none; }
+  .collect-btn.busy :deep(svg) { animation: topbar-spin 1s linear infinite; }
+
+  /* 検索中は他を隠して、入力欄を広く取る */
+  .topbar.m-searching .topbar-profit-btn,
+  .topbar.m-searching .run-status,
+  .topbar.m-searching .topbar-search-btn,
+  .topbar.m-searching .collect-btn { display: none; }
+
+  main {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  /* 通知は上のバーの下、左右いっぱいに */
+  .overlay-notices {
+    top: calc(var(--topbar-h) + env(safe-area-inset-top) + 8px);
+    left: max(12px, env(safe-area-inset-left));
+    right: max(12px, env(safe-area-inset-right));
+    align-items: stretch;
+    max-width: none;
+  }
+  .toast { border-radius: var(--radius-md); }
+
+  /* 下のタブバー */
+  .tabbar {
+    position: relative;
+    z-index: 61; /* 「その他」のシートの幕（60）より上。シートが開いても見えたまま */
+    display: flex;
+    flex-shrink: 0;
+    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    background: var(--surface-nav);
+    border-top: 1px solid var(--line-soft);
+  }
+  .tabbar-item {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    height: var(--tabbar-h);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 0 2px;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    color: var(--text-faint);
+    font-size: var(--fs-11);
+    white-space: nowrap;
+  }
+  .tabbar-item:hover:not(:disabled) { background: transparent; }
+  .tabbar-item.active { color: var(--text); font-weight: 700; box-shadow: inset 0 3px 0 var(--brand); }
+  .tabbar-badge { position: absolute; top: 4px; left: calc(50% + 6px); }
+
+  /* 「その他」のシート：タブバーの上に出す */
+  .more-layer {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(38, 38, 42, .32);
+  }
+  .more-sheet {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 1px);
+    padding: 12px max(12px, env(safe-area-inset-right)) 12px max(12px, env(safe-area-inset-left));
+    background: var(--surface);
+    border-radius: var(--radius) var(--radius) 0 0;
+    box-shadow: var(--shadow-2);
+  }
+  .more-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+  .more-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 72px;
+    padding: 8px 4px;
+    background: transparent;
+    border-radius: var(--radius-md);
+    color: var(--text-dim);
+    font-size: var(--fs-12);
+  }
+  .more-item:hover:not(:disabled) { background: transparent; }
+  .more-item.active { background: var(--brand-soft); color: var(--text); font-weight: 700; }
+  .more-foot {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .more-status {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0 4px 4px;
+    font-size: var(--fs-12);
+    color: var(--text-dim);
+    overflow-wrap: anywhere;
+  }
+  .more-status.warn { color: var(--warn); }
+  .more-account {
+    margin: 0 4px 8px;
+    font-size: var(--fs-12);
+    color: var(--text-faint);
+    overflow-wrap: anywhere;
+  }
+  .more-logout {
+    width: 100%;
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+}
+
+.sheet-enter-active,
+.sheet-leave-active {
+  transition: opacity var(--dur) var(--ease);
+}
+.sheet-enter-active .more-sheet,
+.sheet-leave-active .more-sheet {
+  transition: transform var(--dur) var(--ease);
+}
+.sheet-enter-from,
+.sheet-leave-to {
+  opacity: 0;
+}
+.sheet-enter-from .more-sheet,
+.sheet-leave-to .more-sheet {
+  transform: translateY(24px);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .fade-enter-active,
-  .fade-leave-active {
+  .fade-leave-active,
+  .sheet-enter-active,
+  .sheet-leave-active,
+  .sheet-enter-active .more-sheet,
+  .sheet-leave-active .more-sheet {
     transition: none;
   }
 }
