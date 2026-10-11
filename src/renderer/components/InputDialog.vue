@@ -36,14 +36,23 @@ function cancel() {
   emit('cancel')
 }
 
-// スクリムでの mousedown → mouseup が両方ともスクリム自身のときだけ閉じる。
-// 本文内でのドラッグ選択やスライダー操作が外に抜けて mouseup しても閉じないようにする
+// スクリムでの pointerdown → pointerup が両方ともスクリム自身のときだけ閉じる（マウスもタッチも同じ）。
+// 本文内でのドラッグ選択やスライダー操作が外に抜けて離しても閉じないようにする。
+// タッチは指を置いた要素に pointerup が固定されるので、スクロールのつもりで動かした指（10px 超）では閉じない
 let downOnScrim = false
-function onScrimMouseDown(e: MouseEvent) {
+let downX = 0
+let downY = 0
+function onScrimPointerDown(e: PointerEvent) {
   downOnScrim = e.target === e.currentTarget
+  downX = e.clientX
+  downY = e.clientY
 }
-function onScrimMouseUp(e: MouseEvent) {
-  if (downOnScrim && e.target === e.currentTarget) cancel()
+function onScrimPointerUp(e: PointerEvent) {
+  const moved = e.pointerType !== 'mouse' && Math.hypot(e.clientX - downX, e.clientY - downY) > 10
+  if (downOnScrim && !moved && e.target === e.currentTarget) cancel()
+  downOnScrim = false
+}
+function onScrimPointerCancel() {
   downOnScrim = false
 }
 
@@ -83,7 +92,7 @@ watch(() => props.open, async (isOpen) => {
 <template>
   <Teleport to="body">
     <Transition name="dialog">
-      <div v-if="open" class="scrim" @mousedown="onScrimMouseDown" @mouseup="onScrimMouseUp" @keydown="onKeydown">
+      <div v-if="open" class="scrim" @pointerdown="onScrimPointerDown" @pointerup="onScrimPointerUp" @pointercancel="onScrimPointerCancel" @keydown="onKeydown">
         <div
           class="panel"
           role="dialog"
@@ -186,6 +195,34 @@ watch(() => props.open, async (isOpen) => {
   .dialog-enter-active .panel,
   .dialog-leave-active .panel {
     transition: none;
+  }
+}
+
+/* スマホ幅（768px 未満）：左右いっぱいに、画面の上寄りに出す。
+   下に出すとキーボードに隠れるため（入力欄とボタンが見えたまま打てるように）。ボタンは 48px、2 つ横に並べる */
+@media (max-width: 767px) {
+  .scrim {
+    align-items: flex-start;
+    padding: calc(env(safe-area-inset-top, 0px) + 40px) max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+  }
+  .panel {
+    width: 100%;
+    max-width: 100%;
+    max-height: 70vh;
+    max-height: 70dvh;
+  }
+  .dialog-head { padding: 20px 16px 0; }
+  .dialog-body { padding: 12px 16px; }
+  .dialog-footer { padding: 12px 16px; }
+  .dialog-footer button {
+    flex: 1 1 0;
+    height: auto;
+    min-height: 48px;
+  }
+  .dialog-body input { height: 44px; }
+  .dialog-enter-from .panel,
+  .dialog-leave-to .panel {
+    transform: translateY(-12px);
   }
 }
 </style>

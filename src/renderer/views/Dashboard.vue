@@ -211,7 +211,7 @@ function gotoTopModel() {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page home-page">
     <div class="page-head">
       <h1 class="page-title">ホーム</h1>
     </div>
@@ -330,6 +330,7 @@ function gotoTopModel() {
                       @click="openLoginForRun"
                     >ログインする</button>
                     <button v-else class="sm" :disabled="busy.has(item.id)" @click="retryCollect(item)">もう一度取り込む</button>
+                    <span v-if="item.run?.status === 'auth_required'" class="m-hint">ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください</span>
                   </template>
 
                   <!-- 止めた出品の在庫を外す：1 クリックで全部。押した行はその場で消える -->
@@ -340,6 +341,7 @@ function gotoTopModel() {
                       title="出品から在庫を外すだけです。在庫も販売の記録も消えません。"
                       @click="releaseListing(item)"
                     >{{ releaseButtonLabel(item) }}</button>
+                    <span class="m-hint">出品から在庫を外すだけです。在庫も販売の記録も消えません。</span>
                   </template>
 
                   <!-- 忘れていませんか -->
@@ -540,6 +542,9 @@ function gotoTopModel() {
 }
 .link-action:hover:not(:disabled) { background: transparent; color: var(--text); }
 
+/* スマホ幅だけで出す補足（デスクトップ幅ではボタンの title＝ホバーで読めるもの） */
+.m-hint { display: none; }
+
 .done-row {
   margin: 14px 0 0;
   font-size: var(--fs-12);
@@ -568,4 +573,71 @@ function gotoTopModel() {
 .review-row:first-of-type { border-top: 0; }
 .review-row:hover { background: var(--surface-hi); }
 .review-row b { font-size: var(--fs-14); font-weight: 700; }
+
+/* ============================================================
+   スマホ幅（768px 未満）
+   「今やること」（要対応）を最初に。数字（利益ストリップ）と見直すものはその下に回す。
+   行は 上：サムネイルと文章、下：操作（全幅・44px 以上）。ホバーでしか読めなかったタイトルと補足は切らずに見せる。
+   デスクトップ幅（768px 以上）の見た目には一切効かせない。
+   ============================================================ */
+@media (max-width: 767px) {
+  .home-page { display: flex; flex-direction: column; }
+  .home-page > .page-head { margin-bottom: 8px; }
+  /* 2 列の入れ物をやめて、中の 2 つ（今やること／見直すもの）を並べ替えられるようにする */
+  .inbox-grid { display: contents; }
+  .inbox-panel { order: 1; }
+  .profit-strip-bar,
+  .profit-strip { order: 2; margin: 12px 0 0; }
+  .profit-strip { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .side-col { order: 3; margin-top: 12px; }
+
+  /* 見出し：「今やること」を縦書きにつぶさない。件数と案内は次の行へ回してよい */
+  .inbox-head { flex-wrap: wrap; gap: 0 12px; }
+  .inbox-head h2 { flex: 0 0 auto; }
+
+  .inbox-row {
+    grid-template-columns: 44px minmax(0, 1fr);
+    align-items: start;
+    gap: 10px 12px;
+    padding: 12px 0;
+  }
+  .inbox-row .row-title.one-line { -webkit-line-clamp: 3; min-height: 0; }
+  .inbox-row .row-sub { -webkit-line-clamp: 3; min-height: 0; }
+  .inbox-row .row-sub.two-lines { -webkit-line-clamp: 4; min-height: 0; }
+
+  .row-act { grid-column: 1 / -1; justify-content: stretch; flex-wrap: wrap; }
+  .row-act > button,
+  .row-act > select {
+    flex: 1 1 140px;
+    height: 44px;
+    max-width: none;
+  }
+  .row-act > select { flex-basis: 100%; }
+  .m-hint {
+    display: block;
+    flex: 1 1 100%;
+    font-size: var(--fs-12);
+    color: var(--text-dim);
+  }
+  .row-act > button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    font-size: var(--fs-14);
+  }
+  /* 下線だけの小さな文字は指で押せない。枠つきの 44px にする */
+  .row-act > button.link-action {
+    flex: 0 0 auto;
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: var(--fs-13);
+    text-decoration: none;
+  }
+
+  .side-col .stat-card { padding: 14px 16px; }
+  .side-col .stat-card-value { font-size: var(--fs-28); }
+  .review-row { min-height: 48px; padding: 8px 0; border-radius: 0; font-size: var(--fs-14); }
+}
 </style>

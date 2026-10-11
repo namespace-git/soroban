@@ -54,11 +54,11 @@ async function submit() {
     <div class="fields">
       <label class="field">
         <span>口座の名前</span>
-        <input v-model="name" style="width:180px" placeholder="例：ゆうちょ銀行" @keydown.enter="submit" />
+        <input v-model="name" class="w-name" placeholder="例：ゆうちょ銀行" @keydown.enter="submit" />
       </label>
       <label class="field">
         <span>種類</span>
-        <select v-model="kind" style="width:150px">
+        <select v-model="kind" class="w-kind">
           <option v-for="k in ACCOUNT_KINDS" :key="k" :value="k">{{ ACCOUNT_KIND_LABEL[k] }}</option>
         </select>
       </label>
@@ -66,12 +66,12 @@ async function submit() {
         <span>はじめにあった金額（0円のままでOK）</span>
         <span class="money">
           <span class="yen">¥</span>
-          <input v-model="balance" inputmode="numeric" class="amount" style="width:120px" @keydown.enter="submit" />
+          <input v-model="balance" inputmode="numeric" class="amount w-money" @keydown.enter="submit" />
         </span>
       </label>
       <label class="field">
         <span>いつの時点の金額か</span>
-        <input v-model="openingDate" type="date" style="width:150px" />
+        <input v-model="openingDate" type="date" class="w-date" />
       </label>
       <button class="primary sm add-btn" :disabled="saving" @click="submit">
         <Icon name="plus" :size="14" /> 口座を作る
@@ -87,4 +87,21 @@ async function submit() {
 .money .yen { color: var(--text-dim); font-size: var(--fs-12); }
 .amount { text-align: right; font-variant-numeric: tabular-nums; }
 .hint { margin: 8px 0 0; font-size: var(--fs-12); }
+.w-name { width: 180px; }
+.w-kind { width: 150px; }
+.w-money { width: 120px; }
+.w-date { width: 150px; }
+
+/* スマホ幅（768px 未満）：入力欄は全幅、数字は数字キーボード（inputmode）、ボタンは押しやすい大きさ。
+   768px 以上には一切効かせない */
+@media (max-width: 767px) {
+  .account-form .fields { gap: 12px; }
+  .account-form .field { flex: 1 1 100%; }
+  .account-form input,
+  .account-form select { height: 44px; }
+  .w-name, .w-kind, .w-date { width: 100%; }
+  .money { display: flex; }
+  .w-money { flex: 1; width: auto; min-width: 0; }
+  .add-btn { flex: 1 1 100%; justify-content: center; min-height: 48px; }
+}
 </style>

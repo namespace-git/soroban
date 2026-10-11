@@ -596,7 +596,7 @@ async function doReopen() {
               <h2 class="section-head-title">タグ別の集計</h2>
             </div>
             <template v-if="statement && statement.by_tag.length">
-              <table class="compact">
+              <table class="compact tag-table">
                 <thead>
                   <tr>
                     <th>タグ</th>
@@ -607,11 +607,12 @@ async function doReopen() {
                 </thead>
                 <tbody>
                   <tr v-for="t in statement.by_tag" :key="t.tag.id">
-                    <td><StatusChip tone="info" :label="t.tag.name" /></td>
-                    <td class="num">{{ t.count }}</td>
-                    <td class="num">{{ yen(t.gross_profit) }}</td>
-                    <td class="num" :title="'按分経費 ' + yen(t.allocated_expense)">
+                    <td class="tag-cell"><StatusChip tone="info" :label="t.tag.name" /></td>
+                    <td class="num" data-label="件数">{{ t.count }}</td>
+                    <td class="num" data-label="粗利">{{ yen(t.gross_profit) }}</td>
+                    <td class="num" data-label="按分後利益" :title="'按分経費 ' + yen(t.allocated_expense)">
                       <strong :class="t.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(t.net_profit) }}</strong>
+                      <span class="m-only faint">按分経費 {{ yen(t.allocated_expense) }}</span>
                     </td>
                   </tr>
                 </tbody>
@@ -917,4 +918,110 @@ async function doReopen() {
 .table-panel { padding: 0; overflow: hidden; }
 .table-panel .section-head { padding: 16px 20px 0; margin-bottom: 12px; }
 .purchases-note { margin: 12px 20px 16px; }
+
+/* スマホ幅だけで出す補助（タグ別の「按分経費」。デスクトップでは title のホバーで読める分） */
+.m-only { display: none; }
+
+/* ============================================================
+   スマホ幅（768px 未満）。月の数字が縦に読めて、お金の入力に親指が届くようにする。
+   768px 以上には一切効かせない（ここより上は触らない）。
+   計算書は「名前と金額を 1 行、補足はその下」、タグ別は 1 タグ＝1 枚。
+   ホバーの title でしか読めなかった分（タグ別の按分経費）は見える形にする。
+   ============================================================ */
+@media (max-width: 767px) {
+  /* 月の帯：横にめくる（1 タップで月を選ぶ） */
+  .month-band { scroll-snap-type: x proximity; }
+  .month-card { min-height: 44px; scroll-snap-align: start; }
+
+  /* パネルの余白を詰める（375px でも数字の桁が余裕で入るように） */
+  .statement-layout .panel:not(.statement-card):not(.table-panel) { padding: 16px 14px; }
+
+  /* 締める前に（要対応）：押しやすい 1 本のボタンに */
+  .pending-panel { flex-wrap: wrap; gap: 8px 10px; }
+  .pending-panel .grow { display: none; }
+  .pending-panel button { flex: 1 1 100%; min-height: 44px; }
+
+  /* 見込み：数字を 2 列で */
+  .forecast-panel .stats { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+
+  /* 計算書の頭（黄色い帯） */
+  .statement-head { padding: 12px 16px; }
+  .csv-export { flex: 1 1 100%; flex-wrap: wrap; }
+  .csv-export-label { flex: 1 1 100%; }
+  .csv-export button { flex: 1 1 0; min-height: 44px; background: var(--surface); }
+  .statement-body { padding: 4px 16px 16px; }
+
+  /* 計算書：名前と金額を 1 行に、補足（実額・粗利率など）はその下の行に */
+  .statement-table,
+  .statement-table tbody { display: block; }
+  .statement-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 12px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .statement-table td { display: block; padding: 0; border: none; }
+  .statement-table tr.sum { border-top: 2px solid var(--line); border-bottom: 2px solid var(--line); }
+  .statement-table tr.sum td { border: none; }
+  .statement-table td.num { width: auto; }
+  .statement-table td.hint {
+    grid-column: 1 / -1;
+    width: auto;
+    margin-top: 2px;
+    text-align: left;
+    white-space: normal;
+  }
+  .statement-table td.hint:empty { display: none; }
+  .statement-table td.hint button { height: 44px; padding: 0 14px; border-color: var(--line); }
+
+  /* お金の出入り */
+  .cash-hero { padding: 14px; }
+  .cash-row { align-items: center; min-height: 40px; }
+  .cash-row-name { overflow: visible; white-space: normal; text-overflow: clip; }
+  .cash-steps li button { min-height: 44px; }
+  .entry-list { max-height: none; overflow-y: visible; }
+  .entry-row { gap: 8px; }
+  /* 入った／出た：名前の頭が行ごとにずれないよう、ラベルの幅をそろえる */
+  .entry-row > :first-child { min-width: 56px; justify-content: center; }
+  .entry-name,
+  .entry-sub {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .entry-row button.icon { width: 44px; height: 44px; }
+
+  /* 締める */
+  .close-card-btn { width: 100%; min-height: 48px; }
+  .close-card button { min-height: 44px; }
+
+  /* タグ別の集計：1 タグ＝1 枚。名前（タグ）→ 件数・粗利・按分後利益 */
+  .tag-table,
+  .tag-table tbody { display: block; }
+  .tag-table thead { display: none; }
+  .tag-table tr {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px 8px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .tag-table tbody tr:hover { background: transparent; }
+  .tag-table td { display: block; min-width: 0; padding: 0; border: none; text-align: left; }
+  .tag-table td.tag-cell { grid-column: 1 / -1; }
+  .tag-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: var(--fs-11);
+    font-weight: 400;
+    color: var(--text-faint);
+  }
+  .tag-table .m-only { display: block; margin-top: 2px; font-size: var(--fs-12); font-weight: 400; }
+
+  /* 仕入先への支払い */
+  .table-panel td { padding: 10px 12px; }
+}
 </style>

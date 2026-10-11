@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 横一列の段階カード（売上タブの進捗など）。docs/mocks/mock-sales.html の .progress。
 // レイアウト（列数・間隔）は style.css の .stage-strip、カードの見た目はここのスコープ。
+import { ref, watch, onMounted, nextTick } from 'vue'
 import { yen } from '../format'
 
 export interface StageStripStage {
@@ -14,12 +15,21 @@ export interface StageStripStage {
   tone?: 'brand' | 'warn' | 'ok' | 'neutral'
 }
 
-defineProps<{ stages: StageStripStage[]; active: string | null }>()
+const props = defineProps<{ stages: StageStripStage[]; active: string | null }>()
 const emit = defineEmits<{ select: [string] }>()
+
+// スマホ幅では段階カードを横に並べて動かすので、選ばれたカードが見える位置まで寄せる（デスクトップ幅では動かさない）
+const root = ref<HTMLElement | null>(null)
+function revealActive() {
+  if (!window.matchMedia('(max-width: 767px)').matches) return
+  root.value?.querySelector('.stage-card.active')?.scrollIntoView({ block: 'nearest', inline: 'center' })
+}
+onMounted(revealActive)
+watch(() => props.active, async () => { await nextTick(); revealActive() })
 </script>
 
 <template>
-  <div class="stage-strip">
+  <div ref="root" class="stage-strip">
     <button
       v-for="(s, i) in stages" :key="s.key"
       type="button"
@@ -89,5 +99,27 @@ const emit = defineEmits<{ select: [string] }>()
   font-size: var(--fs-16);
   line-height: 1;
   pointer-events: none;
+}
+
+/* スマホ幅（768px 未満）。段階カードは折り返さず 1 行に並べて横に動かす（売上タブと在庫タブで同じ形）。
+   左右の -12px / 12px は style.css の .page のスマホ幅の余白に合わせて、画面の端まで動かせるようにしたもの。
+   768px 以上には一切効かせない */
+@media (max-width: 767px) {
+  .stage-strip {
+    display: flex;
+    gap: 8px;
+    margin: 0 -12px 4px;
+    padding: 2px 12px 8px;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scroll-padding: 0 12px;
+    scrollbar-width: none;
+  }
+  .stage-strip::-webkit-scrollbar { display: none; }
+  .stage-card {
+    flex: 0 0 148px;
+    min-height: 44px;
+    scroll-snap-align: start;
+  }
 }
 </style>

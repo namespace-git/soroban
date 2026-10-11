@@ -512,4 +512,28 @@ async function onRefetchImages() {
   align-items: center;
   gap: 8px;
 }
+
+/* --- スマホ幅（768px 未満）。引き出しの中身だけ。外枠（下からのシート）は Drawer.vue。
+   768px 以上には一切効かせない。ホバーの title でしか読めない分（品名の補助・追跡の状況）は折り返して見せる --- */
+@media (max-width: 767px) {
+  .draft-reason > :first-child { flex-shrink: 0; }
+  /* チップの行の中のボタン：見た目は 36px、押せる範囲は ::after で縦に広げて 44px にする（行の高さは変えない） */
+  .item-head .chip-row button { position: relative; min-height: 36px; border-color: var(--line); }
+  .item-head .chip-row button::after { content: ""; position: absolute; inset: -4px 0; }
+
+  .line-main .row-sub { -webkit-line-clamp: 3; min-height: 0; }
+  /* 売れた在庫のチップ：見た目は変えず、押せる範囲だけ縦に広げる（行の高さは変えない） */
+  .item-chip-btn.clickable { padding: 8px 2px; margin: -8px -2px; }
+
+  .tracking-row { flex-wrap: wrap; row-gap: 6px; }
+  .tracking-text { flex: 1 1 calc(100% - 24px); white-space: normal; overflow-wrap: anywhere; }
+  .tracking-row .grow { display: none; }
+  .tracking-row button { flex: 1 1 auto; min-height: 44px; border-color: var(--line); }
+  .tracking-status { white-space: normal; }
+
+  .footer-row { flex-wrap: wrap; }
+  .footer-row .grow { display: none; }
+  .footer-row button { flex: 1 1 auto; min-height: 44px; white-space: nowrap; border-color: var(--line); }
+  .footer-row .primary { flex: 1 1 100%; min-height: 48px; border-color: var(--primary); }
+}
 </style>

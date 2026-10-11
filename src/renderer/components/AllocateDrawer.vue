@@ -648,4 +648,58 @@ function placeholderChar(): string {
 
 .match-footer { display: flex; align-items: center; gap: 16px; }
 .calc { flex: 1; display: flex; gap: 14px; align-items: baseline; font-size: var(--fs-13); }
+
+/* スマホ幅（768px 未満）：下からのシート（Drawer.vue）の中。
+   在庫の行は 1 行ごと押せる大きさ（タップ範囲は行全体）にし、チェックを入れた瞬間に動く
+   原価・粗利は、シートの下に固定されたバーに大きく出す（下のボタンは全幅）。 */
+@media (max-width: 767px) {
+  .head-sub { flex-wrap: wrap; gap: 4px 10px; }
+  .allocation-help { margin-bottom: 12px; }
+
+  .selection-modes button { flex: 1 1 auto; height: 44px; }
+  .search-field { padding: 0 12px; }
+  .search-field input { height: 44px; }
+
+  /* 候補の行：1 行目＝チェック・コード・型番・日数・原価、2 行目＝名前と補足（全幅） */
+  .candidates { gap: 4px; }
+  /* 在庫コードのチップ（CodeChip kind="item"）にも .item が付くので、行（label / div）だけに効かせる */
+  .item:not(.chip) {
+    flex-wrap: wrap;
+    align-items: center;
+    min-height: 44px;
+    padding: 10px 8px;
+    gap: 6px 8px;
+  }
+  .item input[type="checkbox"] { width: 22px; height: 22px; }
+  .item > .chip { max-width: 100%; white-space: normal; }
+  label.item > .name-cell,
+  .matched-item > .name-cell { order: 2; flex: 1 1 100%; }
+  label.item > .nowrap,
+  .matched-item > .nowrap { margin-left: auto; }
+  .name-main { min-height: 0; }
+  .name-sub { min-height: 0; -webkit-line-clamp: 2; }
+  .matched-item button,
+  .picked-row button,
+  .blocked-item button { height: 44px; border-color: var(--line); }
+  .blocked-item .name-cell { flex: 1 1 100%; }
+  .picked-row { gap: 6px 8px; }
+
+  .product-row { gap: 10px; padding: 10px 4px; }
+  .product-row button { flex: 0 0 auto; height: 44px; }
+  .product-quantity input { height: 44px; }
+  .maint-toggle { min-height: 44px; font-size: var(--fs-13); }
+  .maint-toggle input { width: 20px; height: 20px; }
+
+  /* 下に固定のバー：点数・原価・粗利を 1 行、確定ボタンは全幅 */
+  .match-footer { flex-wrap: wrap; gap: 10px; }
+  .calc {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 2px 12px;
+    font-size: var(--fs-14);
+  }
+  .calc strong { font-size: var(--fs-16); }
+  .match-footer .primary { flex: 1 1 100%; height: 48px; }
+}
 </style>

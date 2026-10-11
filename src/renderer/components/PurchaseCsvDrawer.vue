@@ -343,12 +343,12 @@ function skipOrder(index: number): ParsedOrder | undefined {
           <tbody>
             <tr v-for="o in orders" :key="o.key" :class="{ problem: o.problems.length }">
               <td>{{ o.shopName }}</td>
-              <td class="nowrap">{{ o.orderedAt ?? o.orderedAtRaw }}</td>
-              <td class="nowrap">{{ o.orderNo ?? '—' }}</td>
-              <td class="num">{{ o.lineCount }}</td>
-              <td class="num">{{ yen(o.subtotal) }}</td>
-              <td class="num dim">{{ yen(o.shippingFee) }}</td>
-              <td class="num"><strong>{{ yen(o.totalCost) }}</strong></td>
+              <td class="nowrap" data-label="注文日">{{ o.orderedAt ?? o.orderedAtRaw }}</td>
+              <td class="nowrap" data-label="注文番号">{{ o.orderNo ?? '—' }}</td>
+              <td class="num" data-label="明細数">{{ o.lineCount }}</td>
+              <td class="num" data-label="商品計">{{ yen(o.subtotal) }}</td>
+              <td class="num dim" data-label="送料">{{ yen(o.shippingFee) }}</td>
+              <td class="num" data-label="総原価の見込み"><strong>{{ yen(o.totalCost) }}</strong></td>
               <td>
                 <div class="chip-row">
                   <StatusChip v-for="p in o.problems" :key="p" tone="warn" :label="p" />
@@ -439,5 +439,52 @@ function skipOrder(index: number): ParsedOrder | undefined {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* --- スマホ幅（768px 未満）。引き出しの中身だけ（外枠は Drawer.vue）。768px 以上には一切効かせない。
+   プレビューの表は横にめくらせず、1 注文＝1 枚のカードにする --- */
+@media (max-width: 767px) {
+  .intro button { flex: 1 1 100%; min-height: 44px; border-color: var(--line); }
+  .filename { flex: 1 1 100%; margin-left: 0; overflow-wrap: anywhere; }
+
+  .table-scroll { overflow: visible; }
+  .preview-table,
+  .preview-table tbody { display: block; min-width: 0; }
+  .preview-table thead { display: none; }
+  .preview-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 8px;
+    row-gap: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+  .preview-table tbody tr:hover { background: var(--surface); }
+  .preview-table tbody tr.problem { background: var(--warn-bg); border-color: var(--warn-line); }
+  .preview-table td { display: block; min-width: 0; padding: 0; border: none; }
+  .preview-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: var(--fs-11);
+    font-weight: 400;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+  /* 仕入先を頭に、右に総原価の見込み。そのあと 注文日・注文番号・明細数、商品計・送料、問題 */
+  .preview-table td:nth-child(1) { grid-column: 1 / 3; font-weight: 600; white-space: normal; }
+  .preview-table td:nth-child(7) { grid-column: 3; grid-row: 1; text-align: right; }
+  .preview-table td:nth-child(2) { grid-column: 1; grid-row: 2; }
+  .preview-table td:nth-child(3) { grid-column: 2; grid-row: 2; }
+  .preview-table td:nth-child(4) { grid-column: 3; grid-row: 2; text-align: left; }
+  .preview-table td:nth-child(5) { grid-column: 1; grid-row: 3; text-align: left; }
+  .preview-table td:nth-child(6) { grid-column: 2; grid-row: 3; text-align: left; }
+  .preview-table td:nth-child(8) { grid-column: 1 / -1; grid-row: 4; }
+  .preview-table td:nth-child(8):not(:has(.chip-row > *)) { display: none; }
+  .chip-row { min-width: 0; }
+
+  .footer-row .grow { display: none; }
+  .footer-row .primary { flex: 1 1 100%; min-height: 48px; }
 }
 </style>

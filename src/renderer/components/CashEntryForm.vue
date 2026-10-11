@@ -557,4 +557,38 @@ async function addDue() {
   font-size: var(--fs-12);
 }
 .submit-btn { height: 40px; font-size: var(--fs-14); font-weight: 600; }
+
+/* ============================================================
+   スマホ幅（768px 未満）：入力欄は全幅、数字は数字キーボード（inputmode）、ボタンは親指で押せる大きさ。
+   768px 以上には一切効かせない（ここより上は触らない）。
+   ホバーの title でしか全文が読めなかった支払い待ちの名前・補足は折り返して見せる。
+   ============================================================ */
+@media (max-width: 767px) {
+  .entry-form { gap: 14px; }
+  .seg button { height: 48px; }
+  .chips { gap: 8px; }
+  .chip-btn { height: 44px; padding: 0 14px; font-size: var(--fs-14); }
+
+  .settle-row { padding: 10px 12px; }
+  .settle-pick { gap: 10px; min-height: 44px; align-items: center; }
+  .settle-pick input { width: 22px; height: 22px; margin: 0; }
+  .settle-name { overflow: visible; white-space: normal; text-overflow: clip; overflow-wrap: anywhere; }
+  .settle-amount { padding-left: 32px; gap: 8px; }
+  .settle-amount .amount,
+  .entry-fields .field input,
+  .entry-fields .field select,
+  .add-due-fields .field input { height: 44px; }
+  .full-btn { min-height: 44px; }
+  .add-due-btn,
+  .link-btn-plain { min-height: 44px; }
+  .add-due-fields { grid-template-columns: 1fr; }
+  .add-due-actions button { flex: 1 1 0; min-height: 44px; }
+
+  .entry-fields { grid-template-columns: 1fr; gap: 12px; }
+  .money { gap: 8px; }
+  .money .amount { flex: 1; min-width: 0; }
+  .check-row { min-height: 44px; gap: 10px; }
+  .check-row input { width: 22px; height: 22px; }
+  .submit-btn { height: 52px; }
+}
 </style>

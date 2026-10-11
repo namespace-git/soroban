@@ -125,6 +125,24 @@ function onSelectStage(key: string) { stage.value = key as Stage }
 const costHeaderLabel = '在庫の紐付け・原価'
 const profitHeaderLabel = computed(() => stage.value === 'listed' ? '見込み粗利' : '粗利')
 
+// --- スマホ幅：絞り込みは「絞り込み」ボタンの中にまとめる（デスクトップ幅では今までどおり常に並ぶ）。
+//     閉じていても、いくつ効いているかはボタンの数字で分かる ---
+const filtersOpen = ref(false)
+const activeFilterCount = computed(() => {
+  let n = 0
+  if (stage.value === 'listed') {
+    if (listingStatusFilter.value !== 'active') n++
+    if (listedFilter.value !== 'all') n++
+  } else {
+    if (statusFilter.value) n++
+    if (tagFilter.value) n++
+  }
+  if (channelFilter.value) n++
+  if (period.value !== 'all') n++
+  if (monthFilter.value) n++
+  return n
+})
+
 /** 利益の入力バンドのピルをクリック：「すべて」に開いて絞る（もう一度押すと解除） */
 async function toggleInputFilter(key: InputFilterKey) {
   const next = inputFilter.value === key ? null : key
@@ -500,6 +518,10 @@ function profitWhyText(s: SaleProfit): string | null {
 }
 function pendingReasonLabel(s: SaleProfit): string {
   return s.is_shipping_confirmed ? '紐付けると確定' : '送料を選ぶと確定'
+}
+/** スマホ幅のカードで、粗利の数字の上に出す見出し（出品の行は見込み） */
+function rowProfitLabel(r: Row): string {
+  return r.kind === 'listing' ? '見込み粗利' : profitHeaderLabel.value
 }
 
 /**
@@ -1085,7 +1107,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 
     <!-- 利益の入力（アプリ側の状態）。進捗とは別の軸 -->
     <p class="inputs-band">
-      利益の入力：
+      <span class="inputs-label">利益の入力：</span>
       <button
         type="button"
         class="input-pill-btn"
@@ -1104,62 +1126,75 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
       </button>
       <StatusPill tone="ok" :label="`入力済み ${progress?.inputs.done ?? 0}`" />
       <span class="grow" />
-      <span class="faint">粗利が出ていない行は上に来ます</span>
+      <span class="faint inputs-hint">粗利が出ていない行は上に来ます</span>
     </p>
 
     <div class="toolbar">
       <SearchBox v-model="searchText" placeholder="商品名・型番・メモ・タグ・買い手を検索" />
-      <select v-if="stage === 'listed'" v-model="listingStatusFilter" title="出品の状態で絞り込む">
-        <option value="all">すべての出品状態</option>
-        <option value="active">{{ LISTING_STATUS_LABEL.active }}</option>
-        <option value="suspended">{{ LISTING_STATUS_LABEL.suspended }}</option>
-      </select>
-      <select v-if="stage === 'listed'" v-model="listedFilter" title="紐付けの状態で絞り込む">
-        <option value="all">すべての紐付け</option>
-        <option value="unallocated">未紐付け</option>
-        <option value="allocated">紐付け済み</option>
-      </select>
-      <select v-else v-model="statusFilter" title="取引の進み具合で絞り込む">
-        <option value="">すべての状態</option>
-        <option value="waiting_shipment">発送してください</option>
-      </select>
-      <select v-model="channelFilter" title="出品先で絞り込む">
-        <option value="">すべての出品先</option>
-        <option value="mercari">{{ CHANNEL_LABEL.mercari }}</option>
-        <option value="yahoo">{{ CHANNEL_LABEL.yahoo }}</option>
-      </select>
-      <select
-        v-model="tagFilter"
-        :disabled="stage === 'listed'"
-        :title="stage === 'listed' ? '出品中はタグで絞れません' : undefined"
-      >
-        <option value="">すべてのタグ</option>
-        <optgroup v-if="directTagOptions.length" label="直接">
-          <option v-for="t in directTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
-        </optgroup>
-        <optgroup v-if="purchaseTagOptions.length" label="仕入から">
-          <option v-for="t in purchaseTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
-        </optgroup>
-        <optgroup v-if="productTagOptions.length" label="商品から">
-          <option v-for="t in productTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
-        </optgroup>
-        <optgroup v-if="inventoryTagOptions.length" label="在庫から">
-          <option v-for="t in inventoryTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
-        </optgroup>
-      </select>
-      <PeriodSelect v-model="period" />
+      <!-- スマホ幅だけ：絞り込みをこのボタンの中にまとめる。数字は効いている絞り込みの数 -->
       <button
-        v-if="monthFilter"
         type="button"
-        class="month-chip-btn"
-        :title="`${monthFilter} の絞り込みを解除`"
-        @click="monthFilter = null"
+        class="m-filter-toggle"
+        :class="{ on: filtersOpen || activeFilterCount > 0 }"
+        :aria-expanded="filtersOpen"
+        @click="filtersOpen = !filtersOpen"
       >
-        <StatusChip tone="brand" :label="`${monthFilter} ×`" />
+        絞り込み<span v-if="activeFilterCount" class="m-filter-n">{{ activeFilterCount }}</span>
       </button>
-      <button v-if="stage === 'listed'" class="sm" :disabled="!visibleListingIds.length" @click="autoReserveListings">型番で自動紐付け</button>
-      <button v-if="stage !== 'listed'" class="sm" :disabled="!visibleSaleIds.length" @click="autoLinkPending">型番で自動紐付け</button>
-      <select v-model="sortOption" title="並び替え">
+      <!-- デスクトップ幅では display: contents（この入れ物は無いのと同じ） -->
+      <div class="toolbar-filters" :class="{ 'm-open': filtersOpen }">
+        <select v-if="stage === 'listed'" v-model="listingStatusFilter" title="出品の状態で絞り込む">
+          <option value="all">すべての出品状態</option>
+          <option value="active">{{ LISTING_STATUS_LABEL.active }}</option>
+          <option value="suspended">{{ LISTING_STATUS_LABEL.suspended }}</option>
+        </select>
+        <select v-if="stage === 'listed'" v-model="listedFilter" title="紐付けの状態で絞り込む">
+          <option value="all">すべての紐付け</option>
+          <option value="unallocated">未紐付け</option>
+          <option value="allocated">紐付け済み</option>
+        </select>
+        <select v-else v-model="statusFilter" title="取引の進み具合で絞り込む">
+          <option value="">すべての状態</option>
+          <option value="waiting_shipment">発送してください</option>
+        </select>
+        <select v-model="channelFilter" title="出品先で絞り込む">
+          <option value="">すべての出品先</option>
+          <option value="mercari">{{ CHANNEL_LABEL.mercari }}</option>
+          <option value="yahoo">{{ CHANNEL_LABEL.yahoo }}</option>
+        </select>
+        <select
+          v-model="tagFilter"
+          :disabled="stage === 'listed'"
+          :title="stage === 'listed' ? '出品中はタグで絞れません' : undefined"
+        >
+          <option value="">すべてのタグ</option>
+          <optgroup v-if="directTagOptions.length" label="直接">
+            <option v-for="t in directTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </optgroup>
+          <optgroup v-if="purchaseTagOptions.length" label="仕入から">
+            <option v-for="t in purchaseTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </optgroup>
+          <optgroup v-if="productTagOptions.length" label="商品から">
+            <option v-for="t in productTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </optgroup>
+          <optgroup v-if="inventoryTagOptions.length" label="在庫から">
+            <option v-for="t in inventoryTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </optgroup>
+        </select>
+        <PeriodSelect v-model="period" :class="{ 'is-custom': typeof period === 'object' }" />
+        <button
+          v-if="monthFilter"
+          type="button"
+          class="month-chip-btn"
+          :title="`${monthFilter} の絞り込みを解除`"
+          @click="monthFilter = null"
+        >
+          <StatusChip tone="brand" :label="`${monthFilter} ×`" />
+        </button>
+      </div>
+      <button v-if="stage === 'listed'" class="sm auto-link-btn" :disabled="!visibleListingIds.length" @click="autoReserveListings">型番で自動紐付け</button>
+      <button v-if="stage !== 'listed'" class="sm auto-link-btn" :disabled="!visibleSaleIds.length" @click="autoLinkPending">型番で自動紐付け</button>
+      <select v-model="sortOption" class="sort-select" title="並び替え">
         <option value="default">既定（未確定が先）</option>
         <option value="date_desc">日付が新しい順</option>
         <option value="date_asc">日付が古い順</option>
@@ -1210,6 +1245,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
             focused: focusedId === r.id,
             settled: r.kind === 'sale' && !!r.sale && !rowUnresolved(r),
             'needs-shipment': r.kind === 'sale' && r.sale?.status === 'waiting_shipment',
+            'needs-input': rowUnresolved(r),
           }"
         >
           <div
@@ -1241,6 +1277,11 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                 :title="SALE_STATUS_PILL[r.sale.status].title" />
               <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="LISTING_STATUS_LABEL[r.listing.status]" />
               <StatusChip v-if="r.sale && !r.sale.status" tone="neutral" :label="r.sale.source === 'manual' ? '手入力' : '状態未取得'" />
+              <!-- スマホ幅だけ：粗利がまだ出ない理由を状態ラベル（①）に出す。表の列が無いので、ここで一目で分かるように -->
+              <template v-if="r.sale && r.sale.kind === 'resale'">
+                <StatusPill v-if="!r.sale.is_shipping_confirmed" class="m-flag" tone="warn" label="送料未入力" />
+                <StatusPill v-if="r.sale.unmatched === 1" class="m-flag" tone="warn" label="未紐付け" />
+              </template>
             </div>
             <span
               class="row-title"
@@ -1309,6 +1350,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 
           <div class="cell-meta">
             <div class="cell-price num">
+              <span class="m-label">価格</span>
               {{ yen(r.kind === 'sale' ? (r.sale?.price ?? 0) : (r.listing?.price ?? 0)) }}
               <div v-if="r.kind === 'sale' && r.sale && r.sale.kind !== 'personal'" class="faint fee-line">
                 手数料 −{{ yen(r.sale.fee) }}
@@ -1322,6 +1364,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
             </div>
 
             <div class="cell-ship">
+              <span class="m-label">発送方法（送料）</span>
               <template v-if="r.kind === 'listing' && r.listing">
                 <select
                   class="ship-select"
@@ -1357,6 +1400,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
             </div>
 
             <div class="cell-cost">
+              <span class="m-label">{{ costHeaderLabel }}</span>
               <span v-if="r.sale?.kind === 'personal'" class="faint">対象外（私物）</span>
               <AllocationCell v-else-if="r.sale"
                 :linked="r.sale.item_count > 0" :cost="r.sale.cost"
@@ -1371,6 +1415,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
             </div>
 
             <div class="cell-profit num">
+              <span class="m-label">{{ rowProfitLabel(r) }}</span>
               <Transition name="settle" mode="out-in">
                 <span v-if="r.kind === 'sale' && r.sale && r.sale.kind === 'personal'" key="personal" class="faint">私物</span>
                 <strong
@@ -1688,5 +1733,204 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   font-size: var(--fs-11);
   color: var(--text-faint);
   font-weight: 500;
+}
+
+/* --- スマホ幅だけで出すもの。デスクトップ幅では出さない（絞り込みの入れ物は無いのと同じ） --- */
+.m-label,
+.m-flag,
+.m-filter-toggle { display: none; }
+.toolbar-filters { display: contents; }
+
+/* ============================================================
+   スマホ幅（768px 未満）：表をカードの一覧に組み替える。
+   1 枚のカード＝1 件の販売（出品）。上から ① 状態ラベル → ② 名前 → ③ 補助 → ④ チップ・メモ（style.css の
+   行の規約のまま）、その下に 価格・粗利／送料／在庫の紐付け、いちばん下に補助の操作。
+   粗利が出ていない（送料未入力・未紐付け）カードは左に橙の帯とラベルで目立たせ、
+   送料の選択と在庫を選ぶボタンは 44px 以上の高さにする。
+   ホバーでしか読めなかった title（チップの切り詰め・メモ・タイトル）は、ここでは切らずに見せる。
+   デスクトップ幅（768px 以上）の見た目には一切効かせない。
+   ============================================================ */
+@media (max-width: 767px) {
+  .page-head { margin-bottom: 10px; }
+  .page-head .primary { height: 44px; }
+
+  /* 販売の手入力フォーム：1 列、入力欄は 44px */
+  .form { gap: 12px; }
+  .form .fields { gap: 12px; }
+  .form .fields > .field { flex: 1 1 100%; }
+  .field-wide input { width: 100%; }
+  .form input, .form select { height: 44px; }
+  .form .row .grow { display: none; }
+  .form .row .primary { flex: 1 1 auto; height: 48px; }
+
+  /* 段階カード（StageStrip）の横並び・横に動かす・選んだ段階を見える位置へ寄せる、は StageStrip.vue 自身が持つ（在庫タブと同じ形） */
+
+  /* 利益の入力：3 つのピルを 1 行に（見出しの文言とひとことは省く。ピル自体が「送料未入力 6」と読める）。押す範囲は 44px 高 */
+  .inputs-band { flex-wrap: wrap; gap: 0 8px; margin-bottom: 4px; }
+  .inputs-band .grow, .inputs-label, .inputs-hint { display: none; }
+  .inputs-band > :not(.input-pill-btn) { margin: 11px 0; }
+  .input-pill-btn { padding: 11px 0; }
+  .input-pill-btn.active { outline: none; }
+  .input-pill-btn.active :deep(.pill-base) { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+  /* ツールバー：検索 →（絞り込み）→ 並び替え → 型番で自動紐付け → 件数・合計 */
+  .toolbar { gap: 8px; }
+  .toolbar .search-box { flex: 1 1 160px; width: auto; min-width: 0; }
+  .toolbar .search-box :deep(.search-box-input) { height: 44px; }
+  .toolbar .search-box :deep(.search-box-clear) { width: 36px; height: 36px; }
+  .toolbar .m-filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    height: 44px;
+    padding: 0 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+  .toolbar .m-filter-toggle.on { background: var(--brand-soft); border-color: var(--brand); }
+  .m-filter-n {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--surface);
+    font-size: var(--fs-12);
+    font-weight: 700;
+  }
+  .toolbar-filters { display: none; order: 1; flex: 1 1 100%; }
+  .toolbar-filters.m-open { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .toolbar-filters select { width: 100%; min-width: 0; height: 44px; }
+  .toolbar-filters .period-select { display: flex; width: 100%; }
+  .toolbar-filters .period-select.is-custom { grid-column: 1 / -1; }
+  .toolbar-filters .period-select :deep(select) { flex: 1 1 100%; min-width: 0; width: 100%; height: 44px; }
+  .toolbar-filters .period-select :deep(input) { flex: 1 1 120px; min-width: 0; height: 44px; }
+  .toolbar-filters .month-chip-btn { grid-column: 1 / -1; justify-self: start; padding: 8px 0; }
+  .toolbar .sort-select { order: 2; flex: 1 1 160px; min-width: 0; height: 44px; }
+  .toolbar .auto-link-btn { order: 3; flex: 0 0 auto; height: 44px; padding: 0 14px; }
+  .toolbar .grow { display: none; }
+  .toolbar .toolbar-count { order: 4; flex: 1 1 100%; text-align: right; }
+
+  .totals-bar { flex-wrap: wrap; gap: 4px 12px; padding: 10px 14px; }
+
+  /* 作業リスト：1 件 1 枚のカード */
+  .work-panel { padding: 0; background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
+  .work-row-hdr { display: none; }
+  .work-row {
+    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-areas:
+      "thumb product"
+      "meta  meta"
+      "ops   ops";
+    gap: 10px 12px;
+    padding: 12px;
+    margin-bottom: 10px;
+    border-top: 0;
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow-1);
+  }
+  /* 今日の作業（発送してください）と、粗利がまだ出ないカードは、左に橙の帯 */
+  .work-row.needs-shipment,
+  .work-row.needs-input { box-shadow: inset 4px 0 0 var(--warn), var(--shadow-1); }
+
+  .cell-thumb { align-self: start; }
+  .thumb, .thumb-placeholder { width: 48px; height: 48px; }
+  .cell-product { overflow: visible; }
+  .cell-product .row-labels { min-height: 0; margin-bottom: 6px; }
+  .m-flag { display: inline-flex; }
+  .work-row .row-title { -webkit-line-clamp: 3; min-height: 0; }
+  .work-row .row-sub { -webkit-line-clamp: 2; min-height: 0; }
+  .work-row .chip-row.fixed-row { flex-wrap: wrap; min-height: 0; }
+  .work-row .chip-row.fixed-row .chip-tags { flex-wrap: wrap; overflow: visible; }
+  .work-row .note-row.fixed-row { min-height: 0; }
+  .work-row .note-row.fixed-row:empty { display: none; }
+  .work-row .note-row.fixed-row .note-text {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    white-space: normal;
+  }
+
+  /* 価格・粗利／送料／在庫の紐付け。表の列見出しが無いので、各項目の上に小さな見出しを出す */
+  .cell-meta {
+    grid-area: meta;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "price profit"
+      "ship  ship"
+      "cost  cost";
+    gap: 10px 12px;
+    align-items: start;
+  }
+  .cell-price, .cell-ship, .cell-cost { min-width: 0; }
+  .m-label {
+    display: block;
+    margin-bottom: 2px;
+    font-size: var(--fs-11);
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--text-faint);
+  }
+  .cell-price {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 8px;
+    text-align: left;
+    font-size: var(--fs-16);
+    font-weight: 700;
+  }
+  .cell-price .m-label { flex: 1 1 100%; }
+  .cell-price .fee-line { justify-content: flex-start; margin-top: 0; font-size: var(--fs-12); font-weight: 400; }
+  .cell-profit { justify-self: end; }
+  .cell-profit strong { font-size: var(--fs-20); }
+  .profit-na .why { font-size: var(--fs-12); }
+  .cell-ship .ship-select { height: 44px; }
+  .cell-ship .shipping-actual { min-height: 44px; }
+  .cell-cost :deep(.allocation-cell) {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    align-self: stretch;
+    gap: 6px 10px;
+  }
+  .cell-cost :deep(.allocation-state) { min-height: 0; }
+  .cell-cost :deep(.link-btn) {
+    flex: 1 1 auto;
+    justify-content: center;
+    height: 44px;
+    font-size: var(--fs-14);
+  }
+  .cell-cost :deep(.allocation-codes),
+  .cell-cost :deep(.allocation-cell > .faint) { flex: 1 1 100%; }
+
+  /* 補助の操作（タグ・メモ・梱包・手数料・履歴・外部ページ・削除）。ホバーが無いので薄くせず、44px 高 */
+  .cell-ops {
+    justify-content: stretch;
+    gap: 6px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .cell-ops button {
+    flex: 1 1 auto;
+    min-width: 44px;
+    height: 44px;
+    padding: 0 8px;
+    font-size: var(--fs-12);
+    border-color: var(--line);
+  }
+  .cell-ops button.icon { flex: 0 0 44px; width: 44px; }
+  .fade-btn { opacity: 1; }
+
+  /* 「転売」チップ（押すと私物に変える）は見た目のまま、押せる範囲だけ広げる */
+  .kind-toggle { position: relative; }
+  .kind-toggle::after { content: ''; position: absolute; inset: -10px -6px; }
 }
 </style>

@@ -23,14 +23,23 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') close()
 }
 
-// スクリムでの mousedown → mouseup が両方ともスクリム自身のときだけ閉じる。
-// 本文内でのドラッグ選択やスライダー操作が外に抜けて mouseup しても閉じないようにする
+// スクリムでの pointerdown → pointerup が両方ともスクリム自身のときだけ閉じる（マウスもタッチも同じ）。
+// 本文内でのドラッグ選択やスライダー操作が外に抜けて離しても閉じないようにする。
+// タッチは指を置いた要素に pointerup が固定されるので、スクロールのつもりで動かした指（10px 超）では閉じない
 let downOnScrim = false
-function onScrimMouseDown(e: MouseEvent) {
+let downX = 0
+let downY = 0
+function onScrimPointerDown(e: PointerEvent) {
   downOnScrim = e.target === e.currentTarget
+  downX = e.clientX
+  downY = e.clientY
 }
-function onScrimMouseUp(e: MouseEvent) {
-  if (downOnScrim && e.target === e.currentTarget) close()
+function onScrimPointerUp(e: PointerEvent) {
+  const moved = e.pointerType !== 'mouse' && Math.hypot(e.clientX - downX, e.clientY - downY) > 10
+  if (downOnScrim && !moved && e.target === e.currentTarget) close()
+  downOnScrim = false
+}
+function onScrimPointerCancel() {
   downOnScrim = false
 }
 
@@ -53,7 +62,7 @@ watch(() => props.open, async (isOpen) => {
 <template>
   <Teleport to="body">
     <Transition name="drawer">
-      <div v-if="open" class="scrim" @mousedown="onScrimMouseDown" @mouseup="onScrimMouseUp" @keydown="onKeydown">
+      <div v-if="open" class="scrim" @pointerdown="onScrimPointerDown" @pointerup="onScrimPointerUp" @pointercancel="onScrimPointerCancel" @keydown="onKeydown">
         <div
           ref="panel"
           class="drawer"
@@ -156,5 +165,43 @@ watch(() => props.open, async (isOpen) => {
   flex-shrink: 0;
   padding: 14px 20px;
   border-top: 1px solid var(--line);
+}
+
+/* スマホ幅（768px 未満）：右から出る引き出しではなく、下からのシート（全幅）。
+   幅は :style のインライン指定（デスクトップ用）に勝つため !important。
+   高さは中身に合わせ、画面の上は少し空ける（そこを押すと閉じる）。
+   下の余白はホームバー（env(safe-area-inset-bottom)）に被らない分だけ足す */
+@media (max-width: 767px) {
+  .drawer {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100% !important;
+    max-width: 100%;
+    height: auto;
+    min-height: 55vh;
+    max-height: calc(100vh - env(safe-area-inset-top, 0px) - 24px);
+    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 24px);
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+  .drawer-enter-from .drawer,
+  .drawer-leave-to .drawer {
+    transform: translateY(100%);
+  }
+  .drawer-head {
+    padding: 12px 8px 10px 16px;
+  }
+  .drawer-head button.icon {
+    width: 44px;
+    height: 44px;
+  }
+  .drawer-body {
+    padding: 14px 16px;
+    overscroll-behavior: contain;
+  }
+  .drawer-footer {
+    padding: 12px 16px max(12px, env(safe-area-inset-bottom));
+  }
 }
 </style>

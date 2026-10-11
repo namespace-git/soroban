@@ -510,4 +510,33 @@ h3 {
   gap: 8px;
   width: 100%;
 }
+
+/* --- スマホ幅（768px 未満）。引き出しの中身だけ（外枠は Drawer.vue）。768px 以上には一切効かせない。
+   お金の 4 枚は 2×2、足あとは「日付と金額」の下に全幅で本文（1 本の縦線は保つ）。
+   ホバーの title でしか全文が読めなかった題・補助は折り返して見せる --- */
+@media (max-width: 767px) {
+  .money-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .money-sub { font-size: var(--fs-12); }
+
+  .purchased-row { flex-wrap: wrap; }
+  .purchased-row button { min-height: 44px; border-color: var(--line); }
+
+  .tl-row {
+    display: grid;
+    grid-template-columns: 10px minmax(0, 1fr) auto;
+    column-gap: 12px;
+    align-items: start;
+  }
+  .tl-rail { grid-column: 1; grid-row: 1 / span 2; align-self: stretch; }
+  .tl-date { grid-column: 2; grid-row: 1; width: auto; padding-top: 0; text-align: left; }
+  .tl-amount { grid-column: 3; grid-row: 1; padding-top: 0; }
+  .tl-body { grid-column: 2 / -1; grid-row: 2; }
+  .tl-title.row-title.one-line { -webkit-line-clamp: 3; min-height: 0; }
+  .tl-detail.row-sub { -webkit-line-clamp: 4; min-height: 0; }
+  .tl-link { min-height: 44px; margin-top: 0; }
+
+  .drawer-actions { flex-wrap: wrap; }
+  .drawer-actions .grow { display: none; }
+  .drawer-actions button { flex: 1 1 auto; min-height: 44px; white-space: nowrap; border-color: var(--line); }
+}
 </style>

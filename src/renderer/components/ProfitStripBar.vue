@@ -96,4 +96,12 @@ defineProps<{ strip: ProfitStrip | null; compact?: boolean }>()
 @media (max-width: 1099px) {
   .profit-strip { grid-template-columns: 1fr 1fr; }
 }
+
+/* スマホ幅（768px 未満）：今月の粗利と確定待ち（長い説明つき）は横いっぱい、残りの 2 枚を横に並べる */
+@media (max-width: 767px) {
+  .profit-strip { gap: 8px; }
+  .p { padding: 12px 14px; }
+  .p.main,
+  .p:nth-child(2) { grid-column: 1 / -1; }
+}
 </style>

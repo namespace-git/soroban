@@ -168,7 +168,7 @@ function expenseContent(e: Expense): string {
 
       <!-- 販売の表 -->
       <div class="panel table-panel">
-        <table v-if="filteredSales.length">
+        <table v-if="filteredSales.length" class="sales-table">
           <thead>
             <tr>
               <th>販売日</th>
@@ -185,7 +185,7 @@ function expenseContent(e: Expense): string {
           </thead>
           <tbody>
             <tr v-for="s in filteredSales" :key="s.id">
-              <td class="dim nowrap">{{ s.sold_at }}</td>
+              <td class="dim nowrap sold-cell">{{ s.sold_at }}</td>
               <td class="title-cell">
                 <div class="row-title one-line" :title="s.title">{{ s.title }}</div>
                 <div class="chip-row">
@@ -194,27 +194,27 @@ function expenseContent(e: Expense): string {
                   <StatusChip v-for="t in s.inherited_tags" :key="'i' + t.id" tone="neutral" :label="t.name" />
                 </div>
               </td>
-              <td class="num">{{ yen(s.price) }}</td>
-              <td class="num dim">{{ yen(s.fee) }}</td>
-              <td class="num dim">{{ yen(s.shipping_fee) }}</td>
-              <td class="num dim">{{ yen(s.packaging_cost) }}</td>
-              <td class="num dim">{{ yen(s.cost) }}</td>
-              <td class="num"><strong :class="s.gross_profit >= 0 ? 'profit' : 'loss'">{{ yen(s.gross_profit) }}</strong></td>
-              <td class="num dim">{{ yen(s.allocated_expense) }}</td>
-              <td class="num"><strong :class="s.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(s.net_profit) }}</strong></td>
+              <td class="num" data-label="価格">{{ yen(s.price) }}</td>
+              <td class="num dim" data-label="手数料">{{ yen(s.fee) }}</td>
+              <td class="num dim" data-label="送料">{{ yen(s.shipping_fee) }}</td>
+              <td class="num dim" data-label="梱包">{{ yen(s.packaging_cost) }}</td>
+              <td class="num dim" data-label="原価">{{ yen(s.cost) }}</td>
+              <td class="num" data-label="粗利"><strong :class="s.gross_profit >= 0 ? 'profit' : 'loss'">{{ yen(s.gross_profit) }}</strong></td>
+              <td class="num dim" data-label="按分経費">{{ yen(s.allocated_expense) }}</td>
+              <td class="num" data-label="按分後利益"><strong :class="s.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(s.net_profit) }}</strong></td>
             </tr>
           </tbody>
           <tfoot v-if="footerTotals">
             <tr class="total-row" :class="{ loss: footerTotals.net_profit < 0 }">
               <td colspan="2">合計</td>
-              <td class="num">{{ yen(footerTotals.revenue) }}</td>
-              <td class="num">{{ yen(footerTotals.total_fee) }}</td>
-              <td class="num">{{ yen(footerTotals.total_shipping) }}</td>
-              <td class="num">{{ yen(footerTotals.total_packaging) }}</td>
-              <td class="num">{{ yen(footerTotals.total_cost) }}</td>
-              <td class="num">{{ yen(footerTotals.gross_profit) }}</td>
-              <td class="num">{{ yen(footerTotals.expense_total) }}</td>
-              <td class="num">{{ yen(footerTotals.net_profit) }}</td>
+              <td class="num" data-label="価格">{{ yen(footerTotals.revenue) }}</td>
+              <td class="num" data-label="手数料">{{ yen(footerTotals.total_fee) }}</td>
+              <td class="num" data-label="送料">{{ yen(footerTotals.total_shipping) }}</td>
+              <td class="num" data-label="梱包">{{ yen(footerTotals.total_packaging) }}</td>
+              <td class="num" data-label="原価">{{ yen(footerTotals.total_cost) }}</td>
+              <td class="num" data-label="粗利">{{ yen(footerTotals.gross_profit) }}</td>
+              <td class="num" data-label="按分経費">{{ yen(footerTotals.expense_total) }}</td>
+              <td class="num" data-label="按分後利益">{{ yen(footerTotals.net_profit) }}</td>
             </tr>
           </tfoot>
         </table>
@@ -235,7 +235,7 @@ function expenseContent(e: Expense): string {
           <span class="grow" />
           <button class="sm ghost" @click="goto('expenses')">経費タブで登録</button>
         </div>
-        <table v-if="detail.expenses.length" class="compact">
+        <table v-if="detail.expenses.length" class="compact expense-table">
           <thead>
             <tr>
               <th>購入日</th>
@@ -247,11 +247,11 @@ function expenseContent(e: Expense): string {
           </thead>
           <tbody>
             <tr v-for="e in detail.expenses" :key="e.id">
-              <td class="dim nowrap">{{ e.occurred_at }}</td>
-              <td>{{ e.shop ?? '—' }}</td>
-              <td class="dim">{{ expenseContent(e) }}</td>
-              <td>{{ CATEGORY_LABEL[e.category] }}</td>
-              <td class="num">{{ yen(e.amount) }}</td>
+              <td class="dim nowrap exp-date">{{ e.occurred_at }}</td>
+              <td class="exp-shop">{{ e.shop ?? '—' }}</td>
+              <td class="dim exp-content">{{ expenseContent(e) }}</td>
+              <td class="exp-cat">{{ CATEGORY_LABEL[e.category] }}</td>
+              <td class="num exp-amount">{{ yen(e.amount) }}</td>
             </tr>
           </tbody>
         </table>
@@ -300,4 +300,88 @@ function expenseContent(e: Expense): string {
 .title-cell { max-width: 320px; }
 
 .expenses-note { margin: 12px 20px 16px; }
+
+/* ============================================================
+   スマホ幅（768px 未満）。表を横にめくらせず、1 販売＝1 枚、1 経費＝1 枚に組み替える。
+   768px 以上には一切効かせない（ここより上は触らない）。
+   金額は 4 つずつ「ラベル → 値」で 2 段（価格・手数料・送料・梱包／原価・粗利・按分経費・按分後利益）。
+   粗利と按分後利益は色付きの太字のまま。ホバーの title でしか読めなかった題は折り返して見せる。
+   ============================================================ */
+@media (max-width: 767px) {
+  /* 絞り込み（タグ・按分）：全幅 */
+  .toolbar { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .toolbar select { width: 100%; min-width: 0; height: 44px; }
+  .toolbar .grow { display: none; }
+
+  .tag-filtered-panel { flex-wrap: wrap; gap: 6px 12px; padding: 12px 14px; }
+
+  .table-panel { overflow: hidden; }
+  .table-panel table { min-width: 0; }
+  .table-panel .section-head { flex-wrap: wrap; padding: 14px 14px 0; gap: 8px 10px; }
+  .category-chips { order: 3; flex: 1 1 100%; }
+  .table-panel .section-head button { min-height: 44px; border-color: var(--line); }
+  .expenses-note { margin: 12px 14px 14px; }
+
+  .sales-table,
+  .sales-table tbody,
+  .sales-table tfoot,
+  .expense-table,
+  .expense-table tbody { display: block; min-width: 0; }
+  .sales-table thead,
+  .expense-table thead { display: none; }
+
+  /* 販売：日付 → 題 → チップ → 金額 2 段 */
+  .sales-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    column-gap: 8px;
+    row-gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .sales-table tbody tr:hover { background: transparent; }
+  .sales-table td { display: block; min-width: 0; padding: 0; border: none; }
+  .sales-table td.sold-cell { grid-column: 1 / -1; font-size: var(--fs-12); }
+  .sales-table td.title-cell { grid-column: 1 / -1; max-width: none; }
+  .sales-table td.title-cell .row-title.one-line { -webkit-line-clamp: 3; min-height: 0; }
+  .sales-table td.num { text-align: left; font-size: var(--fs-13); }
+  .sales-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: var(--fs-11);
+    font-weight: 400;
+    color: var(--text-faint);
+  }
+  /* 合計：緑（損失なら赤）の帯。ラベルは販売の行と同じ 8 つ */
+  .sales-table tfoot tr.total-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    column-gap: 8px;
+    row-gap: 10px;
+    padding: 12px 14px;
+    background: var(--profit-bg);
+  }
+  .sales-table tfoot tr.total-row.loss { background: var(--loss-bg); }
+  .sales-table tfoot tr.total-row > td { background: transparent; }
+  .sales-table tfoot td[colspan] { grid-column: 1 / -1; font-size: var(--fs-14); }
+  .sales-table tfoot td[data-label]::before { color: inherit; opacity: .7; }
+
+  /* 経費：購入店 → 金額、購入日 → 項目、内容 */
+  .expense-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 12px;
+    row-gap: 2px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .expense-table tbody tr:hover { background: transparent; }
+  .expense-table td { display: block; min-width: 0; padding: 0; border: none; }
+  .expense-table td.exp-shop { grid-column: 1; grid-row: 1; font-weight: 600; }
+  .expense-table td.exp-amount { grid-column: 2; grid-row: 1; }
+  .expense-table td.exp-date { grid-column: 1; grid-row: 2; font-size: var(--fs-12); }
+  .expense-table td.exp-cat { grid-column: 2; grid-row: 2; font-size: var(--fs-12); text-align: right; color: var(--text-dim); }
+  .expense-table td.exp-content { grid-column: 1 / -1; grid-row: 3; font-size: var(--fs-13); overflow-wrap: anywhere; }
+  .expense-table td.exp-content:empty { display: none; }
+}
 </style>

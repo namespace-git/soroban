@@ -99,6 +99,10 @@ const statusSelectValue = computed<InventoryGroupFilter>({
   set: (v) => { groupFilter.value = v; agingMinFilter.value = null },
 })
 
+// --- スマホ幅：絞り込み（状態・タグ・期間）は「絞り込み」ボタンの中にまとめる（デスクトップ幅では今までどおり常に並ぶ）。
+//     閉じていても、いくつ効いているかはボタンの数字で分かる。「届いていて未出品」が既定なので、それ以外を選んだら数える ---
+const filtersOpen = ref(false)
+
 // --- 読み込み ---
 async function loadOverview() {
   overview.value = await window.soroban.getInventoryOverview()
@@ -161,6 +165,9 @@ watch(revision, loadTags)
 const tagFilter = ref('')
 const searchText = ref('')
 const period = ref<Period>('all')
+const activeFilterCount = computed(() =>
+  (groupFilter.value !== 'unlisted_arrived' ? 1 : 0) + (tagFilter.value ? 1 : 0) + (period.value !== 'all' ? 1 : 0),
+)
 const focusedId = ref<string | null>(null)
 
 async function focusRow(id: string) {
@@ -607,26 +614,39 @@ async function editNote(item: InventoryItem) {
 
     <div class="toolbar">
       <SearchBox v-model="searchText" placeholder="名前・型番・素材・メモ・タグ・仕入先を検索" />
+      <!-- スマホ幅だけ：絞り込みをこのボタンの中にまとめる（売上タブ・仕入タブと同じ形）。数字は効いている絞り込みの数 -->
+      <button
+        type="button"
+        class="m-filter-toggle"
+        :class="{ on: filtersOpen || activeFilterCount > 0 }"
+        :aria-expanded="filtersOpen"
+        @click="filtersOpen = !filtersOpen"
+      >
+        絞り込み<span v-if="activeFilterCount" class="m-filter-n">{{ activeFilterCount }}</span>
+      </button>
       <span class="seg">
         <button type="button" :class="{ on: viewMode === 'group' }" @click="viewMode = 'group'">型番ごと</button>
         <button type="button" :class="{ on: viewMode === 'flat' }" @click="viewMode = 'flat'">1点ずつ</button>
       </span>
-      <select v-model="statusSelectValue">
-        <option v-for="o in statusOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-      </select>
-      <select v-model="tagFilter">
-        <option value="">すべてのタグ</option>
-        <optgroup v-if="directTagOptions.length" label="直接">
-          <option v-for="t in directTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
-        </optgroup>
-        <optgroup v-if="purchaseTagOptions.length" label="仕入から">
-          <option v-for="t in purchaseTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
-        </optgroup>
-        <optgroup v-if="productTagOptions.length" label="商品から">
-          <option v-for="t in productTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
-        </optgroup>
-      </select>
-      <PeriodSelect v-model="period" />
+      <!-- デスクトップ幅では display: contents（この入れ物は無いのと同じ） -->
+      <div class="toolbar-filters" :class="{ 'm-open': filtersOpen }">
+        <select v-model="statusSelectValue">
+          <option v-for="o in statusOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+        <select v-model="tagFilter">
+          <option value="">すべてのタグ</option>
+          <optgroup v-if="directTagOptions.length" label="直接">
+            <option v-for="t in directTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </optgroup>
+          <optgroup v-if="purchaseTagOptions.length" label="仕入から">
+            <option v-for="t in purchaseTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </optgroup>
+          <optgroup v-if="productTagOptions.length" label="商品から">
+            <option v-for="t in productTagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </optgroup>
+        </select>
+        <PeriodSelect v-model="period" :class="{ 'is-custom': typeof period === 'object' }" />
+      </div>
       <button
         v-if="agingMinFilter != null"
         type="button"
@@ -636,12 +656,12 @@ async function editNote(item: InventoryItem) {
       >
         <StatusChip tone="warn" :label="`滞留 ${agingMinFilter} 日以上 ×`" />
       </button>
-      <select v-if="viewMode === 'group'" v-model="groupSortKey">
+      <select v-if="viewMode === 'group'" v-model="groupSortKey" class="sort-select">
         <option value="aging">滞留が長い順</option>
         <option value="acquired_at">仕入日</option>
         <option value="cost">原価</option>
       </select>
-      <select v-if="viewMode === 'flat'" v-model="sortSelectValue">
+      <select v-if="viewMode === 'flat'" v-model="sortSelectValue" class="sort-select">
         <option value="aging_days:desc">滞留が長い順</option>
         <option value="aging_days:asc">滞留が短い順</option>
         <option value="acquired_at:desc">仕入日が新しい順</option>
@@ -881,16 +901,16 @@ async function editNote(item: InventoryItem) {
                 </template>
               </div>
             </td>
-            <td class="faint">{{ i.shop_account_name ?? '—' }}</td>
-            <td class="faint nowrap">{{ i.acquired_at }}</td>
-            <td class="num">
+            <td class="faint" data-label="仕入先">{{ i.shop_account_name ?? '—' }}</td>
+            <td class="faint nowrap" data-label="仕入日">{{ i.acquired_at }}</td>
+            <td class="num" data-label="滞留">
               <StatusChip
                 v-if="i.aging_days >= warnDays"
                 tone="warn" :label="`${i.aging_days}日`"
               />
               <span v-else>{{ i.aging_days }}日</span>
             </td>
-            <td class="num">{{ yen(i.landed_cost) }}</td>
+            <td class="num" data-label="原価">{{ yen(i.landed_cost) }}</td>
             <td class="actions">
               <template v-if="i.status === 'in_stock'">
                 <button
@@ -1143,5 +1163,201 @@ tr.focused { background: var(--brand-soft); }
     row-gap: 6px;
   }
   .git-ops { justify-content: flex-end; }
+}
+
+/* --- スマホ幅だけで出すもの。デスクトップ幅では出さない（絞り込みの入れ物は無いのと同じ） --- */
+.m-filter-toggle { display: none; }
+.toolbar-filters { display: contents; }
+
+/* ============================================================
+   スマホ幅（768px 未満）。表・行を組み替えて、横にはみ出さず親指で押せるようにする。
+   768px 以上には一切効かせない（ここより上は触らない）。
+   行は ①状態ラベル → ②名前（在庫コード）→ ③補助 → ④タグ・メモ の順を保ち、
+   操作ボタンは 1 タップのまま、表の右端ではなくカードの下に 4 列で並べる。
+   ホバーの title でしか読めなかったタグ・メモは、折り返して全部見せる。
+   ============================================================ */
+@media (max-width: 767px) {
+  .hint-row { font-size: var(--fs-12); }
+
+  /* ツールバー：検索 →（絞り込み）→ 表示（型番ごと／1点ずつ）→ 絞り込みの中身（状態・タグ・期間）→ 並び替え → 件数・合計
+     （売上タブ・仕入タブと同じ形。滞留の絞り込みチップは、閉じていても見えるように外に出したまま） */
+  .toolbar { gap: 8px; }
+  .toolbar :deep(.search-box) { flex: 1 1 160px; width: auto; min-width: 0; }
+  .toolbar :deep(.search-box-input) { height: 44px; }
+  .toolbar :deep(.search-box-clear) { width: 36px; height: 36px; }
+  .toolbar .m-filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    height: 44px;
+    padding: 0 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+  .toolbar .m-filter-toggle.on { background: var(--brand-soft); border-color: var(--brand); }
+  .m-filter-n {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--surface);
+    font-size: var(--fs-12);
+    font-weight: 700;
+  }
+  .seg { order: 1; flex: 1 1 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .seg button { min-height: 44px; padding: 0 14px; }
+  .toolbar-filters { display: none; order: 2; flex: 1 1 100%; }
+  .toolbar-filters.m-open { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .toolbar-filters select { width: 100%; min-width: 0; height: 44px; }
+  .toolbar-filters .period-select { display: flex; width: 100%; }
+  .toolbar-filters .period-select.is-custom { grid-column: 1 / -1; }
+  .toolbar-filters .period-select :deep(select) { flex: 1 1 100%; min-width: 0; width: 100%; height: 44px; }
+  .toolbar-filters .period-select :deep(input) { flex: 1 1 120px; min-width: 0; height: 44px; }
+  .aging-chip-btn { order: 2; flex: 1 1 100%; justify-self: start; padding: 8px 0; height: auto; text-align: left; }
+  .toolbar .sort-select { order: 3; flex: 1 1 100%; min-width: 0; height: 44px; }
+  .toolbar .grow { display: none; }
+  .toolbar .toolbar-count { order: 4; flex: 1 1 100%; text-align: right; white-space: normal; }
+
+  /* 型番ごと：グループの頭（画像・名前・補助）の下に、数字と「商品カルテ」を 1 行で */
+  .group { margin-bottom: 12px; }
+  .ghead {
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 10px 12px;
+    align-items: start;
+    padding: 12px;
+  }
+  .gimg, .gimg-img, .gimg-ph { width: 48px; height: 48px; }
+  .ghead .row-sub { -webkit-line-clamp: 3; min-height: 0; }
+  .gnum {
+    grid-column: 1 / -1;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 8px 20px;
+    text-align: left;
+  }
+  .gnum .product-link,
+  .gnum .link-action { margin-left: auto; min-height: 44px; }
+  .gnum .product-link { border-color: var(--line); }
+  .gnum .link-action {
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: var(--fs-13);
+    text-decoration: none;
+  }
+
+  /* 1 点 = 1 つの区切り。状態 → コード → 補助・タグ・メモ → 操作 */
+  .gitems { padding: 0 12px 4px; }
+  .git {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "state cost"
+      "code  aging"
+      "meta  meta"
+      "ops   ops";
+    gap: 4px 12px;
+    padding: 10px 0 12px;
+    align-items: center;
+  }
+  .git-state { text-align: left; }
+  .git-cost { font-size: var(--fs-16); font-weight: 700; }
+  .git-aging { text-align: right; font-size: var(--fs-12); }
+  .git-aging::before { content: "滞留 "; color: var(--text-faint); }
+  .git-meta { color: var(--text-dim); }
+  /* 足あとを開く領域：見た目と行の高さは変えず、押せる範囲だけ縦に 44px 近くまで広げる（重なった所は後ろの要素が勝つ） */
+  .git-code { padding: 11px 0; margin: -11px 0; }
+  .git-meta { padding: 12px 0; margin: -12px 0; }
+  .git-meta .chip-row:not(:has(.chip-tags > *)) { display: none; }
+  .git-meta .note-row.fixed-row:empty { display: none; }
+  .git-ops {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+    gap: 8px;
+    justify-content: stretch;
+    margin-top: 6px;
+  }
+  /* 補助の操作：ホバーが無いので薄くせず、枠付きの 44px 高（売上タブのカードの操作と同じ） */
+  .git-ops button {
+    min-width: 0;
+    min-height: 44px;
+    padding: 0 2px;
+    font-size: var(--fs-12);
+    white-space: nowrap;
+    border-color: var(--line);
+  }
+
+  /* 1点ずつ：表をやめて、1 点 = カード 1 枚。名前 → コード・状態・タグ → メモ → 仕入先・仕入日・滞留・原価 → 操作 */
+  .table-panel { background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
+  .table-panel table,
+  .table-panel tbody { display: block; min-width: 0; }
+  .table-panel thead { display: none; }
+  .table-panel tbody tr {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.1fr) minmax(0, .8fr) minmax(0, 1fr);
+    column-gap: 8px;
+    row-gap: 10px;
+    padding: 12px;
+    margin-bottom: 8px;
+    background: var(--surface);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+  }
+  .table-panel tbody tr:hover { background: var(--surface); }
+  .table-panel tbody tr.focused { background: var(--brand-soft); }
+  .table-panel td { display: block; min-width: 0; padding: 0; border: none; width: auto; }
+  .table-panel td.thumb-cell { position: absolute; top: 12px; left: 12px; }
+  .table-panel .item-name { padding: 11px 0; margin: -11px 0; }
+  .thumb, .thumb-placeholder { width: 48px; height: 48px; }
+  .table-panel td.item-cell { grid-column: 1 / -1; min-height: 48px; padding-left: 60px; overflow: hidden; }
+  .table-panel td[data-label] { text-align: left; white-space: normal; font-size: var(--fs-13); }
+  .table-panel td.nowrap { white-space: nowrap; }
+  .table-panel td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    font-size: var(--fs-11);
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--text-faint);
+  }
+  .table-panel td.actions {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+    gap: 8px;
+    text-align: left;
+    color: var(--text-dim);
+  }
+  .table-panel .actions > * { margin-left: 0; }
+  .table-panel td.actions button {
+    min-width: 0;
+    min-height: 44px;
+    padding: 0 2px;
+    font-size: var(--fs-12);
+    border-color: var(--line);
+  }
+  .table-panel td.actions:not(:has(button)) { display: none; }
+
+  /* チップの行は折り返す（タグを切らない）。押せるボタンは見た目はそのまま、押せる範囲だけ縦に広げる */
+  .item-cell .chip-row.fixed-row { flex-wrap: wrap; min-height: 0; }
+  .item-cell .chip-row.fixed-row .chip-tags { flex: 1 1 100%; flex-wrap: wrap; overflow: visible; }
+  .item-cell .chip-row.fixed-row button.sm { position: relative; min-height: 36px; border-color: var(--line); }
+  .item-cell .chip-row.fixed-row button.sm::after { content: ""; position: absolute; inset: -4px 0; }
+  .item-cell .note-row.fixed-row:empty { display: none; }
+  .item-cell .note-row.fixed-row .note-text,
+  .git-meta .note-row.fixed-row .note-text {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    overflow: hidden;
+  }
 }
 </style>

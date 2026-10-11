@@ -50,7 +50,8 @@ function onNewKeydown(e: KeyboardEvent) {
   }
 }
 
-function onDocMouseDown(e: MouseEvent) {
+// 外を押したら閉じる。マウスもタッチも pointerdown で拾う（iOS は何も押せない場所をタップしても mousedown を出さない）
+function onDocPointerDown(e: PointerEvent) {
   const target = e.target as Node
   if (panelEl.value?.contains(target)) return
   if (props.anchor?.contains(target)) return
@@ -62,11 +63,11 @@ function onDocKeydown(e: KeyboardEvent) {
 }
 
 function bindDocListeners() {
-  document.addEventListener('mousedown', onDocMouseDown, true)
+  document.addEventListener('pointerdown', onDocPointerDown, true)
   document.addEventListener('keydown', onDocKeydown, true)
 }
 function unbindDocListeners() {
-  document.removeEventListener('mousedown', onDocMouseDown, true)
+  document.removeEventListener('pointerdown', onDocPointerDown, true)
   document.removeEventListener('keydown', onDocKeydown, true)
 }
 
@@ -165,4 +166,22 @@ onUnmounted(unbindDocListeners)
   padding-top: 6px;
 }
 .tagpicker-new input { width: 100%; }
+
+/* スマホ幅（768px 未満）：ボタンの横に小さく出すのではなく、画面の下に全幅で出す（親指が届き、画面の外にはみ出さない）。
+   位置は :style のインライン指定（デスクトップ用）に勝つため !important。行は 48px、押す範囲は行全体 */
+@media (max-width: 767px) {
+  .panel.tagpicker {
+    top: auto !important;
+    left: 0 !important;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    padding: 8px 12px max(8px, env(safe-area-inset-bottom));
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+  .tagpicker-list { max-height: 50vh; max-height: 50dvh; }
+  .item { height: 48px; font-size: var(--fs-16); }
+  .item input[type="checkbox"] { width: 22px; height: 22px; }
+  .tagpicker-new input { height: 44px; }
+}
 </style>

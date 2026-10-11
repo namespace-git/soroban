@@ -39,7 +39,8 @@ watch([revision, dataRevision], load)
 const chartKind = ref<SaleKind>('resale')
 
 const SHOW_CHART_KEY = 'soroban.salesSummary.showChart'
-const showChart = ref(true)
+// スマホ幅では、選び直すまでグラフを隠す（細かく読めず、作業の一覧を下へ押しやるため）。ボタンで 1 タップで開ける
+const showChart = ref(!(typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 767px)').matches))
 try {
   const saved = localStorage.getItem(SHOW_CHART_KEY)
   if (saved !== null) showChart.value = saved === '1'
@@ -355,5 +356,19 @@ const gridLines = computed(() => domainMin.value < 0
   margin: 4px 0 0;
   font-size: var(--fs-12);
   color: var(--text-faint);
+}
+
+/* スマホ幅（768px 未満）：見出しは折り返す（タイトルを縦書きにつぶさない）。ボタンは 44px */
+@media (max-width: 767px) {
+  .sales-summary { margin-bottom: 8px; }
+  .chart-panel { padding: 4px 12px; }
+  .chart-panel .section-head { flex-wrap: wrap; gap: 6px 10px; margin-bottom: 0; }
+  .chart-panel .section-head-title { flex: 0 0 auto; }
+  .chart-panel .section-head > .grow { flex: 1 1 0; }
+  .chart-panel .section-head select { height: 44px; margin-right: 0; }
+  .chart-panel .section-head button { height: 44px; }
+  .legend { order: 5; flex: 1 1 100%; gap: 14px; }
+  .chart-wrap { margin-top: 8px; }
+  .chart-hint { margin-bottom: 8px; }
 }
 </style>

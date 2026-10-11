@@ -818,6 +818,10 @@ tr.total-row.loss > td {
   .page { padding: 16px 12px; }
   .page-head { flex-wrap: wrap; }
 
+  /* 面：左右の余白を詰めて、本文の幅を広く取る（画面ごとの scoped な指定があればそちらが勝つ） */
+  .panel, .card { padding: 14px; }
+  .panel + .panel, .card + .card { margin-top: 12px; }
+
   /* 上のバーの利益ピル（省略の仕方は上の 1099px 以下の規則）。狭いので文字と余白を詰める */
   .topbar .profit-mini {
     padding: 6px 12px;

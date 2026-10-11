@@ -137,6 +137,11 @@ const tagOptions = computed(() => {
   return [...map].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'ja'))
 })
 
+// --- スマホ幅：絞り込み（期間・タグ）は「絞り込み」ボタンの中にまとめる（デスクトップ幅では今までどおり常に並ぶ）。
+//     閉じていても、いくつ効いているかはボタンの数字で分かる ---
+const filtersOpen = ref(false)
+const activeFilterCount = computed(() => (period.value !== 'all' ? 1 : 0) + (tagFilter.value ? 1 : 0))
+
 /** 検索語より前に、期間・仕入先・タグだけで絞った行（明細検索の対象を決めるのに使う） */
 const periodShopFiltered = computed(() =>
   sortedPurchases.value.filter(p =>
@@ -562,7 +567,7 @@ async function remove(p: PurchaseSummary) {
         <Icon name="alert" :size="14" />
         <span><strong>下書きの理由：</strong>{{ draftReason(editingDraftNote) }}。足りない値を入れて「確定して在庫を作る」を押してください</span>
       </p>
-      <div class="fields">
+      <div class="fields basic-fields">
         <label class="field">
           <span>仕入先</span>
           <select v-model="form.shop_account_id">
@@ -607,11 +612,11 @@ async function remove(p: PurchaseSummary) {
         </thead>
         <tbody>
           <tr v-for="(l, i) in form.lines" :key="i">
-            <td><input v-model="l.name" class="full" placeholder="商品名" /></td>
-            <td class="faint">{{ previewModelCode(l) }}</td>
-            <td><input type="number" v-model.number="l.unit_price" class="full" :class="{ invalid: editingId && !l.unit_price }" /></td>
-            <td><input type="number" v-model.number="l.quantity" class="full" min="1" /></td>
-            <td class="num dim">{{ yen((l.unit_price || 0) * (l.quantity || 0)) }}</td>
+            <td class="name-cell"><input v-model="l.name" class="full" placeholder="商品名" /></td>
+            <td class="faint model-cell">{{ previewModelCode(l) }}</td>
+            <td class="price-cell" data-label="単価（税込）"><input type="number" inputmode="numeric" v-model.number="l.unit_price" class="full" :class="{ invalid: editingId && !l.unit_price }" /></td>
+            <td class="qty-cell" data-label="数量"><input type="number" inputmode="numeric" v-model.number="l.quantity" class="full" min="1" /></td>
+            <td class="num dim subtotal-cell" data-label="小計">{{ yen((l.unit_price || 0) * (l.quantity || 0)) }}</td>
             <td class="actions">
               <button class="icon ghost" aria-label="削除" @click="removeLine(i)">
                 <Icon name="trash" :size="16" />
@@ -626,22 +631,22 @@ async function remove(p: PurchaseSummary) {
         明細を追加
       </button>
 
-      <div class="fields">
+      <div class="fields cost-fields">
         <label class="field">
           <span>送料（税込）</span>
           <input
-            type="number" v-model.number="form.shipping_fee" @input="shippingTouched = true"
+            type="number" inputmode="numeric" v-model.number="form.shipping_fee" @input="shippingTouched = true"
             :class="{ invalid: editingId && !form.shipping_fee }"
           />
           <span v-if="selectedAccountDefaultFee !== null" class="faint">仕入先の既定値：{{ yen(selectedAccountDefaultFee) }}</span>
         </label>
         <label class="field">
           <span>その他費用（税込）</span>
-          <input type="number" v-model.number="form.other_cost" />
+          <input type="number" inputmode="numeric" v-model.number="form.other_cost" />
         </label>
         <label class="field">
           <span>割引（税込）</span>
-          <input type="number" v-model.number="form.discount" />
+          <input type="number" inputmode="numeric" v-model.number="form.discount" />
         </label>
         <label class="field">
           <span>按分方式</span>
@@ -671,12 +676,25 @@ async function remove(p: PurchaseSummary) {
 
     <div class="toolbar">
       <SearchBox v-model="searchText" placeholder="商品名・注文番号・仕入先・メモ・明細を検索" />
-      <PeriodSelect v-model="period" />
-      <select v-model="tagFilter">
-        <option value="">すべてのタグ</option>
-        <option v-for="t in tagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
-      </select>
-      <select v-model="sortSelectValue">
+      <!-- スマホ幅だけ：絞り込みをこのボタンの中にまとめる（売上タブと同じ形）。数字は効いている絞り込みの数 -->
+      <button
+        type="button"
+        class="m-filter-toggle"
+        :class="{ on: filtersOpen || activeFilterCount > 0 }"
+        :aria-expanded="filtersOpen"
+        @click="filtersOpen = !filtersOpen"
+      >
+        絞り込み<span v-if="activeFilterCount" class="m-filter-n">{{ activeFilterCount }}</span>
+      </button>
+      <!-- デスクトップ幅では display: contents（この入れ物は無いのと同じ） -->
+      <div class="toolbar-filters" :class="{ 'm-open': filtersOpen }">
+        <PeriodSelect v-model="period" :class="{ 'is-custom': typeof period === 'object' }" />
+        <select v-model="tagFilter">
+          <option value="">すべてのタグ</option>
+          <option v-for="t in tagOptions" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </select>
+      </div>
+      <select v-model="sortSelectValue" class="sort-select">
         <option value="ordered_at:desc">注文日が新しい順</option>
         <option value="ordered_at:asc">注文日が古い順</option>
         <option value="total_cost:desc">総原価が高い順</option>
@@ -712,7 +730,7 @@ async function remove(p: PurchaseSummary) {
               v-for="p in filteredPurchases" :key="p.id"
               :data-row-id="p.id"
               class="clickable"
-              :class="{ focused: focusedId === p.id }"
+              :class="{ focused: focusedId === p.id, 'needs-input': p.status === 'draft' }"
               role="button"
               tabindex="0"
               title="仕入の明細を開く"
@@ -751,15 +769,15 @@ async function remove(p: PurchaseSummary) {
                   <Icon v-if="p.tracking_number" name="truck" :size="12" class="ship-tracking-icon" title="追跡番号あり" />
                 </div>
               </td>
-              <td class="num">
+              <td class="num money-cell" data-label="商品計">
                 <span v-if="p.status === 'draft'" class="faint">—</span>
                 <template v-else>{{ yen(p.subtotal) }}</template>
               </td>
-              <td class="num dim">
+              <td class="num dim money-cell" data-label="送料">
                 <span v-if="p.status === 'draft'" class="faint">—</span>
                 <template v-else>{{ yen(p.shipping_fee) }}</template>
               </td>
-              <td class="num">
+              <td class="num money-cell" data-label="総原価">
                 <strong v-if="p.status !== 'draft'">{{ yen(p.total_cost) }}</strong>
                 <span v-else class="faint">—</span>
               </td>
@@ -971,4 +989,190 @@ tr.focused { background: var(--brand-soft); }
   font-variant-numeric: tabular-nums;
 }
 .acc-sub { font-size: var(--fs-12); }
+
+/* --- スマホ幅だけで出すもの。デスクトップ幅では出さない（絞り込みの入れ物は無いのと同じ） --- */
+.m-filter-toggle { display: none; }
+.toolbar-filters { display: contents; }
+
+/* ============================================================
+   スマホ幅（768px 未満）。表を組み替えて、横にはみ出さず親指で押せるようにする。
+   768px 以上には一切効かせない（ここより上は触らない）。
+   一覧の行は ①状態ラベル → ②名前 → ③補助 → ④メモ の順を保ったまま、
+   カード 1 枚＝1 注文にする。ホバーでしか読めない title の分（メモ・補助）は折り返して見せる。
+   ============================================================ */
+@media (max-width: 767px) {
+  .page-head button { min-height: 44px; }
+
+  /* 仕入先カード：縦に 2 段積まずに、横にめくる 1 列にして一覧を上に寄せる */
+  .acc-row {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(150px, 44%);
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    padding-bottom: 6px;
+  }
+  .acc { scroll-snap-align: start; }
+
+  /* ツールバー：検索 →（絞り込み）→ 並び替え → 件数・合計（売上タブと同じ形） */
+  .toolbar { gap: 8px; }
+  .toolbar :deep(.search-box) { flex: 1 1 160px; width: auto; min-width: 0; }
+  .toolbar :deep(.search-box-input) { height: 44px; }
+  .toolbar :deep(.search-box-clear) { width: 36px; height: 36px; }
+  .toolbar .m-filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    height: 44px;
+    padding: 0 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+  .toolbar .m-filter-toggle.on { background: var(--brand-soft); border-color: var(--brand); }
+  .m-filter-n {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--surface);
+    font-size: var(--fs-12);
+    font-weight: 700;
+  }
+  .toolbar-filters { display: none; order: 1; flex: 1 1 100%; }
+  .toolbar-filters.m-open { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .toolbar-filters select { width: 100%; min-width: 0; height: 44px; }
+  .toolbar-filters .period-select { display: flex; width: 100%; }
+  .toolbar-filters .period-select.is-custom { grid-column: 1 / -1; }
+  .toolbar-filters .period-select :deep(select) { flex: 1 1 100%; min-width: 0; width: 100%; height: 44px; }
+  .toolbar-filters .period-select :deep(input) { flex: 1 1 120px; min-width: 0; height: 44px; }
+  /* 並び替えの文言は長い（「注文日が新しい順」）ので、検索と並べず 1 行を使う */
+  .toolbar .sort-select { order: 2; flex: 1 1 100%; min-width: 0; height: 44px; }
+  .toolbar .grow { display: none; }
+  .toolbar .toolbar-count { order: 4; flex: 1 1 100%; text-align: right; white-space: normal; }
+
+  /* 登録フォーム */
+  .form { padding: 16px 12px; }
+  .form .field input,
+  .form .field select { width: 100%; min-width: 0; height: 44px; }
+  .form .basic-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .form .basic-fields .field { min-width: 0; }
+  .form .basic-fields .field:nth-child(1),
+  .form .basic-fields .field:nth-child(4),
+  .form .basic-fields .field:nth-child(5) { grid-column: 1 / -1; }
+  .form .cost-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .form .cost-fields .field { min-width: 0; }
+  .form button { min-height: 44px; }
+  .form .row { flex-wrap: wrap; }
+  .form .row .grow { display: none; }
+  .form .row .primary { flex: 1 1 100%; min-height: 48px; }
+  .alloc-note { font-size: var(--fs-13); }
+
+  /* 明細の入力行：1 行＝1 枚のミニカード（商品名 → 型番 → 単価・数量・小計。削除は右上） */
+  .lines-table,
+  .lines-table tbody { display: block; }
+  .lines-table thead { display: none; }
+  .lines-table tbody tr {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1.4fr 1fr 1.2fr;
+    gap: 8px;
+    padding: 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+  .lines-table tbody tr:hover { background: var(--surface); }
+  .lines-table td { display: block; min-width: 0; padding: 0; border: none; }
+  .lines-table td.name-cell { grid-column: 1 / -1; padding-right: 48px; }
+  .lines-table td.model-cell { grid-column: 1 / -1; font-size: var(--fs-12); }
+  .lines-table td.model-cell:empty { display: none; }
+  .lines-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    font-size: var(--fs-12);
+    color: var(--text-dim);
+    font-weight: 400;
+    white-space: nowrap;
+  }
+  .lines-table td.subtotal-cell { text-align: left; line-height: 44px; }
+  .lines-table td.subtotal-cell::before { line-height: 1.6; }
+  .lines-table td.actions { position: absolute; top: 4px; right: 4px; }
+  .lines-table td.actions button { width: 44px; height: 44px; }
+  .lines-table input { height: 44px; }
+  .add-line { min-height: 44px; }
+
+  /* 一覧：表をやめて、カードを縦に積む */
+  .table-panel { background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
+  .table-panel table,
+  .table-panel tbody { display: block; }
+  .table-panel thead { display: none; }
+  .table-panel tbody tr {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 8px;
+    row-gap: 10px;
+    padding: 12px;
+    margin-bottom: 8px;
+    background: var(--surface);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+  }
+  .table-panel tbody tr:hover { background: var(--surface); }
+  .table-panel tbody tr.focused { background: var(--brand-soft); }
+  /* 要対応（価格未入力の下書き）：売上タブのカードと同じ、左に橙の帯 */
+  .table-panel tbody tr.needs-input { box-shadow: inset 4px 0 0 var(--warn), var(--shadow-1); }
+  .table-panel td { display: block; min-width: 0; padding: 0; border: none; }
+  .table-panel td.thumb-cell { position: absolute; top: 12px; left: 12px; }
+  .thumb-placeholder { width: 48px; height: 48px; }
+  .table-panel td.info-cell { grid-column: 1 / -1; min-height: 48px; padding-left: 60px; }
+  .table-panel td.ship-cell { grid-column: 1 / -1; }
+  .table-panel td.money-cell { text-align: left; }
+  .table-panel td.money-cell::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    font-size: var(--fs-11);
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--text-faint);
+  }
+  .table-panel td.actions {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    text-align: left;
+    color: var(--text-dim);
+  }
+  .table-panel .actions > * { margin-left: 0; }
+  /* 補助の操作：ホバーが無いので薄くせず、枠付きの 44px 高（売上タブのカードの操作と同じ） */
+  .table-panel td.actions button { flex: 1 1 0; min-width: 0; min-height: 44px; padding: 0 6px; }
+  .table-panel td.actions button.ghost { border-color: var(--line); }
+  .table-panel td.actions button.icon { flex: 0 0 44px; width: 44px; height: 44px; padding: 0; }
+
+  /* 補助とメモはホバーの title でしか全文が読めないので、スマホ幅では 2 行まで折り返して見せる */
+  .info-cell .row-sub { -webkit-line-clamp: 2; min-height: 0; }
+  .info-cell .note-row.fixed-row:empty { display: none; }
+  .info-cell .note-row.fixed-row .note-text {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    overflow: hidden;
+  }
+
+  /* 配送の進行：1 行に収める（折り返すと点灯が読み違えられる）。線と間を詰めて 375px に収まる幅にする */
+  .ship-progress { gap: 3px; }
+  .ship-bar { width: 8px; }
+
+  .hint-row { margin-top: 8px; }
+}
 </style>
