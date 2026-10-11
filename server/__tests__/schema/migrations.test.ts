@@ -27,7 +27,7 @@ describe('流した後の形', () => {
     await db.close()
   })
 
-  it('スキーマ app に、SQLite から移した 30 テーブル＋ Web 用の 4 テーブル＋世帯の 2 テーブルがある', async () => {
+  it('スキーマ app に、SQLite から移した 30 テーブル＋ Web 用の 8 テーブル＋世帯の 2 テーブルがある', async () => {
     const { rows } = await db.query<{ relname: string }>(
       `select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
         where n.nspname = 'app' and c.relkind = 'r' order by c.relname`,
@@ -42,7 +42,9 @@ describe('流した後の形', () => {
         'sale_line', 'sale_tag', 'setting', 'shipping_method', 'shop_account', 'shop_account_tag',
         'shop_alias', 'tag',
         // Web 化で新しく要るもの
-        'collect_job', 'notification_outbox', 'push_subscription', 'setting_secret',
+        'collect_job', 'push_subscription', 'setting_secret',
+        // 取り込み担当・通知・17TRACK のキュー（Wave 3a）
+        'agent_device', 'collect_job_stage', 'notification_delivery', 'notification_event', 'tracking_lease',
         // 世帯
         'household', 'household_member',
       ].sort(),

@@ -393,7 +393,9 @@ describe('表の持ち主・force・権限', () => {
          from acls, aclexplode(acls.acl) x
         where x.grantee = 0 or pg_get_userbyid(x.grantee) in ('anon', 'authenticated')`,
     )
-    expect(acls.rows).toEqual([])
+    // 例外は 1 つだけ：storage.objects の方針が呼ぶ app.my_household()（20261012001530_storage.sql）。
+    // 引数を取らず、auth.uid() の世帯しか返せない
+    expect(acls.rows).toEqual([{ what: 'function my_household', grantee: 'authenticated', privilege: 'EXECUTE' }])
   })
 
   it('household_member は自分自身の行を読める（app.user_id だけ渡した soroban_api）。他人の行は読めず、書けない', async () => {
@@ -459,8 +461,12 @@ describe('全テーブルに RLS がある', () => {
   })
 
   it('household_id を持つ全テーブルに、世帯を見る using と with check の方針がある', async () => {
-    const { rows } = await db.query<{ tablename: string; qual: string | null; with_check: string | null }>(
-      `select c.relname as tablename,
+    const { rows } = await db.query<{
+      tablename: string; polname: string | null; roles: string[] | null
+      qual: string | null; with_check: string | null
+    }>(
+      `select c.relname as tablename, p.polname,
+              array(select r.rolname::text from pg_roles r where r.oid = any(p.polroles)) as roles,
               pg_get_expr(p.polqual, p.polrelid) as qual, pg_get_expr(p.polwithcheck, p.polrelid) as with_check
          from pg_class c
          join pg_namespace n on n.oid = c.relnamespace
@@ -468,7 +474,7 @@ describe('全テーブルに RLS がある', () => {
         where n.nspname = 'app' and c.relkind = 'r'
         order by c.relname`,
     )
-    const byTable = new Map<string, Array<{ qual: string | null; with_check: string | null }>>()
+    const byTable = new Map<string, Array<{ polname: string | null; roles: string[] | null; qual: string | null; with_check: string | null }>>()
     for (const r of rows) {
       const list = byTable.get(r.tablename) ?? []
       list.push(r)
@@ -478,11 +484,16 @@ describe('全テーブルに RLS がある', () => {
     const guard = "current_setting('app.household_id'::text, true)"
     for (const [table, policies] of byTable) {
       // 世帯で絞る方針（using と with check の両方）が 1 つはある。
-      // household_member にだけ、自分自身の行を読む方針（読み取りのみ）が別に付く
+      // 例外は 2 種類（どちらも名前と対象のロールまで決めてある）：
+      //   * 鍵や自分の行から引くための方針（household_member の自分自身の行、agent_device の鍵のハッシュ）
+      //   * 世帯をまたいで動く Cron の Worker（soroban_cron）だけの方針。soroban_api には効かない
       const isolating = policies.filter((p) => p.qual?.includes(guard) && p.with_check?.includes(guard))
       expect(isolating.length, `${table} に世帯で絞る方針が無い`).toBe(1)
-      const others = policies.filter((p) => !isolating.includes(p))
-      expect(others.length, `${table} の想定外の方針`).toBe(table === 'household_member' ? 1 : 0)
+      const others = policies.filter((p) => !isolating.includes(p) && !(p.roles?.length === 1 && p.roles[0] === 'soroban_cron'))
+      const lookups = table === 'household_member' ? ['member_self_lookup']
+        : table === 'agent_device' ? ['agent_token_lookup_select', 'agent_token_lookup_update']
+        : []
+      expect(others.map((p) => p.polname).sort(), `${table} の想定外の方針`).toEqual(lookups)
     }
   })
 

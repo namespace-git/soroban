@@ -158,7 +158,6 @@ describe('CHECK 制約', () => {
     ['expense.month', `insert into app.expense (occurred_at, month, category, amount) values ('2026-10-01', '2026-1', 'other', 1)`, []],
     ['month_book.month', `insert into app.month_book (month) values ('202610')`, []],
     ['month_book.alloc_method', `insert into app.month_book (month, alloc_method) values ('2026-10', 'x')`, []],
-    ['notification_outbox.status', `insert into app.notification_outbox (kind, title, status) values ('k', 't', 'done')`, []],
     ['collect_job.status', `insert into app.collect_job (status) values ('paused')`, []],
     ['collect_job: running なら lease が要る', `insert into app.collect_job (status) values ('running')`, []],
   ]
@@ -527,8 +526,6 @@ describe('列の型', () => {
       ['app_log', 'ts'], ['shop_alias', 'updated_at'], ['product_name', 'updated_at'],
       ['collect_job', 'requested_at'], ['collect_job', 'claimed_at'], ['collect_job', 'heartbeat_at'],
       ['collect_job', 'finished_at'], ['collect_job', 'lease_expires_at'],
-      ['notification_outbox', 'created_at'], ['notification_outbox', 'sent_at'],
-      ['notification_outbox', 'next_attempt_at'], ['notification_outbox', 'claimed_at'],
       ['push_subscription', 'created_at'], ['push_subscription', 'last_used_at'],
       ['setting_secret', 'updated_at'],
     ]
@@ -554,7 +551,7 @@ describe('列の型', () => {
 
   it('model_codes は text[]、raw / result / payload は jsonb、app_log.payload は text', async () => {
     expect(await typeOf('sale', 'model_codes')).toEqual({ data_type: 'ARRAY', udt_name: '_text' })
-    for (const [table, column] of [['sale', 'raw'], ['collect_job', 'result'], ['notification_outbox', 'payload']]) {
+    for (const [table, column] of [['sale', 'raw'], ['collect_job', 'result']]) {
       expect((await typeOf(table, column))?.data_type, `${table}.${column}`).toBe('jsonb')
     }
     expect((await typeOf('app_log', 'payload'))?.data_type).toBe('text')
@@ -611,12 +608,15 @@ describe('Web 版で増えたテーブル', () => {
       { column_name: 'ciphertext', data_type: 'bytea' },
       { column_name: 'iv', data_type: 'bytea' },
       { column_name: 'updated_at', data_type: 'timestamp with time zone' },
+      // Wave 3a：鍵の版と方式（AAD に入れる）
+      { column_name: 'key_version', data_type: 'integer' },
+      { column_name: 'alg', data_type: 'text' },
     ])
   })
 
   it('setting_secret は世帯ごとに 1 キー 1 行で、他の世帯からは見えない', async () => {
     const put = (tx: Transaction) =>
-      tx.query(`insert into app.setting_secret (key, ciphertext, iv) values ('gemini_api_key', '\\x0102'::bytea, '\\x0a0b'::bytea)`)
+      tx.query(`insert into app.setting_secret (key, ciphertext, iv, key_version) values ('gemini_api_key', '\\x0102'::bytea, '\\x0a0b'::bytea, 1)`)
     await asApi(db, HH_A, put)
     await asApi(db, HH_B, put)
     expect(await sqlstateOf(() => asApi(db, HH_A, put))).toBe('23505')
@@ -647,42 +647,5 @@ describe('Web 版で増えたテーブル', () => {
     await db.query(`delete from app.household_member where user_id = '00000000-0000-4000-8000-0000000000a2'`)
     const left = await asApi(db, HH_A, async (tx) => (await tx.query<{ endpoint: string }>('select endpoint from app.push_subscription')).rows)
     expect(left.map((r) => r.endpoint)).toEqual(['https://push.example.test/a1'])
-  })
-
-  it('notification_outbox：再送の列（status / attempts / next_attempt_at / claimed_at / last_error / dedupe_key）', async () => {
-    const { rows } = await db.query<{ column_name: string; data_type: string; is_nullable: string }>(
-      `select column_name, data_type, is_nullable from information_schema.columns
-        where table_schema = 'app' and table_name = 'notification_outbox'
-          and column_name in ('status', 'attempts', 'next_attempt_at', 'claimed_at', 'last_error', 'dedupe_key')
-        order by column_name`,
-    )
-    expect(rows).toEqual([
-      { column_name: 'attempts', data_type: 'integer', is_nullable: 'NO' },
-      { column_name: 'claimed_at', data_type: 'timestamp with time zone', is_nullable: 'YES' },
-      { column_name: 'dedupe_key', data_type: 'text', is_nullable: 'YES' },
-      { column_name: 'last_error', data_type: 'text', is_nullable: 'YES' },
-      { column_name: 'next_attempt_at', data_type: 'timestamp with time zone', is_nullable: 'NO' },
-      { column_name: 'status', data_type: 'text', is_nullable: 'NO' },
-    ])
-
-    const row = await asApi(db, HH_A, async (tx) =>
-      (await tx.query<{ status: string; attempts: number; ok: boolean; sent_at: unknown }>(
-        `insert into app.notification_outbox (kind, title) values ('sale', '売れました')
-         returning status, attempts, next_attempt_at <= now() as ok, sent_at`,
-      )).rows[0],
-    )
-    expect(row).toEqual({ status: 'pending', attempts: 0, ok: true, sent_at: null })
-  })
-
-  it('notification_outbox.dedupe_key は世帯の中で一意（同じ出来事を二重に積めない）。NULL は何件でも', async () => {
-    const put = (key: string | null) => (tx: Transaction) =>
-      tx.query(`insert into app.notification_outbox (kind, title, dedupe_key) values ('sale', 't', $1)`, [key])
-    await asApi(db, HH_A, put('sale:1'))
-    await asApi(db, HH_B, put('sale:1')) // 別の世帯なら同じ鍵でよい
-    expect(await sqlstateOf(() => asApi(db, HH_A, put('sale:1')))).toBe('23505')
-    await asApi(db, HH_A, async (tx) => {
-      await put(null)(tx)
-      await put(null)(tx)
-    })
   })
 })

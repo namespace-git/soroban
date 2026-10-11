@@ -29,8 +29,14 @@ export function listMigrations(dir: string = MIGRATIONS_DIR): MigrationFile[] {
 
 /**
  * Supabase には最初からあるが、素の Postgres（PGlite）には無いものを、マイグレーションが
- * 参照する分だけ作る：auth.users と、ロール anon / authenticated。
- * 本物の Supabase ではこれらは作らない（マイグレーションには入れない）
+ * 参照する分だけ作る：auth.users・auth.uid()、ロール anon / authenticated、
+ * Storage（storage.buckets・storage.objects・storage.foldername()）。
+ * 本物の Supabase ではこれらは作らない（マイグレーションには入れない）。
+ *
+ * auth.uid() と storage.foldername() は本物の定義と同じ。storage の表は本物の列のうち、
+ * 方針の検証に要るものだけ（buckets.type の enum、objects の version・user_metadata の細部、
+ * 所有者 supabase_storage_admin は省いた）。objects は本物と同じく RLS を有効にしてあり、
+ * anon / authenticated には表の権限を出してある（通すかどうかは方針だけで決まる）
  */
 export async function createSupabaseStubs(db: PGlite): Promise<void> {
   await db.exec(`
@@ -50,6 +56,63 @@ export async function createSupabaseStubs(db: PGlite): Promise<void> {
       end if;
     end
     $$;
+
+    -- 本物の auth.uid()：JWT の sub（PostgREST・Storage が request.jwt.claims に入れる）
+    create or replace function auth.uid() returns uuid
+    language sql stable
+    as $$
+      select coalesce(
+        nullif(current_setting('request.jwt.claim.sub', true), ''),
+        (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+      )::uuid
+    $$;
+
+    create schema if not exists storage;
+    create table if not exists storage.buckets (
+      id                 text primary key,
+      name               text not null,
+      owner              uuid,
+      created_at         timestamptz default now(),
+      updated_at         timestamptz default now(),
+      public             boolean default false,
+      avif_autodetection boolean default false,
+      file_size_limit    bigint,
+      allowed_mime_types text[],
+      owner_id           text
+    );
+    create unique index if not exists bname on storage.buckets (name);
+
+    create table if not exists storage.objects (
+      id               uuid primary key default gen_random_uuid(),
+      bucket_id        text references storage.buckets (id),
+      name             text,
+      owner            uuid,
+      created_at       timestamptz default now(),
+      updated_at       timestamptz default now(),
+      last_accessed_at timestamptz default now(),
+      metadata         jsonb,
+      path_tokens      text[] generated always as (string_to_array(name, '/')) stored,
+      version          text,
+      owner_id         text,
+      user_metadata    jsonb
+    );
+    create unique index if not exists bucketid_objname on storage.objects (bucket_id, name);
+    alter table storage.objects enable row level security;
+
+    -- 本物の storage.foldername()：パスの最後（ファイル名）を除いたフォルダの配列
+    create or replace function storage.foldername(name text) returns text[]
+    language plpgsql
+    as $$
+    declare
+      _parts text[];
+    begin
+      select string_to_array(name, '/') into _parts;
+      return _parts[1:array_length(_parts, 1) - 1];
+    end
+    $$;
+
+    grant usage on schema auth, storage to anon, authenticated;
+    grant all on storage.buckets, storage.objects to anon, authenticated;
   `)
 }
 

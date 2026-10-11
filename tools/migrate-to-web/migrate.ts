@@ -179,7 +179,7 @@ function buildReport(args: {
     })
   }
   notMigrated.push({
-    name: 'collect_job・push_subscription・notification_outbox・setting_secret',
+    name: 'collect_job・agent_device・push_subscription・notification_event・setting_secret ほか',
     detail: 'Web 版が使う表で、SQLite に無い。空のまま',
   })
   for (const [table, n] of data.droppedRows) {

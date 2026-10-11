@@ -358,7 +358,10 @@ describe('世帯の分離', () => {
   })
 
   it('Web 版だけの表（取り込み要求・Push・通知・秘密の値）には触らない', async () => {
-    for (const table of ['collect_job', 'push_subscription', 'notification_outbox', 'setting_secret']) {
+    for (const table of [
+      'collect_job', 'push_subscription', 'notification_event', 'notification_delivery', 'setting_secret',
+      'agent_device', 'collect_job_stage', 'tracking_lease',
+    ]) {
       expect(await countAll(table, hhA), table).toBe(0)
     }
   })

@@ -318,8 +318,11 @@ describe('reap（PC が落ちたとき）', () => {
   it('heartbeat で延ばした lease は reap されない', async () => {
     const job = await enqueue()
     const claimed = (await claim('pc-1'))!
-    await backdate(job.id, 'lease_expires_at', 1)
-    await heartbeat(job.id, claimed.lease_token!)
+    // 期限の直前（まだ失効していない）。20261012001500 から、失効した lease は延命できない
+    // （SB003。server/__tests__/wave3/lease.test.ts）ので、生きているうちに延ばす
+    await db.query(`update app.collect_job set lease_expires_at = now() + interval '10 seconds' where id = $1`, [job.id])
+    const expires = await heartbeat(job.id, claimed.lease_token!)
+    expect(new Date(expires).getTime()).toBeGreaterThan(Date.now() + 60_000)
     expect(await reap()).toBe(0)
     expect((await jobRow(job.id)).status).toBe('running')
   })
