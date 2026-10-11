@@ -359,7 +359,7 @@ describe('関数の権限', () => {
         order by p.proname`,
     )
     expect(rows.map((r) => r.proname)).toEqual([
-      'claim_collect_job', 'enqueue_collect_job', 'finish_collect_job', 'heartbeat_collect_job', 'reap_stale_collect_jobs',
+      'cancel_collect_job', 'claim_collect_job', 'enqueue_collect_job', 'finish_collect_job', 'heartbeat_collect_job', 'reap_stale_collect_jobs',
     ])
     for (const r of rows) {
       expect(r, r.proname).toMatchObject({ prosecdef: false, api: true, anon: false, auth: false })

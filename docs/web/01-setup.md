@@ -43,15 +43,14 @@ supabase db push
 
 ### 1-5. 世帯を作って 2 人を入れる
 
-**SQL Editor** で（`<…>` は 1-3 で作ったユーザーの ID。Users の一覧に出ています）：
+**SQL Editor** で 1 行だけ（`<…>` は 1-3 で作ったユーザーの ID。Users の一覧に出ています）：
 
 ```sql
-insert into app.household (id, name) values (gen_random_uuid(), 'うち') returning id;
--- ↑ で出た id を使う
-insert into app.household_member (household_id, user_id, role) values
-  ('<世帯の id>', '<夫のユーザー id>', 'owner'),
-  ('<世帯の id>', '<妻のユーザー id>', 'owner');
+select app.create_household('うち', array['<夫のユーザー id>', '<妻のユーザー id>']::uuid[]);
 ```
+
+返ってきた値が世帯の ID です。**発送方法の既定 8 行と設定の既定値 9 件も、この 1 行で一緒に入ります**
+（いまのデスクトップ版を新しく入れたときと同じ中身）。
 
 ### 1-6. 控えておく値
 
