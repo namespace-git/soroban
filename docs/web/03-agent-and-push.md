@@ -1,106 +1,144 @@
-# 取り込み担当の PC（エージェント）と Push 通知（Wave 3 の設計・下書き）
+# 取り込み担当の PC（エージェント）と Push 通知（Wave 3 の設計）
 
 `00-architecture.md` の「取り込み」「Push 通知」を、実装できる粒度まで落としたもの。
-**下書き。** Wave 2（db.ts の移植）が終わってから確定させる。
+2026-10-12 の下書きを Codex にレビューしてもらい、指摘 8 件を反映した（末尾の表）。
 
 ---
 
-## 1. 取り込みの流れ（Web 版）
+## 1. PC の Electron は「取り込み担当」になる（画面は Web）
+
+- Electron に**「Web 版の取り込み担当になる」**モードを足す。このモードでは：
+  - **帳簿の画面は Web 版を開く**（Electron の窓で Web の URL を開くだけ。ログインはブラウザと同じで、Web 版が持つ）
+  - **ローカルの SQLite は読み取り専用の記録として残す**（凍結）。双方向の同期はしない。戻すときは「新しく始める」扱い
+  - 画面の上に**いまどちらのデータか**を常に出す（「Web の帳簿」／「この PC の帳簿（凍結）」）
+  - デスクトップのバックアップは「この PC の帳簿（凍結）」だけが対象と明記する。Web の帳簿は Supabase がバックアップする
+- **取り込み担当の資格**は、人のログインとは別に持つ：
+  - Web 版にログインした状態で「この PC を取り込み担当にする」を押す → サーバーが**端末専用の鍵**を 1 回だけ発行
+    （`agent_device` 表には**ハッシュだけ**。端末名・作成日・最後に使った日）
+  - Electron は鍵を **safeStorage で暗号化**して持つ（`CLAUDE.md` の API キー 2 つと同じ扱い。safeStorage が使えなければ断る）
+  - 設定画面から端末ごとに**取り消せる**。取り消したら、その PC は次の呼び出しから断られる
+  - `/api/agent/*` は**この鍵だけ**で通る（人の JWT では通らない）。人の画面が乗っ取られても、取り込み担当には化けられない
+  - **`CLAUDE.md` の「認証情報を保存しない」に 3 つ目の例外が要る**（利用者の確認待ち。下の「決めること」）
+
+## 2. 取り込みの流れ
 
 ```
- スマホ／PC のブラウザ                         Cloudflare（API）                         PC の Electron（エージェント）
- 「取り込む」を押す ──requestCollect──▶ app.enqueue_collect_job（queued）
-                                                                     ◀── 20 秒ごと agent/claim ──  起動中はずっと聞いている
-                                         app.claim_collect_job（running・lease）──▶ 取り込みを始める
-                                                                     ◀── agent/<書き込み> ──────  販売・出品・仕入を 1 件ずつ
-                                                                     ◀── agent/heartbeat（60 秒）
-                                         app.finish_collect_job（done/failed）◀── agent/finish
- 画面は getCollectJob を数秒ごとに読む ◀──                                          配送状況（17TRACK）はサーバーが続けて見る
+ 画面「取り込む」 ──requestCollect──▶ enqueue（queued）
+                                        ◀── agent/claim（20 秒ごと。端末の鍵）── PC
+                                        claim（running・lease 3 分・fencing 番号）──▶ PC が収集を始める
+                                        ◀── agent/<段ごとのまとめ>（job id・lease_token・段・冪等キー）
+                                        ◀── agent/heartbeat（60 秒）
+                                        ◀── agent/finish（done / partial / failed）
+ 画面は getCollectJob を走っている間だけ数秒ごとに読む
 ```
 
-### 契約に足すもの（`src/shared/types.ts`。親が確定させる）
+### lease（指摘 1）
 
-| メソッド | 役割 |
-|---|---|
-| `requestCollect(): Promise<CollectJob>` | 要求を積む。走っている・クールダウン中なら日本語で断る（SB001・SB002） |
-| `getCollectJob(): Promise<CollectJob \| null>` | いま積まれている／走っている／直近に終わった要求。画面はこれを読んで「取り込み中」を出す |
-| `cancelCollectJob(id): Promise<void>` | 始まる前なら取り消す（SB004・SB005） |
+- **書き込みのたびに**、そのトランザクションの先頭で `app.assert_lease(job_id, lease_token)` を呼ぶ：
+  job の行を `for update` で取り、`status = 'running' and lease_token = ? and lease_expires_at > now()` でなければ断る（SB003）
+- heartbeat も同じ条件。**失効した lease を延命しない**
+- reap と書き込みが job の行のロックで直列になる。スリープから戻った PC は、最初の書き込みで断られて止まる
+- **出品の状態を `suspended` にするような「観測で引き当てを外す」書き込み**は、lease が生きていることが特に大事（古い観測で在庫の引き当てが静かに外れる）
 
-- デスクトップ版の `collect()` はそのまま（Electron 単体のときは今まで通りその場で走る）
-- Web 版の画面は `collect()` を呼ばず、`requestCollect()` → `getCollectJob()` を数秒ごと（走っている間だけ）
+### 1 件ずつでも、1 回分まとめてでもなく「段ごと」（指摘 2）
 
-### エージェント用の API（`/api/agent/<method>`。画面の `SorobanApi` とは別の契約 `AgentApi`）
+| 段 | 1 回の呼び出しで送るもの | 冪等キー |
+|---|---|---|
+| 販売一覧の 1 ページ | そのページの販売（新規・実績・状態） | `job_id + 'sales' + ページ` |
+| 取引中の一覧 | その時点のスナップショット | `job_id + 'trading'` |
+| 出品の一覧 | その時点のスナップショット | `job_id + 'listings' + ページ` |
+| 仕入の 1 注文 | 注文と明細（と配送状況） | `import_key`（既存） |
+| 画像 1 枚 | Storage に上げた後のパス | 元 URL（`thumb_src`） |
 
-- 認証は画面と同じ（同じアカウントの JWT）。**エージェントだけが呼べる口ではない**が、書き込みのたびに
-  **ジョブ id と lease_token** を受け取り、`running` かつ token が一致しなければ断る（SB003）。
-  lease を失った PC が後から書き込んで、次の取り込みの結果を壊さない
-- 中身は db.ts のうち収集が使っている関数（Wave 2 で `server/domain/*` に移植済みのもの）をそのまま出す：
+- 1 段＝1 トランザクション。**段が全部終わらずに止まったら job は `partial`**（`done` と区別する）。確定した観測は戻さず、
+  次の取り込みで足りない分を埋める（今のデスクトップと同じく、何度流しても同じ結果になる書き方を保つ）
+- 収集のコード（`collector*.ts`）は `store` 経由にする。**同期の `db.x()` を `await store.x()` にするのは機械的な置換では済まない**
+  （戻り値を配列や Set として使っている所、失敗の前に次へ進む所がある）。呼び出しの鎖を全部 async にし、通信の切断・
+  401・途中再開をテストする。スクレイピングの中身・待ち時間・CAPTCHA で止まる動きは変えない
+- 画像：PC が Storage の `media` に上げ、段の書き込みでパスを確定する。どこからも参照されないファイルは後で回収する
 
-| 収集 | 使う関数 |
-|---|---|
-| メルカリ・Yahoo | `existingMercariIds` `isMercariItemExcluded` `insertCollected` `updateCollectedActuals` `updateYahooActuals` `updateSaleStatus` `appendModelCodes` `saleMercariItemId` `salesNeedingPurchasedAt` `setSalePurchasedAt` `salesNeedingThumb` `setSaleThumb` `upsertListings` `listingsNeedingThumb` `setListingThumb` `startRun` `finishRun` `getSettings` |
-| メロジョイ | `existingImportKeys` `isMellojoyOrderExcluded` `markMellojoyOrderExcluded` `createPurchase` `createPurchaseDraft` `getPurchase` `getShopAccount` `applyFulfillmentFromShop` `updatePurchaseFulfillment` `purchaseDetailRevisitCandidates` `purchaseLinesNeedingImage` `setPurchaseImageChecked` `setPurchaseLineImage` `setPurchaseLineImageUrls` `setSetting` |
-| ジョブ | `claim` `heartbeat` `finish` |
+## 3. 定期実行（Cron の Worker）（指摘 5・6）
 
-- 収集のコード（`collector*.ts`）は `db.x(...)` を `store.x(...)` に替えるだけにする。`store` はローカル（db.ts）と
-  リモート（HTTP）の 2 つの実装を持つ。**スクレイピングの中身・待ち時間・CAPTCHA で止まる動きは変えない**
-- 画像：エージェントが Storage の `media` に直接上げ（利用者の JWT。Storage の RLS で自分の世帯のフォルダだけ）、
-  パスを `setSaleThumb` などで書く
+**Pages Functions には定期実行が無い。`waitUntil` は応答から 30 秒で切られる**ので、信頼の根拠にしない。
+小さな Worker を 1 本足し、Cron Trigger（5 分ごと）で次を行う：
 
-### 17TRACK（配送状況）はサーバーで見る
+1. **通知の送信**（下の 4 節）
+2. **17TRACK**：配送状況を確認するべき仕入を DB のキューに積んでおき、1 回の実行で **40 件以下の少数のバッチ**だけ回す。
+   バッチごとに結果を書く。世帯（API キー）ごとに lease を取り、同時に 2 本走らせない（**秒間 3 リクエストを全体で守る**）
+   - `register` は「送る前に `register_pending` を書く → 成功したら `registered`」。途中で切れて不確かなときは、
+     **まず `gettrackinfo` で照会してから**送り直す（無料枠を二重に使わない）
+   - 429 と 4xx は再試行しない（`CLAUDE.md`）
+3. 期限切れの取り込み要求の片付け（`reap`）
 
-- スクレイピングではなく API なので、PC は要らない。`finish` の後に API が `waitUntil` で続けて見る
-  （`CLAUDE.md` の約束はそのまま：1 リクエスト 40 件・秒間 3 リクエスト・429 と 4xx は再試行しない・`register` は一度だけ）
-- API キーは `setting_secret` に、サーバーの鍵（環境変数 `SECRET_KEY`）で AES-GCM 暗号化して持つ。画面にも
-  ログにも平文で出さない。Gemini のキーも同じ
-- 画面の「配送状況を確認」（`checkTracking`）も Web から動くようになる
+- `finish` や画面の「配送状況を確認」は**キューに積むだけ**。実際に聞くのは Cron
+- 同じ DB に Hyperdrive でつなぐ。利用者が Cloudflare でもう 1 本デプロイする手順を `01-setup.md` に足す
 
-### Electron 側
+## 4. Push 通知（指摘 4・5）
 
-- 設定に「Web 版につなぐ」。つなぐと、**画面のデータは Web（Supabase）を読む**（ローカルの SQLite は凍結して残す）
-- ログインは Web 版と同じ画面。セッションは端末に残す（`CLAUDE.md` の「セッションプロファイルのみ」の延長。
-  パスワードは保存しない）
-- 起動中は 20 秒ごとに `claim`。起動時は自分で `requestCollect` してから `claim`（今の「起動時に取り込む」と同じ）
-- PC が複数あれば、どれか 1 台が取る。失敗の通知に PC の名前を入れる（「メルカリにログインが必要です（リビングの PC）」）
+### 表
 
----
+- `notification_event`：出来事 1 つ（種類・本文・行き先・`dedupe_key` は **not null・世帯の中で unique**）
+- `notification_delivery`：出来事 × 端末（`unique (event_id, subscription_id)`）。端末ごとに `pending / sending / sent / failed`・
+  試行回数・次に試す時刻
+- `push_subscription` に**受け取る種類**（販売・発送・取り込み・到着）の列を足す
+- 業務の書き込みと**同じトランザクションで** event と delivery（その時点の購読ぶん）を書く
 
-## 2. Push 通知
+### 送り方
+
+- 保証は**少なくとも 1 回**。完全に 1 回にはできない（Push サービスの受理と DB の更新を 1 つにできない）
+- payload に event id を入れ、service worker が**同じ event id の通知を置き換える**（`tag`）ので、二重に届いても 1 つに見える
+- 送信は Cron の Worker。画面の API は、コミットの後に `waitUntil` で**すぐ送ってみる**（速さのため。失敗しても Cron が拾う）
+- 404・410 が返った購読は消す
+- 送信は WebCrypto で書く（Workers で動くこと。`web-push` は Node の crypto 前提なので使わない）。VAPID の鍵は利用者が作って
+  Cloudflare の環境変数に（秘密鍵はリポジトリに書かない）
 
 ### 送るもの（最初の版）
 
-| 出来事 | 書く場所 | 文面の例 |
-|---|---|---|
-| 販売が増えた | `insertCollected` | 「売れました：【A040】もこ山 スクイーズ ¥5,750」 |
-| 発送の番になった | 取引の状態が「発送待ち」に変わったとき | 「発送してください：2 件」（まとめる） |
-| 取り込みが終わった（失敗・要ログイン・0 件） | `finish` | 「メルカリにログインが必要です（リビングの PC）」 |
-| 仕入が届いた | 17TRACK で到着になったとき | 「メロジョイの荷物が届きました（3 点）」 |
-
-- **業務の書き込みと同じトランザクションで `notification_outbox` に 1 行。** コミットした後に送る
-  （送信の失敗で帳簿が巻き戻らない／帳簿が巻き戻ったのに通知だけ飛ぶ、が起きない）
-- 送るのは API の `waitUntil`。失敗したら `next_attempt_at` を延ばして残す。**次に誰かが API を呼んだときに
-  まとめて送り直す**（エージェントが 20 秒ごとに呼ぶので、PC が動いていれば実質の再送になる）
-- 同じ出来事を 2 回送らない（`dedupe_key`）。発送待ちは数分まとめてから送る
+| 出来事 | 文面の例 |
+|---|---|
+| 販売が増えた | 「売れました：【A040】もこ山 スクイーズ ¥5,750」 |
+| 発送の番になった | 「発送してください：2 件」（数分まとめる） |
+| 取り込みが失敗・要ログイン・0 件 | 「メルカリにログインが必要です（リビングの PC）」 |
+| 仕入が届いた | 「メロジョイの荷物が届きました（3 点）」 |
 
 ### 受け取る側
 
-- 設定に「この端末で通知を受け取る」ボタン。**押したときだけ**許可を求める（iPhone はボタンからでないと出せない）
-- iPhone はホーム画面に追加した PWA でしか受け取れない（iOS 16.4 以降）。Safari で開いているときは
-  「共有 → ホーム画面に追加」の案内を出す
-- 種類ごとに切れる（販売・発送・取り込み・到着）。端末ごとの購読は `push_subscription`
+- 設定に「この端末で通知を受け取る」。**押したときだけ**許可を求める（iPhone はボタンからでないと出せない）
+- iPhone はホーム画面に追加した PWA でだけ受け取れる（iOS 16.4 以降）。判定は機能の有無（`'PushManager' in window` と
+  standalone 表示）で行い、使えなければ「共有 → ホーム画面に追加」の案内を出す
 - 通知を押すと該当の画面へ（service worker → 画面に `soroban:open`。受け取る側の実装が要る）
 
-### 鍵
+## 5. 秘密の値（Gemini・17TRACK の API キー）（指摘 8）
 
-- VAPID の鍵の組は利用者が作って Cloudflare の環境変数に入れる（`VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY`）。
-  **公開鍵は画面にも渡す。秘密鍵はリポジトリに書かない**
-- 送信は WebCrypto で書く（Workers で動くこと。`web-push` は Node の crypto 前提なので使わない）
+- `setting_secret` に `key_version` と方式（`aes-256-gcm`）を足す
+- 鍵は 32 バイトの乱数を base64 で環境変数に（`SECRET_KEYS` = `版:鍵` のカンマ区切り。先頭が今の鍵）。形を起動時に検査する
+- AAD（付加データ）に `household_id + 設定のキー + key_version` を入れる（暗号文を別の世帯・別のキーの行に移しても復号できない）
+- 古い鍵でも読める（鍵の束）。読んだときに今の鍵で書き直せる
+- 復号できなければ**平文に逃げず**、利用者に入れ直してもらう
+
+## 6. Cloudflare の無料枠について
+
+Workers の無料枠は 1 回の呼び出しの **CPU が 10ms**、外部への通信が 50 本。通信の待ち時間は CPU に数えない。
+一覧の大きい画面（販売・在庫）で超えるかもしれない。**超えたら Workers Paid（月 5 ドル）**にする。移植が終わったら実測する。
 
 ---
 
-## 3. 決めていないこと
+## 決めること（利用者に確認）
 
-- エージェントの API を 1 件ずつの呼び出しにするか、取り込み 1 回分をまとめて送るか（今の案は 1 件ずつ。
-  スクレイピングの待ち時間 2〜6 秒に比べれば往復は誤差で、収集のコードをほぼ変えずに済む）
-- Electron の画面を Web のデータに切り替えたとき、デスクトップ専用の機能（バックアップ・更新）をどう見せるか
-- 17TRACK を `finish` の後に回すか、別の定期実行にするか（Pages には定期実行が無い）
+1. **取り込み担当の PC に端末専用の鍵を持たせてよいか。** `CLAUDE.md` の「認証情報を保存するコードを書かない」の
+   3 つ目の例外になる（safeStorage で暗号化・端末ごとに取り消せる・人のパスワードは持たない）
+2. Cloudflare に Worker をもう 1 本（Cron 用）デプロイしてよいか（手順は書く）
+3. 無料枠で足りなければ Workers Paid（月 5 ドル）にしてよいか
+
+## レビューで直したこと（2026-10-12・Codex）
+
+| # | 指摘 | 直し方 |
+|---|---|---|
+| 1 | 失効した lease で古い PC が書き込め、heartbeat で延命できる | 書き込みのたびに `assert_lease`（`lease_expires_at > now()`・行ロック）。heartbeat も同じ条件 |
+| 2 | 1 件ずつだと途中で落ちたとき「どこまで反映したか」分からない。1 回分まとめると全部失う | 意味のある段ごと・冪等キー・`partial` |
+| 3 | 人の JWT で取り込み担当に化けられる | 端末専用の鍵（ハッシュで保存・取り消せる）。agent API はその鍵だけ |
+| 4 | outbox 1 行では複数端末への送達を管理できない | event と delivery（端末ごと）に分ける。少なくとも 1 回＋SW で置き換え |
+| 5 | 「次に誰かが API を呼んだら再送」では、誰も開かないと届かない | Cron の Worker |
+| 6 | 17TRACK を `waitUntil` に載せると 30 秒で切れ、register を二重に送る | DB のキュー＋Cron で少数バッチ・`register_pending` |
+| 7 | Electron の画面を Web に切り替えると帳簿が 2 つになる | 取り込み担当モードでは画面は Web。SQLite は凍結 |
+| 8 | 鍵 1 本の AES-GCM は取り違え・更新に弱い | `key_version`・AAD・鍵の束 |
