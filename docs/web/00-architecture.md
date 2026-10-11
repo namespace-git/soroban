@@ -103,7 +103,7 @@ create table collect_job (
   household_id uuid not null,
   requested_by uuid,               -- 押した人
   requested_at timestamptz not null default now(),
-  status text not null check (status in ('queued','running','done','failed','cancelled')),
+  status text not null check (status in ('queued','running','done','partial','failed','cancelled')),
   agent_id text,                   -- 取った PC
   claimed_at timestamptz,
   heartbeat_at timestamptz,
@@ -133,8 +133,8 @@ create unique index collect_job_one_active on collect_job (household_id)
 
 - **Web Push（VAPID）。** iPhone はホーム画面に追加した PWA で受け取れる（iOS 16.4+）
 - `push_subscription`（人ごと・端末ごと）
-- `notification_outbox` … 出来事を**業務ロジックと同じトランザクションで**書く。送信は API が
-  コミットの後に `waitUntil` で行う（送信の失敗で業務の書き込みが巻き戻らない）
+- `notification_event`（出来事）× `notification_delivery`（端末ごと）… 出来事を**業務ロジックと同じトランザクションで**書く。
+  送信はコミットの後（API の `waitUntil` ですぐ試し、Cron の Worker が拾い直す）。詳しくは `03-agent-and-push.md`
 - 通知する出来事（最初の版）
 
 | 出来事 | 例 |

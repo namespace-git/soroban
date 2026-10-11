@@ -127,6 +127,24 @@ Workers の無料枠は 1 回の呼び出しの **CPU が 10ms**、外部への�
 
 ---
 
+## 7. スキーマで決めた値（Wave 3a・`20261012001500`〜`001530`）
+
+| 項目 | 値 |
+|---|---|
+| 取り込み担当の鍵 | SHA-256 の 16 進（小文字 64 文字）だけを `agent_device.token_hash` に。期限は 24 時間まで（API は 12 時間で出す） |
+| 鍵から PC・世帯を引く | `app.agent_of_token(hash)`（security definer。期限切れ・取り消し済みは 0 行） |
+| 書き込みの先頭 | `app.begin_stage(job, token, key)`（中で `assert_lease`。true＝初めて、false＝済み） |
+| lease の期限の判定 | `clock_timestamp()`（長いトランザクションでも古くならない） |
+| 終わり方 | `done`・`partial`・`failed`・`cancelled` |
+| 通知の再送 | 失敗 1 回目 +1 分・2 回目 +5 分・3 回目 +30 分・4 回目 +2 時間・**5 回目で諦める**。404・410 は購読ごと消す |
+| 通知の種類 | `sale`・`shipping`・`collect`・`arrival`・`test`（`test` は設定に縛られない） |
+| 定期実行のロール | `soroban_cron`：通知・購読・取り込み要求・仕入の追跡の列・秘密の値だけ。販売・在庫・金額は読めない |
+| 17TRACK の同時実行 | 世帯ごとの lease（`acquire_tracking_lease` / `release_tracking_lease`） |
+| SQLSTATE | SB001〜SB005 は今まで通り。**SB006**＝取り消し済みの PC に鍵を出そうとした、**SB007**＝PC が見つからない |
+
+**切り替え前に Supabase の本物で確かめること**（PGlite は接続が 1 本なので確かめられない）：
+2 接続での `skip locked`・`assert_lease` と reap の競合、Storage の REST での upload / delete が方針どおりに通るか。
+
 ## 決めること（利用者に確認）
 
 1. Cloudflare に Worker をもう 1 本（Cron 用）デプロイしてよいか（手順は書く）
