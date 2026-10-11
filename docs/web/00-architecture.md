@@ -33,7 +33,7 @@
  Supabase
    ├─ Postgres  … 全テーブルに household_id。RLS で household を強制
    ├─ Auth      … メール＋パスワードのみ。サインアップ無効
-   └─ Storage   … サムネイル・レシート・商品画像（非公開バケット＋署名 URL）
+   └─ Storage   … 商品の写真は media（公開・推測できないパス）、レシートは receipts（非公開・署名 URL）
 
  PC の Electron（取り込み担当 ＝「エージェント」）
    ・同じアカウントでログインして待機
@@ -160,7 +160,7 @@ create unique index collect_job_one_active on collect_job (household_id)
 | `raw` が TEXT | **`jsonb`** | |
 | `setting(key, value)` | **`setting(household_id, key, value)`** | 世帯ごと |
 | API キーを safeStorage で暗号化 | **サーバーの秘密鍵で AES-GCM 暗号化して DB に**（`setting_secret`） | Web では端末の safeStorage が使えない。平文で持たない方針は同じ |
-| 画像をローカルファイルに | **Supabase Storage の非公開バケット**。画面には署名 URL | |
+| 画像をローカルファイルに | **Supabase Storage**。商品の写真は `media`（公開・`<世帯>/<種類>/<ランダム>` のパス）、レシートは `receipts`（非公開・見るときだけ署名 URL） | 署名 URL は毎回変わり、一覧を開くたびにスマホが全画像を取り直す。商品の写真はフリマ・仕入先で公開済みのもの |
 | `thumb_file` | **`thumb_path`**（Storage の中のパス） | |
 
 **変えないもの**：`CLAUDE.md` の「絶対に守ること」はすべてそのまま。金額は円の整数、
@@ -247,8 +247,8 @@ PGlite と既存の SQLite テストの併存。**ただし本番と同じドラ
 
 | 段 | 中身 | 状態 |
 |---|---|---|
-| **1** | 設計（この文書）・Postgres スキーマ・`Sql` アダプタ・RPC の骨組み・認証・Web 版の外枠（ログイン・PWA・スマホの画面の骨組み） | **着手** |
-| **2** | `db.ts` をドメインごとに移植（読み取り → 書き込み）。エージェント化。画像を Storage へ | |
+| **1** | 設計（この文書）・Postgres スキーマ・`Sql` アダプタ・RPC の骨組み・認証・Web 版の外枠（ログイン・PWA・スマホの画面の骨組み）・金額のビュー | **済** |
+| **2** | `db.ts` をドメインごとに移植（手引きは `02-porting-guide.md`）。エージェント化。画像を Storage へ。データ移行スクリプト | **着手** |
 | **3** | Push 通知。スマホ向けの UI/UX の作り直し。データ移行スクリプト | |
 | **4** | 利用者が Supabase と Cloudflare を用意 → デプロイ → データ移行 → 切り替え | 利用者の作業 |
 
