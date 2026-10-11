@@ -20,7 +20,9 @@
     "release:minor": "npm version minor -m \"v%s\" && git push && git push --tags",
     "dist:mac:ci": "pnpm build && electron-builder --mac --publish never",
     "dist:win:ci": "pnpm build && electron-builder --win --publish never",
-    "test:server": "cross-env TZ=Asia/Tokyo vitest run --config vitest.server.config.ts"
+    "test:server": "cross-env TZ=Asia/Tokyo vitest run --config vitest.server.config.ts",
+    "dev:web": "vite --config vite.config.web.ts",
+    "build:web": "vite build --config vite.config.web.ts"
   },
   "dependencies": {
     "@fontsource-variable/m-plus-2": "^5.3.0",

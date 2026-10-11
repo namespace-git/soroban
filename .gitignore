@@ -32,3 +32,11 @@ backups/
 .impeccable/questions/
 .impeccable/hook.cache.json
 .impeccable/config.local.json
+
+# Web 版（Cloudflare Pages / Supabase）。秘密の値は絶対にコミットしない（このリポジトリは Public）
+dist-web/
+.wrangler/
+.dev.vars
+.env.web.local
+supabase/.temp/
+supabase/.branches/
