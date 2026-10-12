@@ -16,6 +16,8 @@ import type { CollectorStore } from '../store/types'
 const HOUSEHOLD = '33333333-3333-4333-8333-333333333333'
 const HOUR = 3_600_000
 const MIN = 60_000
+/** サーバーが出す取り込み担当の鍵の寿命（server/agent/key.ts は 2 時間）。期限の 30 分前に取り直すので、取り直しは 1 時間 30 分後 */
+const KEY_LIFETIME = 2 * HOUR
 const T0 = new Date('2026-10-12T00:00:00.000Z')
 
 const nowSec = (): number => Math.floor(Date.now() / 1000)
@@ -84,7 +86,7 @@ function harness(over: {
       keys.push(token)
       return {
         agent_id: 'agent-1', name, household_id: HOUSEHOLD, token,
-        expires_at: new Date(Date.now() + 12 * HOUR).toISOString(),
+        expires_at: new Date(Date.now() + KEY_LIFETIME).toISOString(),
       }
     },
     async agent<T>(method: string, args: unknown[], key: string, opts?: CallOptions) {
@@ -556,15 +558,15 @@ describe('鍵の取り直しとログアウト', () => {
     await tick(0)
     expect(h.count('register')).toBe(1)
 
-    // 途中でトークンが更新される（Web 版が渡し直す）
-    await tick(11 * HOUR)
+    // 途中でトークンが更新される（Web 版が渡し直す）。取り直しの 30 分前
+    await tick(1 * HOUR)
     const fresh = session({ accessToken: `jwt-${'2'.repeat(40)}` })
     h.runner.setSession(fresh)
     expect(h.count('register')).toBe(1) // まだ期限の 30 分前ではない
     await tick(29 * MIN)
     expect(h.count('register')).toBe(1)
     await tick(1 * MIN)
-    // 12 時間 − 30 分 ＝ 11 時間 30 分
+    // 2 時間 − 30 分 ＝ 1 時間 30 分
     expect(h.count('register')).toBe(2)
     expect(h.of('register')[1].auth).toBe(fresh.accessToken)
     expect(h.keys).toHaveLength(2)
@@ -577,7 +579,7 @@ describe('鍵の取り直しとログアウト', () => {
     const h = harness()
     h.runner.setSession(session())
     await tick(0)
-    vi.setSystemTime(new Date(T0.getTime() + 11.7 * HOUR))
+    vi.setSystemTime(new Date(T0.getTime() + 1.7 * HOUR)) // 期限（2 時間）まで 18 分
     h.runner.setSession(session({ accessToken: `jwt-${'3'.repeat(40)}` }))
     await tick(0)
     expect(h.count('register')).toBe(2)
@@ -592,7 +594,7 @@ describe('鍵の取り直しとログアウト', () => {
     h.runner.setSession(session())
     await tick(0)
     // 期限の 30 分前をすぎても、取り込み中は取り直さない
-    await tick(11.6 * HOUR)
+    await tick(1.6 * HOUR) // 取り直しの時刻（1 時間 30 分）をすぎ、期限（2 時間）まで 24 分
     h.runner.setSession(session({ accessToken: `jwt-${'4'.repeat(40)}` }))
     await tick(MIN)
     expect(h.count('register')).toBe(1)
@@ -610,7 +612,7 @@ describe('鍵の取り直しとログアウト', () => {
     })
     h.runner.setSession(session())
     await tick(0)
-    await tick(11.6 * HOUR)
+    await tick(1.6 * HOUR) // 取り直しの時刻（1 時間 30 分）をすぎ、期限（2 時間）まで 24 分
     h.runner.setSession(session({ accessToken: `jwt-${'5'.repeat(40)}` }))
     await tick(MIN)
     expect(h.count('register')).toBe(1)
@@ -629,7 +631,7 @@ describe('鍵の取り直しとログアウト', () => {
     h.runner.clearSession()
     expect(h.runner.getStatus().state).toBe('waiting-login')
 
-    await tick(12 * HOUR)
+    await tick(KEY_LIFETIME)
     // 捨てる前の鍵で、unregister だけを 1 回。やり直さず、待ちすぎない（5 秒）
     const after = h.calls.slice(before)
     expect(after).toHaveLength(1)
@@ -669,7 +671,7 @@ describe('鍵の取り直しとログアウト', () => {
       h.runner.clearSession()
       // 返事を待たずに止まる
       expect(h.runner.getStatus().state, label).toBe('waiting-login')
-      await tick(12 * HOUR)
+      await tick(KEY_LIFETIME)
       expect(h.calls.slice(before).map(c => c.method), label).toEqual(['unregister'])
       expect(h.count('claim'), label).toBe(1)
 
@@ -783,7 +785,7 @@ describe('鍵を出してもらえないとき', () => {
     const h = harness({
       register: (name, _jwt, n) => {
         if (first) { first = false; throw new AgentHttpError('unauthorized', 401, 'ログインが必要です') }
-        return { agent_id: 'a', name, household_id: HOUSEHOLD, token: `sbagent_${n}${'K'.repeat(42)}`, expires_at: new Date(Date.now() + 12 * HOUR).toISOString() }
+        return { agent_id: 'a', name, household_id: HOUSEHOLD, token: `sbagent_${n}${'K'.repeat(42)}`, expires_at: new Date(Date.now() + KEY_LIFETIME).toISOString() }
       },
     })
     h.runner.setSession(session())
@@ -803,7 +805,7 @@ describe('鍵を出してもらえないとき', () => {
       register: (name) => {
         n++
         if (n < 3) throw new AgentHttpError('network', 0, 'サーバーにつながりません')
-        return { agent_id: 'a', name, household_id: HOUSEHOLD, token: `sbagent_${'K'.repeat(43)}`, expires_at: new Date(Date.now() + 12 * HOUR).toISOString() }
+        return { agent_id: 'a', name, household_id: HOUSEHOLD, token: `sbagent_${'K'.repeat(43)}`, expires_at: new Date(Date.now() + KEY_LIFETIME).toISOString() }
       },
     })
     h.runner.setSession(session())
@@ -826,7 +828,7 @@ describe('鍵を出してもらえないとき', () => {
     h.runner.setSession(session())
     await tick(0)
     h.runner.clearSession()
-    gate.resolve({ agent_id: 'a', name: 'PC', household_id: HOUSEHOLD, token: `sbagent_${'K'.repeat(43)}`, expires_at: new Date(Date.now() + 12 * HOUR).toISOString() })
+    gate.resolve({ agent_id: 'a', name: 'PC', household_id: HOUSEHOLD, token: `sbagent_${'K'.repeat(43)}`, expires_at: new Date(Date.now() + KEY_LIFETIME).toISOString() })
     await tick(5 * MIN)
     expect(h.count('claim')).toBe(0)
     expect(h.runner.getStatus().state).toBe('waiting-login')

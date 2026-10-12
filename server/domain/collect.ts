@@ -20,6 +20,12 @@ const COOLDOWN = '10 minutes'
 const COOLDOWN_MINUTES = 10
 /** 「生きている」と数える時間。last_seen_at がこれより新しい PC がオンライン */
 const ONLINE_WINDOW = '5 minutes'
+/**
+ * オンラインの条件（`?` は ONLINE_WINDOW を 1 つ取る）。取り消されていない・鍵の期限が切れていない・直近に使われた、の全部。
+ * 鍵の期限を見るのは、ログアウト（unregister は token_expires_at をいまにする）の直後に、最後に使われてから 5 分間
+ * 「動いている」と出さないため。鍵が通る条件（token_expires_at > clock_timestamp()）と同じ式で見る
+ */
+const ONLINE_CONDITION = `(revoked_at is null and token_expires_at > clock_timestamp() and last_seen_at > now() - ?::interval)`
 
 /** lease_token・lease_expires・agent_device_id は読まない */
 const JOB_COLUMNS = `
@@ -113,7 +119,7 @@ export async function requestCollect(ctx: Ctx): Promise<CollectJob> {
 /**
  * 「取り込む」ボタンの状態。
  * - job … いま積まれている・走っているもの。無ければ直近のもの。1 度も無ければ null
- * - agents_online … 直近 5 分以内に last_seen_at が進んだ、取り消されていない PC の数（0 なら押しても誰も拾わない）
+ * - agents_online … 直近 5 分以内に last_seen_at が進んだ、取り消されておらず鍵の期限も切れていない PC の数（0 なら押しても誰も拾わない）
  * - cooldown_seconds … 次に押せるまで。requestCollect と同じ規則（最後に始めた時刻 claimed_at + 10 分）
  * 期限切れの要求（PC が落ちた・誰も取らなかった）は、ここで片付けてから読む（画面が古い状態を見続けない）
  */
@@ -127,7 +133,7 @@ export async function getCollectStatus(ctx: Ctx): Promise<CollectStatus> {
   )
   const online = await ctx.sql.get<{ n: number }>(
     `select count(*)::integer as n from agent_device
-      where revoked_at is null and last_seen_at > now() - ?::interval`,
+      where ${ONLINE_CONDITION}`,
     ONLINE_WINDOW,
   )
   const cooldown = await ctx.sql.get<{ s: number }>(
@@ -151,7 +157,7 @@ export async function listAgentDevices(ctx: Ctx): Promise<AgentDevice[]> {
   // token_hash は読まない
   return ctx.sql.all<AgentDevice>(
     `select id, name, first_seen_at, last_seen_at,
-            (revoked_at is null and last_seen_at > now() - ?::interval) as online,
+            ${ONLINE_CONDITION} as online,
             (revoked_at is not null) as revoked
        from agent_device
       order by name collate "C", id`,

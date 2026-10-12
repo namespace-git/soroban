@@ -1,5 +1,5 @@
 import type { Ctx } from '../context'
-import { UserError, registerDbErrorRule } from '../errors'
+import { UserError, describeError, registerDbErrorRule } from '../errors'
 import { registerHandler } from '../rpc'
 import type {
   CollectorRun, CollectorSource, RunStatus, ShippingMethod, ShopAccount, ShopAccountKind, ShopAccountStats, Tag,
@@ -352,7 +352,8 @@ export async function logClient(ctx: Ctx, kind: string, message: string, payload
       )
     })
   } catch (e) {
-    console.error('操作ログの書き込みに失敗しました', e)
+    // エラーのオブジェクトは渡さない（SQL の引数＝画面から届いたログの中身が載る）
+    console.error('操作ログの書き込みに失敗しました', describeError(e))
   }
 }
 

@@ -81,6 +81,24 @@ describe('drainDeliveries：結果ごとの complete_delivery', () => {
     }
   })
 
+  it('宛先が許可した Push サービスの外（許可リストより前に登録された購読）は、通信せずに gone：購読ごと消える。ほかの購読は送る', async () => {
+    await dom.pg.exec('delete from app.push_subscription')
+    const good = await subscribe(w.a)
+    // 許可の外の宛先を持つ行を DB に直接入れる（登録の検査を通らなかった昔の行を想定）
+    await dom.pg.query(
+      `insert into app.push_subscription (household_id, user_id, endpoint, p256dh, auth) values ($1, $2, 'https://push.example.test/old', 'p', 'a')`,
+      [w.a.householdId, w.a.userId])
+    expect(await subCount()).toBe(2)
+    await eventOn(w.a)
+    const svc = fakePushService(201)
+
+    expect(await drainDeliveries(dom.root, vapid.env, { fetch: svc.fetch })).toEqual({ sent: 1, failed: 0, gone: 1, retried: 0 })
+    expect(svc.calls.map((c) => c.endpoint)).toEqual([good.input.endpoint]) // 許可の外の宛先には 1 度も通信していない
+    expect(await subCount()).toBe(1)
+    expect((await deliveries()).map((r) => r.status)).toEqual(['sent'])
+    await dom.pg.exec('delete from app.push_subscription') // 次のテストに残さない
+  })
+
   it('同じ死んだ購読への配送が 2 つあっても、gone は 2 と数える（1 つ目が購読ごと消すので 2 つ目の行は無い）', async () => {
     await subscribe(w.a)
     await eventOn(w.a)

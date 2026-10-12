@@ -1,5 +1,6 @@
 import { b64urlDecode } from './base64url'
 import { encryptPayload, MAX_PLAINTEXT_BYTES } from './encrypt'
+import { isAllowedPushEndpoint } from './hosts'
 import { vapidAuthorization, type VapidKeys } from './vapid'
 
 // 1 件の通知を 1 つの端末（Push サービスの endpoint）へ送る。WebCrypto と fetch だけ（Workers で動く）。
@@ -25,8 +26,11 @@ export interface PushPayload {
 export type PushOutcome =
   /** 201 / 202（2xx）。Push サービスが受け付けた */
   | { kind: 'sent'; status: number }
-  /** 404 / 410。この購読はもう無効（端末が通知を断った・購読の期限切れ） */
-  | { kind: 'gone'; status: number }
+  /**
+   * 404 / 410。この購読はもう無効（端末が通知を断った・購読の期限切れ）。
+   * `reason: 'endpoint_not_allowed'` は、宛先が許可した Push サービスの外だったので**通信せずに**無効とした場合（status は 0）
+   */
+  | { kind: 'gone'; status: number; reason?: 'endpoint_not_allowed' }
   /** 429・5xx・通信失敗・それ以外の 4xx。あとで送り直す（回数は complete_delivery が数えて、規定で諦める） */
   | { kind: 'retry'; status: number | null; error: string }
 
@@ -66,6 +70,9 @@ export async function sendWebPush(
 ): Promise<PushOutcome> {
   const doFetch = deps.fetch ?? globalThis.fetch
   const now = deps.now ?? Date.now
+  // 登録のときにも検査しているが、許可リストを足す前に入った購読があるので、送る直前にも確かめる。
+  // 許可の外なら通信せず、無効な購読として消させる（再送しても同じなので retry にしない）
+  if (!isAllowedPushEndpoint(target.endpoint)) return { kind: 'gone', status: 0, reason: 'endpoint_not_allowed' }
   try {
     const uaPublic = b64urlDecode(target.p256dh)
     const authSecret = b64urlDecode(target.auth)

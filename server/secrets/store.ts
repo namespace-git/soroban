@@ -76,7 +76,8 @@ export async function readSecret(ctx: SecretScope, ring: KeyRing, key: string): 
 /**
  * 古い版の鍵で書かれた値を、今の版で書き直す（読んだついでに呼ぶ）。書き直したら true。
  * 同じ版のまま誰かが書き換えていたら（並行して入れ直された）何もしない。updated_at は触らない（値は変わらないため）。
- * 書き込めない役割（定期実行の soroban_cron は読むだけ）や失敗は握りつぶす（読めた事実は変わらない）
+ * 失敗は握りつぶす（読めた事実は変わらない）。定期実行（17TRACK）も、画面の API と同じ soroban_api で世帯の文脈の中に入って読む
+ * ので、書き直しも同じ権限で行う（soroban_cron は setting_secret に触れない。20261012001900）
  */
 export async function rewriteIfStale(
   ctx: SecretScope, ring: KeyRing, key: string, read: SecretRead,

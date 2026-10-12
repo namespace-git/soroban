@@ -1,5 +1,5 @@
 import type { Ctx } from '../context'
-import { UserError, mapDbError, registerDbErrorRule } from '../errors'
+import { UserError, describeError, mapDbError, registerDbErrorRule } from '../errors'
 import { registerHandler } from '../rpc'
 import type {
   AllocMethod, Fulfillment, Material, PurchaseDetail, PurchaseDraftInput, PurchaseImportResult, PurchaseInput,
@@ -368,7 +368,8 @@ export async function importPurchases(ctx: Ctx, inputs: PurchaseInput[]): Promis
     } catch (e) {
       // 利用者に見せてよい日本語（UserError）だけを理由にする。SQL のエラーの文面は見せない
       const known = e instanceof UserError ? e : mapDbError(e)
-      if (!known) console.error('仕入の取り込みで想定外のエラー', e)
+      // エラーのオブジェクトは渡さない（SQL の引数＝個人データが載る）。describeError は名前・コード・メッセージ・スタックだけ
+      if (!known) console.error('仕入の取り込みで想定外のエラー', describeError(e))
       result.skipped.push({ index, reason: known ? known.message : '登録できませんでした' })
     }
   }

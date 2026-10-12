@@ -4,6 +4,7 @@ import { readDbError, UserError } from '../errors'
 import { registerWebHandler } from '../rpc'
 import { b64urlDecode, b64urlEncode } from '../push/base64url'
 import { completeDelivery, sendClaimed, type ClaimedDelivery } from '../push/deliver'
+import { isPushServiceHost } from '../push/hosts'
 import { enqueueNotification } from '../push/notify'
 import type { SendDeps } from '../push/send'
 import { isValidVapidPublicKey, loadVapidKeys, VapidConfigError, type VapidEnv } from '../push/vapid'
@@ -38,24 +39,9 @@ const TEST_SEND_LIMIT = 20
 // 引数の検査
 // ------------------------------------------------------------
 
-/**
- * ブラウザの Push サービス（通知の配信元）のホスト。購読の宛先（endpoint）はここに限る。
- * サーバーは endpoint にそのまま POST するので、許可しないと「この世帯の人が好きな URL を登録 → サーバーがそこへ送る」
- * 経路（SSRF）になる。
- *   Chrome・Edge・Android・Samsung … fcm.googleapis.com
- *   Firefox                        … *.push.services.mozilla.com（updates.push.services.mozilla.com）
- *   Safari・iPhone の PWA          … *.push.apple.com（web.push.apple.com）
- *   Edge（Windows の通知基盤）     … *.notify.windows.com
- * 新しいブラウザが別のホストを使うようになったら、ここに足す
- */
-const PUSH_SERVICE_HOSTS: readonly string[] = ['fcm.googleapis.com']
-const PUSH_SERVICE_HOST_SUFFIXES: readonly string[] = ['.push.services.mozilla.com', '.push.apple.com', '.notify.windows.com']
-
-/** 小文字にした hostname が、許可した Push サービスのホストか（`*.` は 1 つ以上のラベル。ドメインそのものは含まない） */
-export function isPushServiceHost(host: string): boolean {
-  return PUSH_SERVICE_HOSTS.includes(host) ||
-    PUSH_SERVICE_HOST_SUFFIXES.some((suffix) => host.length > suffix.length && host.endsWith(suffix))
-}
+// 購読の宛先（endpoint）はブラウザの Push サービスのホストに限る。許可リストは push/hosts.ts にある
+// （送る直前の検査 push/send.ts と同じ判定を使うため。ここは従来の import 先として再公開する）
+export { isPushServiceHost }
 
 /**
  * https の URL だけ。資格情報つき・自分自身（localhost）・IP アドレス直指定は、通知サービスの宛先ではないので断る。

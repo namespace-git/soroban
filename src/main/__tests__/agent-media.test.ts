@@ -88,6 +88,22 @@ describe('画像を Storage に上げる', () => {
     expect(puts).toHaveLength(0)
   })
 
+  it('上限は Storage の media バケットと同じ 5MB：ちょうど 5MB は上げ、1 バイトでも超えたら送らない', async () => {
+    const LIMIT = 5 * 1024 * 1024
+    const sized = (n: number): Uint8Array => {
+      const bytes = new Uint8Array(n)
+      bytes.set(JPEG) // 先頭は JPEG（画像として読める形）
+      return bytes
+    }
+    const ok = setup({ files: { 'edge.jpg': sized(LIMIT) } })
+    await expect(ok.uploader.upload('sale', 'edge.jpg')).resolves.toMatch(/\.jpg$/)
+    expect(ok.puts).toHaveLength(1)
+
+    const over = setup({ files: { 'over.jpg': sized(LIMIT + 1) } })
+    await expect(over.uploader.upload('sale', 'over.jpg')).rejects.toThrow('サイズ')
+    expect(over.puts).toHaveLength(0)
+  })
+
   it('ファイル名にパス区切り・.. ・変な文字があれば読まずに断る', async () => {
     const { puts, uploader } = setup({ files: { 'a.jpg': JPEG } })
     for (const bad of ['../a.jpg', 'a/b.jpg', 'a\\b.jpg', '..', '.hidden.jpg', '', 'a b.jpg', 'a..b.jpg']) {

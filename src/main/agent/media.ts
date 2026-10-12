@@ -50,7 +50,8 @@ export interface MediaUploaderOptions {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const SAFE_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const RANDOM_ID = /^[A-Za-z0-9-]{8,64}$/
-const DEFAULT_MAX_BYTES = 8 * 1024 * 1024
+/** Storage の `media` バケットの上限（5MB。supabase/migrations/20261012001900_security_hardening.sql）に揃える。超えるものを送っても断られるだけ */
+const DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 const TIMEOUT_MS = 60_000
 
 /** 先頭のバイトで画像の種類を決める（拡張子や Content-Type は信用しない。HTML のエラーページを画像として上げない） */

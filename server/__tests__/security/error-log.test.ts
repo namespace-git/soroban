@@ -3,6 +3,8 @@ import { dispatch, type Handlers } from '../../rpc'
 import { describeError } from '../../errors'
 import type { Sql } from '../../db/sql'
 import { handleAgent, type AgentHandlers } from '../../agent/index'
+import { logClient } from '../../domain/master'
+import { importPurchases } from '../../domain/purchase'
 import { openDomainDb, newWorld, type DomainDb, type World } from '../domain/helpers'
 import { closeFixture, openFixture, registerPc, resetWorld, type Fixture } from '../collect/helpers'
 
@@ -122,6 +124,59 @@ describe('server/rpc.ts のログ', () => {
     const logged = spy.mock.calls.find((c) => String(c[0]).includes('操作ログの書き込みに失敗しました'))!
     expect(Object.keys(logged[1] as object).sort()).toEqual(['code', 'message', 'name', 'stack'])
     expectNoRawErrors()
+  })
+})
+
+describe('server/domain のログ（同じ形）', () => {
+  let dom: DomainDb
+  let w: World
+  let spy: ReturnType<typeof vi.spyOn>
+
+  beforeAll(async () => {
+    dom = await openDomainDb()
+    w = await newWorld(dom)
+  })
+  afterAll(async () => {
+    await dom.close()
+  })
+  beforeEach(() => {
+    spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    spy.mockRestore()
+  })
+
+  /** tx（savepoint）に入ると SQL と引数を持つエラーを投げる Sql */
+  const failingTx = (sql: Sql): Sql => ({
+    get: sql.get.bind(sql),
+    all: sql.all.bind(sql),
+    run: sql.run.bind(sql),
+    tx: async () => { throw dbError() },
+  })
+
+  /** console.error に渡された引数に、Error のオブジェクトそのもの・SQL の引数・秘密が無く、残っているのは describeError の形だけ */
+  function expectOnlyDescribedErrors(message: string): void {
+    const logged = spy.mock.calls.find((c) => String(c[0]).includes(message))
+    expect(logged, message).toBeDefined()
+    expect(logged![1]).toMatchObject({ name: 'PostgresError', code: '42P01', message: 'relation "foo" does not exist' })
+    expect(Object.keys(logged![1] as object).sort()).toEqual(['code', 'message', 'name', 'stack'])
+    for (const call of spy.mock.calls) {
+      for (const arg of call.slice(1)) expect(arg instanceof Error).toBe(false)
+    }
+    expect(JSON.stringify(spy.mock.calls)).not.toContain(SECRET)
+    expect(JSON.stringify(spy.mock.calls)).not.toContain('api-key-xyz')
+  }
+
+  it('master.ts logClient：画面のログが書けなかったとき、エラーのオブジェクトは出さず、呼び出しは成功のまま', async () => {
+    await expect(w.a.run((ctx) => logClient({ ...ctx, sql: failingTx(ctx.sql) }, 'ui', 'メッセージ', { note: SECRET }))).resolves.toBeUndefined()
+    expectOnlyDescribedErrors('操作ログの書き込みに失敗しました')
+  })
+
+  it('purchase.ts importPurchases：想定外の DB エラーは describeError の形で出し、画面には「登録できませんでした」だけ返す', async () => {
+    const result = await w.a.run((ctx) => importPurchases({ ...ctx, sql: failingTx(ctx.sql) }, [{ memo: SECRET } as never]))
+    expect(result).toEqual({ created: 0, skipped: [{ index: 0, reason: '登録できませんでした' }] })
+    expect(JSON.stringify(result)).not.toContain(SECRET)
+    expectOnlyDescribedErrors('仕入の取り込みで想定外のエラー')
   })
 })
 

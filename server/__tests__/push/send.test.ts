@@ -168,11 +168,53 @@ describe('sendWebPush（1 件を 1 つの端末へ）', () => {
     }
   })
 
-  it('endpoint が https でなければ通信しない（retry）', async () => {
+  it('endpoint が https でなければ通信しない（許可の外＝gone。再送しても同じなので retry にしない）', async () => {
     const s = await setup()
     const r = await sendWebPush({ ...s.target, endpoint: 'http://push.example.test/x' }, PAYLOAD, s.keys, { fetch: s.svc.fetch, now: () => NOW })
-    expect(r.kind).toBe('retry')
+    expect(r).toEqual({ kind: 'gone', status: 0, reason: 'endpoint_not_allowed' })
     expect(s.svc.calls).toHaveLength(0)
+  })
+
+  it('許可した Push サービスのホストでなければ、通信せずに gone（許可リストより前に登録された購読を止める）', async () => {
+    const s = await setup()
+    const notAllowed = [
+      'https://push.example.test/send/abc',
+      'https://evil.example/fcm.googleapis.com',
+      'https://fcm.googleapis.com@evil.example/x', // @ の前はユーザー名。ホストは evil.example
+      'https://fcm.googleapis.com.evil.example/x',
+      'https://evil.googleapis.com/x',
+      'https://push.apple.com/x', // ドメインそのものは含まない
+      'https://fcm.googleapis.com:8443/fcm/send/abc', // ポートは既定（443）だけ
+      'https://user:pw@fcm.googleapis.com/x', // 資格情報つき
+      'https://169.254.169.254/latest/meta-data',
+      'https://localhost/x',
+      'http://fcm.googleapis.com/fcm/send/abc',
+      'ftp://fcm.googleapis.com/x',
+      'javascript:alert(1)',
+      '/relative',
+      '',
+    ]
+    for (const endpoint of notAllowed) {
+      const r = await sendWebPush({ ...s.target, endpoint }, PAYLOAD, s.keys, { fetch: s.svc.fetch, now: () => NOW })
+      expect(r, endpoint).toEqual({ kind: 'gone', status: 0, reason: 'endpoint_not_allowed' })
+    }
+    expect(s.svc.calls).toHaveLength(0)
+  })
+
+  it('許可した Push サービスのホストなら送る（FCM・Firefox・Safari・Windows。ホスト名の大文字小文字・443 の明示は問わない）', async () => {
+    const s = await setup()
+    for (const endpoint of [
+      'https://fcm.googleapis.com/fcm/send/abc',
+      'https://updates.push.services.mozilla.com/wpush/v2/gAAAA',
+      'https://web.push.apple.com/QGxyz',
+      'https://wns2-par02p.notify.windows.com/w/?token=abc',
+      'https://FCM.GoogleAPIs.com/fcm/send/upper',
+      'https://fcm.googleapis.com:443/fcm/send/explicit-port',
+    ]) {
+      const r = await sendWebPush({ ...s.target, endpoint }, PAYLOAD, s.keys, { fetch: s.svc.fetch, now: () => NOW })
+      expect(r, endpoint).toEqual({ kind: 'sent', status: 201 })
+    }
+    expect(s.svc.calls).toHaveLength(6)
   })
 })
 

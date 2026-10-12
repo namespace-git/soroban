@@ -262,6 +262,39 @@ describe('取り込み担当の PC の一覧', () => {
     expect((await ask(a,'revokeAgentDevice', pc.agentId)).status).toBe(200)
   })
 
+  it('鍵の期限が切れた PC はオンラインに数えない（last_seen_at が直近でも）。agents_online と一覧の online が一致する', async () => {
+    const live = await registerPc(f, a, 'リビングの PC')
+    const expired = await registerPc(f, a, '寝室の PC')
+    // 寝室の PC は、いま使われたばかりだが鍵の期限は 1 秒前に切れている
+    await f.dom.pg.query(
+      `update app.agent_device set last_seen_at = now(), token_expires_at = now() - interval '1 second' where id = $1`, [expired.agentId])
+
+    const devices = (await ask(a, 'listAgentDevices')).body.result as Array<{ id: string; online: boolean; revoked: boolean }>
+    expect(devices.map((d) => [d.id, d.online, d.revoked]).sort()).toEqual([
+      [live.agentId, true, false],
+      [expired.agentId, false, false],
+    ].sort())
+    expect((await ask(a, 'getCollectStatus')).body.result.agents_online).toBe(1)
+  })
+
+  it('ログアウト（unregister）した直後の PC は、最後に使われたのが数秒前でも、すぐオンラインから外れる', async () => {
+    const pc = await registerPc(f, a, 'リビングの PC')
+    expect((await pc.call('claim')).status).toBe(200) // last_seen_at を「いま」にしておく
+    expect((await ask(a, 'getCollectStatus')).body.result.agents_online).toBe(1)
+
+    expect((await pc.call('unregister')).status).toBe(200)
+
+    const devices = (await ask(a, 'listAgentDevices')).body.result
+    expect(devices).toHaveLength(1)
+    expect(devices[0]).toMatchObject({ id: pc.agentId, online: false, revoked: false })
+    expect((await ask(a, 'getCollectStatus')).body.result.agents_online).toBe(0)
+
+    // 同じ名前で取り直せば、またオンライン
+    await registerPc(f, a, 'リビングの PC')
+    expect((await ask(a, 'getCollectStatus')).body.result.agents_online).toBe(1)
+    expect((await ask(a, 'listAgentDevices')).body.result[0]).toMatchObject({ online: true })
+  })
+
   it('PC が無い世帯は空の一覧・オンライン 0', async () => {
     expect((await ask(a,'listAgentDevices')).body.result).toEqual([])
     expect((await ask(a,'getCollectStatus')).body.result.agents_online).toBe(0)
