@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, inject, watch, type Ref } from 'vue'
+import { ref, computed, onMounted, inject, watch, defineAsyncComponent, type Ref } from 'vue'
 import { CHANNEL_LABEL, SALE_KIND_LABEL } from '../../shared/types'
 import type { CashAccount, CashAccountKind, CashAccountPatch, Liability, LiabilityPatch, ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck, ListingStatus } from '../../shared/types'
 import { runSourceLabel } from '../utils/collector-run'
@@ -25,6 +25,19 @@ const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const goto = inject<(t: string, payload?: { search?: string; status?: string; stage?: string; month?: string; listingStatus?: ListingStatus }) => void>('goto')!
+
+// Web 版（auth/boot.ts が window.sorobanWeb を差す）。デスクトップ専用の節（バックアップ・更新・ログイン・初期化）を出さず、
+// 通知と取り込み担当の PC の節を出す。Electron 版では false で、今までと同じ
+const isWeb = !!window.sorobanWeb
+
+// Web 版だけの節（取り込み担当の PC・通知）。Electron 版のビルドに入れないよう、ビルド時の印（VITE_TARGET は Web のビルドだけが埋める。
+// DEV は ?webmock= の画面確認用）で分ける。Electron の本番ビルドでは条件が偽に決まり、import ごと消える
+const AgentDevices = import.meta.env.VITE_TARGET === 'web' || import.meta.env.DEV
+  ? defineAsyncComponent(() => import('../components/AgentDevices.vue'))
+  : null
+const PushSettings = import.meta.env.VITE_TARGET === 'web' || import.meta.env.DEV
+  ? defineAsyncComponent(() => import('../components/PushSettings.vue'))
+  : null
 
 const methods = ref<ShippingMethod[]>([])
 const settings = ref<Record<string, string>>({})
@@ -84,12 +97,12 @@ async function load() {
     window.soroban.listRuns(10),
     window.soroban.listShopAccounts(),
     window.soroban.listTags(),
-    window.soroban.checkForUpdate(),
+    isWeb ? Promise.resolve(null) : window.soroban.checkForUpdate(),
     window.soroban.listShopAccountStats(),
     window.soroban.listSaleExclusions(),
     window.soroban.getAiStatus(),
     window.soroban.getTrackingApiStatus(),
-    window.soroban.getAutoBackupStatus(),
+    isWeb ? Promise.resolve(null) : window.soroban.getAutoBackupStatus(),
     window.soroban.getHealthChecks(),
     window.soroban.listCashAccounts(),
     window.soroban.listLiabilities({ kind: 'loan' }),
@@ -960,6 +973,12 @@ const runLabel: Record<string, string> = {
         </div>
       </div>
 
+      <!-- Web 版だけ：取り込みを担当する PC と、この端末への通知 -->
+      <template v-if="isWeb">
+        <component :is="AgentDevices" v-if="AgentDevices" />
+        <component :is="PushSettings" v-if="PushSettings" />
+      </template>
+
       <!-- 取り込み -->
       <div class="panel">
         <div class="section-head">
@@ -1091,10 +1110,13 @@ const runLabel: Record<string, string> = {
           <span class="section-head-icon"><Icon name="login" :size="16" /></span>
           <h2 class="section-head-title">メルカリ</h2>
         </div>
-        <div class="row">
+        <div v-if="!isWeb" class="row">
           <button @click="openLogin"><Icon name="login" :size="16" /> メルカリにログイン</button>
           <p class="faint">初回だけ。以後はセッションを再利用します</p>
         </div>
+        <p v-else class="faint hint first-hint">
+          メルカリ・Yahoo!フリマ・メロジョイへのログインは、取り込み担当の PC のそろばんで行います。
+        </p>
         <div class="fields">
           <label class="field">
             <span>{{ CHANNEL_LABEL.mercari }}で「{{ SALE_KIND_LABEL.resale }}」（{{ SALE_KIND_LABEL.personal }}ではない）と判定するキーワード（カンマ区切りで複数可）</span>
@@ -1117,11 +1139,11 @@ const runLabel: Record<string, string> = {
           <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
           <h2 class="section-head-title">{{ CHANNEL_LABEL.yahoo }}</h2>
         </div>
-        <div class="row">
+        <div v-if="!isWeb" class="row">
           <button @click="openYahooLogin"><Icon name="login" :size="16" /> {{ CHANNEL_LABEL.yahoo }}にログイン</button>
           <p class="faint">初回だけ。以後はセッションを再利用します</p>
         </div>
-        <p class="faint hint">
+        <p v-if="!isWeb" class="faint hint">
           {{ CHANNEL_LABEL.yahoo }}の取り込みは 2 つのサイトにまたがりますが、同じ Yahoo ID なので
           このログイン 1 回で両方に入れるはずです。取り込みが「ログインが必要です」に戻るときは、
           もう一度ここからログインしてください。
@@ -1204,7 +1226,7 @@ const runLabel: Record<string, string> = {
               <td class="actions c-act">
                 <div class="actions-row">
                   <button class="sm ghost" @click="renameAccount(a)">改名</button>
-                  <button v-if="a.kind === 'mellojoy' && a.is_active" class="sm" @click="openShopLogin(a.id)">
+                  <button v-if="a.kind === 'mellojoy' && a.is_active && !isWeb" class="sm" @click="openShopLogin(a.id)">
                     <Icon name="login" :size="14" /> ログイン
                   </button>
                   <button class="sm ghost" @click="toggleAccountActive(a)">{{ a.is_active ? '無効にする' : '有効にする' }}</button>
@@ -1221,9 +1243,12 @@ const runLabel: Record<string, string> = {
         <p class="add-row">
           <button class="ghost sm" @click="addShopAccount"><Icon name="plus" :size="14" /> 仕入先を追加</button>
         </p>
-        <p class="faint hint">
+        <p v-if="!isWeb" class="faint hint">
           メロジョイはアカウントごとに別のブラウザプロファイルでログインします。ログイン状態は保存され、次回から入力は不要です。
           パスワードはアプリに保存しません。「取り込む」でメルカリのあとに注文履歴を読み、合計が合う注文はそのまま仕入に入ります。
+        </p>
+        <p v-else class="faint hint">
+          「取り込む」でメルカリのあとに注文履歴を読み、合計が合う注文はそのまま仕入に入ります。
         </p>
         <p class="faint hint">
           商品名がどれかに一致する明細だけを取り込みます。一致しない明細の分の送料は原価に入りません。
@@ -1273,13 +1298,18 @@ const runLabel: Record<string, string> = {
           <span class="section-head-icon"><Icon name="folder" :size="16" /></span>
           <h2 class="section-head-title">データ</h2>
         </div>
-        <p class="faint hint">
-          データはこのPCの中だけにあります。壊れたら戻せないので、
-          週に1回、自動でバックアップを取ります（下で切れます）。大事な作業の前は手動でも取ってください。
-        </p>
-        <p class="faint hint">
-          データベース・レシート画像・サムネ・操作ログ（14 日分）が 1 つの zip に入ります。
-          不具合の報告はこのファイルを送ってください。別のパソコンへの引っ越しにも。
+        <template v-if="!isWeb">
+          <p class="faint hint">
+            データはこのPCの中だけにあります。壊れたら戻せないので、
+            週に1回、自動でバックアップを取ります（下で切れます）。大事な作業の前は手動でも取ってください。
+          </p>
+          <p class="faint hint">
+            データベース・レシート画像・サムネ・操作ログ（14 日分）が 1 つの zip に入ります。
+            不具合の報告はこのファイルを送ってください。別のパソコンへの引っ越しにも。
+          </p>
+        </template>
+        <p v-else class="faint hint">
+          Web 版のデータは Supabase が毎日バックアップします。
         </p>
 
         <div class="health-head">
@@ -1304,37 +1334,39 @@ const runLabel: Record<string, string> = {
           </div>
         </div>
 
-        <p class="panel-title auto-backup-title">自動バックアップ</p>
-        <label class="row hint">
-          <input
-            type="checkbox"
-            :checked="autoBackup?.enabled ?? true"
-            @change="toggleAutoBackup(($event.target as HTMLInputElement).checked)"
-          />
-          週に1回、自動でバックアップを取る
-        </label>
-        <p class="faint hint">
-          最後の自動バックアップ：{{ autoBackup?.last_at ? dateTime(autoBackup.last_at) : 'まだ取っていません' }}
-        </p>
-        <div class="row">
-          <button class="ghost sm" @click="runAutoBackupNow"><Icon name="download" :size="14" /> いま取る</button>
-          <button class="ghost sm" @click="openBackupFolder"><Icon name="folder" :size="14" /> フォルダを開く</button>
-        </div>
-        <table class="compact stack-table backups-table">
-          <thead>
-            <tr><th>ファイル名</th><th class="num">サイズ</th><th>日時</th></tr>
-          </thead>
-          <tbody>
-            <tr v-for="f in autoBackup?.files ?? []" :key="f.name">
-              <td class="faint c-name">{{ f.name }}</td>
-              <td class="num faint c-size" data-label="サイズ">{{ fileSizeText(f.size) }}</td>
-              <td class="faint nowrap c-time" data-label="日時">{{ dateTime(f.created_at) }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-if="!autoBackup?.files.length" class="dim">まだ自動バックアップはありません</p>
+        <template v-if="!isWeb">
+          <p class="panel-title auto-backup-title">自動バックアップ</p>
+          <label class="row hint">
+            <input
+              type="checkbox"
+              :checked="autoBackup?.enabled ?? true"
+              @change="toggleAutoBackup(($event.target as HTMLInputElement).checked)"
+            />
+            週に1回、自動でバックアップを取る
+          </label>
+          <p class="faint hint">
+            最後の自動バックアップ：{{ autoBackup?.last_at ? dateTime(autoBackup.last_at) : 'まだ取っていません' }}
+          </p>
+          <div class="row">
+            <button class="ghost sm" @click="runAutoBackupNow"><Icon name="download" :size="14" /> いま取る</button>
+            <button class="ghost sm" @click="openBackupFolder"><Icon name="folder" :size="14" /> フォルダを開く</button>
+          </div>
+          <table class="compact stack-table backups-table">
+            <thead>
+              <tr><th>ファイル名</th><th class="num">サイズ</th><th>日時</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="f in autoBackup?.files ?? []" :key="f.name">
+                <td class="faint c-name">{{ f.name }}</td>
+                <td class="num faint c-size" data-label="サイズ">{{ fileSizeText(f.size) }}</td>
+                <td class="faint nowrap c-time" data-label="日時">{{ dateTime(f.created_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="!autoBackup?.files.length" class="dim">まだ自動バックアップはありません</p>
+        </template>
 
-        <p class="panel-title csv-title">CSVで書き出す（全期間）</p>
+        <p class="panel-title csv-title" :class="{ 'csv-title-web': isWeb }">CSVで書き出す（全期間）</p>
         <div class="row">
           <button v-for="k in exportKinds" :key="k" class="ghost" @click="exportCsv(k)">
             <Icon name="download" :size="16" /> {{ EXPORT_KIND_LABEL[k] }}
@@ -1342,24 +1374,26 @@ const runLabel: Record<string, string> = {
         </div>
         <p class="faint hint">在庫は今の姿をそのまま出します（月では切れません）。</p>
 
-        <p class="panel-title manual-backup-title">手動バックアップ</p>
-        <div class="row">
-          <button @click="backup"><Icon name="download" :size="16" /> バックアップを保存（zip）</button>
-          <button class="ghost" @click="revealFolder"><Icon name="folder" :size="16" /> 保存フォルダを開く</button>
-        </div>
-        <div class="danger-zone">
-          <p class="faint hint">
-            zip（または以前の .db）を選ぶと、今のデータを退避してから置き換え、再起動します。
-          </p>
-          <button class="danger" @click="restore"><Icon name="refresh" :size="16" /> バックアップから復元</button>
-        </div>
-        <div class="danger-zone">
-          <p class="faint hint">
-            販売・仕入・在庫・取り込み履歴をすべて消します。設定・仕入先・発送方法は残ります。
-            元に戻せないので、先にバックアップを取ってください。
-          </p>
-          <button class="danger" @click="resetData">取引データを初期化</button>
-        </div>
+        <template v-if="!isWeb">
+          <p class="panel-title manual-backup-title">手動バックアップ</p>
+          <div class="row">
+            <button @click="backup"><Icon name="download" :size="16" /> バックアップを保存（zip）</button>
+            <button class="ghost" @click="revealFolder"><Icon name="folder" :size="16" /> 保存フォルダを開く</button>
+          </div>
+          <div class="danger-zone">
+            <p class="faint hint">
+              zip（または以前の .db）を選ぶと、今のデータを退避してから置き換え、再起動します。
+            </p>
+            <button class="danger" @click="restore"><Icon name="refresh" :size="16" /> バックアップから復元</button>
+          </div>
+          <div class="danger-zone">
+            <p class="faint hint">
+              販売・仕入・在庫・取り込み履歴をすべて消します。設定・仕入先・発送方法は残ります。
+              元に戻せないので、先にバックアップを取ってください。
+            </p>
+            <button class="danger" @click="resetData">取引データを初期化</button>
+          </div>
+        </template>
 
         <div v-if="saleExclusions.length" class="exclusions-zone">
           <p class="panel-title">取り込まない販売</p>
@@ -1396,8 +1430,11 @@ const runLabel: Record<string, string> = {
         <p class="faint hint">
           画像は Google に送られます。無料枠ではデータが Google の改善に使われる規約です。
         </p>
-        <p class="faint hint">
+        <p v-if="!isWeb" class="faint hint">
           キーは OS の安全な保存（キーチェーン／資格情報マネージャー）で暗号化して保存し、DB には入れません。
+        </p>
+        <p v-else class="faint hint">
+          キーは暗号化してサーバーに保存し、画面には出しません。
         </p>
 
         <div class="fields">
@@ -1462,8 +1499,8 @@ const runLabel: Record<string, string> = {
         </p>
       </div>
 
-      <!-- アプリの更新 -->
-      <div class="panel">
+      <!-- アプリの更新（Web 版は開くたびに最新になるので出さない） -->
+      <div v-if="!isWeb" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="refresh" :size="16" /></span>
           <h2 class="section-head-title">アプリの更新</h2>
@@ -1530,6 +1567,10 @@ const runLabel: Record<string, string> = {
   gap: 6px;
 }
 
+/* Web 版だけ：メルカリの節の頭の 1 行（ログインの案内）と、そのあとの入力欄の間 */
+.hint.first-hint { margin-top: 0; }
+.first-hint + .fields { margin-top: 12px; }
+
 .health-head { display: flex; align-items: center; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .health-title { margin: 0; }
 .health-head button { flex-shrink: 0; }
@@ -1549,6 +1590,8 @@ const runLabel: Record<string, string> = {
 .tracking-title, .listing-title { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .auto-backup-title { margin-top: 16px; }
 .manual-backup-title { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+/* Web 版だけ：自動バックアップの節が無いので、健康診断との間に自分で線を引く */
+.csv-title-web { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .small { font-size: var(--fs-12); }
 .col-target { width: 96px; }
 

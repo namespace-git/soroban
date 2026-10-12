@@ -35,6 +35,8 @@ import type {
 import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 import { matchesSearch } from '../components/SearchBox.vue'
+import type { AgentDevice, CollectJob, CollectJobStatus, PushDevice, PushKinds, WebApi } from '../../shared/web-types'
+import { createWebSoroban } from '../api/web'
 
 // ------------------------------------------------------------
 // 小さなユーティリティ
@@ -4845,6 +4847,148 @@ function assignInitialProductImage(): void {
   if (model) productManualImage.set(model, autoProductThumb(model))
 }
 
+// ------------------------------------------------------------
+// Web 版の見え方の確認（URL に ?webmock=<場面> を付けたときだけ。付けなければ上のモックのまま）
+//
+// window.sorobanWeb（取り込みの要求・通知・取り込み担当の PC）を作り物で差し、window.soroban を Web 版の包み
+// （api/web.ts の createWebSoroban。デスクトップ専用の呼び出しは日本語のエラー）にする。
+// 場面（カンマで足せる）：
+//   idle      押すと 待ち（5 秒）→ 取り込み中（7 秒）→ done
+//   partial / failed   同じ流れで、途中で止まる／失敗する
+//   offline   取り込み担当の PC が動いていない（押すと待ちのまま、25 秒で取り消される）
+//   queued / running   最初からその状態（動かない）
+//   cooldown  押せるまで 90 秒
+//   this      通知の端末の一覧で、先頭の端末を「この端末」にする
+// ------------------------------------------------------------
+
+function installWebMock(scenario: string): void {
+  const flags = new Set(scenario.split(',').map(s => s.trim()))
+  const iso = (ms = Date.now()) => new Date(ms).toISOString()
+  const agentsOnline = flags.has('offline') ? 0 : 1
+  let cooldownUntil = flags.has('cooldown') ? Date.now() + 90_000 : 0
+  let job = null as CollectJob | null
+  let timers: ReturnType<typeof setTimeout>[] = []
+
+  const makeJob = (status: CollectJobStatus, over: Partial<CollectJob> = {}): CollectJob => ({
+    id: uid(), status, requested_at: iso(), requested_by_me: true, agent_name: null,
+    claimed_at: null, heartbeat_at: null, finished_at: null, runs: null, message: null, ...over,
+  })
+  const makeRun = (
+    source: CollectorRun['source'], status: CollectorRun['status'],
+    fetched: number, inserted: number, message: string | null, shopName: string | null = null,
+  ): CollectorRun => ({
+    id: uid(), started_at: isoLocal(new Date()), finished_at: isoLocal(new Date()),
+    status, fetched, inserted, message, source, shop_account_id: null, shop_account_name: shopName,
+  })
+
+  function finish(outcome: 'done' | 'partial' | 'failed'): void {
+    if (!job) return
+    const finishedAt = iso()
+    if (outcome === 'done') {
+      job = { ...job, status: 'done', finished_at: finishedAt, runs: [
+        makeRun('mercari', 'ok', 3, 1, null), makeRun('mellojoy', 'ok', 2, 1, null, 'メロジョイA'), makeRun('yahoo', 'ok', 1, 0, null),
+      ] }
+    } else if (outcome === 'partial') {
+      job = { ...job, status: 'partial', finished_at: finishedAt, message: 'メロジョイA：通信に失敗しました', runs: [
+        makeRun('mercari', 'ok', 3, 1, null), makeRun('mellojoy', 'failed', 0, 0, '通信に失敗しました', 'メロジョイA'),
+      ] }
+    } else {
+      job = { ...job, status: 'failed', finished_at: finishedAt, message: 'メルカリにログインが必要です（リビングの PC）', runs: [
+        makeRun('mercari', 'auth_required', 0, 0, 'ログインが必要です'),
+      ] }
+    }
+    cooldownUntil = Date.now() + 60_000
+  }
+
+  const outcome = flags.has('partial') ? 'partial' : flags.has('failed') ? 'failed' : 'done'
+
+  function startTimeline(): void {
+    timers.forEach(t => clearTimeout(t))
+    if (agentsOnline === 0) {
+      timers = [setTimeout(() => {
+        if (job?.status === 'queued') job = { ...job, status: 'cancelled', finished_at: iso(), message: '5 分たっても取り込み担当の PC が拾わなかったので、取り消しました' }
+      }, 25_000)]
+      return
+    }
+    timers = [
+      setTimeout(() => {
+        if (job?.status === 'queued') job = { ...job, status: 'running', agent_name: 'リビングの PC', claimed_at: iso(), heartbeat_at: iso() }
+      }, 5_000),
+      setTimeout(() => { if (job?.status === 'running') finish(outcome) }, 12_000),
+    ]
+  }
+
+  if (flags.has('queued')) job = makeJob('queued')
+  if (flags.has('running')) job = makeJob('running', { agent_name: 'リビングの PC', claimed_at: iso(), heartbeat_at: iso() })
+
+  const allKinds = (): PushKinds => ({ sale: true, shipping: true, collect: true, arrival: true })
+  let pushDevices: PushDevice[] = [
+    { id: 'pd-1', label: 'iPhone', kinds: allKinds(), created_at: iso(Date.now() - 3 * 86400_000), is_this_device: flags.has('this') },
+    { id: 'pd-2', label: 'Mac', kinds: { ...allKinds(), arrival: false }, created_at: iso(Date.now() - 9 * 86400_000), is_this_device: false },
+  ]
+  const agentDevices: AgentDevice[] = [
+    { id: 'ad-1', name: 'リビングの PC', first_seen_at: iso(Date.now() - 20 * 86400_000), last_seen_at: iso(Date.now() - (agentsOnline ? 40_000 : 3 * 3600_000)), online: agentsOnline > 0, revoked: false },
+    { id: 'ad-2', name: '古いノート PC', first_seen_at: iso(Date.now() - 90 * 86400_000), last_seen_at: iso(Date.now() - 30 * 86400_000), online: false, revoked: true },
+  ]
+
+  const web: WebApi = {
+    async requestCollect() {
+      if (job && (job.status === 'queued' || job.status === 'running')) throw new Error('いま取り込み中です')
+      const left = Math.ceil((cooldownUntil - Date.now()) / 1000)
+      if (left > 0) throw new Error(`あと ${left} 秒たってから押してください`)
+      const created = makeJob('queued')
+      job = created
+      startTimeline()
+      return wait(created)
+    },
+    async getCollectStatus() {
+      return wait({ job, agents_online: agentsOnline, cooldown_seconds: Math.max(0, Math.ceil((cooldownUntil - Date.now()) / 1000)) })
+    },
+    async cancelCollectJob(id: string) {
+      if (!job || job.id !== id || job.status !== 'queued') throw new Error('取り込みはもう始まっているので、取り消せません')
+      timers.forEach(t => clearTimeout(t))
+      job = { ...job, status: 'cancelled', finished_at: iso(), message: '取り消しました' }
+      return wait(undefined)
+    },
+    async listAgentDevices() {
+      return wait(agentDevices.map(d => ({ ...d })))
+    },
+    async revokeAgentDevice(id: string) {
+      const d = agentDevices.find(x => x.id === id)
+      if (d) { d.revoked = true; d.online = false }
+      return wait(undefined)
+    },
+    async getPushConfig() {
+      // web-push の説明に載っているサンプルの公開鍵（形だけ。本物の配信先は無い）
+      return wait({ vapid_public_key: flags.has('nopush') ? null : 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' })
+    },
+    async savePushSubscription(input) {
+      pushDevices = [{ id: uid(), label: input.label, kinds: input.kinds, created_at: iso(), is_this_device: true }, ...pushDevices.map(d => ({ ...d, is_this_device: false }))]
+      return wait(undefined)
+    },
+    async deletePushSubscription() {
+      pushDevices = pushDevices.filter(d => !d.is_this_device)
+      return wait(undefined)
+    },
+    async listPushDevices() {
+      return wait(pushDevices.map(d => ({ ...d, kinds: { ...d.kinds } })))
+    },
+    async setPushKinds(deviceId: string, kinds: PushKinds) {
+      pushDevices = pushDevices.map(d => (d.id === deviceId ? { ...d, kinds: { ...kinds } } : d))
+      return wait(undefined)
+    },
+    async sendTestPush() {
+      return wait({ sent: pushDevices.length, failed: 0 })
+    },
+    async getTrackingNumber(purchaseId: string) {
+      return wait(purchases.find(x => x.id === purchaseId)?.tracking_number ?? null)
+    },
+  }
+
+  Object.defineProperty(window, 'sorobanWeb', { value: web, configurable: true, writable: true })
+  window.soroban = createWebSoroban(api, web)
+}
+
 export function installMock(): void {
   assignInitialAutoTags()
   buildInitialPurchasesAndInventory()
@@ -4874,4 +5018,8 @@ export function installMock(): void {
       // モックでは裏の自動確認イベントを発火しない（checkForUpdate() は手動呼び出しのみ）
     },
   }
+
+  // 画面確認用：?webmock=<場面> で Web 版の見え方にする（付けなければ何も変わらない）
+  const webScenario = new URLSearchParams(window.location.search).get('webmock')
+  if (webScenario) installWebMock(webScenario)
 }

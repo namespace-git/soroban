@@ -11,3 +11,11 @@ interface ImportMetaEnv {
   /** API の入口。既定は /api */
   readonly VITE_API_BASE?: string
 }
+
+interface Window {
+  /**
+   * Web 版だけの API（取り込みの要求・Push 通知・取り込み担当の PC）。
+   * auth/boot.ts が差す。デスクトップ版（Electron）・画面確認用のモックでは undefined
+   */
+  sorobanWeb?: import('../shared/web-types').WebApi
+}

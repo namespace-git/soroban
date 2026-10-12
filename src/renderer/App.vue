@@ -19,6 +19,9 @@ import Settings from './views/Settings.vue'
 import Help from './views/Help.vue'
 import type { CollectorRun, DashboardStats, ListingStatus, ProfitStrip, SaleStatus, SearchHit, TrackingCheckSummary, UpdateStatus } from '../shared/types'
 import type { IconName } from './components/Icon.vue'
+import type { CollectJob } from '../shared/web-types'
+import { useWebCollect, describeJob, formatRemaining } from './components/web-collect'
+import { parseOpenTarget } from './components/web-glue'
 import { runSourceLabel } from './utils/collector-run'
 import { yen } from './format'
 
@@ -71,6 +74,15 @@ const gotoPayload = ref<GotoPayload | null>(null)
 provide('gotoPayload', gotoPayload)
 function goto(t: Tab, payload?: GotoPayload) { tab.value = t; gotoPayload.value = payload ?? null }
 provide('goto', goto)
+
+// --- Web 版：「取り込む」は取り込み担当の PC への依頼。通知から開く ---
+// window.sorobanWeb は Web 版（auth/boot.ts）だけが差す。Electron 版では undefined で、この節は何もしない
+
+const webApi = window.sorobanWeb ?? null
+// queued・running の間だけ数秒ごとに状態を読み、終わったら reportJob で知らせる
+const webCollect = webApi ? useWebCollect({ api: webApi, onFinished: reportJob }) : null
+// ホームの「もう一度取り込む」も、このボタンと同じ流れにする
+if (webCollect) provide('collect', collect)
 
 // --- 横断検索（Ctrl+K / Cmd+K でフォーカス。250ms デバウンスで searchAll） ---
 
@@ -327,6 +339,9 @@ function formatRunTime(iso: string): string {
 }
 
 const runStatusText = computed(() => {
+  // Web 版：走っている・PC が動いていない・クールダウン中のときは、最終取り込みより先にそれを見せる
+  const web = webCollect?.statusLine.value
+  if (web) return web.text
   const run = stats.value?.lastRun
   if (!run) return '取り込み未実施'
   const label = run.source === 'mellojoy' ? `メロジョイ(${run.shop_account_name ?? '?'}) ` : ''
@@ -334,6 +349,8 @@ const runStatusText = computed(() => {
 })
 
 const runIsWarn = computed(() => {
+  const web = webCollect?.statusLine.value
+  if (web) return web.warn
   const run = stats.value?.lastRun
   return !!run && run.status !== 'ok'
 })
@@ -368,7 +385,8 @@ async function reportRun(runs: CollectorRun[]) {
   const parts = runs.map(r => `${runSourceLabel(r)}: ${runMessage(r)}`)
   let kind: 'ok' | 'warn' = runs.some(r => r.status !== 'ok') ? 'warn' : 'ok'
 
-  const t = await window.soroban.getLastTrackingSummary()
+  // Web 版の配送状況の確認は定期実行がやる（取り込みと一緒には走らない）ので、ここでは見ない
+  const t = webApi ? null : await window.soroban.getLastTrackingSummary()
   if (t && t.at !== lastShownTrackingAt.value) {
     lastShownTrackingAt.value = t.at
     parts.push(trackingMessage(t))
@@ -389,6 +407,12 @@ function showNotice(n: { text: string; kind: 'ok' | 'warn' } | null) {
 }
 
 async function collect() {
+  if (webCollect) {
+    // 押すのは 1 回だけ。積まれたあとは数秒ごとに状態を読み、終わったら reportJob が知らせる
+    showNotice(null)
+    await webCollect.request()
+    return
+  }
   collecting.value = true
   showNotice(null)
   try {
@@ -396,6 +420,49 @@ async function collect() {
   } finally {
     collecting.value = false
   }
+}
+
+// 取り込むボタンの見え方。Electron 版は今までどおり collecting だけ
+const collectBusy = computed(() => (webCollect ? webCollect.active.value : collecting.value))
+const collectDisabled = computed(() => collectBusy.value || (webCollect?.cooldown.value ?? 0) > 0)
+const collectLabel = computed(() => {
+  if (webCollect?.queued.value) return '待っています…'
+  return collectBusy.value ? '取り込み中…' : '取り込む'
+})
+const collectTitle = computed(() => {
+  if (!webCollect) return undefined
+  if (webCollect.cooldown.value > 0) return `あと ${formatRemaining(webCollect.cooldown.value)} で取り込めます`
+  if (webCollect.agentsOffline.value) return '取り込み担当の PC が動いていません。押しても、5 分たつと取り消されます'
+  return '取り込み担当の PC に取り込みを頼みます'
+})
+
+/** Web 版：頼んだ取り込みが終わった。デスクトップの reportRun と同じ見せ方（トースト＋画面の読み直し） */
+function reportJob(job: CollectJob) {
+  showNotice(describeJob(job, run => `${runSourceLabel(run)}: ${runMessage(run)}`))
+  revision.value++
+}
+
+async function cancelCollect() {
+  await webCollect?.cancel()
+  showNotice({ text: '取り込みを取り消しました', kind: 'ok' })
+}
+
+// 通知（service worker の soroban:open）と、通知から立ち上げたときの URL（/?tab=sales&sale=<id> など）。知らない tab は無視
+function openFromUrl(raw: unknown): boolean {
+  const target = parseOpenTarget(raw, window.location.origin, tabs.map(t => t.key))
+  if (!target) return false
+  moreOpen.value = false
+  goto(target.tab, target.payload ?? undefined)
+  return true
+}
+
+function onSwMessage(e: MessageEvent) {
+  const data = e.data as { type?: unknown; url?: unknown } | null
+  if (data && data.type === 'soroban:open') openFromUrl(data.url)
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') webCollect?.onVisible()
 }
 
 // --- アプリの更新（GitHub Releases）。裏の自動確認から知らされたら薄いバナーで出す ---
@@ -439,6 +506,14 @@ onMounted(() => {
   mobileMql = window.matchMedia(MOBILE_QUERY)
   onMobileChange(mobileMql)
   mobileMql.addEventListener('change', onMobileChange)
+  if (webApi) {
+    // 通知から立ち上げたとき：URL の tab（と sale / purchase）で該当の画面を開く。開いたら URL から外す（再読み込みで戻らない）
+    if (openFromUrl(window.location.href)) window.history.replaceState(window.history.state, '', window.location.pathname)
+    if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', onSwMessage)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    // 積まれている・走っている取り込みがあれば追い始める（無ければ PC の数・クールダウンを読むだけ）
+    void webCollect?.start()
+  }
 })
 
 onUnmounted(() => {
@@ -446,6 +521,11 @@ onUnmounted(() => {
   window.removeEventListener('soroban:error', onSorobanError)
   window.removeEventListener('keydown', onGlobalKeydown)
   mobileMql?.removeEventListener('change', onMobileChange)
+  if (webApi) {
+    if ('serviceWorker' in navigator) navigator.serviceWorker.removeEventListener('message', onSwMessage)
+    document.removeEventListener('visibilitychange', onVisibilityChange)
+    webCollect?.stop()
+  }
 })
 
 // 子側の revision カウンタが動くたびに要対応件数・取り込み状態・利益ピルも更新する
@@ -516,9 +596,9 @@ watch(dataRevision, loadProfitStrip)
         <button class="ghost topbar-search-btn" aria-label="すべてから探す" @click="openMobileSearch">
           <Icon name="search" :size="20" />
         </button>
-        <button class="primary collect-btn" :class="{ busy: collecting }" :disabled="collecting" aria-label="取り込む" @click="collect">
+        <button class="primary collect-btn" :class="{ busy: collectBusy }" :disabled="collectDisabled" :title="collectTitle" aria-label="取り込む" @click="collect">
           <Icon name="refresh" :size="16" />
-          <span class="collect-label">{{ collecting ? '取り込み中…' : '取り込む' }}</span>
+          <span class="collect-label">{{ collectLabel }}</span>
         </button>
       </header>
 
@@ -532,6 +612,15 @@ watch(dataRevision, loadProfitStrip)
               {{ updateStatus?.canAutoInstall ? '再起動して更新' : 'ダウンロード' }}
             </button>
             <button class="ghost sm" @click="dismissUpdateBanner">あとで</button>
+          </div>
+        </Transition>
+
+        <!-- Web 版だけ：PC が拾うのを待っている間。取り消せる（始まったあとは取り消せない） -->
+        <Transition name="fade">
+          <div v-if="webCollect && webCollect.queued.value" class="collect-banner">
+            <Icon name="clock" :size="14" />
+            <span class="collect-banner-text">{{ webCollect.queuedText.value }}</span>
+            <button class="ghost sm" @click="cancelCollect">取り消す</button>
           </div>
         </Transition>
 
@@ -858,6 +947,22 @@ main {
 .update-banner button { margin-left: 0; }
 .update-banner button:last-child { margin-left: auto; }
 
+/* Web 版だけ：取り込みが PC に拾われるのを待っているとき。更新バナーと同じ面（重ねて出し、本文の位置を動かさない） */
+.collect-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: var(--radius-md);
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-size: var(--fs-13);
+  box-shadow: var(--shadow-2);
+}
+.collect-banner svg { flex-shrink: 0; }
+.collect-banner-text { min-width: 0; overflow-wrap: anywhere; }
+.collect-banner button { margin-left: auto; flex-shrink: 0; }
+
 /* 上書き：style.css の .toast は本文中の sticky 前提。ここでは重ねて出すので fixed 相当に */
 .toast {
   position: static;
@@ -955,6 +1060,7 @@ main {
     max-width: none;
   }
   .toast { border-radius: var(--radius-md); }
+  .collect-banner button { min-height: 44px; }
 
   /* 下のタブバー */
   .tabbar {
