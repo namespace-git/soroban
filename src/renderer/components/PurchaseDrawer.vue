@@ -192,8 +192,10 @@ function draftReason(note: string | null): string {
 
 // --- 画像を取り直す（メンテ用）：メロジョイの取り込みだけ ---
 const refetchingImages = ref(false)
+// Web 版（auth/boot.ts が window.sorobanWeb を差す）では出さない。メロジョイの注文詳細を開くのは取り込み担当の PC のそろばんだけ
+const isWeb = !!window.sorobanWeb
 function canRefetchImages(): boolean {
-  return !!detail.value?.import_key?.startsWith('mellojoy:')
+  return !isWeb && !!detail.value?.import_key?.startsWith('mellojoy:')
 }
 async function onRefetchImages() {
   if (!detail.value || refetchingImages.value) return

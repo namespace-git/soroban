@@ -31,6 +31,8 @@ const timeline = ref<ItemTimeline | null>(null)
 const purchaseDetail = ref<PurchaseDetail | null>(null)
 const loading = ref(false)
 const refetchBusy = ref(false)
+// Web 版（auth/boot.ts が window.sorobanWeb を差す）では購入日時の取り直しを出さない。取引画面を開くのは取り込み担当の PC のそろばんだけ
+const isWeb = !!window.sorobanWeb
 
 // --- 取引の進み具合のチップ。Sales.vue と同じ表記に揃える ---
 const SALE_STATUS_CHIP: Record<SaleStatus, { tone: 'warn' | 'info' | 'ok'; label: string }> = {
@@ -285,7 +287,7 @@ function openProduct() {
       <div v-if="timeline.sale" class="purchased-row">
         <span class="faint">購入日時 {{ purchasedAtLabel }}</span>
         <button
-          v-if="saleMercariId"
+          v-if="saleMercariId && !isWeb"
           type="button" class="sm ghost"
           title="取引画面を1ページ開いて購入日時を読み直します"
           :disabled="refetchBusy"

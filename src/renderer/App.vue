@@ -355,6 +355,11 @@ const runIsWarn = computed(() => {
   return !!run && run.status !== 'ok'
 })
 
+// Web 版だけ：狭い幅の上のバーに出す短い文言（「あと 52 秒」「取り込み中」）。無ければ今までどおり全文だけ。
+// reserve はカウントダウンの間、欄の幅を動かさないための確保（桁が変わる境目で検索欄・利益ピルがずれない）
+const runShort = computed(() => webCollect?.statusLine.value?.short ?? null)
+const runReserve = computed(() => webCollect?.statusLine.value?.reserve ?? null)
+
 function runMessage(run: CollectorRun): string {
   const messages: Record<string, string> = {
     ok: `新規 ${run.inserted}件（取得 ${run.fetched}件）`,
@@ -586,12 +591,14 @@ watch(dataRevision, loadProfitStrip)
         <!-- スマホ幅では、要確認のときだけ警告アイコンを出す。押すと「その他」に全文が出る -->
         <span
           class="run-status"
-          :class="{ warn: runIsWarn }"
+          :class="{ warn: runIsWarn, 'has-short': !!runShort }"
           :title="runStatusText"
           @click="isMobile && (moreOpen = true)"
         >
           <Icon v-if="runIsWarn" name="alert" :size="14" class="run-status-icon" />
-          <span class="run-status-text">{{ runStatusText }}</span>
+          <span class="run-status-text" :data-reserve="runReserve?.text">{{ runStatusText }}</span>
+          <!-- Web 版だけ：狭い幅（〜1199px）では全文の代わりに短い文言。スマホ幅では取り込むボタンの左に出る -->
+          <span v-if="runShort" class="run-status-short" :data-reserve="runReserve?.short">{{ runShort }}</span>
         </span>
         <button class="ghost topbar-search-btn" aria-label="すべてから探す" @click="openMobileSearch">
           <Icon name="search" :size="20" />
@@ -615,9 +622,10 @@ watch(dataRevision, loadProfitStrip)
           </div>
         </Transition>
 
-        <!-- Web 版だけ：PC が拾うのを待っている間。取り消せる（始まったあとは取り消せない） -->
+        <!-- Web 版だけ：PC が拾うのを待っている間。取り消せる（始まったあとは取り消せない）。
+             スマホ幅では下の上のバーの下（文書フロー）に出す。ここに重ねると本文の見出しにかぶる -->
         <Transition name="fade">
-          <div v-if="webCollect && webCollect.queued.value" class="collect-banner">
+          <div v-if="webCollect && webCollect.queued.value && !isMobile" class="collect-banner">
             <Icon name="clock" :size="14" />
             <span class="collect-banner-text">{{ webCollect.queuedText.value }}</span>
             <button class="ghost sm" @click="cancelCollect">取り消す</button>
@@ -627,11 +635,20 @@ watch(dataRevision, loadProfitStrip)
         <Transition name="fade">
           <div v-if="notice" class="toast" :class="notice.kind">
             <Icon v-if="notice.kind === 'warn'" class="toast-warn-icon" name="alert" :size="14" />
-            {{ notice.text }}
+            <span class="toast-text">{{ notice.text }}</span>
             <button class="ghost sm" @click="notice = null">閉じる</button>
           </div>
         </Transition>
       </div>
+
+      <!-- Web 版・スマホ幅だけ：PC が拾うのを待っている間のバナー。上のバーの下に流し込む（取り消しは 1 タップのまま） -->
+      <Transition name="fade">
+        <div v-if="webCollect && webCollect.queued.value && isMobile" class="collect-banner collect-banner-flow">
+          <Icon name="clock" :size="14" />
+          <span class="collect-banner-text">{{ webCollect.queuedText.value }}</span>
+          <button class="ghost sm" @click="cancelCollect">取り消す</button>
+        </div>
+      </Transition>
 
       <main>
         <Dashboard v-if="tab === 'dashboard'" />
@@ -897,6 +914,35 @@ watch(dataRevision, loadProfitStrip)
   text-overflow: ellipsis;
 }
 
+/* --- Web 版だけ（短い文言＝has-short があるとき。デスクトップ版の「最終取り込み：…」には効かない） --- */
+.run-status-short { display: none; }
+.run-status.has-short { font-variant-numeric: tabular-nums; }
+/* カウントダウン中は、数え下げで桁が変わっても欄の幅が動かないよう、いちばん長い文字列（data-reserve）を
+   見えない行として足して幅だけ確保する。動かすと隣の検索欄・利益ピルが数 px ずれる */
+.run-status-text[data-reserve]::after,
+.run-status-short[data-reserve]::after {
+  content: attr(data-reserve);
+  display: block;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+/* 1200px 未満（768〜1199px）の上のバーでは全文が入りきらず「あと 1分2…」と切れるので、短い文言に替える */
+@media (max-width: 1199px) {
+  .run-status.has-short .run-status-text { display: none; }
+  .run-status.has-short .run-status-short {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+}
+/* 1100px 未満は利益ピルが縮んで空きを作る。短い文言は縮めず、ピルのほうを省く */
+@media (max-width: 1099px) {
+  .run-status.has-short { flex-shrink: 0; }
+}
+
 .topbar button {
   display: inline-flex;
   flex-shrink: 0;
@@ -1033,9 +1079,14 @@ main {
   .run-status:not(.warn) { display: none; }
   .run-status.warn { justify-content: center; min-width: 44px; min-height: 44px; cursor: pointer; }
   .run-status-text { display: none; }
+  /* Web 版：取り込み中・クールダウン中は短い文言（「取り込み中」「あと 52 秒」）を取り込むボタンのすぐ左に出す。
+     警告のとき（PC が動いていない）はこれまでどおりアイコンだけ。どちらも押すと「その他」に全文が出る */
+  .run-status.has-short:not(.warn) { display: flex; min-height: 44px; cursor: pointer; order: 1; }
+  .run-status.has-short:not(.warn) .run-status-short { font-size: var(--fs-12); text-align: right; }
+  .run-status.warn .run-status-short { display: none; }
 
-  /* 取り込む：アイコンだけ。取り込み中は回す */
-  .topbar .collect-btn { justify-content: center; width: 44px; height: 44px; padding: 0; }
+  /* 取り込む：アイコンだけ。取り込み中は回す（order は、短い文言をこのボタンのすぐ左に並べるため） */
+  .topbar .collect-btn { justify-content: center; width: 44px; height: 44px; padding: 0; order: 2; }
   .collect-btn :deep(svg) { width: 20px; height: 20px; }
   .collect-label { display: none; }
   .collect-btn.busy :deep(svg) { animation: topbar-spin 1s linear infinite; }
@@ -1061,6 +1112,12 @@ main {
   }
   .toast { border-radius: var(--radius-md); }
   .collect-banner button { min-height: 44px; }
+  /* 待ちのバナーは上のバーの下に流し込む（本文を少し押し下げる。取り消しはそのまま 1 タップ） */
+  .collect-banner-flow {
+    flex-shrink: 0;
+    margin: 0 max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left));
+    box-shadow: none;
+  }
 
   /* 下のタブバー */
   .tabbar {

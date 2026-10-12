@@ -612,9 +612,13 @@ tr.total-row.loss > td {
   border-radius: 999px;
   box-shadow: var(--shadow-1);
 }
-.toast .toast-warn-icon { color: var(--warn-solid); }
+/* 結果の文が長いときは文のほうが折り返す。警告アイコンと「閉じる」は縮めない（縦に割れる・潰れるのを防ぐ） */
+.toast .toast-warn-icon { color: var(--warn-solid); flex-shrink: 0; }
+.toast .toast-text { min-width: 0; overflow-wrap: anywhere; }
 .toast button {
   margin-left: auto;
+  flex-shrink: 0;
+  white-space: nowrap;
   color: #fff;
   background: transparent;
   border-color: transparent;

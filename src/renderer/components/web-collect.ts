@@ -24,6 +24,39 @@ export function formatRemaining(seconds: number): string {
   return r === 0 ? `${m}分` : `${m}分${r}秒`
 }
 
+/**
+ * クールダウンの数え下げの途中（残り 1〜total 秒）で、いちばん幅を取る「残り」の文字列。
+ * 幅は「数字の桁数＋分・秒の字数」で決まるので、数字はすべて「0」（どのフォントでもいちばん広い桁）に置き換える。
+ * 返すのは本当の残りではなく、幅を確保するための見本。上のバーはこの幅を先に確保して、
+ * 桁が変わる境目（10秒→9秒、1分→59秒）で隣の検索欄・利益ピルが動かないようにする
+ */
+export function widestRemaining(total: number): string {
+  const max = Math.min(Math.max(1, Math.ceil(total)), 3600)
+  let best = ''
+  let bestWidth = 0
+  for (let s = 1; s <= max; s++) {
+    const t = formatRemaining(s).replace(/[0-9]/g, '0')
+    const width = [...t].reduce((w, c) => w + (c === '0' ? 0.55 : 1), 0)
+    if (width > bestWidth) {
+      best = t
+      bestWidth = width
+    }
+  }
+  return best
+}
+
+/**
+ * 上のバーの取り込み状態の欄。
+ * `text` は全文（広い画面と、ホバー・「その他」のシート）。`short` は狭い幅の上のバー用（無ければ短くしない）。
+ * `reserve` はカウントダウンのとき、数え下げの間で幅が変わらないよう先に確保する幅（いちばん長い文字列）
+ */
+export interface StatusLine {
+  text: string
+  warn: boolean
+  short?: string
+  reserve?: { text: string; short: string }
+}
+
 export interface JobNotice {
   text: string
   kind: 'ok' | 'warn'
@@ -69,6 +102,8 @@ export function useWebCollect(deps: WebCollectDeps) {
   // クールダウンの残りは、読んだ時刻から数える（1 秒ごとの再読み込みはしない）
   const now = ref(Date.now())
   const cooldownUntil = ref(0)
+  // 読んだ時点のクールダウン（秒）。数え下げの間でいちばん長い文字列を決めるのに使う（表示の残りは cooldown）
+  const cooldownTotal = ref(0)
 
   let started = false
   // 積まれた・走っていると見ていた要求の id。終わったのを見たら onFinished を呼ぶ
@@ -94,11 +129,21 @@ export function useWebCollect(deps: WebCollectDeps) {
    * 上のバーの取り込み状態の欄に出す文（無ければ null = 今までの「最終取り込み：…」）。
    * 走っている間 → 押す前から分かるべき「PC が動いていない」→ クールダウンの順
    */
-  const statusLine = computed<{ text: string; warn: boolean } | null>(() => {
-    if (running.value) return { text: `取り込み中（${job.value?.agent_name ?? 'PC'}）`, warn: false }
+  const widest = computed(() => widestRemaining(cooldownTotal.value))
+  const statusLine = computed<StatusLine | null>(() => {
+    if (running.value) return { text: `取り込み中（${job.value?.agent_name ?? 'PC'}）`, warn: false, short: '取り込み中' }
     if (queued.value || requesting.value) return null
-    if (agentsOffline.value) return { text: '取り込み担当の PC が動いていません', warn: true }
-    if (cooldown.value > 0) return { text: `あと ${formatRemaining(cooldown.value)} で取り込めます`, warn: false }
+    if (agentsOffline.value) return { text: '取り込み担当の PC が動いていません', warn: true, short: 'PC 停止中' }
+    if (cooldown.value > 0) {
+      const left = `あと ${formatRemaining(cooldown.value)}`
+      const longest = `あと ${widest.value}`
+      return {
+        text: `${left} で取り込めます`,
+        warn: false,
+        short: left,
+        reserve: { text: `${longest} で取り込めます`, short: longest },
+      }
+    }
     return null
   })
 
@@ -122,6 +167,7 @@ export function useWebCollect(deps: WebCollectDeps) {
   function apply(s: CollectStatus) {
     status.value = s
     cooldownUntil.value = s.cooldown_seconds > 0 ? Date.now() + s.cooldown_seconds * 1000 : 0
+    cooldownTotal.value = s.cooldown_seconds > 0 ? s.cooldown_seconds : 0
     tick()
     const j = s.job
     if (j && isActiveJob(j)) {
@@ -171,6 +217,7 @@ export function useWebCollect(deps: WebCollectDeps) {
       // まだ読んでいない PC の数は「動いていない」と決めつけない
       status.value = { job: j, agents_online: status.value?.agents_online ?? 1, cooldown_seconds: 0 }
       cooldownUntil.value = 0
+      cooldownTotal.value = 0
       tick()
       schedule()
     } catch (e) {

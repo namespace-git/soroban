@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { CollectorRun } from '../../../shared/types'
 import type { CollectJob, CollectStatus } from '../../../shared/web-types'
-import { COLLECT_POLL_MS, describeJob, formatRemaining, isActiveJob, useWebCollect } from '../web-collect'
+import { COLLECT_POLL_MS, describeJob, formatRemaining, isActiveJob, useWebCollect, widestRemaining } from '../web-collect'
 
 function job(over: Partial<CollectJob> = {}): CollectJob {
   return {
@@ -39,6 +39,35 @@ describe('formatRemaining / isActiveJob', () => {
     expect(isActiveJob(job({ status: 'running' }))).toBe(true)
     for (const s of ['done', 'partial', 'failed', 'cancelled'] as const) expect(isActiveJob(job({ status: s }))).toBe(false)
     expect(isActiveJob(null)).toBe(false)
+  })
+})
+
+describe('widestRemaining（数え下げの間でいちばん幅を取る残りの見本。数字は 0 に置き換える）', () => {
+  it('秒だけのうちは 1 桁→2 桁。1 分を超えると「分＋2 桁の秒」（「1分」より「59秒」のほうが幅を取る）', () => {
+    expect(widestRemaining(9)).toBe('0秒')
+    expect(widestRemaining(45)).toBe('00秒')
+    expect(widestRemaining(60)).toBe('00秒')
+    expect(widestRemaining(90)).toBe('0分00秒')
+    expect(widestRemaining(125)).toBe('0分00秒')
+    expect(widestRemaining(600)).toBe('0分00秒')
+  })
+
+  it('分の桁が増えれば、そのぶん広い（10 分以上）', () => {
+    expect(widestRemaining(700)).toBe('00分00秒')
+  })
+
+  it('0 以下・極端に長くても落ちない（上限あり）', () => {
+    expect(widestRemaining(0)).toBe('0秒')
+    expect(widestRemaining(-5)).toBe('0秒')
+    expect(widestRemaining(1_000_000)).toBe(widestRemaining(3600))
+  })
+
+  it('見本の幅は、数え下げのどの時点の文字列よりも狭くならない', () => {
+    const width = (s: string) => [...s].reduce((w, c) => w + (c >= '0' && c <= '9' ? 0.55 : 1), 0)
+    for (const total of [30, 60, 90, 119, 600, 725]) {
+      const sample = width(widestRemaining(total))
+      for (let s = 1; s <= total; s++) expect(width(formatRemaining(s))).toBeLessThanOrEqual(sample)
+    }
   })
 })
 
@@ -120,7 +149,7 @@ describe('useWebCollect（状態を読む・押す・取り消す）', () => {
 
     await vi.advanceTimersByTimeAsync(COLLECT_POLL_MS)
     expect(c.running.value).toBe(true)
-    expect(c.statusLine.value).toEqual({ text: '取り込み中（リビングの PC）', warn: false })
+    expect(c.statusLine.value).toEqual({ text: '取り込み中（リビングの PC）', warn: false, short: '取り込み中' })
     expect(finished).toEqual([])
 
     await vi.advanceTimersByTimeAsync(COLLECT_POLL_MS)
@@ -198,7 +227,7 @@ describe('useWebCollect（状態を読む・押す・取り消す）', () => {
     expect(c.statusLine.value).toBeNull() // まだ読んでいない間は「動いていない」と決めつけない
     await c.start()
     expect(c.agentsOffline.value).toBe(true)
-    expect(c.statusLine.value).toEqual({ text: '取り込み担当の PC が動いていません', warn: true })
+    expect(c.statusLine.value).toEqual({ text: '取り込み担当の PC が動いていません', warn: true, short: 'PC 停止中' })
   })
 
   it('積まれたあいだの文：PC が動いていなければそれも添える', async () => {
@@ -214,13 +243,29 @@ describe('useWebCollect（状態を読む・押す・取り消す）', () => {
     const { c, api } = setup({ reads: [status(null, { cooldown: 90 })] })
     await c.start()
     expect(c.cooldown.value).toBe(90)
-    expect(c.statusLine.value).toEqual({ text: 'あと 1分30秒 で取り込めます', warn: false })
+    expect(c.statusLine.value).toMatchObject({ text: 'あと 1分30秒 で取り込めます', warn: false })
     await vi.advanceTimersByTimeAsync(31_000)
     expect(c.cooldown.value).toBe(59)
     await vi.advanceTimersByTimeAsync(60_000)
     expect(c.cooldown.value).toBe(0)
     expect(c.statusLine.value).toBeNull()
     expect(api.getCollectStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('クールダウン中は、狭い幅用の短い文言と、数え下げの間ずっと同じ「確保する幅」を持つ', async () => {
+    const { c } = setup({ reads: [status(null, { cooldown: 90 })] })
+    await c.start()
+    const first = c.statusLine.value
+    expect(first?.short).toBe('あと 1分30秒')
+    expect(first?.reserve).toEqual({ text: 'あと 0分00秒 で取り込めます', short: 'あと 0分00秒' })
+
+    // 数え下げて桁が変わっても（1分30秒 → 59秒 → 9秒）、確保する幅は動かない
+    for (const advance of [31_000, 50_000]) {
+      await vi.advanceTimersByTimeAsync(advance)
+      const line = c.statusLine.value
+      expect(line?.reserve).toEqual(first?.reserve)
+    }
+    expect(c.statusLine.value?.short).toBe('あと 9秒')
   })
 
   it('押したときに走っている・クールダウン中ならエラーを投げ、その状態を画面に出す', async () => {

@@ -43,6 +43,9 @@ const goto = inject<(t: string, payload?: {
 // 無ければ window.soroban.collect() を直接呼ぶ（Dashboard 単体表示など）
 const injectedCollect = inject<(() => Promise<void>) | undefined>('collect', undefined)
 
+// Web 版（auth/boot.ts が window.sorobanWeb を差す）。ログインのウィンドウはこの端末では開けない（取り込み担当の PC のそろばんで行う）
+const isWeb = !!window.sorobanWeb
+
 const inbox = ref<Inbox | null>(null)
 // 「見直すもの」の在庫カード（点数・原価）は getInbox に無いので getDashboard から補う
 const dashboard = ref<DashboardStats | null>(null)
@@ -323,14 +326,16 @@ function gotoTopModel() {
 
                   <!-- 取り込みの問題 -->
                   <template v-else-if="group.kind === 'collect'">
+                    <!-- Web 版：押しても開けるウィンドウが無いので、ボタンは出さず、やることを文で伝える -->
+                    <span v-if="isWeb && item.run?.status === 'auth_required'" class="web-hint" title="取り込み担当の PC のそろばんでログインしてください"><span>取り込み担当の PC の</span><span>そろばんでログインしてください</span></span>
                     <button
-                      v-if="item.run?.status === 'auth_required'"
+                      v-else-if="item.run?.status === 'auth_required'"
                       class="sm"
                       title="ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください"
                       @click="openLoginForRun"
                     >ログインする</button>
                     <button v-else class="sm" :disabled="busy.has(item.id)" @click="retryCollect(item)">もう一度取り込む</button>
-                    <span v-if="item.run?.status === 'auth_required'" class="m-hint">ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください</span>
+                    <span v-if="!isWeb && item.run?.status === 'auth_required'" class="m-hint">ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください</span>
                   </template>
 
                   <!-- 止めた出品の在庫を外す：1 クリックで全部。押した行はその場で消える -->
@@ -545,6 +550,17 @@ function gotoTopModel() {
 /* スマホ幅だけで出す補足（デスクトップ幅ではボタンの title＝ホバーで読めるもの） */
 .m-hint { display: none; }
 
+/* Web 版だけ：ログインのボタンの代わりに出す 1 文（どの幅でも出す）。右の列を広げないよう折り返す */
+.web-hint {
+  max-width: 220px;
+  font-size: var(--fs-12);
+  line-height: 1.5;
+  color: var(--text-dim);
+  text-align: right;
+}
+/* 折り返すときは句の切れ目で（「ログイン／してください」と割れない） */
+.web-hint > span { display: inline-block; }
+
 .done-row {
   margin: 14px 0 0;
   font-size: var(--fs-12);
@@ -619,6 +635,7 @@ function gotoTopModel() {
     font-size: var(--fs-12);
     color: var(--text-dim);
   }
+  .web-hint { flex: 1 1 100%; max-width: none; text-align: left; }
   .row-act > button {
     display: inline-flex;
     align-items: center;
