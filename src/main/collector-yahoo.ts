@@ -3,11 +3,14 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { mkdirSync } from 'node:fs'
 import { readdir, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import * as db from './db'
 import {
   buildUserAgent, CHALLENGE_MESSAGE, isChallengeText, randomWait, revealForChallenge, thumbFileName,
 } from './collector'
-import type { CollectorRun, SaleStatus } from '../shared/types'
+import { localStore } from './store/local'
+import type { YahooCombinedSalesSplit as YahooSalesSplit } from './store/rules'
+import type { CollectorStore } from './store/types'
+import type { AgentThumbTarget } from '../shared/agent-types'
+import type { CollectorRun, RunStatus, SaleStatus } from '../shared/types'
 
 // ============================================================
 // Yahoo!フリマの取り込み（パーサ＋実行部）
@@ -808,7 +811,7 @@ export function formatYahooDebugSavedNote(pageLabel: string, file: string, summa
 
 // ------------------------------------------------------------
 // サムネイル保存（collector.ts と同じ作法。private ヘルパーは export されていないため
-// ここに複製する。thumbFileName だけ collector.ts から借りる）
+// ここに複製する。thumbFileName だけ collector.ts から借りる）。帳簿への記録は store.saveThumb
 // ------------------------------------------------------------
 
 function ensureThumbDir(): string {
@@ -828,22 +831,27 @@ async function cleanupOldThumbFiles(dir: string, itemId: string, keepFile: strin
   }
 }
 
-async function downloadThumbFile(itemId: string, url: string): Promise<{ file: string; src: string }> {
+/** 画像を 1 枚取得してファイルに保存し、ファイル名を返す（元 URL の正規化・帳簿への記録は store.saveThumb） */
+async function downloadThumbFile(itemId: string, url: string): Promise<string> {
   const res = await session.fromPartition(PARTITION).fetch(url)
   if (!res.ok) throw new Error(`サムネイル取得に失敗しました（${res.status}）: ${url}`)
   const buf = Buffer.from(await res.arrayBuffer())
   const file = thumbFileName(itemId, url)
-  const src = db.normalizeThumbSrc(url)
   const dir = ensureThumbDir()
   await writeFile(join(dir, file), buf)
   await cleanupOldThumbFiles(dir, itemId, file)
-  return { file, src }
+  return file
 }
 
 interface ThumbSaveResult { saved: number; attempted: number }
 
+/**
+ * 販売・出品のサムネイルを保存する（対象は store の段が返す。種類は target.kind）。上限は呼び出し側が
+ * `limit` で切る（試みた数で減らす）。各画像の間に 300〜800ms 待つ。失敗しても再試行しない。
+ */
 async function saveNewThumbs(
-  targets: Array<{ id: string; mercariItemId: string; thumbUrl: string }>,
+  store: CollectorStore,
+  targets: AgentThumbTarget[],
   limit: number,
 ): Promise<ThumbSaveResult> {
   const list = targets.slice(0, Math.max(0, limit))
@@ -852,29 +860,8 @@ async function saveNewThumbs(
   for (const t of list) {
     attempted++
     try {
-      const { file, src } = await downloadThumbFile(t.mercariItemId, t.thumbUrl)
-      db.setSaleThumb(t.id, file, src)
-      saved++
-    } catch {
-      // 失敗しても再試行しない
-    }
-    await sleep(300 + Math.floor(Math.random() * 500))
-  }
-  return { saved, attempted }
-}
-
-async function saveNewListingThumbs(
-  targets: Array<{ id: string; thumbUrl: string }>,
-  limit: number,
-): Promise<ThumbSaveResult> {
-  const list = targets.slice(0, Math.max(0, limit))
-  let saved = 0
-  let attempted = 0
-  for (const t of list) {
-    attempted++
-    try {
-      const { file, src } = await downloadThumbFile(t.id, t.thumbUrl)
-      db.setListingThumb(t.id, file, src)
+      const file = await downloadThumbFile(t.channel_item_id, t.thumb_url)
+      await store.saveThumb({ kind: t.kind, channel_item_id: t.channel_item_id, thumb_url: t.thumb_url, path: file })
       saved++
     } catch {
       // 失敗しても再試行しない
@@ -991,67 +978,14 @@ export function combineYahooSales(
 }
 
 /** splitYahooCombinedSales の返り値 */
-export interface YahooCombinedSalesSplit {
-  /** 新規（db.insertCollected へ渡す） */
-  freshMatched: YahooCombinedSale[]
-  /** 既に帳簿にある（db.updateYahooActuals へ渡す） */
-  knownMatched: YahooCombinedSale[]
-  /** 新規のうちキーワード不一致で弾いた件数（タイトルが途中で切れている行は含まない） */
-  excludedByKeyword: number
-  /** 新規のうち削除済み（sale_exclusion）で弾いた件数 */
-  excludedDeleted: number
-  /**
-   * 新規のうち、タイトルが③（売上金管理）の商品名しか無く途中で切れていたため、キーワードでの
-   * 判定をスキップしてそのまま freshMatched に含めた行の商品id（実行記録に残すため）
-   */
-  truncatedTitleIds: string[]
-}
+export type YahooCombinedSalesSplit = YahooSalesSplit<YahooCombinedSale>
 
 /**
- * combineYahooSales の結果を「新規（insertCollected へ）」と「既知（updateYahooActuals へ）」に
- * 分ける（実行部 collect() の配線を単体でテストできるように切り出した純粋関数）。
- *
- * knownIds は db.existingMercariIds、excludedIds は db.isMercariItemExcluded で事前に解決した
- * 結果を呼び出し側が渡す（この関数自体は DB に触らない）。
- *
- * combined は combineYahooSales が amountsConsistent=false の行をすでに除いた後のものなので、
- * ここでは意識しなくてよい（新規・既知のどちらにも式が崩れた行は混ざらない）。
- * 削除済み（sale_exclusion）は新規側だけ弾く（既知はすでに帳簿にある＝削除判定は関係ない）。
- *
- * キーワードは「取り込むかどうか」を決めるものであって「もう帳簿にあるものを更新するかどうか」
- * ではない。だから既知（knownMatched）は現在のキーワードに関わらず全件を updateYahooActuals へ
- * 渡す。キーワードで絞るのは新規（freshMatched）だけ（今までどおり）。
- *
- * タイトルが③（売上金管理）の商品名しか無く途中で切れている行（titleTruncated）は、切れた
- * 部分にキーワードがあった場合に誤って「不一致」と判定してしまう。だからキーワード判定を
- * スキップし、そのまま freshMatched に含める（黙って捨てない）。id は truncatedTitleIds に
- * 残し、呼び出し側が実行記録に書けるようにする。
+ * 新規（insertCollected へ）と既知（updateYahooActuals へ）の仕分けは、ローカルの store
+ * （store/local.ts の ingestYahooSales）が行う。規則は store/rules.ts の 1 か所に置き、ここから再 export する
+ * （既存のテストと呼び出しが今までの場所から取れるように）。
  */
-export function splitYahooCombinedSales(
-  combined: YahooCombinedSale[],
-  knownIds: Set<string>,
-  excludedIds: Set<string>,
-  keywords: string[],
-): YahooCombinedSalesSplit {
-  const freshAll = combined.filter(c => !knownIds.has(c.yahooItemId))
-  const knownMatched = combined.filter(c => knownIds.has(c.yahooItemId))
-
-  const freshNotDeleted = freshAll.filter(c => !excludedIds.has(c.yahooItemId))
-  const excludedDeleted = freshAll.length - freshNotDeleted.length
-
-  const freshTruncated = freshNotDeleted.filter(c => c.titleTruncated)
-  const freshJudgeable = freshNotDeleted.filter(c => !c.titleTruncated)
-
-  const freshJudgeableMatched = keywords.length > 0
-    ? freshJudgeable.filter(c => db.matchesAnyKeyword(c.title, keywords))
-    : freshJudgeable
-  const excludedByKeyword = freshJudgeable.length - freshJudgeableMatched.length
-
-  const freshMatched = [...freshJudgeableMatched, ...freshTruncated]
-  const truncatedTitleIds = freshTruncated.map(c => c.yahooItemId)
-
-  return { freshMatched, knownMatched, excludedByKeyword, excludedDeleted, truncatedTitleIds }
-}
+export { splitYahooCombinedSales } from './store/rules'
 
 /**
  * ページの HTML に商品ページへのリンク（`href="…/item/<id>"` `<id>` は英字1文字＋数字8桁以上）
@@ -1283,11 +1217,15 @@ export async function saveIfUnknownYahooBreakdown(
 // ------------------------------------------------------------
 
 /**
- * 収集を1回実行する。
+ * 収集を1回実行する。帳簿への書き込み・読み取りは `store` の段を通す（既定はこの PC の SQLite）。
  * @param silent true なら画面を出さない（起動時の自動実行）
  */
-export async function collect(silent: boolean): Promise<CollectorRun> {
-  const runId = db.startRun('yahoo')
+export async function collect(silent: boolean, store: CollectorStore = localStore): Promise<CollectorRun> {
+  // 実行記録は終わったときに 1 回書く（始めた時刻はここで控えておく）
+  const startedAt = new Date().toISOString()
+  const record = (status: RunStatus, fetched: number, inserted: number, message?: string): Promise<CollectorRun> =>
+    store.recordRun({ source: 'yahoo', started_at: startedAt, status, fetched, inserted, message })
+
   const win = createWindow(!silent)
   let keepWindowOpen = false
   // 0件だったページの HTML を保存した通知（原因の切り分け用）。0件でないページは保存しない
@@ -1301,11 +1239,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     if (await isChallenge(win)) {
       keepWindowOpen = true
       revealForChallenge(win, 'Yahoo!フリマ')
-      return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
+      return await record('auth_required', 0, 0, CHALLENGE_MESSAGE)
     }
     if (!(await isLoggedIn(win))) {
-      return db.finishRun(
-        runId, 'auth_required', 0, 0,
+      return await record(
+        'auth_required', 0, 0,
         'Yahoo!フリマにログインし直してください（出品中一覧が開けませんでした）',
       )
     }
@@ -1327,11 +1265,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     if (await isChallenge(win)) {
       keepWindowOpen = true
       revealForChallenge(win, 'Yahoo!フリマ')
-      return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
+      return await record('auth_required', 0, 0, CHALLENGE_MESSAGE)
     }
     if (!(await isLoggedIn(win))) {
-      return db.finishRun(
-        runId, 'auth_required', 0, 0,
+      return await record(
+        'auth_required', 0, 0,
         'Yahoo!フリマにログインし直してください（取引中・取引完了が開けませんでした）',
       )
     }
@@ -1355,13 +1293,13 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     if (await isChallenge(win)) {
       keepWindowOpen = true
       revealForChallenge(win, 'Yahoo!フリマ')
-      return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
+      return await record('auth_required', 0, 0, CHALLENGE_MESSAGE)
     }
     if (!(await isLoggedIn(win))) {
       // 2つのホストにまたがるため、同じYahoo IDのセッションでもここだけ通らないことがあり得る。
       // 黙って0件にせず、どちらで弾かれたか分かる文言にする
-      return db.finishRun(
-        runId, 'auth_required', 0, 0,
+      return await record(
+        'auth_required', 0, 0,
         '売上金管理（salesmanagement.yahoo.co.jp）でログインが確認できませんでした。'
           + 'Yahoo!フリマにログインし直してください',
       )
@@ -1379,8 +1317,8 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
         ? `（${renderTimedOutPages.join('・')}は描画待ちの上限に達しました）`
         : ''
       const debugNote = debugSavedNotes.length > 0 ? `。${debugSavedNotes.join('。')}` : ''
-      return db.finishRun(
-        runId, 'empty', 0, 0,
+      return await record(
+        'empty', 0, 0,
         `0件でした。画面構造が変わってセレクタが壊れている可能性があります${timeoutNote}${debugNote}`,
       )
     }
@@ -1400,96 +1338,75 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     const breakdownNote = await saveIfUnknownYahooBreakdown(inconsistent, salesHtml, html => saveYahooDebugHtml('sales', html))
     if (breakdownNote) debugSavedNotes.push(breakdownNote)
 
-    const keywords = db.parseKeywords(db.getSettings().yahoo_keyword ?? '')
-
-    const known = db.existingMercariIds(combined.map(c => c.yahooItemId))
-    // 削除した販売（sale_exclusion）は再取り込みしない（新規側だけ）
-    const excludedIds = new Set(
-      combined.filter(c => !known.has(c.yahooItemId) && db.isMercariItemExcluded(c.yahooItemId))
-        .map(c => c.yahooItemId),
-    )
-
-    // キーワードが設定されていれば、新規のうち不一致は insertCollected に渡さない（詳細・
-    // サムネイルも取りに行かない）。既知（knownMatched）はキーワードに関わらず更新へ渡る
-    // （splitYahooCombinedSales 参照）。タイトルが途中で切れている新規行はキーワード判定を
-    // スキップしてそのまま取り込む（truncatedTitleIds に id が残る）
-    const { freshMatched, knownMatched, excludedByKeyword, excludedDeleted, truncatedTitleIds } =
-      splitYahooCombinedSales(combined, known, excludedIds, keywords)
-
-    const insertedRows = freshMatched.length > 0
-      ? db.insertCollected(freshMatched.map(c => ({
-          mercariItemId: c.yahooItemId,
-          title: c.title,
-          price: c.price,
-          soldAt: c.soldAt,
-          fee: c.fee,
-          shippingFee: c.shippingFee,
-          bundleCount: c.bundleCount,
-          status: c.status,
-        })), 'yahoo')
-      : []
-
-    // --- 既に取り込み済みの販売を実額・状態で更新する（キーワードには関わらない） ---
-    // メルカリ用の updateCollectedActuals は status='completed' を決め打ちするため使わない
-    // （Yahoo!は受取連絡待ちの取引も出るので、渡された status（null もそのまま）を使う updateYahooActuals を使う）
-    // title：全文（②取引ページ由来）が取れたときだけ渡す。titleTruncated=true（③の切れた商品名
-    // しか無い）のものは渡さない（切れたタイトルで上書きしようとしない）
-    const updatedCount = knownMatched.length > 0
-      ? db.updateYahooActuals(knownMatched.map(c => ({
-          mercariItemId: c.yahooItemId,
-          soldAt: c.soldAt,
-          fee: c.fee,
-          shippingFee: c.shippingFee,
-          bundleCount: c.bundleCount,
-          price: c.price,
-          status: c.status,
-          title: c.titleTruncated ? undefined : c.title,
-        })))
-      : 0
+    // 新規／既知の仕分け・削除済み・キーワードの絞り込み・実額と状態の更新は store の段が行い、
+    // 画像の対象を返す。キーワード（yahoo_keyword）は、新規のうち不一致は入れない（詳細・サムネイルも
+    // 取りに行かない）。既知はキーワードに関わらず更新へ渡る。タイトルが途中で切れている新規行は
+    // キーワード判定をスキップしてそのまま取り込む（truncatedTitleIds に id が残る）。
+    // 更新は status='completed' を決め打ちしない（Yahoo!は受取連絡待ちの取引も出るので、渡した status
+    // （null もそのまま）を使う）。titleTruncated=true の行は切れたタイトルで上書きしない
+    let insertedCount = 0
+    let updatedCount = 0
+    let excludedByKeyword = 0
+    let excludedDeleted = 0
+    let truncatedTitleIds: string[] = []
+    let thumbTargets: AgentThumbTarget[] = []
+    if (combined.length > 0) {
+      const salesPage = await store.ingestYahooSales(1, combined.map(c => ({
+        yahooItemId: c.yahooItemId,
+        title: c.title,
+        titleTruncated: c.titleTruncated,
+        price: c.price,
+        fee: c.fee,
+        shippingFee: c.shippingFee,
+        bundleCount: c.bundleCount,
+        soldAt: c.soldAt,
+        status: c.status,
+        thumbUrl: c.thumbUrl,
+      })))
+      if (!salesPage.already) {
+        insertedCount = salesPage.inserted
+        updatedCount = salesPage.updated
+        excludedByKeyword = salesPage.excluded_by_keyword
+        excludedDeleted = salesPage.excluded_deleted
+        truncatedTitleIds = salesPage.truncated_title_ids
+        thumbTargets = salesPage.thumb_targets
+      }
+    }
 
     // --- サムネイル：新規 ＋ 既知（キーワードには関わらない）。予算は出品と合算で管理 ---
+    const thumbsResult = await saveNewThumbs(store, thumbTargets, MAX_THUMBS_PER_RUN)
 
-    const thumbTargets = db.salesNeedingThumb(
-      [...freshMatched, ...knownMatched]
-        .filter((c): c is YahooCombinedSale & { thumbUrl: string } => !!c.thumbUrl)
-        .map(c => ({ mercariItemId: c.yahooItemId, thumbUrl: c.thumbUrl })),
-    )
-    const thumbsResult = await saveNewThumbs(thumbTargets, MAX_THUMBS_PER_RUN)
-
-    // --- 出品中一覧（①）。売却済みの後に読む。キーワードで絞る ---
-    const targetListings = keywords.length > 0
-      ? scrapedListings.filter(l => db.matchesAnyKeyword(l.title, keywords))
-      : scrapedListings
-
-    const listingResult = db.upsertListings(
-      targetListings.map(l => ({
-        mercariItemId: l.yahooItemId,
-        title: l.title,
-        price: l.price,
-        // Yahoo!フリマの「公開停止中」相当の表示は未観測（tradstat=NONEのみ出品中とみなす）
-        suspended: false,
-        thumbUrl: l.thumbUrl,
-        likes: l.likes,
-        listedAt: l.listedAt,
-      })),
-      'yahoo',
+    // --- 出品中一覧（①）。売却済みの後に読む。キーワードで絞るのは store の段 ---
+    // Yahoo!フリマの「公開停止中」相当の表示は未観測（tradstat=NONEのみ出品中とみなす）ので suspended は常に false
+    const listingsPage = await store.ingestListingsPage('yahoo', 1, scrapedListings.map(l => ({
+      mercariItemId: l.yahooItemId,
+      title: l.title,
+      price: l.price,
+      suspended: false,
+      thumbUrl: l.thumbUrl,
+      likes: l.likes,
+      listedAt: l.listedAt,
+    })))
+    let listingInserted = 0
+    let listingUpdated = 0
+    let listingThumbTargets: AgentThumbTarget[] = []
+    if (!listingsPage.already) {
+      listingInserted = listingsPage.inserted
+      listingUpdated = listingsPage.updated
+      listingThumbTargets = listingsPage.thumb_targets
+    }
+    const listingThumbsResult = await saveNewThumbs(
+      store, listingThumbTargets, MAX_THUMBS_PER_RUN - thumbsResult.attempted,
     )
 
-    const listingThumbTargets = db.listingsNeedingThumb(
-      targetListings.map(l => ({ mercariItemId: l.yahooItemId, thumbUrl: l.thumbUrl })),
-    )
-    const listingThumbsResult = await saveNewListingThumbs(
-      listingThumbTargets, MAX_THUMBS_PER_RUN - thumbsResult.attempted,
-    )
-
-    const parts = [`新規 ${insertedRows.length}・更新 ${updatedCount}`]
+    const parts = [`新規 ${insertedCount}・更新 ${updatedCount}`]
     if (excludedByKeyword > 0) parts.push(`キーワード不一致で除外 ${excludedByKeyword} 件`)
     if (excludedDeleted > 0) parts.push(`削除済み ${excludedDeleted} 件`)
     if (truncatedTitleIds.length > 0) parts.push(formatYahooTruncatedTitleNote(truncatedTitleIds))
     if (inconsistent.length > 0) parts.push(formatYahooInconsistentNote(inconsistent))
     const totalThumbsSaved = thumbsResult.saved + listingThumbsResult.saved
     if (totalThumbsSaved > 0) parts.push(`サムネイル ${totalThumbsSaved} 枚`)
-    parts.push(`出品 新規 ${listingResult.inserted}・更新 ${listingResult.updated}`)
+    parts.push(`出品 新規 ${listingInserted}・更新 ${listingUpdated}`)
     if (renderTimedOutPages.length > 0) parts.push(formatYahooRenderTimeoutNote(renderTimedOutPages))
     if (zeroPages.length > 0) {
       parts.push(`0件のページ：${zeroPages.join('・')}（実際に0件か読み取りが壊れているかは、この情報だけでは判別できません）`)
@@ -1502,11 +1419,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       ...salesRows.map(r => r.yahooItemId),
     ])
 
-    return db.finishRun(runId, 'ok', observedIds.size, insertedRows.length, parts.join('。'))
+    return await record('ok', observedIds.size, insertedCount, parts.join('。'))
 
   } catch (e) {
-    return db.finishRun(
-      runId, 'failed', 0, 0,
+    return await record(
+      'failed', 0, 0,
       e instanceof Error ? e.message : String(e),
     )
   } finally {

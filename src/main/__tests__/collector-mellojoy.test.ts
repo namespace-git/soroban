@@ -126,6 +126,8 @@ vi.mock('../db', () => ({
   setPurchaseImageChecked: vi.fn(),
   getSettings: vi.fn(() => ({})),
   setSetting: vi.fn(),
+  // store.recordRun が、収集の開始時刻を collector_run に戻すために使う（実行記録は終わったときに 1 回書く）
+  getDb: vi.fn(() => ({ prepare: vi.fn(() => ({ run: vi.fn() })) })),
 }))
 
 import {
@@ -1032,7 +1034,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
 })
 
 // ============================================================
-// savePurchaseImages()（対象は db.purchaseLinesNeedingImage、session.fetch はモック）
+// savePurchaseImages()（対象は store の段が返す image_targets、session.fetch はモック）
 // ============================================================
 describe('savePurchaseImages()', () => {
   beforeEach(() => {
@@ -1051,11 +1053,10 @@ describe('savePurchaseImages()', () => {
     const targets = Array.from({ length: 12 }, (_, i) => (
       { id: `line-${i}`, image_url: `https://cdn.example.com/${i}.jpg` }
     ))
-    vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue(targets)
     const fetchMock = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }))
     state.opts.fetchImpl = fetchMock
 
-    const saved = await savePurchaseImages('shop-1', 'purchase-1')
+    const saved = await savePurchaseImages('shop-1', targets)
 
     expect(fetchMock).toHaveBeenCalledTimes(10)
     expect(saved).toBe(10)
@@ -1067,11 +1068,10 @@ describe('savePurchaseImages()', () => {
       { id: 'line-1', image_url: 'https://cdn.example.com/1.jpg' },
       { id: 'line-2', image_url: 'https://cdn.example.com/2.jpg' },
     ]
-    vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue(targets)
     const fetchMock = vi.fn(async () => ({ ok: false, arrayBuffer: async () => new ArrayBuffer(0) }))
     state.opts.fetchImpl = fetchMock
 
-    const saved = await savePurchaseImages('shop-1', 'purchase-1')
+    const saved = await savePurchaseImages('shop-1', targets)
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(saved).toBe(0)
@@ -1079,11 +1079,10 @@ describe('savePurchaseImages()', () => {
   })
 
   it('対象が0件なら何もしない', async () => {
-    vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue([])
     const fetchMock = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }))
     state.opts.fetchImpl = fetchMock
 
-    const saved = await savePurchaseImages('shop-1', 'purchase-1')
+    const saved = await savePurchaseImages('shop-1', [])
 
     expect(fetchMock).not.toHaveBeenCalled()
     expect(saved).toBe(0)

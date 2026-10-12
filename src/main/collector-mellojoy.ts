@@ -7,7 +7,10 @@ import { extname, join } from 'node:path'
 import * as db from './db'
 import { extractCode, extractMaterial } from './code'
 import { buildUserAgent, CHALLENGE_MESSAGE, isChallengeText, randomWait, revealForChallenge } from './collector'
+import { localStore } from './store/local'
+import type { CollectorStore } from './store/types'
 import { todayLocal } from '../shared/date'
+import type { AgentImageTarget, AgentImageUrl } from '../shared/agent-types'
 import type {
   CollectorRun, Fulfillment, Material, PurchaseDraftInput, PurchaseInput, PurchaseLineInput, RunStatus,
 } from '../shared/types'
@@ -44,14 +47,10 @@ export function partitionFor(shopAccountId: string): string {
   return `persist:mellojoy-${shopAccountId}`
 }
 
-/**
- * import_keywords（db.parseKeywords で正規化済みの配列）から sha1 を作る。
- * 順序に依らないよう並べ替えてから連結する。キーワードを変えればハッシュが変わり、
- * 除外記録（mellojoy_excluded_order）が再評価される。
- */
-export function hashKeywords(keywords: string[]): string {
-  return createHash('sha1').update(keywords.slice().sort().join('\n')).digest('hex')
-}
+// キーワードの印（hashKeywords）と明細の絞り込み（filterPurchase*ByKeywords）は、仕入の 1 注文を書く段
+// （store/local.ts の ingestOrder）が使う規則なので store/rules.ts に置き、ここから再 export する
+// （既存のテストと呼び出しが今までの場所から取れるように）
+export { filterPurchaseDraftByKeywords, filterPurchaseInputByKeywords, hashKeywords } from './store/rules'
 
 /** UA・Accept-Language を通常の Chrome に合わせる（collector.ts と同じ） */
 export function ensureShopSession(shopAccountId: string): void {
@@ -666,67 +665,6 @@ export function toPurchaseInput(
 }
 
 /**
- * 口座の import_keywords で確定済みの仕入を絞り込む。confirmed / draft の判定は
- * 絞り込む前の注文全体で終わっているので、ここでは既に確定した PurchaseInput の
- * 明細を削るだけ（判定のやり直しはしない）。
- *
- * - keywords が空なら input をそのまま返す（絞り込みなし）
- * - 一致する明細が1つも無ければ null（その注文は取り込まない）
- * - 一部だけ一致するなら、一致した明細だけに絞り、送料・割引は注文全体の金額比
- *   （一致した明細の小計 ÷ 全明細の小計）で按分する。小計が0なら按分せず0
- */
-export function filterPurchaseInputByKeywords(
-  input: PurchaseInput, keywords: string[],
-): PurchaseInput | null {
-  if (keywords.length === 0) return input
-
-  const matched = input.lines.filter(l => db.matchesAnyKeyword(l.name, keywords))
-  if (matched.length === 0) return null
-  if (matched.length === input.lines.length) return input
-
-  const fullSubtotal = input.lines.reduce((s, l) => s + l.unit_price * l.quantity, 0)
-  const matchedSubtotal = matched.reduce((s, l) => s + l.unit_price * l.quantity, 0)
-  const ratio = fullSubtotal > 0 ? matchedSubtotal / fullSubtotal : 0
-
-  const excluded = input.lines.length - matched.length
-  const addition = `キーワード不一致の明細 ${excluded} 件を除外（送料・割引は金額比で按分）`
-
-  return {
-    ...input,
-    lines: matched,
-    shipping_fee: Math.round((input.shipping_fee ?? 0) * ratio),
-    discount: Math.round((input.discount ?? 0) * ratio),
-    note: input.note ? `${input.note}\n${addition}` : addition,
-  }
-}
-
-/**
- * 下書き版。下書きは単価が確定していない（quantity当たりの金額が分からない）ことがあるため、
- * 金額比の按分はできない。送料・割引は注文全体の値のまま残し、note で「確定時に見直してください」
- * と伝える。私物だけの注文が価格未入力の下書きとして要対応に出続けないよう、confirmed と同じく
- * 一致0件は null（取り込まない）にする。
- */
-export function filterPurchaseDraftByKeywords(
-  input: PurchaseDraftInput, keywords: string[],
-): PurchaseDraftInput | null {
-  if (keywords.length === 0) return input
-
-  const matched = input.lines.filter(l => db.matchesAnyKeyword(l.name, keywords))
-  if (matched.length === 0) return null
-  if (matched.length === input.lines.length) return input
-
-  const excluded = input.lines.length - matched.length
-  const addition =
-    `キーワード不一致の明細 ${excluded} 件を除外（送料・割引は注文全体の値。確定時に見直してください）`
-
-  return {
-    ...input,
-    lines: matched,
-    note: input.note ? `${input.note}\n${addition}` : addition,
-  }
-}
-
-/**
  * 詳細ページの描画がまだで明細が1行も取れていない場合に true。
  * この場合は下書きも作らない（import_key 付きの空 draft が既取込扱いになり
  * 二度と取り直せなくなるのを避ける）。次回に再試行する。
@@ -832,7 +770,20 @@ const MAX_IMAGES_PER_ORDER = 10
 
 interface ImageBudget { remaining: number; failures: string[] }
 
-/** 詳細の名前は新規取り込みと同じくバリアントを含める。保存済み明細への完全一致だけで更新。 */
+/**
+ * 詳細から読めた明細の商品画像の元 URL。名前は新規取り込みと同じくバリアントを含める（保存済み明細への
+ * 完全一致だけで更新される）。キーワードに一致する明細だけに絞るのは store の段が行う。
+ */
+function detailImageUrls(detail: OrderDetail): AgentImageUrl[] {
+  return detail.lines
+    .filter(l => l.imageUrl)
+    .map(l => ({ name: buildName(l), image_url: toDetailImageUrl(l.imageUrl!) }))
+}
+
+/**
+ * メンテ用（refetchPurchaseImages）：詳細の名前は新規取り込みと同じくバリアントを含める。
+ * 保存済み明細への完全一致だけで更新。人が押す 1 件の取り直しなので、取り込みの段にはせず帳簿を直接書く。
+ */
 function updatePurchaseImageUrls(purchaseId: string, detail: OrderDetail, keywords: string[] = []): void {
   db.setPurchaseLineImageUrls(purchaseId, detail.lines
     .filter(l => l.imageUrl && (keywords.length === 0 || db.matchesAnyKeyword(buildName(l), keywords)))
@@ -871,24 +822,24 @@ async function downloadPurchaseLineImage(shopAccountId: string, lineId: string, 
 }
 
 /**
- * 仕入の取り込み直後に、明細の商品画像を保存する。対象は `db.purchaseLinesNeedingImage`
- * が返す「image_url はあるが image_file がまだ無い」明細だけ（画像の無い注文は0件）。
+ * 仕入の取り込み直後に、明細の商品画像を保存する。対象は store の段（ingestOrder / revisitOrder）が
+ * 返す `image_targets`＝「image_url はあるが image_file がまだ無い」明細だけ（画像の無い注文は0件）。
  * 1注文につき最大 `MAX_IMAGES_PER_ORDER` 枚、各画像の間に 300〜800ms 待つ。
  * 失敗は結果に記録し、その場で再試行しない（次回の既存注文の巡回で拾う）。
  */
 export async function savePurchaseImages(
-  shopAccountId: string, purchaseId: string,
-  budget: ImageBudget = { remaining: MAX_IMAGES_PER_ORDER, failures: [] }, keywords: string[] = [],
+  shopAccountId: string, imageTargets: AgentImageTarget[],
+  budget: ImageBudget = { remaining: MAX_IMAGES_PER_ORDER, failures: [] },
+  store: CollectorStore = localStore,
 ): Promise<number> {
-  const targets = db.purchaseLinesNeedingImage(purchaseId, keywords)
-    .slice(0, Math.min(MAX_IMAGES_PER_ORDER, budget.remaining))
+  const targets = imageTargets.slice(0, Math.min(MAX_IMAGES_PER_ORDER, budget.remaining))
 
   let saved = 0
   for (const line of targets) {
     budget.remaining--
     try {
       const file = await downloadPurchaseLineImage(shopAccountId, line.id, line.image_url)
-      db.setPurchaseLineImage(line.id, file)
+      await store.saveLineImage(line.id, file)
       saved++
     } catch (e) {
       budget.failures.push(`商品画像：${e instanceof Error ? e.message : String(e)}`)
@@ -954,7 +905,9 @@ export async function refetchPurchaseImages(purchaseId: string): Promise<{ saved
     db.setPurchaseImageChecked(purchaseId)
     applyFulfillmentFromDetail(purchaseId, detail)
     const imageBudget: ImageBudget = { remaining: MAX_IMAGES_PER_ORDER, failures: [] }
-    const saved = await savePurchaseImages(shopAccountId, purchaseId, imageBudget, keywords)
+    const saved = await savePurchaseImages(
+      shopAccountId, db.purchaseLinesNeedingImage(purchaseId, keywords), imageBudget,
+    )
     // 1枚でも保存できていれば成功として扱う（一部失敗は saved の枚数で分かる）。
     // 1枚も保存できず、かつ失敗があったときだけ例外にする
     if (saved === 0 && imageBudget.failures.length > 0) throw new Error(imageBudget.failures.join('、'))
@@ -965,18 +918,26 @@ export async function refetchPurchaseImages(purchaseId: string): Promise<{ saved
 }
 
 /**
- * メロジョイの注文履歴を読み、`purchase` に積む（確定 or 下書き）。
+ * メロジョイの注文履歴を読み、`purchase` に積む（確定 or 下書き）。帳簿への書き込み・読み取りは
+ * `store` の段を通す（既定はこの PC の SQLite）。キーワードの絞り込み・除外記録・既取込の判定は store の段が行う。
  * @param silent true なら画面を出さない
  */
-export async function collectShopOrders(shopAccountId: string, silent: boolean): Promise<CollectorRun> {
+export async function collectShopOrders(
+  shopAccountId: string, silent: boolean, store: CollectorStore = localStore,
+): Promise<CollectorRun> {
   ensureShopSession(shopAccountId)
-  const runId = db.startRun('mellojoy', shopAccountId)
+  // 実行記録は終わったときに 1 回書く（始めた時刻はここで控えておく）
+  const startedAt = new Date().toISOString()
+  const record = (status: RunStatus, fetched: number, inserted: number, message?: string): Promise<CollectorRun> =>
+    store.recordRun({
+      source: 'mellojoy', shop_account_id: shopAccountId, started_at: startedAt, status, fetched, inserted, message,
+    })
+
   const win = createShopWindow(shopAccountId, !silent)
   let pagesOpened = 0
   // CAPTCHA・本人確認が出たときは、非表示で走っていてもウィンドウを見せて残す
   // （finally での destroy をスキップする）
   let keepWindowOpen = false
-  const importKeywords = db.parseKeywords(db.getShopAccount(shopAccountId)?.import_keywords ?? '')
 
   try {
     await win.loadURL(ORDERS_URL)
@@ -985,12 +946,12 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     await waitForOrdersReady(win)
 
     if (isShopLoginUrl(win.webContents.getURL())) {
-      return db.finishRun(runId, 'auth_required', 0, 0, AUTH_MESSAGE)
+      return await record('auth_required', 0, 0, AUTH_MESSAGE)
     }
     if (await isChallenge(win)) {
       keepWindowOpen = true
       revealForChallenge(win, shopLabel(shopAccountId))
-      return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
+      return await record('auth_required', 0, 0, CHALLENGE_MESSAGE)
     }
 
     const listUrl = win.webContents.getURL()
@@ -998,8 +959,8 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     const list = parseOrderListHtml(html)
 
     if (list.length === 0) {
-      return db.finishRun(
-        runId, 'empty', 0, 0,
+      return await record(
+        'empty', 0, 0,
         '0件でした。画面構造が変わった可能性があります',
       )
     }
@@ -1011,38 +972,39 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     let cancelledCount = list.length - active.length
 
     const importKeys = active.map(o => `mellojoy:${o.orderNo}`)
-    const known = db.existingImportKeys(importKeys)
+    const known = new Set(importKeys.length > 0 ? await store.existingImportKeys(importKeys) : [])
     const fresh = active.filter(o => !known.has(`mellojoy:${o.orderNo}`))
     const alreadyImported = active.length - fresh.length
 
     // 既取込の注文は詳細ページを開かず、一覧の状態表示だけで到着状態を更新する
+    // （前に進む方向だけ。規則は store の段）
     let fulfillmentUpdated = 0
-    for (const order of active) {
-      const key = `mellojoy:${order.orderNo}`
-      if (!known.has(key)) continue
-      if (db.updatePurchaseFulfillment(key, fulfillmentFromStatus(order.status))) {
-        fulfillmentUpdated++
-      }
+    const listUpdates = active
+      .filter(o => known.has(`mellojoy:${o.orderNo}`))
+      .map(o => ({ import_key: `mellojoy:${o.orderNo}`, fulfillment: fulfillmentFromStatus(o.status) }))
+    if (listUpdates.length > 0) {
+      const updatedByList = await store.updateOrderFulfillments(shopAccountId, listUpdates)
+      if (!updatedByList.already) fulfillmentUpdated = updatedByList.updated
     }
 
     // 前回キーワード不一致と判明した注文は、詳細を開かずに飛ばす（キーワードが変われば
     // ハッシュが変わるので再評価される）。取得枠を占有しないよう、budget/slice の前に弾く
-    const currentKeywordsHash = hashKeywords(importKeywords)
-    const freshNotExcluded = fresh.filter(
-      o => !db.isMellojoyOrderExcluded(shopAccountId, o.orderNo, currentKeywordsHash),
-    )
+    const excludedNos = new Set(fresh.length > 0
+      ? await store.excludedOrders(shopAccountId, fresh.map(o => o.orderNo))
+      : [])
+    const freshNotExcluded = fresh.filter(o => !excludedNos.has(o.orderNo))
     const skippedExcluded = fresh.length - freshNotExcluded.length
 
     const budget = Math.max(0, Math.min(MAX_DETAILS_PER_RUN, MAX_PAGES_PER_RUN - pagesOpened))
     const targets = freshNotExcluded.slice(0, budget)
 
     // 新規取り込み後の余った詳細枠で既存注文も巡回する。画像なしの注文で後続を塞がない。
-    const refreshCandidates = db.purchaseDetailRevisitCandidates(shopAccountId, [...known], importKeywords)
-    const cursorKey = `mellojoy_image_cursor:${shopAccountId}`
-    const cursor = db.getSettings()[cursorKey]
-    const cursorIndex = refreshCandidates.findIndex(p => p.id === cursor)
-    const refreshOrdered = [...refreshCandidates.slice(cursorIndex + 1), ...refreshCandidates.slice(0, cursorIndex + 1)]
-    const refreshTargets = refreshOrdered.slice(0, budget - targets.length)
+    // 候補は前回の続き（巡回の位置の次）から並べ直されて返る。
+    const refreshBudget = budget - targets.length
+    const refreshOrdered = refreshBudget > 0 && known.size > 0
+      ? await store.purchaseRevisitCandidates(shopAccountId, [...known])
+      : []
+    const refreshTargets = refreshOrdered.slice(0, refreshBudget)
 
     let confirmedCount = 0
     let draftCount = 0
@@ -1066,23 +1028,22 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
         await waitForDetailReady(win)
 
         if (isShopLoginUrl(win.webContents.getURL())) {
-          return db.finishRun(
-            runId, 'auth_required', list.length, confirmedCount + draftCount, AUTH_MESSAGE,
-          )
+          return await record('auth_required', list.length, confirmedCount + draftCount, AUTH_MESSAGE)
         }
         if (await isChallenge(win)) {
           keepWindowOpen = true
           revealForChallenge(win, shopLabel(shopAccountId))
-          return db.finishRun(
-            runId, 'auth_required', list.length, confirmedCount + draftCount, CHALLENGE_MESSAGE,
-          )
+          return await record('auth_required', list.length, confirmedCount + draftCount, CHALLENGE_MESSAGE)
         }
 
         const detailHtml = await win.webContents.executeJavaScript('document.documentElement.outerHTML') as string
         const detail = parseOrderDetailHtml(detailHtml)
 
         if (isCancelledDetail(detail)) {
-          db.markMellojoyOrderExcluded(shopAccountId, order.orderNo, currentKeywordsHash)
+          // キャンセル（合計 ￥0）。除外を記録して、次回から詳細を開かない
+          await store.ingestOrder(shopAccountId, {
+            order_no: order.orderNo, purchase: { kind: 'cancelled' }, fulfillment: null, image_urls: [],
+          })
           cancelledCount++
           continue
         }
@@ -1099,35 +1060,29 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
           fulfillment: fulfillmentFromStatus(order.status),
         })
 
-        if (result.kind === 'confirmed') {
-          const filtered = filterPurchaseInputByKeywords(result.input, importKeywords)
-          if (filtered === null) {
-            skippedByKeyword++
-            db.markMellojoyOrderExcluded(shopAccountId, order.orderNo, currentKeywordsHash)
-            continue
-          }
-          const purchaseId = db.createPurchase(filtered)
-          confirmedCount++
-          // 取り込みでこの注文の詳細は読み終えている（あとで画像巡回に拾わせない）
-          db.setPurchaseImageChecked(purchaseId)
-          if (applyFulfillmentFromDetail(purchaseId, detail)) fulfillmentDetailUpdated++
-          imagesSaved += await savePurchaseImages(shopAccountId, purchaseId, imageBudget, importKeywords)
-        } else {
-          const filteredDraft = filterPurchaseDraftByKeywords(result.input, importKeywords)
-          if (filteredDraft === null) {
-            skippedByKeyword++
-            db.markMellojoyOrderExcluded(shopAccountId, order.orderNo, currentKeywordsHash)
-            continue
-          }
-          const purchaseId = db.createPurchaseDraft(filteredDraft)
-          draftCount++
-          if (purchaseId) {
-            updatePurchaseImageUrls(purchaseId, detail, importKeywords)
-            db.setPurchaseImageChecked(purchaseId)
-            if (applyFulfillmentFromDetail(purchaseId, detail)) fulfillmentDetailUpdated++
-            imagesSaved += await savePurchaseImages(shopAccountId, purchaseId, imageBudget, importKeywords)
-          }
+        // 注文 1 件を 1 回で書く。キーワードの絞り込み（一致 0 件なら取り込まず除外を記録）・仕入（確定なら在庫も）
+        // の作成・詳細を読み終えた印・配送の反映は store の段が行い、画像を取る明細を返す
+        const placed = await store.ingestOrder(shopAccountId, {
+          order_no: order.orderNo,
+          purchase: result.kind === 'confirmed'
+            ? { kind: 'confirmed', input: result.input }
+            : { kind: 'draft', input: result.input },
+          fulfillment: fulfillmentUpdateFromDetail(detail),
+          // 確定の画像 URL は input.lines[].image_url に入っている。下書きは別に渡す
+          image_urls: result.kind === 'draft' ? detailImageUrls(detail) : [],
+        })
+        if (placed.already) continue
+
+        if (placed.outcome === 'excluded') {
+          skippedByKeyword++
+          continue
         }
+        if (placed.outcome === 'confirmed') confirmedCount++
+        else if (placed.outcome === 'draft') draftCount++
+        else continue
+
+        if (placed.fulfillment_updated) fulfillmentDetailUpdated++
+        imagesSaved += await savePurchaseImages(shopAccountId, placed.image_targets, imageBudget, store)
       } catch (e) {
         failures.push(`${order.orderNo}：${e instanceof Error ? e.message : String(e)}`)
       }
@@ -1137,29 +1092,39 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
       if (imageBudget.remaining <= 0 || pagesOpened >= MAX_PAGES_PER_RUN) break
       imagesChecked++
       const order = active.find(o => `mellojoy:${o.orderNo}` === purchase.import_key)!
+      // revisitOrder の段は巡回の位置も進める。段まで届かなかった（読めなかった・例外）ときは、
+      // 下で「位置だけ進める」呼び出しをする
+      let revisited = false
       try {
         await win.loadURL(new URL(order.href, listUrl).toString())
         pagesOpened++
         await randomWait()
         await waitForDetailReady(win)
         if (isShopLoginUrl(win.webContents.getURL())) {
-          return db.finishRun(runId, 'auth_required', list.length, confirmedCount + draftCount, AUTH_MESSAGE)
+          return await record('auth_required', list.length, confirmedCount + draftCount, AUTH_MESSAGE)
         }
         if (await isChallenge(win)) {
           keepWindowOpen = true
           revealForChallenge(win, shopLabel(shopAccountId))
-          return db.finishRun(runId, 'auth_required', list.length, confirmedCount + draftCount, CHALLENGE_MESSAGE)
+          return await record('auth_required', list.length, confirmedCount + draftCount, CHALLENGE_MESSAGE)
         }
         const detail = parseOrderDetailHtml(await win.webContents.executeJavaScript('document.documentElement.outerHTML') as string)
         if (shouldSkipDetail(detail)) throw new Error('商品画像の明細が読めませんでした')
-        updatePurchaseImageUrls(purchase.id, detail, importKeywords)
-        db.setPurchaseImageChecked(purchase.id)
-        if (applyFulfillmentFromDetail(purchase.id, detail)) fulfillmentDetailUpdated++
-        imagesSaved += await savePurchaseImages(shopAccountId, purchase.id, imageBudget, importKeywords)
+        // 画像の URL（キーワードに一致する明細だけ）・詳細を読んだ印・配送の反映を 1 回で書き、画像を取る明細を返す
+        const revisit = await store.revisitOrder(shopAccountId, purchase.id, {
+          image_urls: detailImageUrls(detail),
+          fulfillment: fulfillmentUpdateFromDetail(detail),
+        })
+        revisited = true
+        if (!revisit.already) {
+          if (revisit.fulfillment_updated) fulfillmentDetailUpdated++
+          imagesSaved += await savePurchaseImages(shopAccountId, revisit.image_targets, imageBudget, store)
+        }
       } catch (e) {
         failures.push(`${order.orderNo}：${e instanceof Error ? e.message : String(e)}`)
       }
-      db.setSetting(cursorKey, purchase.id)
+      // 詳細を読めなかった注文も、巡回の位置だけは進める（同じ注文で詰まらない。読んだ印は付けない＝次回また候補に残る）
+      if (!revisited) await store.revisitOrder(shopAccountId, purchase.id, null)
     }
 
     const detailFailures = failures.length
@@ -1188,11 +1153,11 @@ export async function collectShopOrders(shopAccountId: string, silent: boolean):
     const status: RunStatus = allDetailsFailed ? 'failed' : 'ok'
     if (allDetailsFailed) parts.unshift(`詳細の取得に全て失敗しました（${detailCount} 件）`)
 
-    return db.finishRun(runId, status, list.length, confirmedCount + draftCount, parts.join('。'))
+    return await record(status, list.length, confirmedCount + draftCount, parts.join('。'))
 
   } catch (e) {
-    return db.finishRun(
-      runId, 'failed', 0, 0,
+    return await record(
+      'failed', 0, 0,
       e instanceof Error ? e.message : String(e),
     )
   } finally {

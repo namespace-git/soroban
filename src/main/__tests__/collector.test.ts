@@ -159,6 +159,8 @@ vi.mock('../db', () => ({
   })),
   listSales: vi.fn(() => []),
   appendModelCodes: vi.fn(() => false),
+  // store.recordRun が、収集の開始時刻を collector_run に戻すために使う（実行記録は終わったときに 1 回書く）
+  getDb: vi.fn(() => ({ prepare: vi.fn(() => ({ run: vi.fn() })) })),
 }))
 
 import { BrowserWindow } from 'electron'

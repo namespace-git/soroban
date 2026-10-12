@@ -5,9 +5,10 @@ import { mkdirSync } from 'node:fs'
 import { readdir, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import * as db from './db'
-import { extractCodes } from './code'
-import { todayLocal } from '../shared/date'
-import type { CollectorRun, SaleStatus } from '../shared/types'
+import { localStore } from './store/local'
+import type { CollectorStore } from './store/types'
+import type { AgentThumbTarget } from '../shared/agent-types'
+import type { CollectorRun, RunStatus, SaleStatus } from '../shared/types'
 
 // ============================================================
 // メルカリの販売履歴を読み取る
@@ -634,29 +635,6 @@ async function scrapeDetail(win: BrowserWindow): Promise<{ description: string |
   return { description }
 }
 
-function toRow(s: ScrapedSale): {
-  mercariItemId: string
-  title: string
-  price: number
-  soldAt: string
-  fee?: number | null
-  shippingFee?: number | null
-  otherCost?: number | null
-  status?: SaleStatus | null
-} {
-  return {
-    mercariItemId: s.mercariItemId,
-    title: s.title,
-    price: s.price,
-    soldAt: s.soldAt,
-    fee: s.fee,
-    shippingFee: s.shippingFee,
-    otherCost: s.otherCost,
-    // 販売履歴（sold）タブに出ている時点で取引完了（購入完了日つき）
-    status: 'completed',
-  }
-}
-
 /** サムネイル保存先ディレクトリ（無ければ作る） */
 function ensureThumbDir(): string {
   const dir = join(app.getPath('userData'), 'thumbs')
@@ -692,28 +670,20 @@ async function cleanupOldThumbFiles(dir: string, mercariItemId: string, keepFile
 }
 
 /**
- * 一覧に写っているサムネイルを1枚取得してファイルに保存し、ファイル名と正規化後URL
- * （DB保存用）を返す。書き込み操作ではない（画像のGETのみ）。session.fetch を使うことで、
- * 普通のブラウザの画像取得と同じ Cookie/UA に見える。保存できたら、同じ商品IDの
- * 旧ファイルを削除する。
+ * 一覧に写っているサムネイルを1枚取得してファイルに保存し、ファイル名を返す。書き込み操作では
+ * ない（画像のGETのみ）。session.fetch を使うことで、普通のブラウザの画像取得と同じ Cookie/UA に
+ * 見える。保存できたら、同じ商品IDの旧ファイルを削除する。帳簿への記録（元URLの正規化を含む）は
+ * store.saveThumb が行う。
  */
-async function downloadThumbFile(
-  mercariItemId: string, url: string,
-): Promise<{ file: string; src: string }> {
+async function downloadThumbFile(mercariItemId: string, url: string): Promise<string> {
   const res = await session.fromPartition(PARTITION).fetch(url)
   if (!res.ok) throw new Error(`サムネイル取得に失敗しました（${res.status}）: ${url}`)
   const buf = Buffer.from(await res.arrayBuffer())
   const file = thumbFileName(mercariItemId, url)
-  const src = db.normalizeThumbSrc(url)
   const dir = ensureThumbDir()
   await writeFile(join(dir, file), buf)
   await cleanupOldThumbFiles(dir, mercariItemId, file)
-  return { file, src }
-}
-
-async function downloadThumb(saleId: string, mercariItemId: string, url: string): Promise<void> {
-  const { file, src } = await downloadThumbFile(mercariItemId, url)
-  db.setSaleThumb(saleId, file, src)
+  return file
 }
 
 /** 保存に成功した数（saved）と、実際にリクエストを試みた数（attempted）。予算は attempted で減らす */
@@ -723,13 +693,16 @@ export interface ThumbSaveResult {
 }
 
 /**
- * サムネイルを保存する。対象は `db.salesNeedingThumb` が返す「まだ取れていない」
- * 「画像URLが変わった」販売（未取得が先に並ぶ）。上限は呼び出し側が `limit` で切る
+ * サムネイルを保存する。対象は store の段（ingestSoldPage / ingestTrading / ingestListingsPage）が返す
+ * 「まだ取れていない」「画像URLが変わった」販売・出品（未取得が先に並ぶ）。上限は呼び出し側が `limit` で切る
  * （試みた数で減らす＝失敗が多くても2倍のリクエストにはならない）。各画像の間に
  * 300〜800ms 待つ（連打しない）。失敗しても再試行せず、収集全体も失敗にしない。
+ * 販売と出品は同じ約束（画像が変わったときだけもう一度）で、予算は呼び出し側が合算で管理する
+ * （1回の収集でサムネイルは合計 `MAX_THUMBS_PER_RUN` 枚まで）。
  */
 async function saveNewThumbs(
-  targets: Array<{ id: string; mercariItemId: string; thumbUrl: string }>,
+  store: CollectorStore,
+  targets: AgentThumbTarget[],
   limit: number,
 ): Promise<ThumbSaveResult> {
   const list = targets.slice(0, Math.max(0, limit))
@@ -739,7 +712,8 @@ async function saveNewThumbs(
   for (const t of list) {
     attempted++
     try {
-      await downloadThumb(t.id, t.mercariItemId, t.thumbUrl)
+      const file = await downloadThumbFile(t.channel_item_id, t.thumb_url)
+      await store.saveThumb({ kind: t.kind, channel_item_id: t.channel_item_id, thumb_url: t.thumb_url, path: file })
       saved++
     } catch {
       // 失敗しても再試行しない
@@ -750,39 +724,15 @@ async function saveNewThumbs(
 }
 
 /**
- * 出品（listing）版のサムネイル保存。saveNewThumbs と同じ約束（画像が変わったときだけ
- * もう一度・連打しない・失敗を再試行しない）で、`db.setListingThumb` に書く。予算は
- * 呼び出し側が `saveNewThumbs` と合算で管理する（1回の収集でサムネイルは合計
- * `MAX_THUMBS_PER_RUN` 枚まで）。
- */
-async function saveNewListingThumbs(
-  targets: Array<{ id: string; thumbUrl: string }>,
-  limit: number,
-): Promise<ThumbSaveResult> {
-  const list = targets.slice(0, Math.max(0, limit))
-
-  let saved = 0
-  let attempted = 0
-  for (const t of list) {
-    attempted++
-    try {
-      const { file, src } = await downloadThumbFile(t.id, t.thumbUrl)
-      db.setListingThumb(t.id, file, src)
-      saved++
-    } catch {
-      // 失敗しても再試行しない
-    }
-    await sleep(300 + Math.floor(Math.random() * 500))
-  }
-  return { saved, attempted }
-}
-
-/**
- * 収集を1回実行する。
+ * 収集を1回実行する。帳簿への書き込み・読み取りは `store` の段を通す（既定はこの PC の SQLite）。
  * @param silent true なら画面を出さない（起動時の自動実行）
  */
-export async function collect(silent: boolean): Promise<CollectorRun> {
-  const runId = db.startRun('mercari')
+export async function collect(silent: boolean, store: CollectorStore = localStore): Promise<CollectorRun> {
+  // 実行記録は終わったときに 1 回書く（始めた時刻はここで控えておく）
+  const startedAt = new Date().toISOString()
+  const record = (status: RunStatus, fetched: number, inserted: number, message?: string): Promise<CollectorRun> =>
+    store.recordRun({ source: 'mercari', started_at: startedAt, status, fetched, inserted, message })
+
   const win = createWindow(!silent)
   let pagesOpened = 0
   // CAPTCHA・本人確認が出たときは、非表示で走っていてもウィンドウを見せて残す
@@ -797,14 +747,14 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     if (await isChallenge(win)) {
       keepWindowOpen = true
       revealForChallenge(win, 'メルカリ')
-      return db.finishRun(runId, 'auth_required', 0, 0, CHALLENGE_MESSAGE)
+      return await record('auth_required', 0, 0, CHALLENGE_MESSAGE)
     }
 
     if (!(await isLoggedIn(win))) {
       // 自動ログインは試みない。2段階認証もあるし、
       // 認証情報を持たない設計にしている
-      return db.finishRun(
-        runId, 'auth_required', 0, 0,
+      return await record(
+        'auth_required', 0, 0,
         'セッションが切れています。「メルカリにログイン」から入り直してください',
       )
     }
@@ -823,39 +773,22 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     let excludedKnownByKeyword = 0
 
     if (!salesEmpty) {
-      const known = db.existingMercariIds(sales.map(s => s.mercariItemId))
-      const freshSalesAll = sales.filter(s => !known.has(s.mercariItemId))
-      const knownScraped = sales.filter(s => known.has(s.mercariItemId))
+      // 販売履歴の 1 ページ。既知／新規の仕分け・削除済み・キーワードの絞り込み（不一致は入れない＝
+      // 詳細ページもサムネイルも取りに行かない）・実額の更新は store の段が行い、画像の対象を返す。
+      // 画像の対象：新規に入れた分 ＋ 今回の一覧に出ていて画像がまだ／画像URLが変わった既存分
+      // （実DBに元からあった販売は「新規」ではないので、後者を含めないと永久にサムネが付かない）
+      const soldPage = await store.ingestSoldPage(1, sales)
+      let thumbTargets: AgentThumbTarget[] = []
+      if (!soldPage.already) {
+        inserted = soldPage.inserted
+        updated = soldPage.updated
+        excludedByKeyword = soldPage.excluded_by_keyword
+        excludedDeleted += soldPage.excluded_deleted
+        excludedKnownByKeyword = soldPage.excluded_known_by_keyword
+        thumbTargets = soldPage.thumb_targets
+      }
 
-      // 削除した販売（sale_exclusion）は再取り込みしない。挿入の前に弾く
-      const freshSalesNotDeleted = freshSalesAll.filter(s => !db.isMercariItemExcluded(s.mercariItemId))
-      excludedDeleted += freshSalesAll.length - freshSalesNotDeleted.length
-
-      // キーワードが設定されていれば、出品中タブと同じ規則（タイトル一致）で絞る。
-      // 不一致のものは insertCollected に渡さない＝詳細ページもサムネイルも取りに行かない
-      const keywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
-      const freshSales = keywords.length > 0
-        ? freshSalesNotDeleted.filter(s => db.matchesAnyKeyword(s.title, keywords))
-        : freshSalesNotDeleted
-      excludedByKeyword = freshSalesNotDeleted.length - freshSales.length
-
-      const insertedRows = freshSales.length > 0 ? db.insertCollected(freshSales.map(toRow)) : []
-      inserted = insertedRows.length
-      const knownRows = knownScraped.map(toRow)
-      updated = knownRows.length > 0 ? db.updateCollectedActuals(knownRows) : 0
-
-      // サムネイル対象：新規に入れた分 ＋ 今回の一覧に出ていて画像がまだ／画像URLが
-      // 変わった既存分（db.salesNeedingThumb が判定する）。実DBに元からあった販売は
-      // 「新規」ではないので、後者を含めないと永久にサムネが付かない。既知分は
-      // 「現在のキーワードに一致する」ものだけを対象にする（キーワードを変えた後、
-      // 既に取り込んだ不一致の販売にサムネを取りに行かないため。判定は新規と同じ関数）
-      const knownScrapedMatched = keywords.length > 0
-        ? knownScraped.filter(s => db.matchesAnyKeyword(s.title, keywords))
-        : knownScraped
-      excludedKnownByKeyword = knownScraped.length - knownScrapedMatched.length
-
-      const thumbTargets = db.salesNeedingThumb([...freshSales, ...knownScrapedMatched])
-      const thumbsResult = await saveNewThumbs(thumbTargets, MAX_THUMBS_PER_RUN)
+      const thumbsResult = await saveNewThumbs(store, thumbTargets, MAX_THUMBS_PER_RUN)
       thumbsSaved = thumbsResult.saved
       thumbsAttempted = thumbsResult.attempted
     }
@@ -881,7 +814,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       if (await isChallenge(win)) {
         keepWindowOpen = true
         revealForChallenge(win, 'メルカリ')
-        return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
+        return await record('auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
       const listingsHtml = await win.webContents
@@ -900,33 +833,23 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
         // ページの入れ物ごと見つからない＝セレクタが壊れている疑い
         listingBrokenMessage = '出品中タブの構造が変わっている可能性があります'
       } else {
-        const keywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
-        const targetListings = keywords.length > 0
-          ? scrapedListings.filter(l => db.matchesAnyKeyword(l.title, keywords))
-          : scrapedListings
-
-        const result = db.upsertListings(targetListings.map(l => ({
-          mercariItemId: l.mercariItemId,
-          title: l.title,
-          price: l.price,
-          suspended: l.suspended,
-          thumbUrl: l.thumbUrl,
-          updatedText: l.updatedText,
-          likes: l.likes,
-        })))
-        listingInserted = result.inserted
-        listingUpdated = result.updated
-        listingReleased = result.releasedListings
-        listingReleasedItems = result.releasedItems
+        // キーワード（mercari_keyword）に合うものだけ入れる。出品停止に変わった出品の引き当てを外す
+        // 規則も含め、store の段が行う
+        const listingsPage = await store.ingestListingsPage('mercari', 1, scrapedListings)
+        let listingThumbTargets: AgentThumbTarget[] = []
+        if (!listingsPage.already) {
+          listingInserted = listingsPage.inserted
+          listingUpdated = listingsPage.updated
+          listingReleased = listingsPage.released_listings
+          listingReleasedItems = listingsPage.released_items
+          listingThumbTargets = listingsPage.thumb_targets
+        }
 
         // 残りのサムネイル予算（サムネイルは1回の収集で販売・出品合わせて30枚まで。
         // 「保存できた数」ではなく「試みた数」で減らす。失敗が多いと2倍のリクエストに
         // なってしまうため（Codexレビュー指摘）
-        const listingThumbTargets = db.listingsNeedingThumb(
-          targetListings.map(l => ({ mercariItemId: l.mercariItemId, thumbUrl: l.thumbUrl })),
-        )
-        const listingThumbsResult = await saveNewListingThumbs(
-          listingThumbTargets, MAX_THUMBS_PER_RUN - thumbsAttempted,
+        const listingThumbsResult = await saveNewThumbs(
+          store, listingThumbTargets, MAX_THUMBS_PER_RUN - thumbsAttempted,
         )
         listingThumbsSaved = listingThumbsResult.saved
         listingThumbsAttempted = listingThumbsResult.attempted
@@ -952,7 +875,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       if (await isChallenge(win)) {
         keepWindowOpen = true
         revealForChallenge(win, 'メルカリ')
-        return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
+        return await record('auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
       const inProgressHtml = await win.webContents
@@ -970,37 +893,27 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       } else if (scrapedTransactions.length === 0 && !inProgressHtml.includes('data-testid="mypage-main-content"')) {
         inProgressBrokenMessage = '取引中タブの構造が変わっている可能性があります'
       } else {
-        const keywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
-        const targetTransactions = keywords.length > 0
-          ? scrapedTransactions.filter(t => db.matchesAnyKeyword(t.title, keywords))
-          : scrapedTransactions
-
-        const knownIds = db.existingMercariIds(targetTransactions.map(t => t.mercariItemId))
-        const freshTransactionsAll = targetTransactions.filter(t => !knownIds.has(t.mercariItemId))
-        // 削除した販売は取引中タブからも再取り込みしない
-        const freshTransactions = freshTransactionsAll.filter(t => !db.isMercariItemExcluded(t.mercariItemId))
-        excludedDeleted += freshTransactionsAll.length - freshTransactions.length
-
-        for (const t of targetTransactions) {
-          if (t.status === null) inProgressUnknownStatus++
-          if (!knownIds.has(t.mercariItemId) || !t.status) continue
-          if (db.updateSaleStatus(t.mercariItemId, t.status)) inProgressUpdated++
+        // キーワードで絞り、既知は状態だけ前に進め、未知は新しい販売として入れる（削除した販売は
+        // 取引中タブからも再取り込みしない）のは store の段が行い、画像の対象を返す。
+        // 状態の文言（statusText）・更新の表示（updatedText）は帳簿に要らないので渡さない
+        const trading = await store.ingestTrading(scrapedTransactions.map(t => ({
+          mercariItemId: t.mercariItemId,
+          title: t.title,
+          price: t.price,
+          status: t.status,
+          thumbUrl: t.thumbUrl,
+        })))
+        let transactionThumbTargets: AgentThumbTarget[] = []
+        if (!trading.already) {
+          inProgressNew = trading.inserted
+          inProgressUpdated = trading.updated
+          inProgressUnknownStatus = trading.unknown_status
+          excludedDeleted += trading.excluded_deleted
+          transactionThumbTargets = trading.thumb_targets
         }
 
-        const insertedRows = freshTransactions.length > 0
-          ? db.insertCollected(freshTransactions.map(t => ({
-              mercariItemId: t.mercariItemId,
-              title: t.title,
-              price: t.price,
-              soldAt: todayLocal(),
-              status: t.status,
-            })))
-          : []
-        inProgressNew = insertedRows.length
-
-        const transactionThumbTargets = db.salesNeedingThumb(targetTransactions)
         const inProgressThumbsResult = await saveNewThumbs(
-          transactionThumbTargets, MAX_THUMBS_PER_RUN - thumbsAttempted - listingThumbsAttempted,
+          store, transactionThumbTargets, MAX_THUMBS_PER_RUN - thumbsAttempted - listingThumbsAttempted,
         )
         inProgressThumbsSaved = inProgressThumbsResult.saved
       }
@@ -1009,16 +922,9 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     // 詳細を開く対象：未紐付けの転売で model_codes が空のものだけ
     // （説明文に型番があれば紐付けを救える）。実額のためには開かない。
     // キーワードを変えた後は、取り込み時点では resale だったが現在のキーワードには
-    // 一致しない販売が残っていることがあるため、ここでも同じ関数で絞る
-    const pendingKeywords = db.parseKeywords(db.getSettings().mercari_keyword ?? '')
-    const pendingAll = db.listSales({ onlyPending: true })
-      .filter(s => s.mercari_item_id
-        && s.kind === 'resale' && s.unmatched === 1 && s.model_codes.length === 0)
-    const pendingMatched = pendingKeywords.length > 0
-      ? pendingAll.filter(s => db.matchesAnyKeyword(s.title, pendingKeywords))
-      : pendingAll
-    const excludedPendingByKeyword = pendingAll.length - pendingMatched.length
-    const pending = pendingMatched.slice(0, Math.max(0, MAX_PAGES_PER_RUN - pagesOpened))
+    // 一致しない販売が残っていることがあるため、store の段が同じ関数で絞る
+    const { targets: pending, excluded_by_keyword: excludedPendingByKeyword } =
+      await store.listSalesNeedingDetail(Math.max(0, MAX_PAGES_PER_RUN - pagesOpened))
 
     let detailsRead = 0
     let codesApplied = 0
@@ -1033,15 +939,16 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       if (await isChallenge(win)) {
         keepWindowOpen = true
         revealForChallenge(win, 'メルカリ')
-        return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
+        return await record('auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
       const detail = await scrapeDetail(win)
       detailsRead++
       if (!detail?.description) continue
 
-      const codes = extractCodes(detail.description)
-      if (codes.length > 0 && db.appendModelCodes(s.id, codes)) {
+      // 説明文から型番を拾って販売に追記する（拾い方・自動紐付けまでの規則は store の段）
+      const applied = await store.applySaleDescription(s.id, detail.description)
+      if (!applied.already && applied.applied) {
         codesApplied++
       }
     }
@@ -1051,7 +958,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     const purchasedAtBudget = Math.max(
       0, Math.min(MAX_PURCHASED_AT_PER_RUN, MAX_PAGES_PER_RUN - pagesOpened),
     )
-    const purchasedAtTargets = purchasedAtBudget > 0 ? db.salesNeedingPurchasedAt(purchasedAtBudget) : []
+    const purchasedAtTargets = purchasedAtBudget > 0 ? await store.listSalesNeedingPurchasedAt(purchasedAtBudget) : []
     let purchasedAtRead = 0
 
     for (const s of purchasedAtTargets) {
@@ -1064,13 +971,13 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       if (await isChallenge(win)) {
         keepWindowOpen = true
         revealForChallenge(win, 'メルカリ')
-        return db.finishRun(runId, 'auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
+        return await record('auth_required', sales.length, inserted, CHALLENGE_MESSAGE)
       }
 
       const bodyText = await win.webContents
         .executeJavaScript(`document.body ? document.body.innerText : ''`)
         .catch(() => '') as string
-      db.setSalePurchasedAt(s.id, parsePurchasedAt(bodyText))
+      await store.setSalePurchasedAt(s.id, parsePurchasedAt(bodyText))
       purchasedAtRead++
     }
 
@@ -1080,7 +987,7 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
       // status に関わらず必ず message に残す
       const parts = ['0件でした。画面構造が変わってセレクタが壊れている可能性があります']
       if (listingBrokenMessage) parts.push(listingBrokenMessage)
-      return db.finishRun(runId, 'empty', 0, 0, parts.join('。'))
+      return await record('empty', 0, 0, parts.join('。'))
     }
 
     // status は販売側の結果に従う（ここまで来ていれば ok。出品中・取引中タブの構造異常は
@@ -1110,11 +1017,11 @@ export async function collect(silent: boolean): Promise<CollectorRun> {
     const totalFetched = observedIds.size
     const totalInserted = inserted + inProgressNew
 
-    return db.finishRun(runId, 'ok', totalFetched, totalInserted, parts.join('。'))
+    return await record('ok', totalFetched, totalInserted, parts.join('。'))
 
   } catch (e) {
-    return db.finishRun(
-      runId, 'failed', 0, 0,
+    return await record(
+      'failed', 0, 0,
       e instanceof Error ? e.message : String(e),
     )
   } finally {
