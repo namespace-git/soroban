@@ -398,24 +398,30 @@ describe('表の持ち主・force・権限', () => {
     expect(acls.rows).toEqual([{ what: 'function my_household', grantee: 'authenticated', privilege: 'EXECUTE' }])
   })
 
-  it('household_member は自分自身の行を読める（app.user_id だけ渡した soroban_api）。他人の行は読めず、書けない', async () => {
+  it('household_member の「自分自身の行」の方針は、関数の持ち主だけに効く。app.user_id を渡した soroban_api にも読めず、書けない', async () => {
+    // 20261012001900 で member_self_lookup に TO（持ち主）を付けた。以前は soroban_api も、app.user_id を名乗れば自分の行を読めた
     const own = await asApiWithoutHousehold(db, async (tx) => {
       await tx.query("select set_config('app.user_id', $1, true)", [USER_B])
       return (await tx.query<{ household_id: string; user_id: string }>(
         'select household_id, user_id from app.household_member',
       )).rows
     })
-    expect(own).toEqual([{ household_id: HH_B, user_id: USER_B }])
+    expect(own).toEqual([])
+    // 世帯の文脈の中では、自分の世帯の行だけ（household_isolation）
+    const mine = await asApi(db, HH_B, async (tx) => (await tx.query<{ user_id: string }>('select user_id from app.household_member')).rows)
+    expect(mine).toEqual([{ user_id: USER_B }])
 
-    const code = await sqlstateOf(() =>
-      asApiWithoutHousehold(db, async (tx) => {
-        await tx.query("select set_config('app.user_id', $1, true)", [USER_B])
-        await tx.query(
-          `insert into app.household_member (household_id, user_id) values ('${HH_B}', '${USER_A}')`,
-        )
-      }),
-    )
-    expect(code).not.toBeNull()
+    // メンバーの追加・変更・削除は、soroban_api からはできない（権限が無い。世帯を作る・メンバーを入れるのは管理画面だけ）
+    for (const sql of [
+      `insert into app.household_member (household_id, user_id) values ('${HH_B}', '${USER_A}')`,
+      `update app.household_member set role = 'member'`,
+      'delete from app.household_member',
+      `insert into app.household (name) values ('勝手な世帯')`,
+      `update app.household set name = 'x'`,
+      'delete from app.household',
+    ]) {
+      expect(await sqlstateOf(() => asApi(db, HH_B, (tx) => tx.query(sql))), sql).toBe('42501')
+    }
   })
 })
 

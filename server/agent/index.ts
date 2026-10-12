@@ -3,6 +3,7 @@
 import './jobs'
 import './sales'
 import './orders'
+import './unregister'
 
 export {
   handleAgent, dispatchAgent, agentHandlers, registerAgentHandler, isAgentMethod, agentMayQueueNotification, AGENT_METHOD_NAMES,

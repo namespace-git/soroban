@@ -11,12 +11,15 @@ import type { MediaCredentials, MediaUploader } from './media'
 // ============================================================
 // 取り込み担当の動き（Web 版の取り込みを、この PC が受け持つ）
 //
-//   ログイン（トークン）が来る ── register(端末名)＝人の JWT ──▶ 取り込み担当の鍵（12 時間・**メモリだけ**）
+//   ログイン（トークン）が来る ── register(端末名)＝人の JWT ──▶ 取り込み担当の鍵（2 時間・**メモリだけ**）
 //        └ 起動後の最初の 1 回だけ requestCollect（間隔が空いていれば。エラーは黙って無視）
 //   20 秒ごとに claim ──▶ 取れたら：60 秒ごとに heartbeat ／ リモートの store で
 //        メルカリ → Yahoo!フリマ → メロジョイ（計画の仕入先ごと）を直列に収集 ／ 終わったら finish
-//   鍵の期限の 30 分前に、そのときのトークンで register し直す（取り込み中は終わるまで待つ。残り 5 分を切ったら待たない）
-//   トークンが消える（ログアウト）＝鍵を捨てて止まる。lease_lost＝直ちに止まる（finish も呼ばない）
+//   鍵の期限の 30 分前に、そのときのトークンで register し直す（取り込み中は終わるまで待つ。残り 5 分を切ったら待たない）。
+//        2 時間の鍵なら 90 分ごとに取り直す。30 分の余裕は、取り込みが長引いたときに待てる幅（25 分）と、
+//        取り直しに失敗しても 60 秒ごとにやり直せる幅のため、12 時間だったころのまま変えていない
+//   トークンが消える（ログアウト）＝**サーバーの鍵を捨ててから**（unregister。失敗しても・待ちすぎても止まらない）、
+//        メモリの鍵も捨てて止まる。lease_lost＝直ちに止まる（finish も呼ばない）
 //
 // 持つもの（すべてメモリ）：トークン・鍵・lease_token。ファイル・DB・ログに書かない（ログに出すのは job の id と状態だけ）。
 // claim のポーリングは収集ではない（メルカリなどへのアクセスは増えない）。収集の頻度・待ち時間・CAPTCHA は収集のコードのまま。
@@ -54,6 +57,8 @@ const KEY_REFRESH_MARGIN_MS = 30 * 60_000
 /** 取り込み中は鍵の取り直しを待つ。ただし期限までこれを切ったら待たない */
 const REFRESH_DEFER_UNTIL_MS = 5 * 60_000
 const REGISTER_RETRY_MS = 60_000
+/** ログアウトのときのサーバーの鍵の破棄は、これだけ待って諦める（失敗しても鍵は期限で切れる） */
+const UNREGISTER_TIMEOUT_MS = 5_000
 const MAX_TIMER_MS = 2 ** 31 - 1
 
 interface Registration {
@@ -125,22 +130,49 @@ export class AgentRunner {
     }
   }
 
-  /** ログアウト。鍵を捨てて止まる（走っている取り込みは lease を手放す＝サーバーが時間切れで片付ける） */
+  /**
+   * ログアウト。サーバーの鍵を捨ててから、メモリの鍵も捨てて止まる
+   * （走っている取り込みは lease を手放す＝サーバーが時間切れで片付ける）
+   */
   clearSession(): void {
     if (this.disposed) return
+    const key = this.reg?.key
     this.session = null
     this.dropRegistration()
     this.job?.guard.stop()
     this.setStatus('waiting-login', null)
+    if (key) void this.unregisterRemote(key)
   }
 
-  /** この PC のモードを抜ける・アプリを閉じる。二度と動かない */
+  /** この PC のモードを抜ける・アプリを閉じる。二度と動かない（サーバーの鍵も捨てに行くが、閉じるまでに届かなくても鍵は期限で切れる） */
   dispose(): void {
     if (this.disposed) return
+    const key = this.reg?.key
     this.session = null
     this.dropRegistration()
     this.job?.guard.stop()
     this.disposed = true
+    if (key) void this.unregisterRemote(key)
+  }
+
+  /**
+   * サーバーの鍵を捨てる（鍵の期限をいまにする）。**メモリの鍵を捨てる前に渡された鍵**で 1 回だけ呼ぶ。
+   * やり直さない・待ちすぎない・失敗しても何もしない（鍵は期限で切れる）。ログには結果の言葉だけで、鍵は出さない
+   */
+  private async unregisterRemote(key: string): Promise<void> {
+    let kind = 'agent_unregistered'
+    let message = '取り込み担当の鍵をサーバーで捨てました'
+    try {
+      await this.deps.http.agent('unregister', [], key, { retry: false, timeoutMs: UNREGISTER_TIMEOUT_MS })
+    } catch (e) {
+      kind = 'agent_unregister_failed'
+      message = `取り込み担当の鍵をサーバーで捨てられませんでした（期限で切れます）：${errorText(e)}`
+    }
+    try {
+      this.log(kind, message)
+    } catch {
+      // 記録が書けなくても止めない（アプリを閉じる途中など）
+    }
   }
 
   getStatus(): AgentStatus {

@@ -3,6 +3,7 @@ import type { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createMigratedDb } from '../../test/migrate'
 import { asApi, asRole, HH_A, HH_B, seedHouseholds, sha256hex, sqlstateOf, USER_A, USER_B } from './helpers'
+import { asGateway } from '../security/helpers'
 
 // 取り込み担当の PC（agent_device）と、鍵のハッシュから PC と世帯を引く app.agent_of_token
 // （20261012001500_agent_push_cron.sql）。平文の鍵はどこにも持たない（ハッシュだけ）
@@ -34,12 +35,16 @@ interface Device {
   registered_by: string | null
 }
 
-const register = (hh: string, name: string, token: string, expires = '12 hours', userId?: string) =>
+/**
+ * 鍵を出す。押した人は、その世帯のメンバー（世帯 A なら USER_A）が既定。
+ * 鍵を引く（agent_of_token）には、押した人がいまもメンバーであることが要る（20261012001900）。null を渡すと「押した人なし」
+ */
+const register = (hh: string, name: string, token: string, expires = '2 hours', userId?: string | null) =>
   asApi(db, hh, async (tx) =>
     (await tx.query<{ d: Device }>(
       `select to_jsonb(app.register_agent_device($1, $2, now() + $3::interval)) as d`,
       [name, sha256hex(token), expires],
-    )).rows[0].d, userId ? { userId } : {})
+    )).rows[0].d, userId === null ? {} : { userId: userId ?? (hh === HH_A ? USER_A : USER_B) })
 
 const revoke = (hh: string, id: string) =>
   asApi(db, hh, async (tx) =>
@@ -56,24 +61,27 @@ const row = async (id: string): Promise<Device> =>
 
 describe('register_agent_device（鍵を出す）', () => {
   it('新しい PC の行ができる。ハッシュと期限・押した人が入り、first_seen_at = last_seen_at', async () => {
-    const d = await register(HH_A, 'リビングの PC', 'tok-1', '12 hours', USER_A)
+    const d = await register(HH_A, 'リビングの PC', 'tok-1', '2 hours', USER_A)
     expect(d).toMatchObject({
       household_id: HH_A, name: 'リビングの PC', token_hash: sha256hex('tok-1'), revoked_at: null, registered_by: USER_A,
     })
-    expect(new Date(d.token_expires_at).getTime()).toBeGreaterThan(Date.now() + 11 * 3600_000)
-    expect(new Date(d.token_expires_at).getTime()).toBeLessThan(Date.now() + 13 * 3600_000)
+    expect(new Date(d.token_expires_at).getTime()).toBeGreaterThan(Date.now() + 1.9 * 3600_000)
+    expect(new Date(d.token_expires_at).getTime()).toBeLessThan(Date.now() + 2.1 * 3600_000)
     expect(d.first_seen_at).toBe(d.last_seen_at)
   })
 
-  it('押した人が分からなくても作れる（registered_by は NULL）', async () => {
-    expect((await register(HH_A, 'PC', 'tok-1')).registered_by).toBeNull()
+  it('押した人（app.user_id）が分からなければ断る（22023）。registered_by が NULL の鍵は agent_of_token で引けないので、作らない', async () => {
+    const err = await register(HH_A, 'PC', 'tok-1', '1 hour', null).catch((e) => e)
+    expect(err).toMatchObject({ code: '22023' })
+    expect(err.message).toContain('（ログインしている人）が分かりません')
+    expect((await db.query('select 1 from app.agent_device')).rows).toEqual([])
   })
 
   it('同じ端末名なら行を使い回して、鍵と期限を差し替える（取り直し）。first_seen_at は残り、古い鍵は引けなくなる', async () => {
     const first = await register(HH_A, 'リビングの PC', 'tok-old', '1 hour', USER_A)
     expect(await lookup('tok-old')).toHaveLength(1)
 
-    const second = await register(HH_A, 'リビングの PC', 'tok-new', '12 hours', USER_A)
+    const second = await register(HH_A, 'リビングの PC', 'tok-new', '2 hours', USER_A)
     expect(second.id).toBe(first.id)
     expect(second.first_seen_at).toBe(first.first_seen_at)
     expect(second.token_hash).toBe(sha256hex('tok-new'))
@@ -115,7 +123,7 @@ describe('register_agent_device（鍵を出す）', () => {
       expect(await sqlstateOf(() => register(HH_A, name, 'tok')), JSON.stringify(name.slice(0, 5))).toBe('22023')
     }
     expect(await sqlstateOf(() =>
-      asApi(db, HH_A, (tx) => tx.query(`select app.register_agent_device(null, $1, now() + interval '1 hour')`, [sha256hex('t')])),
+      asApi(db, HH_A, (tx) => tx.query(`select app.register_agent_device(null, $1, now() + interval '1 hour')`, [sha256hex('t')]), { userId: USER_A }),
     )).toBe('22023')
     await expect(register(HH_A, 'x'.repeat(200), 'tok')).resolves.toBeDefined()
   })
@@ -123,11 +131,11 @@ describe('register_agent_device（鍵を出す）', () => {
   it('鍵のハッシュは SHA-256 の 16 進（小文字 64 文字）だけ。平文の鍵・大文字・短いものは 22023', async () => {
     for (const bad of ['plain-token', sha256hex('x').toUpperCase(), sha256hex('x').slice(0, 63), '', sha256hex('x') + '0']) {
       expect(await sqlstateOf(() =>
-        asApi(db, HH_A, (tx) => tx.query(`select app.register_agent_device('PC', $1, now() + interval '1 hour')`, [bad])),
+        asApi(db, HH_A, (tx) => tx.query(`select app.register_agent_device('PC', $1, now() + interval '1 hour')`, [bad]), { userId: USER_A }),
       ), bad.slice(0, 12)).toBe('22023')
     }
     expect(await sqlstateOf(() =>
-      asApi(db, HH_A, (tx) => tx.query(`select app.register_agent_device('PC', null, now() + interval '1 hour')`)),
+      asApi(db, HH_A, (tx) => tx.query(`select app.register_agent_device('PC', null, now() + interval '1 hour')`), { userId: USER_A }),
     )).toBe('22023')
   })
 
@@ -140,14 +148,15 @@ describe('register_agent_device（鍵を出す）', () => {
     expect(code).toBe('23514')
   })
 
-  it('期限は「いまから 24 時間以内」。過去・いま・null・24 時間超は 22023', async () => {
-    for (const expires of ['-1 minute', '0 seconds', '25 hours', '30 days']) {
+  it('期限は「いまから 3 時間以内」（API は 2 時間で出す）。過去・いま・null・3 時間超は 22023', async () => {
+    // 以前は 24 時間まで。短命の鍵という前提を DB でも守る（20261012001900）
+    for (const expires of ['-1 minute', '0 seconds', '3 hours 5 minutes', '12 hours', '25 hours', '30 days']) {
       expect(await sqlstateOf(() => register(HH_A, 'PC', 'tok', expires)), expires).toBe('22023')
     }
     expect(await sqlstateOf(() =>
-      asApi(db, HH_A, (tx) => tx.query(`select app.register_agent_device('PC', $1, null)`, [sha256hex('t')])),
+      asApi(db, HH_A, (tx) => tx.query(`select app.register_agent_device('PC', $1, null)`, [sha256hex('t')]), { userId: USER_A }),
     )).toBe('22023')
-    await expect(register(HH_A, 'PC', 'tok', '23 hours')).resolves.toBeDefined()
+    await expect(register(HH_A, 'PC', 'tok', '2 hours 59 minutes')).resolves.toBeDefined()
   })
 
   it('同じ鍵のハッシュを別の PC には使えない（一意）', async () => {
@@ -219,12 +228,13 @@ describe('agent_of_token（鍵 → PC と世帯。API が set role の前に呼�
     expect(r).toBe('before')
   })
 
-  it('security definer で search_path が固定され、soroban_api だけが実行できる（PUBLIC・anon・authenticated・soroban_cron は不可）', async () => {
+  it('security definer で search_path が固定され、soroban_gateway だけが実行できる（soroban_api・PUBLIC・anon・authenticated・soroban_cron は不可）', async () => {
     const { rows } = await db.query<{
-      prosecdef: boolean; proconfig: string[] | null; api: boolean; anon: boolean; auth: boolean; cron: boolean; public_exec: boolean
+      prosecdef: boolean; proconfig: string[] | null; api: boolean; gateway: boolean; anon: boolean; auth: boolean; cron: boolean; public_exec: boolean
     }>(
       `select p.prosecdef, p.proconfig,
               has_function_privilege('soroban_api', p.oid, 'execute') as api,
+              has_function_privilege('soroban_gateway', p.oid, 'execute') as gateway,
               has_function_privilege('anon', p.oid, 'execute') as anon,
               has_function_privilege('authenticated', p.oid, 'execute') as auth,
               has_function_privilege('soroban_cron', p.oid, 'execute') as cron,
@@ -234,18 +244,28 @@ describe('agent_of_token（鍵 → PC と世帯。API が set role の前に呼�
     expect(rows).toHaveLength(1)
     expect(rows[0].prosecdef).toBe(true)
     expect(rows[0].proconfig).toContain('search_path=app, pg_temp')
-    expect(rows[0]).toMatchObject({ api: true, anon: false, auth: false, cron: false, public_exec: false })
+    expect(rows[0]).toMatchObject({ api: false, gateway: true, anon: false, auth: false, cron: false, public_exec: false })
   })
 
-  it('soroban_api から（set role の後）呼んでも引ける。ただし他の世帯の PC を、ハッシュを知らずに探ることはできない', async () => {
+  it('soroban_gateway（set role の前の接続）なら引ける。soroban_api（set role の後）は呼べず、鍵の方針でも他の世帯の PC を探れない', async () => {
     const b = await register(HH_B, 'PC-B', 'tok-b')
-    // 世帯 A の文脈で、B の鍵のハッシュを渡せば引ける（鍵を持っている＝B の PC なので、B の世帯と分かるだけ）
-    const viaApi = await asApi(db, HH_A, async (tx) =>
+    // set role の前（ゲートウェイ）：鍵のハッシュを渡せば引ける（鍵を持っている＝B の PC なので、B の世帯と分かるだけ）
+    const viaGateway = await asGateway(db, async (tx) =>
       (await tx.query<{ household_id: string }>('select household_id from app.agent_of_token($1)', [sha256hex('tok-b')])).rows)
-    expect(viaApi).toEqual([{ household_id: HH_B }])
-    // ハッシュを知らなければ、A の文脈で B の PC の行は 1 行も見えない
-    const seen = await asApi(db, HH_A, async (tx) => (await tx.query('select * from app.agent_device where id = $1', [b.id])).rows)
+    expect(viaGateway).toEqual([{ household_id: HH_B }])
+    // set role の後（soroban_api）：もう呼べない（20261012001900。EXECUTE はゲートウェイだけ）
+    expect(await sqlstateOf(() => asApi(db, HH_A, (tx) => tx.query('select * from app.agent_of_token($1)', [sha256hex('tok-b')])))).toBe('42501')
+    // app.agent_token_hash を自分で渡しても、方針（agent_token_lookup_*）は関数の持ち主だけに効くので、A の文脈から B の PC は 1 行も見えない
+    const seen = await asApi(db, HH_A, async (tx) => {
+      await tx.query("select set_config('app.agent_token_hash', $1, true)", [sha256hex('tok-b')])
+      return (await tx.query('select * from app.agent_device where id = $1', [b.id])).rows
+    })
     expect(seen).toEqual([])
+    expect(await sqlstateOf(() => asApi(db, HH_A, async (tx) => {
+      await tx.query("select set_config('app.agent_token_hash', $1, true)", [sha256hex('tok-b')])
+      await tx.query(`update app.agent_device set revoked_at = now() where id = $1`, [b.id])
+    }))).toBeNull() // 0 行の更新（エラーにはならない）
+    expect((await row(b.id)).revoked_at).toBeNull()
   })
 
   it('接続ロールが BYPASSRLS を持たず、表と関数の持ち主でも force row level security で読めない環境でも引ける', async () => {
@@ -261,6 +281,12 @@ describe('agent_of_token（鍵 → PC と世帯。API が set role の前に呼�
         await tx.query('grant usage on schema app to probe_owner, probe_conn')
         await tx.query('alter table app.agent_device owner to probe_owner')
         await tx.query('alter function app.agent_of_token(text) owner to probe_owner')
+        // 関数はメンバーの表（鍵を作った人がいまもメンバーか）も読む。引くための方針は持ち主だけに効く（20261012001900）ので、
+        // 持ち主を替えたぶん、表の権限と方針の対象も替える
+        await tx.query('grant select on app.household_member to probe_owner')
+        await tx.query('alter policy member_self_lookup on app.household_member to probe_owner')
+        await tx.query('alter policy agent_token_lookup_select on app.agent_device to probe_owner')
+        await tx.query('alter policy agent_token_lookup_update on app.agent_device to probe_owner')
         await tx.query('grant execute on function app.agent_of_token(text) to probe_conn')
         // 直接 select は許す（それでも force row level security で 0 件になることの対照）
         await tx.query('grant select on app.agent_device to probe_conn')
@@ -340,8 +366,9 @@ describe('世帯の分離と権限', () => {
   })
 
   it('鍵を作らせた人のアカウントを消しても PC は残り（registered_by だけ null）、世帯を消すと PC も消える', async () => {
-    const d = await register(HH_B, 'PC', 'tok', '12 hours', USER_B)
+    const d = await register(HH_B, 'PC', 'tok', '2 hours', USER_B)
     await db.query('delete from auth.users where id = $1', [USER_B])
+    // 取り消しの印（revoked_at）が先に付くかは、cascade の順次第なので見ない。鍵が引けないことは agent-key.test.ts
     expect(await row(d.id)).toMatchObject({ household_id: HH_B, registered_by: null })
     await db.query('delete from app.household where id = $1', [HH_B])
     expect((await db.query('select id from app.agent_device where id = $1', [d.id])).rows).toEqual([])

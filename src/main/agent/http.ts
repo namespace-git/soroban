@@ -30,6 +30,8 @@ export interface AgentHttpOptions {
 export interface CallOptions {
   /** 5xx・通信切れをやり直すか（既定 true）。claim・heartbeat は次の周期があるので false */
   retry?: boolean
+  /** この 1 回の通信の上限（ms）。省略すると createAgentHttp の timeoutMs。ログアウトの unregister のように、待ちたくない呼び出し用 */
+  timeoutMs?: number
 }
 
 export interface AgentHttp {
@@ -65,7 +67,7 @@ export function createAgentHttp(options: AgentHttpOptions): AgentHttp {
   const delays = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
-  async function attempt(url: string, authorization: string, body: string): Promise<unknown> {
+  async function attempt(url: string, authorization: string, body: string, limitMs: number): Promise<unknown> {
     let status: number
     let ok: boolean
     let text: string
@@ -76,7 +78,7 @@ export function createAgentHttp(options: AgentHttpOptions): AgentHttp {
         body,
         redirect: 'error',
         credentials: 'omit',
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(limitMs),
       })
       status = res.status
       ok = res.ok
@@ -109,13 +111,13 @@ export function createAgentHttp(options: AgentHttpOptions): AgentHttp {
     )
   }
 
-  async function send(path: string, args: unknown[], authorization: string, retry: boolean): Promise<unknown> {
+  async function send(path: string, args: unknown[], authorization: string, retry: boolean, limitMs: number = timeoutMs): Promise<unknown> {
     const url = `${origin}${path}`
     const body = JSON.stringify({ args })
     const waits = retry ? delays : []
     for (let i = 0; ; i++) {
       try {
-        return await attempt(url, authorization, body)
+        return await attempt(url, authorization, body, limitMs)
       } catch (e) {
         if (e instanceof AgentHttpError && e.retryable && i < waits.length) {
           await sleep(waits[i])
@@ -128,7 +130,7 @@ export function createAgentHttp(options: AgentHttpOptions): AgentHttp {
 
   return {
     async agent<T>(method: string, args: unknown[], key: string, opts?: CallOptions): Promise<T> {
-      return await send(`/api/agent/${encodeURIComponent(method)}`, args, `Agent ${key}`, opts?.retry !== false) as T
+      return await send(`/api/agent/${encodeURIComponent(method)}`, args, `Agent ${key}`, opts?.retry !== false, opts?.timeoutMs) as T
     },
 
     async register(deviceName: string, jwt: string): Promise<AgentRegistration> {
@@ -144,7 +146,7 @@ export function createAgentHttp(options: AgentHttpOptions): AgentHttp {
     },
 
     async rpc<T>(method: string, args: unknown[], jwt: string, opts?: CallOptions): Promise<T> {
-      return await send(`/api/rpc/${encodeURIComponent(method)}`, args, `Bearer ${jwt}`, opts?.retry !== false) as T
+      return await send(`/api/rpc/${encodeURIComponent(method)}`, args, `Bearer ${jwt}`, opts?.retry !== false, opts?.timeoutMs) as T
     },
   }
 }

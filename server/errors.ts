@@ -83,6 +83,9 @@ const dbErrorRules: DbErrorRule[] = [
   // integer 列に入らない大きさの数、NUL 文字（text に入れられない）
   { code: '22003', message: '数値が大きすぎます', as: 'bad_request' },
   { code: '22021', message: '使えない文字が含まれています', as: 'bad_request' },
+  // 同じ画像を 2 つの経費・型番に結ぼうとした（アプリの検査を同時に通り抜けた分を、DB の部分ユニーク索引が止める。20261012001900）
+  { code: '23505', constraint: 'expense_receipt_path_unique', message: 'このレシートはすでに別の経費に付いています', as: 'conflict' },
+  { code: '23505', constraint: 'product_image_product_path_unique', message: 'この画像はすでに別の商品に使われています', as: 'conflict' },
 ]
 
 /** 制約名などから、利用者向けの日本語に写す規則を足す（業務ロジック側が起動時に呼ぶ） */
@@ -121,6 +124,7 @@ export function readDbError(e: unknown): DbErrorInfo | undefined {
  * SB005（取り込みの要求が見つからない。他の世帯の要求も RLS で見えない）と
  * SB007（取り込み担当の PC が見つからない。同じく他の世帯の PC も見えない）は 404 `not_found`。
  * SB006（取り消し済みの PC に鍵を出そうとした）は 409 `conflict` のまま。
+ * SB008（同じ名前の PC が、ほかの人のログインで使われている）・SB009（取り込み担当の PC が多すぎる）も 409 `conflict`。
  * SB003（取り込みの権限の失効）も 409 だが、取り込み担当の API（server/agent/）は `lease_lost` として区別して返す。
  */
 export function mapDbError(e: unknown): UserError | undefined {
@@ -136,6 +140,17 @@ export function mapDbError(e: unknown): UserError | undefined {
     return new UserError(info.detail ? `${info.message}（${info.detail}）` : info.message, SB_CODE_AS[info.code] ?? 'conflict')
   }
   return undefined
+}
+
+/**
+ * 想定外のエラーを、ログに出してよい形にする：名前・コード・メッセージ・スタックだけ。
+ * **エラーのオブジェクトをそのまま `console.error` に渡さない。** postgres.js などのエラーは SQL の引数
+ * （個人データ・API キー）や接続の情報を持っていて、オブジェクトごと出すとログに載る。
+ * 呼び出し側は `console.error('[rpc] …', describeError(e))` の形で使う
+ */
+export function describeError(e: unknown): Record<string, unknown> {
+  if (e instanceof Error) return { name: e.name, code: (e as { code?: unknown }).code, message: e.message, stack: e.stack }
+  return { value: String(e) }
 }
 
 /** SB で始まる SQLSTATE のうち、409 `conflict` 以外にするもの */

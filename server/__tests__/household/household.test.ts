@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { createMigratedDb } from '../../test/migrate'
 import { asApi, asApiWithoutHousehold, asRole, sqlstateOf } from '../schema/helpers'
+import { asGateway } from '../security/helpers'
 
 // 世帯を作る関数（app.create_household）と、ユーザー → 世帯の照会（app.household_of_user）
 
@@ -271,13 +272,14 @@ describe('create_household の権限', () => {
     }
   })
 
-  it('security definer で search_path が固定されている。PUBLIC に EXECUTE が残っていない', async () => {
+  it('security definer で search_path が固定されている。PUBLIC に EXECUTE が残っていない。household_of_user は soroban_gateway だけが呼べる', async () => {
     const { rows } = await db.query<{
       proname: string; prosecdef: boolean; proconfig: string[] | null
-      api: boolean; anon: boolean; auth: boolean; public_exec: boolean
+      api: boolean; gateway: boolean; anon: boolean; auth: boolean; public_exec: boolean
     }>(
       `select p.proname, p.prosecdef, p.proconfig,
               has_function_privilege('soroban_api', p.oid, 'execute') as api,
+              has_function_privilege('soroban_gateway', p.oid, 'execute') as gateway,
               has_function_privilege('anon', p.oid, 'execute') as anon,
               has_function_privilege('authenticated', p.oid, 'execute') as auth,
               exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) x where x.grantee = 0) as public_exec
@@ -295,7 +297,10 @@ describe('create_household の権限', () => {
       expect(r.auth, r.proname).toBe(false)
     }
     expect(create.api).toBe(false)
-    expect(lookup.api).toBe(true)
+    expect(create.gateway).toBe(false)
+    // 世帯の照会は、set role の前の接続（soroban_gateway）だけ。soroban_api はもう呼べない（20261012001900）
+    expect(lookup.api).toBe(false)
+    expect(lookup.gateway).toBe(true)
   })
 })
 
@@ -308,23 +313,27 @@ describe('household_of_user（ユーザー → 世帯）', () => {
     expect(await householdOf(null)).toBeNull()
   })
 
-  it('soroban_api が、世帯も app.user_id も渡さずに呼べる（メンバーの表は直接読めないまま）', async () => {
+  it('soroban_gateway（set role の前の接続）が、世帯も app.user_id も渡さずに呼べる。soroban_api は呼べない', async () => {
     const user = await newUser()
     const id = await createHousehold('API から照会', [user])
-    const got = await asApiWithoutHousehold(db, async (tx) =>
+    const got = await asGateway(db, async (tx) =>
       (await tx.query<{ id: string | null }>('select app.household_of_user($1) as id', [user])).rows[0].id,
     )
     expect(got).toBe(id)
 
-    const none = await asApiWithoutHousehold(db, async (tx) =>
+    const none = await asGateway(db, async (tx) =>
       (await tx.query<{ id: string | null }>('select app.household_of_user($1) as id', [U_NOBODY])).rows[0].id,
     )
     expect(none).toBeNull()
 
-    // 関数を通さずにメンバーの表を読んでも、ユーザーを名乗っていなければ 1 行も見えない
-    const direct = await asApiWithoutHousehold(db, async (tx) =>
-      (await tx.query('select * from app.household_member')).rows,
-    )
+    // 関数を通さずにメンバーの表を読むことはできない（表の権限が無い）
+    expect(await sqlstateOf(() => asGateway(db, (tx) => tx.query('select * from app.household_member')))).toBe('42501')
+    // API の接続（soroban_api）は、この関数をもう呼べない。メンバーの表も、ユーザーを名乗っても読めない
+    expect(await sqlstateOf(() => asApiWithoutHousehold(db, (tx) => tx.query('select app.household_of_user($1)', [user])))).toBe('42501')
+    const direct = await asApiWithoutHousehold(db, async (tx) => {
+      await tx.query("select set_config('app.user_id', $1, true)", [user])
+      return (await tx.query('select * from app.household_member')).rows
+    })
     expect(direct).toEqual([])
   })
 
@@ -333,13 +342,14 @@ describe('household_of_user（ユーザー → 世帯）', () => {
     const target = await newUser()
     const mine = await createHousehold('呼ぶ側', [caller])
     const other = await createHousehold('引かれる側', [target])
-    const seen = await asApi(db, mine, async (tx) => {
+    const seen = await asGateway(db, async (tx) => {
+      await tx.query("select set_config('app.household_id', $1, true), set_config('app.user_id', $2, true)", [mine, caller])
       const got = (await tx.query<{ id: string }>('select app.household_of_user($1) as id', [target])).rows[0].id
       const cfg = (await tx.query<{ hh: string; u: string }>(
         "select current_setting('app.household_id') as hh, current_setting('app.user_id') as u",
       )).rows[0]
       return { got, ...cfg }
-    }, { userId: caller })
+    })
     expect(seen).toEqual({ got: other, hh: mine, u: caller })
   })
 
@@ -379,6 +389,8 @@ describe('関数の持ち主が RLS を素通りできない環境でも動く',
         }
         await tx.query('alter function app.create_household(text, uuid[]) owner to definer_probe')
         await tx.query('alter function app.household_of_user(uuid) owner to definer_probe')
+        // member_self_lookup は関数の持ち主だけに効く方針（20261012001900）。持ち主を替えたので方針の対象も替える
+        await tx.query('alter policy member_self_lookup on app.household_member to definer_probe')
         await tx.query(`insert into auth.users (id, email) values ($1, 'probe@example.test')`, [probeUser])
 
         // 対照：持ち主のロールで直接 insert すると、force row level security で拒否される

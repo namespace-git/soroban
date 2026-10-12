@@ -257,22 +257,24 @@ describe('setting_secret への保存', () => {
     expect(await world.a.run(ctx => readSecret(ctx, ring1, SECRET_TRACK17))).toEqual({ status: 'unreadable' })
   })
 
-  it('定期実行のロール（soroban_cron）は暗号文を読めて復号できる。書けないので書き直しは黙って諦める', async () => {
+  it('定期実行のロール（soroban_cron）は暗号文を読めない（権限エラー）。17TRACK のキーは世帯の文脈（soroban_api）の中で読む', async () => {
+    // 20261012001900 で soroban_cron から setting_secret の読み取りを外した。server/cron/tracking.ts は withHousehold（soroban_api）の中で読む
     world = await newWorld(db)
     const plain = fakeApiKey()
     await world.a.run(ctx => putSecret(ctx, ring1, SECRET_TRACK17, plain))
-    const result = await db.root.tx(async (sql) => {
+    const err = await db.root.tx(async (sql) => {
       await sql.run('set local search_path = app, public')
       await sql.run('set local role soroban_cron')
       await sql.get("select set_config('app.household_id', ?, true)", world.a.householdId)
-      const scope = { sql, householdId: world.a.householdId }
-      const read = await readSecret(scope, ring2, SECRET_TRACK17)
-      const rewritten = await rewriteIfStale(scope, ring2, SECRET_TRACK17, read)
-      return { read, rewritten }
-    })
-    expect(result.read).toMatchObject({ status: 'ok', value: plain, stale: true })
-    expect(result.rewritten).toBe(false)
+      return readSecret({ sql, householdId: world.a.householdId }, ring2, SECRET_TRACK17)
+    }).then(() => null, (e: unknown) => e)
+    expect(err).toMatchObject({ code: '42501' })
     expect((await rowOf(world.a))!.key_version).toBe(1)
+
+    // 世帯の文脈（soroban_api）の中なら読めて、古い版は今の鍵で書き直される
+    const read = await world.a.run(ctx => readSecretAndRefresh(ctx, ring2, SECRET_TRACK17))
+    expect(read).toMatchObject({ status: 'ok', value: plain, stale: true })
+    expect((await rowOf(world.a))!.key_version).toBe(2)
   })
 
   it('ログにも例外にも、鍵（SECRET_KEYS）と平文が出ない（成功・復号できない・書き直せない、どの経路でも）', async () => {

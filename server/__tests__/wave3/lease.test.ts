@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { createMigratedDb } from '../../test/migrate'
-import { asApi, asRole, HH_A, HH_B, seedHouseholds, sha256hex, sqlstateOf } from './helpers'
+import { asApi, asRole, HH_A, HH_B, seedHouseholds, sha256hex, sqlstateOf, USER_A, USER_B } from './helpers'
 
 // 取り込みの lease の穴ふさぎ（20261012001500_agent_push_cron.sql）：
 // assert_lease・失効した lease の heartbeat / finish・partial・段ごとの冪等・取った PC（agent_device_id）。
@@ -363,9 +363,9 @@ describe('claim：取った PC（agent_device_id）', () => {
   const makeDevice = async (hh: string, name: string): Promise<string> =>
     asApi(db, hh, async (tx) =>
       (await tx.query<{ id: string }>(
-        `select (app.register_agent_device($1, $2, now() + interval '12 hours')).id as id`,
+        `select (app.register_agent_device($1, $2, now() + interval '2 hours')).id as id`,
         [name, sha256hex(`${hh}:${name}:${Math.random()}`)],
-      )).rows[0].id)
+      )).rows[0].id, { userId: hh === HH_A ? USER_A : USER_B }) // 鍵を出す人（app.user_id）が要る
 
   it('PC の id を渡すと job に残る。渡さなければ null（これまでの呼び方がそのまま通る）', async () => {
     const dev = await makeDevice(HH_A, 'リビングの PC')

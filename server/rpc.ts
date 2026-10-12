@@ -3,7 +3,7 @@ import type { WebApi } from '../src/shared/web-types'
 import { authenticate, bearerToken, type Identity } from './auth'
 import { serverEnvFrom, withHousehold, type Ctx, type HouseholdIds, type Net, type RawServerEnv } from './context'
 import type { Sql } from './db/sql'
-import { ApiError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError } from './errors'
+import { ApiError, describeError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError } from './errors'
 import { drainDeliveries } from './push/deliver'
 
 /**
@@ -402,7 +402,8 @@ async function logIpc(ctx: Ctx, method: string, durationMs: number): Promise<voi
       )
     })
   } catch (e) {
-    console.error('操作ログの書き込みに失敗しました', e)
+    // エラーのオブジェクトそのものは出さない（SQL の引数に個人データが入りうる）
+    console.error('操作ログの書き込みに失敗しました', describeError(e))
   }
 }
 
@@ -454,8 +455,9 @@ function toApiError(e: unknown, method: string): ApiError {
   if (e instanceof ApiError) return e
   const mapped = mapDbError(e)
   if (mapped) return mapped
-  // それ以外は丸める。原因（SQL・スタック）はサーバーのログにだけ出す。引数は載せない（API キーが入りうる）
-  console.error(`[rpc] ${method}: 予期しないエラー`, e)
+  // それ以外は丸める。原因（名前・コード・メッセージ・スタック）はサーバーのログにだけ出す。
+  // 引数・エラーのオブジェクトそのものは載せない（API キー・個人データが入りうる）
+  console.error(`[rpc] ${method}: 予期しないエラー`, describeError(e))
   return new ApiError('internal', INTERNAL_MESSAGE)
 }
 
@@ -465,7 +467,7 @@ function jsonResponse(status: number, body: unknown): Response {
     text = JSON.stringify(body)
   } catch (e) {
     // bigint など JSON にできない値がハンドラから返ってきた
-    console.error('[rpc] 応答を JSON にできません', e)
+    console.error('[rpc] 応答を JSON にできません', describeError(e))
     return new Response(JSON.stringify({ error: { code: 'internal', message: INTERNAL_MESSAGE } }), {
       status: HTTP_STATUS.internal,
       headers: JSON_HEADERS,

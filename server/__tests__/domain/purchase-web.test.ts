@@ -223,7 +223,9 @@ describe('仕入：按分の合計一致', () => {
           alloc_method: method, shipping_fee: rnd(3000), other_cost: rnd(500), discount: rnd(4000), lines,
         })
       }
-    })
+      // 全体を並べて回すと 27 秒台（単独なら 7 秒）で、既定の 30 秒の上限にぎりぎりだった。ファイルが増えて負荷が少し増えると落ちるので、
+      // このテストだけ上限を広げる（中身は変えていない）
+    }, 120_000)
 
   it('確定済みの在庫の landed_cost は、仕入のメモを直しても・もう一度確定しようとしても動かない', async () => {
     const shop = await shopOf()

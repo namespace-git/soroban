@@ -4,7 +4,7 @@ import type { CollectorRun, CollectorSource } from '../../shared/types'
 import type { CollectStatus } from '../../shared/web-types'
 import type { AgentSessionInput } from '../../preload/agent-bridge'
 import { AgentHttpError, LeaseLostError } from '../agent/errors'
-import type { AgentHttp } from '../agent/http'
+import type { AgentHttp, CallOptions } from '../agent/http'
 import type { MediaCredentials } from '../agent/media'
 import { AgentRunner, shouldSkipStartupRequest, type AgentStatus, type RunnerDeps } from '../agent/runner'
 import type { CollectorStore } from '../store/types'
@@ -27,7 +27,7 @@ const session = (over: Partial<AgentSessionInput> = {}): AgentSessionInput => ({
   ...over,
 })
 
-interface Call { kind: 'agent' | 'register' | 'rpc'; method: string; args: unknown[]; auth: string }
+interface Call { kind: 'agent' | 'register' | 'rpc'; method: string; args: unknown[]; auth: string; opts?: CallOptions }
 
 type AgentHandler = (args: unknown[], key: string) => unknown | Promise<unknown>
 
@@ -87,8 +87,8 @@ function harness(over: {
         expires_at: new Date(Date.now() + 12 * HOUR).toISOString(),
       }
     },
-    async agent<T>(method: string, args: unknown[], key: string) {
-      calls.push({ kind: 'agent', method, args, auth: key })
+    async agent<T>(method: string, args: unknown[], key: string, opts?: CallOptions) {
+      calls.push({ kind: 'agent', method, args, auth: key, opts })
       return await agentHandlers[method]?.(args, key) as T
     },
     async rpc<T>(method: string, args: unknown[], jwt: string) {
@@ -620,16 +620,71 @@ describe('鍵の取り直しとログアウト', () => {
     await tick(0)
   })
 
-  it('トークンが消える（ログアウト）と、鍵を捨てて止まる：claim も取り直しも通信しない', async () => {
+  it('トークンが消える（ログアウト）と、サーバーの鍵を 1 回だけ捨ててから止まる：unregister のほかは claim も取り直しも通信しない', async () => {
     const h = harness()
     h.runner.setSession(session())
     await tick(0)
+    const key = h.keys[0]
     const before = h.calls.length
     h.runner.clearSession()
     expect(h.runner.getStatus().state).toBe('waiting-login')
 
     await tick(12 * HOUR)
-    expect(h.calls).toHaveLength(before)
+    // 捨てる前の鍵で、unregister だけを 1 回。やり直さず、待ちすぎない（5 秒）
+    const after = h.calls.slice(before)
+    expect(after).toHaveLength(1)
+    expect(after[0]).toMatchObject({ kind: 'agent', method: 'unregister', args: [], auth: key })
+    expect(after[0].opts).toEqual({ retry: false, timeoutMs: 5_000 })
+    expect(h.logs.map(l => l.kind)).toContain('agent_unregistered')
+    // 鍵はログに出さない
+    expect(JSON.stringify(h.logs)).not.toContain(key)
+
+    // もう一度ログアウトが来ても（鍵はもう無い）、何も送らない
+    h.runner.clearSession()
+    await tick(MIN)
+    expect(h.calls).toHaveLength(before + 1)
+  })
+
+  it('ログインしていない（鍵を持っていない）ときのログアウトは、サーバーに何も送らない', async () => {
+    const h = harness()
+    h.runner.clearSession()
+    await tick(MIN)
+    expect(h.calls).toHaveLength(0)
+    expect(h.runner.getStatus().state).toBe('waiting-login')
+  })
+
+  it('サーバーの鍵を捨てるのに失敗しても（通信切れ・401・応答が来ない）止まる：やり直さず、ログに理由だけ残す', async () => {
+    const failures: Array<[string, () => unknown]> = [
+      ['通信切れ', () => { throw new AgentHttpError('network', 0, 'サーバーにつながりません') }],
+      ['401', () => { throw new AgentHttpError('unauthorized', 401, '鍵が正しくありません') }],
+      ['応答が来ない', () => new Promise(() => {})],
+    ]
+    for (const [label, unregister] of failures) {
+      const h = harness({ agent: { unregister } })
+      h.runner.setSession(session())
+      await tick(0)
+      const key = h.keys[0]
+      const before = h.calls.length
+
+      h.runner.clearSession()
+      // 返事を待たずに止まる
+      expect(h.runner.getStatus().state, label).toBe('waiting-login')
+      await tick(12 * HOUR)
+      expect(h.calls.slice(before).map(c => c.method), label).toEqual(['unregister'])
+      expect(h.count('claim'), label).toBe(1)
+
+      if (label !== '応答が来ない') {
+        const failed = h.logs.find(l => l.kind === 'agent_unregister_failed')
+        expect(failed?.message, label).toContain('期限で切れます')
+      }
+      expect(JSON.stringify(h.logs), label).not.toContain(key)
+
+      // またログインすれば、鍵を取り直して再開できる
+      h.runner.setSession(session({ accessToken: `jwt-${'u'.repeat(40)}` }))
+      await tick(0)
+      expect(h.count('register'), label).toBe(2)
+      h.runner.dispose()
+    }
   })
 
   it('ログアウトしたあとにまたログインしたら、鍵を取り直して再開する（起動時の依頼は出さない）', async () => {
@@ -662,23 +717,32 @@ describe('鍵の取り直しとログアウト', () => {
     })
     h.runner.setSession(session())
     await tick(0)
-    const agentCalls = h.calls.filter(c => c.kind === 'agent').length
+    // unregister（ログアウトで鍵を捨てる 1 回）は別に数える：それ以外は一切通信しない
+    const agentCallsExceptUnregister = (): number =>
+      h.calls.filter(c => c.kind === 'agent' && c.method !== 'unregister').length
+    const agentCalls = agentCallsExceptUnregister()
 
     h.runner.clearSession()
     gate.resolve()
     await tick(0)
     expect(errors[0]).toMatchObject({ name: 'AgentStoppedError' })
-    expect(h.calls.filter(c => c.kind === 'agent')).toHaveLength(agentCalls)
+    expect(agentCallsExceptUnregister()).toBe(agentCalls)
+    expect(h.count('unregister')).toBe(1)
     expect(h.count('finish')).toBe(0)
     await tick(5 * MIN)
-    expect(h.calls.filter(c => c.kind === 'agent')).toHaveLength(agentCalls) // もう claim もしない
+    expect(agentCallsExceptUnregister()).toBe(agentCalls) // もう claim もしない
+    expect(h.count('unregister')).toBe(1)
   })
 
   it('dispose（モードを抜ける）すると以後は何をしても動かない', async () => {
     const h = harness()
     h.runner.setSession(session())
     await tick(0)
+    const key = h.keys[0]
     h.runner.dispose()
+    // 抜けるときも、サーバーの鍵を 1 回だけ捨てに行く（届かなくても鍵は期限で切れる）
+    expect(h.of('unregister')).toHaveLength(1)
+    expect(h.of('unregister')[0].auth).toBe(key)
     const before = h.calls.length
     h.runner.setSession(session())
     await tick(10 * MIN)

@@ -14,8 +14,12 @@ const KEY_BYTES = 32
 /** 形が合うものだけ DB に問い合わせる（変な文字列で DB を叩かない） */
 export const AGENT_KEY_RE = /^sbagent_[A-Za-z0-9_-]{43}$/
 
-/** 鍵の期限。DB の register_agent_device は 24 時間までしか受けない */
-export const AGENT_KEY_TTL_HOURS = 12
+/**
+ * 鍵の期限。DB の register_agent_device は 3 時間までしか受けない（20261012001900）。
+ * 短くしてあるのは、盗まれた・忘れた鍵が効く時間を縮めるため。PC は期限の前に、ログイン中のトークンで取り直す
+ * （src/main/agent/runner.ts）。ログアウトのときは `unregister` で鍵をすぐ捨てる
+ */
+export const AGENT_KEY_TTL_HOURS = 2
 
 export function generateAgentKey(): string {
   const bytes = new Uint8Array(KEY_BYTES)
@@ -65,9 +69,9 @@ function agentKeyFromRequest(request: Request): string | null {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
- * 鍵 → SHA-256 → `app.agent_of_token`（security definer）。**`set role` の前の接続ロールで**呼ぶ
- * （`root` はトランザクションの外の Sql）。引けたら last_seen_at が進む（画面の「取り込み担当 n 台」の根拠）。
- * 知らない鍵・期限切れ・取り消し済みは 401（理由は区別しない）。
+ * 鍵 → SHA-256 → `app.agent_of_token`（security definer）。**`set role` の前の接続ロール（soroban_gateway）で**呼ぶ
+ * （`root` はトランザクションの外の Sql）。引けたら last_seen_at が進む（1 分に 1 回まで。画面の「取り込み担当 n 台」の根拠）。
+ * 知らない鍵・期限切れ・取り消し済み・鍵を作った人が世帯のメンバーでなくなった、は 401（理由は区別しない）。
  */
 export async function authenticateAgent(request: Request, root: Sql): Promise<AgentIdentity> {
   const key = agentKeyFromRequest(request)

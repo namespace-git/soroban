@@ -42,7 +42,8 @@ export async function makeDevice(
   const auth = crypto.getRandomValues(new Uint8Array(16))
   return {
     input: {
-      endpoint: opts.endpoint ?? `https://push.example.test/send/${randomUUID()}`,
+      // 登録できるのは許可した Push サービスのホストだけ（server/domain/push.ts の isPushServiceHost）。FCM（Chrome・Android）の形
+      endpoint: opts.endpoint ?? `https://fcm.googleapis.com/fcm/send/${randomUUID()}`,
       p256dh: b64urlEncode(uaPublic),
       auth: b64urlEncode(auth),
       label: opts.label ?? 'テストの端末',

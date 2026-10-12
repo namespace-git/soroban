@@ -37,7 +37,7 @@ const LEASES: unknown[] = [
 
 describe('契約と表', () => {
   it('AgentApi の全メソッドが表にあり、register 以外は実装が登録されている', () => {
-    expect(AGENT_METHOD_NAMES.length).toBe(22)
+    expect(AGENT_METHOD_NAMES.length).toBe(23)
     for (const name of AGENT_METHOD_NAMES) {
       if (name === 'register') continue
       expect(typeof agentHandlers[name], name).toBe('function')
@@ -45,11 +45,12 @@ describe('契約と表', () => {
   })
 })
 
-// register は人の JWT の経路（変な端末名は agent-auth.test.ts で確認）
+// register は人の JWT の経路（変な端末名は agent-auth.test.ts で確認）。
+// unregister は lease も引数も見ない（鍵を捨てるだけ）ので、lease を渡して調べる下の 2 つからは外し、専用のテストで確かめる
 describe('変な引数で 500 にならない', () => {
   it('lease が変なら、どのメソッドも 400 か 409（lease_lost）。何も書かない', async () => {
     for (const name of AGENT_METHOD_NAMES) {
-      if (name === 'register' || name === 'claim') continue
+      if (name === 'register' || name === 'claim' || name === 'unregister') continue
       for (const bad of LEASES) {
         const r = await pc.call(name, bad)
         expect(r.status, `${name}(${JSON.stringify(bad)})`).toBeLessThan(500)
@@ -60,7 +61,7 @@ describe('変な引数で 500 にならない', () => {
 
   it('lease が正しくても、引数が変なら 4xx（500 にしない）。状態は壊れない', async () => {
     for (const name of AGENT_METHOD_NAMES) {
-      if (name === 'register' || name === 'claim' || name === 'finish') continue
+      if (name === 'register' || name === 'claim' || name === 'finish' || name === 'unregister') continue
       for (const args of GARBAGE) {
         const r = await pc.call(name, lease, ...args)
         expect(r.status, `${name}(lease, ${JSON.stringify(args)}) → ${JSON.stringify(r.body)}`).toBeLessThan(500)
@@ -86,6 +87,19 @@ describe('変な引数で 500 にならない', () => {
     for (const args of GARBAGE) {
       const r = await pc.call('claim', ...args)
       expect(r.status).toBe(200)
+    }
+  })
+
+  it('unregister も引数を見ない（変な引数があっても 200。捨てられるのは呼んだ PC の鍵だけ）', async () => {
+    for (const args of GARBAGE) {
+      await resetWorld(f)
+      const one = await registerPc(f, f.world.a, 'PC 1')
+      const other = await registerPc(f, f.world.a, 'PC 2')
+      const r = await one.call('unregister', ...args)
+      expect(r.status, JSON.stringify(args)).toBe(200)
+      expect(r.body.result).toBeNull()
+      expect((await one.call('claim')).status).toBe(401)
+      expect((await other.call('claim')).status).toBe(200)
     }
   })
 })

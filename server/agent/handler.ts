@@ -2,7 +2,7 @@ import type { AgentApi, AgentErrorCode } from '../../src/shared/agent-types'
 import { authenticate } from '../auth'
 import { mediaBaseFromEnv, newAfterCommit, serverEnvFrom, withHousehold, type RawServerEnv, type ServerEnv } from '../context'
 import type { Sql } from '../db/sql'
-import { ApiError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError, readDbError } from '../errors'
+import { ApiError, describeError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError, readDbError } from '../errors'
 import { authenticateAgent, type AgentIdentity } from './key'
 import { LeaseLostError, type AgentCtx } from './lease'
 import { registerAgent } from './register'
@@ -41,6 +41,7 @@ export function registerAgentHandler<K extends RpcMethod>(name: K, fn: AgentHand
 /** 受け付けるメソッド名。契約と食い違えば型エラー（`rpc.ts` の API_METHOD_TABLE と同じ作り） */
 const AGENT_METHOD_TABLE = {
   register: true,
+  unregister: true,
   claim: true,
   heartbeat: true,
   finish: true,
@@ -78,7 +79,7 @@ export const AGENT_METHOD_NAMES = Object.keys(AGENT_METHOD_TABLE) as (keyof Agen
  * 名前は契約と食い違えば型エラー
  */
 const AGENT_NO_NOTIFY: readonly (keyof AgentApi)[] = [
-  'register', 'claim', 'heartbeat', 'getCollectPlan', 'listSalesNeedingDetail', 'listSalesNeedingPurchasedAt',
+  'register', 'unregister', 'claim', 'heartbeat', 'getCollectPlan', 'listSalesNeedingDetail', 'listSalesNeedingPurchasedAt',
   'existingImportKeys', 'excludedOrders', 'purchaseRevisitCandidates',
 ]
 const AGENT_NO_NOTIFY_METHODS: ReadonlySet<string> = new Set<string>(AGENT_NO_NOTIFY)
@@ -197,11 +198,6 @@ function toAgentError(e: unknown, method: string): { code: AgentErrorCode; messa
   // それ以外は丸める。原因はサーバーのログにだけ出す。引数・オブジェクトそのものは載せない（鍵・lease が入りうる）
   console.error(`[agent] ${method}: 予期しないエラー`, describeError(e))
   return { code: 'internal', message: INTERNAL_MESSAGE }
-}
-
-function describeError(e: unknown): Record<string, unknown> {
-  if (e instanceof Error) return { name: e.name, code: (e as { code?: unknown }).code, message: e.message, stack: e.stack }
-  return { value: String(e) }
 }
 
 function jsonResponse(status: number, body: unknown): Response {

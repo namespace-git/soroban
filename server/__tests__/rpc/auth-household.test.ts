@@ -65,6 +65,8 @@ describe('findHousehold（本物のマイグレーション）', () => {
         await tx.run('alter table app.household owner to probe_owner')
         await tx.run('alter table app.household_member owner to probe_owner')
         await tx.run('alter function app.household_of_user(uuid) owner to probe_owner')
+        // member_self_lookup は関数の持ち主だけに効く方針（20261012001900）。持ち主を替えたので方針の対象も替える
+        await tx.run('alter policy member_self_lookup on app.household_member to probe_owner')
         await tx.run('grant execute on function app.household_of_user(uuid) to probe_conn')
         // 直接 select は許す（それでも force row level security で 0 件になることの対照）
         await tx.run('grant select on app.household_member to probe_conn')

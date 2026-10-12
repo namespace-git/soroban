@@ -101,7 +101,7 @@ describe('世帯を消すと、Wave 3a の表の行も全部消える', () => {
       await tx.query(`select app.enqueue_notification('sale', 't', '', null, 'sale:c')`)
       await tx.query('select app.acquire_tracking_lease()')
       await tx.query(`insert into app.setting_secret (key, ciphertext, iv, key_version) values ('k', '\\x01'::bytea, '\\x02'::bytea, 1)`)
-    })
+    }, { userId: userC }) // 鍵を出す人（app.user_id）が要る
 
     const tables = ['agent_device', 'collect_job', 'collect_job_stage', 'notification_event', 'notification_delivery', 'push_subscription', 'tracking_lease', 'setting_secret']
     for (const t of tables) {
@@ -127,7 +127,8 @@ describe('他の世帯の行を指す外部キーが作れない（Wave 3a の�
     const eventB = await asApi(db, HH_B, async (tx) =>
       (await tx.query<{ id: string }>(`select app.enqueue_notification('test', 't', '', null, 'fk:b', $1) as id`, [USER_B])).rows[0].id)
     const devB = await asApi(db, HH_B, async (tx) =>
-      (await tx.query<{ id: string }>(`select (app.register_agent_device('PC-B', repeat('d', 64), now() + interval '1 hour')).id as id`)).rows[0].id)
+      (await tx.query<{ id: string }>(`select (app.register_agent_device('PC-B', repeat('d', 64), now() + interval '1 hour')).id as id`)).rows[0].id,
+    { userId: USER_B })
     const jobB = await asApi(db, HH_B, async (tx) =>
       (await tx.query<{ id: string }>('select (app.enqueue_collect_job()).id as id')).rows[0].id)
 

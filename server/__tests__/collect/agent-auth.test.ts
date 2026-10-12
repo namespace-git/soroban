@@ -37,7 +37,7 @@ beforeEach(async () => {
 const bearer = async (m: Member): Promise<string> => `Bearer ${await jwtOf(f, m)}`
 
 describe('鍵の発行（register）', () => {
-  it('人の JWT で呼ぶと、12 時間の鍵を 1 度だけ返す。DB にはハッシュしかない', async () => {
+  it('人の JWT で呼ぶと、2 時間の鍵を 1 度だけ返す。DB にはハッシュしかない', async () => {
     const r = await callAgent(f, 'register', ['リビングの PC'], await bearer(a))
     expect(r.status).toBe(200)
     const reg = r.body.result
@@ -47,8 +47,8 @@ describe('鍵の発行（register）', () => {
     expect(reg.household_id).toBe(a.householdId)
     expect(reg.token).toMatch(/^sbagent_[A-Za-z0-9_-]{43}$/)
     const hours = (new Date(reg.expires_at).getTime() - Date.now()) / 3_600_000
-    expect(hours).toBeGreaterThan(11.9)
-    expect(hours).toBeLessThanOrEqual(12.01)
+    expect(hours).toBeGreaterThan(1.9)
+    expect(hours).toBeLessThanOrEqual(2.01)
 
     const rows = (await f.dom.pg.query<Record<string, unknown>>('select * from app.agent_device where id = $1', [reg.agent_id])).rows
     expect(rows).toHaveLength(1)

@@ -38,8 +38,31 @@ const TEST_SEND_LIMIT = 20
 // 引数の検査
 // ------------------------------------------------------------
 
-/** https の URL だけ。資格情報つき・自分自身（localhost）・IP アドレス直指定は、通知サービスの宛先ではないので断る */
-function argEndpoint(v: unknown): string {
+/**
+ * ブラウザの Push サービス（通知の配信元）のホスト。購読の宛先（endpoint）はここに限る。
+ * サーバーは endpoint にそのまま POST するので、許可しないと「この世帯の人が好きな URL を登録 → サーバーがそこへ送る」
+ * 経路（SSRF）になる。
+ *   Chrome・Edge・Android・Samsung … fcm.googleapis.com
+ *   Firefox                        … *.push.services.mozilla.com（updates.push.services.mozilla.com）
+ *   Safari・iPhone の PWA          … *.push.apple.com（web.push.apple.com）
+ *   Edge（Windows の通知基盤）     … *.notify.windows.com
+ * 新しいブラウザが別のホストを使うようになったら、ここに足す
+ */
+const PUSH_SERVICE_HOSTS: readonly string[] = ['fcm.googleapis.com']
+const PUSH_SERVICE_HOST_SUFFIXES: readonly string[] = ['.push.services.mozilla.com', '.push.apple.com', '.notify.windows.com']
+
+/** 小文字にした hostname が、許可した Push サービスのホストか（`*.` は 1 つ以上のラベル。ドメインそのものは含まない） */
+export function isPushServiceHost(host: string): boolean {
+  return PUSH_SERVICE_HOSTS.includes(host) ||
+    PUSH_SERVICE_HOST_SUFFIXES.some((suffix) => host.length > suffix.length && host.endsWith(suffix))
+}
+
+/**
+ * https の URL だけ。資格情報つき・自分自身（localhost）・IP アドレス直指定は、通知サービスの宛先ではないので断る。
+ * `pushServiceOnly` なら、さらにホストを許可した Push サービス（`isPushServiceHost`）に限り、ポートは既定（443）だけ。
+ * 登録（savePushSubscription）はこちら。消す側（deletePushSubscription）は形だけ見る（許可の外の宛先が昔入っていても消せるように）
+ */
+function argEndpoint(v: unknown, pushServiceOnly = false): string {
   const raw = argText('通知の宛先（endpoint）', v, { max: ENDPOINT_MAX })
   const bad = () => new UserError('通知の宛先（endpoint）は https:// の URL にしてください')
   if (!raw.startsWith('https://') || /\s/.test(raw)) throw bad()
@@ -54,6 +77,9 @@ function argEndpoint(v: unknown): string {
     url.protocol !== 'https:' || url.username || url.password || !host ||
     host === 'localhost' || host.endsWith('.localhost') || host.startsWith('[') || /^\d+\.\d+\.\d+\.\d+$/.test(host)
   ) throw bad()
+  if (pushServiceOnly && (url.port !== '' || !isPushServiceHost(host))) {
+    throw new UserError('この通知の宛先には対応していません。ブラウザの通知サービス（Chrome・Firefox・Safari・Edge）の宛先だけ登録できます')
+  }
   return raw
 }
 
@@ -98,7 +124,7 @@ export async function getPushConfig(ctx: Ctx): Promise<{ vapid_public_key: strin
  */
 export async function savePushSubscription(ctx: Ctx, input: PushSubscriptionInput): Promise<void> {
   const i = argObject('通知の購読', input)
-  const endpoint = argEndpoint(i.endpoint)
+  const endpoint = argEndpoint(i.endpoint, true)
   const p256dh = argKey('p256dh', i.p256dh, 65, 0x04)
   const auth = argKey('auth', i.auth, 16)
   const label = argText('端末の名前', i.label, { max: LABEL_MAX }).replace(/\s+/g, ' ').trim()

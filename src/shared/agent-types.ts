@@ -10,8 +10,9 @@
 //   成功 {"result":…}（undefined は null）
 //   失敗 {"error":{"code":"…","message":"<日本語>"}}（コードは AgentErrorCode）
 //
-// 鍵（取り込み担当の鍵）：register が 12 時間の短命の鍵を 1 度だけ返す。PC のメモリにだけ持つ（保存しない）。
+// 鍵（取り込み担当の鍵）：register が 2 時間の短命の鍵を 1 度だけ返す。PC のメモリにだけ持つ（保存しない）。
 // 人の JWT では register 以外は通らない。鍵では画面の API（/api/rpc）は通らない。
+// ログアウト・取り込み担当をやめるときは unregister で鍵をすぐ捨てる（鍵を作った人が世帯から外れたときも、サーバーが鍵を止める）。
 //
 // lease（取り込みの権限）：claim が返す job_id と lease_token。**書き込みは必ず lease を渡す**。
 // サーバーは書き込みのトランザクションの先頭で lease を確かめる。失効していたら何も書かずに `lease_lost`（409）。
@@ -46,7 +47,7 @@ export interface AgentRegistration {
   household_id: string
   /** 取り込み担当の鍵。`Authorization: Agent <token>` で送る */
   token: string
-  /** 鍵の期限（ISO。いまから 12 時間）。近づいたら、そのときのログインで register し直す */
+  /** 鍵の期限（ISO。いまから 2 時間）。近づいたら、そのときのログインで register し直す */
   expires_at: string
 }
 
@@ -323,8 +324,16 @@ export interface AgentRevisitResult {
 
 export interface AgentApi {
   // --- 資格（register だけ人の JWT） ---
-  /** 取り込み担当の鍵を出す。端末名が同じなら取り直し。取り消された PC は 409 */
+  /**
+   * 取り込み担当の鍵を出す。端末名が同じなら取り直し。取り消された PC は 409。
+   * 鍵が生きている同じ名前の PC を、別の人が取り直そうとしても 409。取り消されていない PC は世帯ごとに 10 台まで（409）
+   */
   register(deviceName: string): Promise<AgentRegistration>
+  /**
+   * この PC の鍵を捨てる（ログアウト・取り込み担当をやめるとき）。鍵の期限をいまにするので、以後この鍵では何も通らない。
+   * `Authorization: Agent <鍵>` で呼ぶ。失敗しても止まらなくてよい（鍵は期限で切れる）。捨てた鍵でもう一度呼ぶと 401
+   */
+  unregister(): Promise<void>
 
   // --- 取り込み要求 ---
   /** 積まれた要求を 1 本取る（20 秒ごと）。無ければ null。端末名・PC の id は鍵から決まる */

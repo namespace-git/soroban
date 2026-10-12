@@ -76,6 +76,17 @@ describe('agent：Authorization: Agent <鍵> と本文', () => {
     expect(s.seen[0].init.credentials).toBe('omit')
   })
 
+  it('timeoutMs を渡すと、その 1 回の通信だけ待つ時間が変わる（応答が来ない unregister を短く諦める）', async () => {
+    const hang: FetchFn = (_url, init) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+    })
+    const http = createAgentHttp({ origin: ORIGIN, fetch: hang, sleep: async () => {}, retryDelaysMs: [] })
+    const started = Date.now()
+    const e = await caught(http.agent('unregister', [], KEY, { retry: false, timeoutMs: 30 }))
+    expect(e.code).toBe('network')
+    expect(Date.now() - started).toBeLessThan(5_000) // 既定の 60 秒ではなく、渡した 30ms で切れる
+  })
+
   it('末尾の / のある origin でも URL が二重にならない', async () => {
     const s = server(() => ok(null))
     await createAgentHttp({ origin: `${ORIGIN}/`, fetch: s.fetch, sleep: s.sleep }).agent('claim', [], KEY)

@@ -74,7 +74,7 @@ describe('ロール soroban_cron', () => {
     expect(owned.rows).toEqual([])
   })
 
-  it('読める表は、通知・取り込み要求・仕入（追跡の列）・仕入の明細（点数）・秘密（暗号文）・17TRACK の lease だけ。ビューは読めない', async () => {
+  it('読める表は、通知・取り込み要求・仕入（追跡の列）・仕入の明細（点数）・17TRACK の lease だけ。秘密（暗号文）もビューも読めない', async () => {
     const { rows } = await db.query<{ relname: string; relkind: string; any_col: boolean; insert: boolean; update: boolean; delete: boolean }>(
       `select c.relname, c.relkind::text,
               has_any_column_privilege('soroban_cron', c.oid, 'select') as any_col,
@@ -87,9 +87,10 @@ describe('ロール soroban_cron', () => {
     )
     expect(rows.length).toBeGreaterThanOrEqual(40)
     const readable = rows.filter((r) => r.any_col).map((r) => r.relname)
+    // setting_secret は外した（20261012001900）。17TRACK のキーは withHousehold（soroban_api）の中で読むので、定期実行は暗号文に触れない
     expect(readable).toEqual([
       'collect_job', 'notification_delivery', 'notification_event', 'purchase', 'purchase_line',
-      'push_subscription', 'setting_secret', 'tracking_lease',
+      'push_subscription', 'tracking_lease',
     ])
     // 表全体への insert / delete は、必要な表だけ
     expect(rows.filter((r) => r.insert).map((r) => r.relname)).toEqual(['notification_delivery', 'notification_event', 'tracking_lease'])
@@ -100,7 +101,7 @@ describe('ロール soroban_cron', () => {
     for (const t of [
       'sale', 'sale_line', 'inventory_item', 'listing', 'listing_line', 'expense', 'expense_line', 'month_book',
       'cash_account', 'cash_entry', 'liability', 'setting', 'tag', 'shop_account', 'product_name', 'app_log',
-      'collector_run', 'household', 'household_member', 'agent_device', 'collect_job_stage',
+      'collector_run', 'household', 'household_member', 'agent_device', 'collect_job_stage', 'setting_secret',
       'sale_profit', 'monthly_summary', 'inventory_view',
     ]) {
       expect(await denied(() => asCron(db, null, (tx) => tx.query(`select 1 from app.${t} limit 1`))), t).toBe('42501')
@@ -141,7 +142,7 @@ describe('ロール soroban_cron', () => {
     for (const [t, c] of [
       ['purchase', 'tracking_number'], ['purchase', 'tracking_queued_at'], ['purchase', 'tracking_register_pending_at'],
       ['purchase', 'tracking_registered_at'], ['purchase', 'fulfillment'], ['purchase_line', 'quantity'],
-      ['collect_job', 'lease_expires_at'], ['push_subscription', 'endpoint'], ['setting_secret', 'ciphertext'],
+      ['collect_job', 'lease_expires_at'], ['push_subscription', 'endpoint'],
     ]) {
       expect(await can(t, c), `${t}.${c}`).toBe(true)
     }
@@ -149,6 +150,7 @@ describe('ロール soroban_cron', () => {
       ['collect_job', 'lease_token'], ['push_subscription', 'user_agent'], ['purchase', 'shipping_fee'],
       ['purchase', 'discount'], ['purchase_line', 'unit_price'], ['purchase_line', 'landed_unit_cost'],
       ['inventory_item', 'landed_cost'], ['sale', 'price'], ['sale', 'fee'],
+      ['setting_secret', 'ciphertext'], ['setting_secret', 'iv'], ['setting_secret', 'key_version'],
     ]) {
       expect(await can(t, c), `${t}.${c}`).toBe(false)
     }
@@ -294,27 +296,33 @@ describe('世帯をまたいで読める（取り込み要求の片付け・秘�
     }
   })
 
-  it('setting_secret：世帯をまたいで暗号文・版・方式を読める。書けない', async () => {
+  it('setting_secret：定期実行は暗号文に触れない（世帯の文脈つきでも）。soroban_api は自分の世帯の分だけ', async () => {
+    // 以前は世帯をまたいで暗号文・版・方式を読めた。コード（server/cron/tracking.ts）は使っていなかったので外した（20261012001900）。
+    // 17TRACK のキーは withHousehold（soroban_api）の中で読む
     const put = (v: number) => (tx: Transaction) =>
       tx.query(`insert into app.setting_secret (key, ciphertext, iv, key_version) values ('track17_api_key', '\\x0102'::bytea, '\\x0a0b'::bytea, $1)`, [v])
     await asApi(db, HH_A, put(1))
     await asApi(db, HH_B, put(2))
 
-    const rows = await asCron(db, null, async (tx) =>
-      (await tx.query<{ household_id: string; key: string; key_version: number; alg: string }>(
-        'select household_id, key, key_version, alg from app.setting_secret order by household_id')).rows)
-    expect(rows).toEqual([
-      { household_id: HH_A, key: 'track17_api_key', key_version: 1, alg: 'aes-256-gcm' },
-      { household_id: HH_B, key: 'track17_api_key', key_version: 2, alg: 'aes-256-gcm' },
-    ])
-    const bytes = await asCron(db, null, async (tx) =>
-      (await tx.query<{ ciphertext: Uint8Array }>('select ciphertext, iv from app.setting_secret where household_id = $1', [HH_A])).rows)
-    expect(bytes).toHaveLength(1)
-
+    for (const sql of [
+      'select household_id, key, key_version, alg from app.setting_secret',
+      'select ciphertext from app.setting_secret',
+      'select iv from app.setting_secret',
+      'select * from app.setting_secret',
+      'select count(*) from app.setting_secret',
+    ]) {
+      expect(await denied(() => asCron(db, null, (tx) => tx.query(sql))), sql).toBe('42501')
+      expect(await denied(() => asCron(db, HH_A, (tx) => tx.query(sql))), `${sql}（世帯の文脈つき）`).toBe('42501')
+    }
+    // 書けない
     expect(await denied(() => asCron(db, HH_A, put(1)))).toBe('42501')
     expect(await denied(() => asCron(db, HH_A, (tx) => tx.query(`update app.setting_secret set key_version = 9`)))).toBe('42501')
     expect(await denied(() => asCron(db, HH_A, (tx) => tx.query(`delete from app.setting_secret`)))).toBe('42501')
-    // 暗号文は soroban_api の側でも他の世帯からは見えない（Cron だけが世帯をまたぐ）
+    // 方針も外してある（cron_read が残っていない）
+    const policies = await db.query<{ polname: string }>(
+      `select polname from pg_policy where polrelid = 'app.setting_secret'::regclass order by polname`)
+    expect(policies.rows).toEqual([{ polname: 'household_isolation' }])
+    // 暗号文は soroban_api の側でも他の世帯からは見えない
     const seenByApi = await asApi(db, HH_A, async (tx) => (await tx.query('select household_id from app.setting_secret')).rows)
     expect(seenByApi).toEqual([{ household_id: HH_A }])
   })
