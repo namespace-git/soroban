@@ -24,7 +24,8 @@
     "dev:web": "vite --config vite.config.web.ts",
     "build:web": "vite build --config vite.config.web.ts",
     "migrate:web": "node tools/migrate-to-web/run.mjs",
-    "gen-keys": "node tools/gen-keys/index.mjs"
+    "gen-keys": "node tools/gen-keys/index.mjs",
+    "setup:gateway": "node tools/setup-web/gateway.mjs"
   },
   "dependencies": {
     "@fontsource-variable/m-plus-2": "^5.3.0",
