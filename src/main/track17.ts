@@ -23,12 +23,16 @@ import type { Fulfillment } from '../shared/types'
 
 const API_BASE = 'https://api.17track.net/track/v2.4'
 const BATCH_SIZE = 40
+/** 1リクエストに入れられる追跡番号の数（サーバーの定期実行が、1リクエストぶんの束を作るのに使う） */
+export const TRACK17_BATCH_SIZE = BATCH_SIZE
 /** 1秒に3リクエストまで。バッチ間はこの間隔だけ空ける（40件程度しか無いので数回で済む） */
 const BATCH_INTERVAL_MS = 350
 const TIMEOUT_MS = 30_000
 
 /** register のときだけ成功として扱うコード（すでに登録済み。課金もされない） */
 const ALREADY_REGISTERED_CODE = -18019901
+/** gettrackinfo が返す「この番号はまだ register されていない」（未登録の番号は読めない） */
+export const NOT_REGISTERED_CODE = -18019902
 
 /** 17TRACK が返す最新状態（9種類）。知らない文字列は 'Unknown' に丸める */
 export type Track17Status =
@@ -76,7 +80,24 @@ export class Track17Error extends Error {
   }
 }
 
-function sleep(ms: number): Promise<void> {
+/**
+ * 呼び方の差し替え口。省略すればデスクトップ（Electron）の今までの動きそのまま
+ * （グローバルの fetch・setTimeout・実行環境のタイムゾーン）。
+ * サーバー（Cloudflare Workers の定期実行）とテストが、通信・待ち・日付の変換を差し替えるために使う
+ */
+export interface Track17Options {
+  /** 通信。省略時はグローバルの fetch（呼ぶたびに引く。テストが差し替えられるように） */
+  fetch?: typeof fetch
+  /** 待ち。再試行とバッチ間の間隔で使う。省略時は setTimeout */
+  sleep?: (ms: number) => Promise<void>
+  /**
+   * 時刻を YYYY-MM-DD（日本時間）にする。省略時は todayLocal（実行環境のタイムゾーン。PC が日本時間である前提）。
+   * サーバーは UTC で動くので、日本時間に直す関数（todayJst）を渡す
+   */
+  dateOf?: (d: Date) => string
+}
+
+function defaultSleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
@@ -137,11 +158,13 @@ function parseApiError(bodyText: string): { code: number; message: string } | nu
 }
 
 /** 1回だけ叩く。JSONとして読めなければ Track17Error（「解釈できませんでした」） */
-async function callOnce(path: string, apiKey: string, body: unknown): Promise<any> {
+async function callOnce(path: string, apiKey: string, body: unknown, options: Track17Options): Promise<any> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  // グローバルの fetch は呼ぶたびに引く（Workers では fetch を取り出して別の名前で呼ぶと Illegal invocation になる）
+  const doFetch = options.fetch ?? ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => fetch(input, init))
   try {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await doFetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -187,10 +210,11 @@ async function callOnce(path: string, apiKey: string, body: unknown): Promise<an
 }
 
 /** 5xx・通信失敗だけ再試行する */
-async function call(path: string, apiKey: string, body: unknown): Promise<any> {
+async function call(path: string, apiKey: string, body: unknown, options: Track17Options): Promise<any> {
+  const sleep = options.sleep ?? defaultSleep
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      return await callOnce(path, apiKey, body)
+      return await callOnce(path, apiKey, body, options)
     } catch (e) {
       if (attempt === MAX_ATTEMPTS || !isRetryable(e)) {
         if (e instanceof Track17Error) throw e
@@ -209,17 +233,18 @@ async function call(path: string, apiKey: string, body: unknown): Promise<any> {
  * バッチ間に間を置く。carrier は送らない（17TRACK に自動判別させる）。
  * -18019901（すでに登録済み）は accepted 扱い（課金もされないため）
  */
-export async function registerNumbers(apiKey: string, numbers: string[]): Promise<{
+export async function registerNumbers(apiKey: string, numbers: string[], options: Track17Options = {}): Promise<{
   accepted: string[]
   rejected: Array<{ number: string; code: number; message: string }>
 }> {
+  const sleep = options.sleep ?? defaultSleep
   const accepted: string[] = []
   const rejected: Array<{ number: string; code: number; message: string }> = []
   const batches = toBatches(numbers)
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i]
-    const json = await call('/register', apiKey, batch.map(number => ({ number })))
+    const json = await call('/register', apiKey, batch.map(number => ({ number })), options)
     const data = json?.data ?? {}
     const acceptedItems: any[] = Array.isArray(data.accepted) ? data.accepted : []
     const rejectedItems: any[] = Array.isArray(data.rejected) ? data.rejected : []
@@ -277,12 +302,15 @@ function eventTimestampMs(event: any): number {
   return Number.NaN
 }
 
+/** 時刻を日付（YYYY-MM-DD）にする関数。既定は実行環境のタイムゾーン（todayLocal）、サーバーは日本時間に直す関数を渡す */
+type DateOf = (d: Date) => string
+
 /** 時刻の文字列（ISO・「YYYY-MM-DD HH:mm:ss」等）を JST の YYYY-MM-DD へ。読めなければ null */
-function toLocalDate(raw: string | null): string | null {
+function toLocalDate(raw: string | null, dateOf: DateOf): string | null {
   if (!raw) return null
   const d = new Date(raw)
   if (Number.isNaN(d.getTime())) return null
-  return todayLocal(d)
+  return dateOf(d)
 }
 
 /**
@@ -293,18 +321,18 @@ function toLocalDate(raw: string | null): string | null {
  *   4. time_utc（文字列）→ toLocalDate
  * どれも読めなければ null
  */
-function extractEventDate(event: any): string | null {
+function extractEventDate(event: any, dateOf: DateOf): string | null {
   const timeRaw = event?.time_raw
   if (timeRaw && typeof timeRaw === 'object' && typeof timeRaw.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(timeRaw.date)) {
     return timeRaw.date
   }
   if (typeof timeRaw === 'string' && timeRaw) {
-    const local = toLocalDate(timeRaw)
+    const local = toLocalDate(timeRaw, dateOf)
     if (local) return local
   }
-  const isoLocal = toLocalDate(typeof event?.time_iso === 'string' ? event.time_iso : null)
+  const isoLocal = toLocalDate(typeof event?.time_iso === 'string' ? event.time_iso : null, dateOf)
   if (isoLocal) return isoLocal
-  return toLocalDate(typeof event?.time_utc === 'string' ? event.time_utc : null)
+  return toLocalDate(typeof event?.time_utc === 'string' ? event.time_utc : null, dateOf)
 }
 
 /**
@@ -312,7 +340,7 @@ function extractEventDate(event: any): string | null {
  * または stage が Delivered）を探す。複数あれば最も新しいものの到着日を返す。
  * 無ければ null
  */
-function findDeliveredEventDate(trackInfo: any): string | null {
+function findDeliveredEventDate(trackInfo: any, dateOf: DateOf): string | null {
   const providers: any[] = trackInfo?.tracking?.providers ?? []
   let best: any = null
   let bestTime = Number.NEGATIVE_INFINITY
@@ -328,11 +356,11 @@ function findDeliveredEventDate(trackInfo: any): string | null {
       }
     }
   }
-  return best ? extractEventDate(best) : null
+  return best ? extractEventDate(best, dateOf) : null
 }
 
 /** 1件の accepted 要素を Track17Read へ整える */
-function toTrack17Read(item: any): Track17Read {
+function toTrack17Read(item: any, dateOf: DateOf): Track17Read {
   const number = typeof item?.number === 'string' ? item.number : ''
   const trackInfo = item?.track_info ?? {}
   const latestStatus = trackInfo?.latest_status ?? {}
@@ -346,7 +374,7 @@ function toTrack17Read(item: any): Track17Read {
   if (status === 'Delivered') {
     // 「配達された event」自身の日付を優先。無ければ latest_event を予備に使う
     // （latest_event についても同じ優先順位＝time_raw.date を先に見る）
-    deliveredAt = findDeliveredEventDate(trackInfo) ?? extractEventDate(trackInfo?.latest_event)
+    deliveredAt = findDeliveredEventDate(trackInfo, dateOf) ?? extractEventDate(trackInfo?.latest_event, dateOf)
   }
 
   return { number, status, subStatus, deliveredAt, latestEventAt, error: null }
@@ -359,14 +387,16 @@ function toTrack17Read(item: any): Track17Read {
  * 最重要：応答の number が問い合わせた番号のどれとも一致しないものは捨てる
  * （大文字小文字の違いだけは同一とみなす。別物を書き込まないための最終防波堤）
  */
-export async function getTrackInfo(apiKey: string, numbers: string[]): Promise<Track17Read[]> {
+export async function getTrackInfo(apiKey: string, numbers: string[], options: Track17Options = {}): Promise<Track17Read[]> {
+  const sleep = options.sleep ?? defaultSleep
+  const dateOf: DateOf = options.dateOf ?? todayLocal
   const requested = new Set(numbers.map(n => n.toUpperCase()))
   const results: Track17Read[] = []
   const batches = toBatches(numbers)
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i]
-    const json = await call('/gettrackinfo', apiKey, batch.map(number => ({ number })))
+    const json = await call('/gettrackinfo', apiKey, batch.map(number => ({ number })), options)
     const data = json?.data ?? {}
     const acceptedItems: any[] = Array.isArray(data.accepted) ? data.accepted : []
     const rejectedItems: any[] = Array.isArray(data.rejected) ? data.rejected : []
@@ -374,7 +404,7 @@ export async function getTrackInfo(apiKey: string, numbers: string[]): Promise<T
     for (const item of acceptedItems) {
       const number = typeof item?.number === 'string' ? item.number : ''
       if (!requested.has(number.toUpperCase())) continue // 自分が問い合わせた番号でなければ捨てる
-      results.push(toTrack17Read(item))
+      results.push(toTrack17Read(item, dateOf))
     }
     for (const item of rejectedItems) {
       const number = typeof item?.number === 'string' ? item.number : ''

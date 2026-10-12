@@ -13,6 +13,7 @@ import {
 } from './_shared'
 import { nextItemCodes } from './inventory'
 import { applyShopAccountAutoTags } from './master'
+import { notifyArrival } from '../push/notify'
 
 // ============================================================
 // 仕入・按分・配送・追跡・明細画像・店名の学習
@@ -729,6 +730,9 @@ export async function applyTrackingResult(ctx: Ctx, purchaseId: string, r: {
       where id = ?`,
     statusText, nextDeliveredAt, id,
   )
+
+  // 17TRACK で初めて到着済になった。dedupe_key が仕入ごとなので、状態が行き来しても二度は積まれない
+  if (statusChanged && fulfillment === 'delivered') await notifyArrival(ctx, id)
 
   return statusChanged || deliveredAtChanged
 }

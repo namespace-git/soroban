@@ -19,6 +19,7 @@ import {
   findInventoryIdsByItemCodes, findInventoryIdsByModelCodeFifo, linkInventory,
 } from './inventory'
 import { takeOverListing } from './listing'
+import { notifyNewSale, notifyShipping } from '../push/notify'
 
 // ============================================================
 // 販売（メルカリ・Yahoo!フリマの取引）と自動紐付け
@@ -129,6 +130,8 @@ export async function updateSaleStatus(
     `update sale set status = ?, shipped_at = ?, delivered_at = ? where id = ?`,
     status, shippedAt, deliveredAt, row.id,
   )
+  // 発送の番になった（発送待ちに初めて変わった）ことを知らせる。dedupe_key が販売ごとなので二度は積まれない
+  if (status === 'waiting_shipment') await notifyShipping(ctx, row.id)
   return true
 }
 
@@ -1120,6 +1123,7 @@ export async function insertCollected(
     )
     const id = row!.id
     inserted.push({ id, mercariItemId: itemId })
+    await notifyNewSale(ctx, { id, title, price: r.price, soldAt, status })
 
     if (typeof r.bundleCount === 'number') {
       await ctx.sql.run('update sale set expected_item_count = ? where id = ?', argInt('まとめ買いの点数', r.bundleCount, { min: 1 }), id)

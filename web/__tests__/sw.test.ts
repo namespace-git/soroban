@@ -183,6 +183,27 @@ describe('push（通知を出す）', () => {
     })
   })
 
+  it('tag（event id）があれば通知に付ける＝同じ出来事の通知は置き換わる。無ければ付けない', async () => {
+    const sw = await loadSw()
+    const eventId = '3f1c2a9e-0000-4000-8000-000000000001'
+    await sw.fire('push', pushEvent(JSON.stringify({ title: '売れました', body: '', url: '/', tag: eventId })))
+    expect(sw.showNotification).toHaveBeenLastCalledWith('売れました', {
+      body: '', icon: '/icon-192.png', data: { url: '/' }, tag: eventId,
+    })
+    // 同じ tag で 2 回届いても、ブラウザが 1 つに置き換える（出す側は同じ tag を渡し続ける）
+    await sw.fire('push', pushEvent(JSON.stringify({ title: '売れました', body: '', url: '/', tag: eventId })))
+    const tags = sw.showNotification.mock.calls.map((c) => (c[1] as { tag?: string }).tag)
+    expect(tags).toEqual([eventId, eventId])
+    // tag が空・文字列でないときは付けない（空の tag を渡すと別々の通知として扱われる）
+    for (const tag of ['', 42, null]) {
+      await sw.fire('push', pushEvent(JSON.stringify({ title: 't', tag })))
+      expect(sw.showNotification.mock.lastCall![1]).not.toHaveProperty('tag')
+    }
+    // 長すぎる tag は切る
+    await sw.fire('push', pushEvent(JSON.stringify({ title: 't', tag: 'x'.repeat(300) })))
+    expect((sw.showNotification.mock.lastCall![1] as { tag: string }).tag).toHaveLength(100)
+  })
+
   it('JSON でなければ本文だけの通知。データが無くても必ず通知を出す（iOS は出さないと購読を外す）', async () => {
     const sw = await loadSw()
     await sw.fire('push', pushEvent('発送してください：2 件'))

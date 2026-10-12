@@ -129,7 +129,8 @@ sw.addEventListener('fetch', (event) => {
 
 // --- Push 通知 ---
 
-type PushPayload = { title?: string; body?: string; url?: string }
+// tag は出来事（event id）。同じ tag の通知は置き換わるので、二重に届いても 1 つに見える
+type PushPayload = { title?: string; body?: string; url?: string; tag?: string }
 
 function readPayload(event: SwPushEvent): PushPayload {
   if (!event.data) return {}
@@ -161,6 +162,7 @@ sw.addEventListener('push', (event) => {
       body: payload.body || '',
       icon: ICON,
       data: { url: safeTarget(payload.url) },
+      ...(typeof payload.tag === 'string' && payload.tag !== '' ? { tag: payload.tag.slice(0, 100) } : {}),
     }),
   )
 })

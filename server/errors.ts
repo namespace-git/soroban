@@ -118,7 +118,10 @@ export function readDbError(e: unknown): DbErrorInfo | undefined {
  * （それ以外の SQLSTATE のメッセージは英語の内部用なので、見せない）。
  *
  * SB004（取り消せない：始まっている・もう終わっている）は 409 `conflict`、
- * SB005（取り込みの要求が見つからない。他の世帯の要求も RLS で見えない）は 404 `not_found`。
+ * SB005（取り込みの要求が見つからない。他の世帯の要求も RLS で見えない）と
+ * SB007（取り込み担当の PC が見つからない。同じく他の世帯の PC も見えない）は 404 `not_found`。
+ * SB006（取り消し済みの PC に鍵を出そうとした）は 409 `conflict` のまま。
+ * SB003（取り込みの権限の失効）も 409 だが、取り込み担当の API（server/agent/）は `lease_lost` として区別して返す。
  */
 export function mapDbError(e: unknown): UserError | undefined {
   const info = readDbError(e)
@@ -138,4 +141,6 @@ export function mapDbError(e: unknown): UserError | undefined {
 /** SB で始まる SQLSTATE のうち、409 `conflict` 以外にするもの */
 const SB_CODE_AS: Record<string, 'not_found'> = {
   SB005: 'not_found',
+  // 取り込み担当の PC が見つからない（取り消し・一覧の対象。他の世帯の PC も RLS で見えない）
+  SB007: 'not_found',
 }

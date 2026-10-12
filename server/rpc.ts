@@ -1,4 +1,5 @@
 import type { SorobanApi } from '../src/shared/types'
+import type { WebApi } from '../src/shared/web-types'
 import { authenticate, type AuthEnv, type Identity } from './auth'
 import { mediaBaseFromEnv, withHousehold, type Ctx } from './context'
 import type { Sql } from './db/sql'
@@ -21,13 +22,21 @@ export type HandlerFor<K extends keyof SorobanApi> = (
   ...args: Parameters<SorobanApi[K]>
 ) => ReturnType<SorobanApi[K]>
 
-export type Handlers = Partial<Record<keyof SorobanApi, Handler>>
+/** Web 版だけの契約（`WebApi`）のメソッド `K` に型を合わせたハンドラ。`registerWebHandler` が使う */
+export type WebHandlerFor<K extends keyof WebApi> = (ctx: Ctx, ...args: Parameters<WebApi[K]>) => ReturnType<WebApi[K]>
+
+export type Handlers = Partial<Record<keyof SorobanApi | keyof WebApi, Handler>>
 
 /** メソッド名 → 実装。移植が済んだものからここに入る。無いものは 501 */
 export const handlers: Handlers = {}
 
 /** 契約どおりの引数・戻り値の型でハンドラを登録する（型が食い違えば型エラー） */
 export function registerHandler<K extends keyof SorobanApi>(name: K, fn: HandlerFor<K>): void {
+  handlers[name] = fn as Handler
+}
+
+/** Web 版だけの契約（`WebApi`）のハンドラを、契約どおりの型で登録する（型が食い違えば型エラー） */
+export function registerWebHandler<K extends keyof WebApi>(name: K, fn: WebHandlerFor<K>): void {
   handlers[name] = fn as Handler
 }
 
@@ -167,14 +176,39 @@ const API_METHOD_TABLE = {
   installUpdate: true,
 } satisfies Record<keyof SorobanApi, true>
 
-/** `Object.keys` ではなく Set にして、`constructor`・`__proto__` などの継承されたキーを拾わない */
-const API_METHODS: ReadonlySet<string> = new Set(Object.keys(API_METHOD_TABLE))
+/**
+ * Web 版だけの契約（`WebApi`、src/shared/web-types.ts）のメソッド名。`API_METHOD_TABLE` と同じく、契約と食い違えば型エラー。
+ * 画面からは `SorobanApi` と同じ `POST /api/rpc/<method>` で呼ぶ。`SorobanApi` と名前を重ねない。
+ */
+const WEB_API_METHOD_TABLE = {
+  requestCollect: true,
+  getCollectStatus: true,
+  cancelCollectJob: true,
+  listAgentDevices: true,
+  revokeAgentDevice: true,
+  getPushConfig: true,
+  savePushSubscription: true,
+  deletePushSubscription: true,
+  listPushDevices: true,
+  setPushKinds: true,
+  sendTestPush: true,
+  getTrackingNumber: true,
+} satisfies Record<keyof WebApi, true>
 
-export function isApiMethod(name: string): name is keyof SorobanApi {
+/** `Object.keys` ではなく Set にして、`constructor`・`__proto__` などの継承されたキーを拾わない */
+const API_METHODS: ReadonlySet<string> = new Set([
+  ...Object.keys(API_METHOD_TABLE),
+  ...Object.keys(WEB_API_METHOD_TABLE),
+])
+
+export function isApiMethod(name: string): name is keyof SorobanApi | keyof WebApi {
   return API_METHODS.has(name)
 }
 
-export const API_METHOD_NAMES: readonly (keyof SorobanApi)[] = Object.keys(API_METHOD_TABLE) as (keyof SorobanApi)[]
+export const API_METHOD_NAMES: readonly (keyof SorobanApi | keyof WebApi)[] = [
+  ...(Object.keys(API_METHOD_TABLE) as (keyof SorobanApi)[]),
+  ...(Object.keys(WEB_API_METHOD_TABLE) as (keyof WebApi)[]),
+]
 
 export interface RpcDeps {
   /** 接続ロールの Sql（世帯の解決と、withHousehold の元）。トランザクションの外のもの */
