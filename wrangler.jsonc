@@ -27,13 +27,13 @@
   // 定期実行（同じ Worker の scheduled）。期限切れの取り込み要求の片付け・通知の送信・17TRACK の確認
   "triggers": { "crons": ["*/5 * * * *"] },
 
-  // DB への接続（Hyperdrive）。**Hyperdrive を作ったら、次の 1 行をここ（この下）に足す**（id は秘密ではない）：
-  //
-  //   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<Hyperdrive の ID>" }],
-  //
-  // まだ書かない理由：存在しない id だとデプロイが失敗する。書くまでは、画面は出て、API は「設定が無い」で 500 を返し、
-  // 定期実行は何もしない（ログに出る）。
+  // DB への接続（Hyperdrive。pnpm setup:gateway が作ったもの。id は秘密ではない。接続のパスワードは Hyperdrive の中にだけある）。
   // **画面（Settings → Bindings）で Hyperdrive を結び付けるだけでは足りない。** 結び付けは、このファイルに無いと次のデプロイで消える。
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "9751b25c5b69461a8f5f6507d8bcfb9a" }],
+
+  // workers.dev の URL で公開する（https://soroban.<アカウント>.workers.dev）。ブランチごとのプレビュー URL は作らない
+  "workers_dev": true,
+  "preview_urls": false,
 
   // 画面で入れたプレーンテキストの変数をデプロイで消さない（Secret 型は、この指定に関わらず消えない）
   "keep_vars": true,
