@@ -1,0 +1,19 @@
+# Cloudflare Pages のレスポンスヘッダー（ビルドで dist-web/_headers に出る）。書式: https://developers.cloudflare.com/pages/configuration/headers/
+#
+# 画面（HTML・JS・service worker・画像）に付く。Pages Functions（/api/*）のレスポンスには _headers は効かない
+# （Functions の応答は functions/ のコードが付ける）。/api/* の Cache-Control は、静的ファイル側に万一あっても溜めないための保険。
+# meta の CSP では frame-ancestors が効かないので、埋め込み（クリックジャッキング）の禁止はヘッダーで行う。
+# index.html の meta の CSP（vite.config.web.ts の webCsp）とは両方が守られる（厳しい方に合わさる）。
+# Permissions-Policy の camera=(self) は、レシートをカメラで撮るため（<input type=file capture> は権限不要だが念のため）。
+# マイク・位置情報は使わない。
+
+/*
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(self), microphone=(), geolocation=()
+  Strict-Transport-Security: max-age=31536000
+
+/api/*
+  Cache-Control: no-store

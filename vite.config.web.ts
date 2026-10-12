@@ -70,8 +70,13 @@ function origins(...urls: Array<string | undefined>): string[] {
   return out
 }
 
-/** Web 用の CSP。Electron 版（index.html の既定）に、通信先（Supabase・API）と画像の署名 URL を足したもの */
-function webCsp(env: Record<string, string>): string {
+/**
+ * Web 用の CSP。Electron 版（index.html の既定）に、通信先（Supabase・API）と画像の署名 URL を足したもの。
+ * base-uri 'none'（<base> による相対 URL の乗っ取りを防ぐ）・form-action 'self'（フォームの送信先を自分に限る）・
+ * object-src 'none'（プラグインを使わない）は、default-src に引き継がれない指示なので明示する。
+ * 埋め込みの禁止（frame-ancestors）は meta では効かないので web/public/_headers のヘッダーで行う
+ */
+export function webCsp(env: Record<string, string>): string {
   const supabase = origins(env.VITE_SUPABASE_URL) // 認証と、Storage の署名 URL（画像）
   const api = origins(env.VITE_API_BASE) // 同じ Pages の中（/api）なら空
   return [
@@ -81,6 +86,9 @@ function webCsp(env: Record<string, string>): string {
     "script-src 'self'",
     "font-src 'self' data:",
     ['connect-src', "'self'", ...supabase, ...api].join(' '),
+    "base-uri 'none'",
+    "form-action 'self'",
+    "object-src 'none'",
   ].join('; ')
 }
 

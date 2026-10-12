@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
-  AGENT_WINDOW_TITLE, SettingError, externalUrlToOpen, isAllowedNavigation, isTrustedSender, resolveAgentMode,
-  resolveDeviceName, validateAgentSetting,
+  AGENT_WINDOW_TITLE, EXTERNAL_HOSTS, SettingError, denyPermissionCheck, denyPermissionRequest, externalUrlToOpen,
+  isAllowedNavigation, isTrustedSender, lockDownPermissions, resolveAgentMode, resolveDeviceName, validateAgentSetting,
 } from '../agent/mode'
+import { channelPageUrl } from '../../shared/channel-url'
 
 // 取り込み担当モードの判定・設定の検査・窓の出入りの規則（electron に依存しない純粋な関数）
 
@@ -57,19 +58,80 @@ describe('isAllowedNavigation：取り込み担当の窓がたどってよい先
   })
 })
 
-describe('externalUrlToOpen：window.open の外部リンクを OS のブラウザで開くのは https のときだけ', () => {
-  it('https は開く', () => {
+describe('externalUrlToOpen：window.open の外部リンクを OS のブラウザで開くのは、許可したホストの https だけ', () => {
+  it('許可したホスト（メルカリ・Yahoo!フリマ・17TRACK）の https は開く', () => {
     expect(externalUrlToOpen('https://t.17track.net/#nums=ABC')).toBe('https://t.17track.net/#nums=ABC')
     expect(externalUrlToOpen('https://jp.mercari.com/item/m123')).toBe('https://jp.mercari.com/item/m123')
+    expect(externalUrlToOpen('https://paypayfleamarket.yahoo.co.jp/item/z12345678')).toBe('https://paypayfleamarket.yahoo.co.jp/item/z12345678')
+    expect(externalUrlToOpen('https://paypayfleamarket-sec.yahoo.co.jp/item/z12345678/trade/seller'))
+      .toBe('https://paypayfleamarket-sec.yahoo.co.jp/item/z12345678/trade/seller')
+    // ホストは大文字でも同じ（URL が小文字にそろえる）。既定のポート（443）の明示は同じ扱い
+    expect(externalUrlToOpen('https://JP.Mercari.com:443/item/m123')).toBe('https://jp.mercari.com/item/m123')
   })
 
-  it('http・file・javascript・data・about・mailto・ユーザー名つき・壊れた形は開かない', () => {
+  it('許可するホストは 4 つだけ（増やすときはここと EXTERNAL_HOSTS を揃える）', () => {
+    expect([...EXTERNAL_HOSTS].sort()).toEqual([
+      'jp.mercari.com', 'paypayfleamarket-sec.yahoo.co.jp', 'paypayfleamarket.yahoo.co.jp', 't.17track.net',
+    ])
+  })
+
+  it('画面が外へ開く先（channelPageUrl の全部の出品先・取引画面）は、すべて許可したホストに入っている', () => {
+    const urls = [
+      channelPageUrl('mercari', 'item', 'm123456789'),
+      channelPageUrl('mercari', 'transaction', 'm123456789'),
+      channelPageUrl('yahoo', 'item', 'z12345678'),
+      channelPageUrl('yahoo', 'transaction', 'z12345678'),
+    ]
+    for (const url of urls) expect(externalUrlToOpen(url), url).toBe(url)
+  })
+
+  it('https でも、許可していないホスト・似せたホスト・サブドメイン・別のポートは開かない', () => {
     for (const url of [
-      'http://example.com/', 'file:///C:/Windows/System32/calc.exe', 'javascript:alert(1)', 'data:text/html,hi', 'about:blank',
-      'mailto:a@example.com', 'ms-msdt:/id', 'https://user:pw@example.com/', '', 'not a url',
+      'https://example.com/', 'https://evil.example/item/m123', 'https://jp.mercari.com.evil.example/', 'https://evil.example/jp.mercari.com',
+      'https://x.jp.mercari.com/', 'https://mercari.com/', 'https://17track.net/', 'https://t.17track.net.evil.example/',
+      'https://jp.mercari.com./item/m1', 'https://yahoo.co.jp/', 'https://jp.mercari.com:8443/item/m1',
+      'https://jp-mercari.com/', 'https://jp.mercari.com@evil.example/', 'https://github.com/namespace-git/soroban/releases/latest',
     ]) {
       expect(externalUrlToOpen(url), url).toBeNull()
     }
+  })
+
+  it('http・file・javascript・data・about・mailto・ユーザー名つき・壊れた形は開かない（許可したホストでも）', () => {
+    for (const url of [
+      'http://example.com/', 'file:///C:/Windows/System32/calc.exe', 'javascript:alert(1)', 'data:text/html,hi', 'about:blank',
+      'mailto:a@example.com', 'ms-msdt:/id', 'https://user:pw@example.com/', '', 'not a url',
+      'http://jp.mercari.com/item/m123', 'http://t.17track.net/', 'https://user:pw@jp.mercari.com/item/m123', 'https://user@t.17track.net/',
+      'ftp://jp.mercari.com/', 'file://jp.mercari.com/x',
+    ]) {
+      expect(externalUrlToOpen(url), url).toBeNull()
+    }
+  })
+})
+
+describe('権限の要求：取り込み担当の窓は何も許可しない（Electron はハンドラが無いと全部許可する）', () => {
+  const PERMISSIONS = [
+    'media', 'geolocation', 'notifications', 'midi', 'midiSysex', 'clipboard-read', 'clipboard-sanitized-write',
+    'fullscreen', 'pointerLock', 'openExternal', 'display-capture', 'idle-detection', 'unknown-future-permission',
+  ]
+
+  it('denyPermissionRequest は何を求められても callback(false)', () => {
+    for (const permission of PERMISSIONS) {
+      const callback = vi.fn()
+      denyPermissionRequest(null, permission, callback)
+      expect(callback, permission).toHaveBeenCalledTimes(1)
+      expect(callback, permission).toHaveBeenCalledWith(false)
+    }
+  })
+
+  it('denyPermissionCheck は何を聞かれても false', () => {
+    expect(denyPermissionCheck()).toBe(false)
+  })
+
+  it('lockDownPermissions は、request と check の両方のハンドラを付ける', () => {
+    const target = { setPermissionRequestHandler: vi.fn(), setPermissionCheckHandler: vi.fn() }
+    lockDownPermissions(target)
+    expect(target.setPermissionRequestHandler).toHaveBeenCalledWith(denyPermissionRequest)
+    expect(target.setPermissionCheckHandler).toHaveBeenCalledWith(denyPermissionCheck)
   })
 })
 

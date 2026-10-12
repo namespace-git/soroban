@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, ipcMain, net, shell } from 'electron'
+import { BrowserWindow, Menu, app, ipcMain, net, session, shell } from 'electron'
 import type { IpcMainEvent, MenuItemConstructorOptions } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -16,7 +16,7 @@ import { errorText } from './errors'
 import { createAgentHttp, type FetchFn } from './http'
 import { createMediaUploader } from './media'
 import {
-  AGENT_PARTITION, AGENT_WINDOW_TITLE, externalUrlToOpen, isAllowedNavigation, isTrustedSender,
+  AGENT_PARTITION, AGENT_WINDOW_TITLE, externalUrlToOpen, isAllowedNavigation, isTrustedSender, lockDownPermissions,
 } from './mode'
 import { AgentRunner, type AgentState, type AgentStatus } from './runner'
 
@@ -55,10 +55,14 @@ function showOfflinePage(win: BrowserWindow, origin: string): void {
 /**
  * 取り込み担当モードの主窓：設定した Web 版の URL を開く。
  *  - ログインはブラウザと同じ（専用の partition に残る。私たちのコードはファイルに書かない）
- *  - その origin 以外へのナビゲーションは止める。window.open の外部リンクは https のときだけ OS のブラウザで開く
+ *  - その origin 以外へのナビゲーションは止める。window.open の外部リンクは https の許可したホスト（mode.ts の EXTERNAL_HOSTS）
+ *    だけ OS のブラウザで開く
+ *  - 権限の要求（カメラ・マイク・位置情報・通知・クリップボードなど）は全部断る。Electron はハンドラが無いと全部許可するため、
+ *    窓を作る前にこの partition へ付ける（mode.ts の lockDownPermissions）
  *  - preload は agent.ts だけ（SorobanApi の IPC は出さない）。origin が一致するときだけ橋が出る
  */
 export function createAgentWindow(origin: string): BrowserWindow {
+  lockDownPermissions(session.fromPartition(AGENT_PARTITION))
   const win = new BrowserWindow({
     width: 1280,
     height: 860,

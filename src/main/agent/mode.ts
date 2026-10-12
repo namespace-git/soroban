@@ -47,15 +47,70 @@ export function isAllowedNavigation(url: string, origin: string): boolean {
   }
 }
 
-/** window.open の外部リンクを OS のブラウザで開いてよいか：https だけ（それ以外は開かない）。開く URL を返す */
+/**
+ * window.open の外部リンクを OS のブラウザで開いてよいホスト。Web 版の画面が外へ開く先はこの 4 つだけ：
+ *  - jp.mercari.com … 出品・取引のページ（shared/channel-url.ts の channelPageUrl）
+ *  - paypayfleamarket.yahoo.co.jp / paypayfleamarket-sec.yahoo.co.jp … Yahoo!フリマの出品・取引のページ（同上）
+ *  - t.17track.net … 追跡のページ（Web 版 api/web.ts の openTracking）
+ * 画面に XSS があっても、ここに無い先（フィッシングの URL・ms-msdt: のような OS のハンドラ）を OS に開かせない
+ */
+export const EXTERNAL_HOSTS: readonly string[] = [
+  'jp.mercari.com',
+  'paypayfleamarket.yahoo.co.jp',
+  'paypayfleamarket-sec.yahoo.co.jp',
+  't.17track.net',
+]
+
+/**
+ * window.open の外部リンクを OS のブラウザで開いてよいか：**https の EXTERNAL_HOSTS だけ**（それ以外は開かない）。
+ * ユーザー名・パスワード・ポート指定つきも開かない。開く URL を返す
+ */
 export function externalUrlToOpen(url: string): string | null {
   try {
     const u = new URL(url)
-    if (u.protocol !== 'https:' || u.username || u.password || !u.hostname) return null
+    if (u.protocol !== 'https:' || u.username || u.password || u.port) return null
+    if (!EXTERNAL_HOSTS.includes(u.hostname)) return null
     return u.toString()
   } catch {
     return null
   }
+}
+
+// ------------------------------------------------------------
+// 権限の要求（カメラ・マイク・位置情報・通知・クリップボードなど）
+//
+// Electron は、権限の要求を処理するハンドラが無いと**全部許可する**。取り込み担当の窓は外の Web 版を開くので、
+// 配信が乗っ取られたり画面に XSS があったりすると、PC のカメラ・マイクなどを黙って使われてしまう。
+// Web 版の画面がこの窓で必要とする権限は無いので、**全部断る**：
+//  - レシートの撮影は <input type=file capture> で、権限を要さない（Electron ではファイル選択になる）
+//  - 通知は PC では使わない（売れた通知は手元のスマホ・ブラウザに届く）。Notification.requestPermission は 'denied' になる
+//  - クリップボードのコピー（CodeChip.vue）は navigator.clipboard が断られても document.execCommand('copy') に切り替わる
+// ------------------------------------------------------------
+
+/** 権限の要求（setPermissionRequestHandler）。何を求められても断る */
+export function denyPermissionRequest(
+  _webContents: unknown,
+  _permission: string,
+  callback: (granted: boolean) => void,
+): void {
+  callback(false)
+}
+
+/** 権限の確認（setPermissionCheckHandler）。何を聞かれても「無い」 */
+export function denyPermissionCheck(): boolean {
+  return false
+}
+
+/** electron の Session のうち、権限のハンドラを付ける部分（テストでは差し替える） */
+export interface PermissionPolicyTarget {
+  setPermissionRequestHandler(handler: typeof denyPermissionRequest): void
+  setPermissionCheckHandler(handler: typeof denyPermissionCheck): void
+}
+
+/** 窓を作る前に、その session の権限を全部断る */
+export function lockDownPermissions(target: PermissionPolicyTarget): void {
+  target.setPermissionRequestHandler(denyPermissionRequest)
+  target.setPermissionCheckHandler(denyPermissionCheck)
 }
 
 /** IPC の送り元（橋を出した窓のページ）が、設定した Web 版の origin か */
