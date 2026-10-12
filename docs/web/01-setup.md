@@ -69,7 +69,7 @@ select app.create_household('うち', array['<夫のユーザー id>', '<妻の�
 | Project URL | Project Settings → API | 公開してよい |
 | anon（publishable）key | Project Settings → API | **公開してよい**（ブラウザに出る前提の鍵） |
 | **service_role（secret）key** | Project Settings → API | **秘密。そろばんでは使わない。どこにも貼らない** |
-| **接続文字列（Direct connection）** | Connect → Direct connection | **秘密**（パスワードが入っている）。ユーザー名が `postgres` のこの文字列は**全テーブルの持ち主**の権限。Hyperdrive には**そのまま渡さず**、1-8 で `soroban_gateway` に差し替えたものを渡す |
+| **接続文字列（Session pooler）** | Connect → Session pooler（IPv4 で届く。Direct connection も可） | **秘密**（パスワードが入っている）。ユーザー名が `postgres` のこの文字列は**全テーブルの持ち主**の権限。Hyperdrive には**そのまま渡さず**、1-8 で `soroban_gateway` に差し替えたものを渡す |
 
 ### 1-7. Storage（画像の置き場）を確かめる
 
@@ -109,10 +109,10 @@ API は、ログインした人の世帯が決まってから、読み書き用�
 
 2. パスワードは**パスワードマネージャーに保存**（秘密）。SQL Editor の履歴や保存したスニペットにパスワードが残るので、
    実行したら履歴・スニペットから**削除**する
-3. 接続文字列を作る：1-6 の Direct connection の文字列の**ユーザー名の `postgres` を `soroban_gateway` に、パスワードを 2 のものに**
-   替える。Session pooler を使うときは、ユーザー名が `postgres.<プロジェクトの ID>` の形なので、
-   `soroban_gateway.<プロジェクトの ID>` にする
-4. この文字列を **2-3 の Hyperdrive に渡す**（`postgres` のものは渡さない）。定期実行の Worker（2-6）も同じ Hyperdrive を使う
+3. 接続文字列を作る：1-6 の文字列の**ユーザー名を `soroban_gateway` に、パスワードを 2 のものに**替える。
+   Session pooler の文字列は、ユーザー名が `postgres.<プロジェクトの ID>` の形なので、`soroban_gateway.<プロジェクトの ID>` にする
+   （このプロジェクトなら `soroban_gateway.erugfqqphgdaebpvbzhs`）。Direct connection の文字列なら、ユーザー名の `postgres` を `soroban_gateway` に
+4. この文字列を **2-3 の Hyperdrive に渡す**（`postgres` のものは渡さない）。定期実行も同じ Worker に入っているので、同じ Hyperdrive を使う
 5. 確かめる（SQL Editor）：
    - `select rolcanlogin, rolinherit, rolbypassrls from pg_roles where rolname = 'soroban_gateway';` → `true, false, false`
      （ログインできる・権限を引き継がない・行の保護をすり抜けない）
@@ -124,55 +124,101 @@ API は、ログインした人の世帯が決まってから、読み書き用�
 
 ---
 
-## 2. Cloudflare Pages
+## 2. Cloudflare（Workers）
 
-### 2-1. GitHub と繋ぐ
+**1 本の Worker が「画面（静的アセット）＋ API ＋ 定期実行」をすべてやります。** 設定は、リポジトリ直下の `wrangler.jsonc`
+（`/api/*` は Worker の処理へ、それ以外は画面のファイルを直接返す／5 分ごとの定期実行）と、Cloudflare の画面で入れる値（下の 2-2・2-4）の 2 つ。
+GitHub の `web` ブランチに push すると、Cloudflare（Workers Builds）が自動でビルドしてデプロイします。
 
-**Workers & Pages → Create → Pages → Connect to Git** で、このリポジトリを選ぶ。
+- 画面の URL は `https://soroban.<アカウントのサブドメイン>.workers.dev`（Worker の画面に出ます）
+- Hyperdrive（2-3）を作って `wrangler.jsonc` に ID を書くまでは、**画面は出ますが API は動きません**（ログインしても読み込みに失敗する）
+- Pages で作る場合は 2-9
+
+### 2-1. GitHub と繋ぐ（Workers Builds）
+
+**Workers & Pages → Create → GitHub のリポジトリを選ぶ（Connect to Git）** で、このリポジトリ（`soroban`）を選ぶ。
+すでに作ってある場合は、Worker の **Settings → Build** が次の値になっているか確かめる。
 
 | 項目 | 値 |
 |---|---|
-| 本番のブランチ | `web`（切り替えが済んだら `main`） |
+| Worker の名前 | **`soroban`**（`wrangler.jsonc` の `name` と同じ。違うとビルドが止まる） |
+| Production branch | `web`（切り替えが済んだら `main`） |
 | Build command | `pnpm build:web` |
-| Build output directory | `dist-web` |
+| Deploy command | `npx wrangler deploy` |
+| Root directory | `/` |
 
-### 2-2. 互換性フラグ
+- `nodejs_compat`（API が Postgres のドライバを使うための互換性フラグ）は `wrangler.jsonc` に入っています。画面で入れなくてよい
+- `pnpm build:web` が `dist-web/` に画面を作り、`npx wrangler deploy` がそれと Worker をまとめて上げます
 
-**Settings → Runtime → Compatibility flags** に **`nodejs_compat`** を入れる（API が Postgres のドライバを使うため）。
+### 2-2. ビルドの変数
+
+Worker の **Settings → Build → Variables and secrets**（ビルドのときだけ使う変数。**2-4 の実行時の変数とは別の場所**）：
+
+| 名前 | 中身 | 秘密？ |
+|---|---|---|
+| `NODE_VERSION` | `22` | 公開 |
+| `PNPM_VERSION` | `10` | 公開 |
+| `ELECTRON_SKIP_BINARY_DOWNLOAD` | `1`（Electron 本体をダウンロードしない） | 公開 |
+| `SOROBAN_SKIP_APP_DEPS` | `1`（デスクトップ用の `electron-builder install-app-deps` を飛ばす） | 公開 |
+| `VITE_SUPABASE_URL` | 1-6 の Project URL | 公開 |
+| `VITE_SUPABASE_ANON_KEY` | 1-6 の anon（publishable）key | **公開してよい**（ブラウザに出る前提の鍵）。service_role（secret）は入れない（入っているとビルドが止まる） |
+
+- `pnpm install` の後処理（`scripts/postinstall.cjs`）は、Workers Builds が自動で入れる `WORKERS_CI`、または `SOROBAN_SKIP_APP_DEPS=1`
+  のどちらかがあれば、Electron 用の作り直しを飛ばします。**`CI` だけでは飛ばしません**（GitHub Actions のリリースは作り直しが要る）。
+  最初のビルドが `electron-builder`・`better-sqlite3` の作り直しで止まっていたなら、この 2 つで直ります
+- ビルドの変数は、変えたあとに**もう一度ビルド**しないと画面に入りません（`VITE_*` は画面のファイルに埋め込まれるため）
 
 ### 2-3. Hyperdrive（DB への接続）
 
-**Workers & Pages → Hyperdrive → Create** で、**1-8 で作った `soroban_gateway` の接続文字列**（1-6 の Direct connection の
-文字列の、ユーザー名とパスワードを替えたもの）を渡して作る。
-できたら Pages の **Settings → Bindings** で **`HYPERDRIVE`** という名前で結び付ける。
+**Storage & databases → Hyperdrive → Create configuration**（名前は `soroban` など）で、**1-8 で作った `soroban_gateway` の接続文字列**を渡して作る。
+Supabase の **Connect → Session pooler**（IPv4 で届く）の文字列を元に、**ユーザー名を `soroban_gateway.erugfqqphgdaebpvbzhs`、パスワードを 1-8 で付けたもの**に替える：
 
+```text
+postgresql://soroban_gateway.erugfqqphgdaebpvbzhs:<パスワード>@<Session pooler のホスト>:5432/postgres
+```
+
+- ホストは Connect の画面に出ているものをそのまま使う（Session pooler は **5432**。6543 は Transaction pooler なので使わない）
+- パスワードに `@` `:` `/` `#` `?` `%` などが入っているときは、URL エンコード（`%40` など）する
+
+作れたら、**Hyperdrive の ID**（一覧や詳細に出る 32 桁の英数字。**秘密ではありません**）を `wrangler.jsonc` に書く：
+
+```jsonc
+"hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<Hyperdrive の ID>" }],
+```
+
+`wrangler.jsonc` の `triggers` の下に足して（コメントで場所を示してあります）コミット・push すると、Workers Builds がデプロイして API が動き出します。
+ID は Claude に伝えれば足してコミットします。
+
+> **Worker の画面（Settings → Bindings）で Hyperdrive を結び付けるだけでは足りません。** `wrangler deploy` は `wrangler.jsonc` を正とするので、
+> ファイルに無い結び付けは次のデプロイで消えます。必ずファイルに書く。
+>
 > **`postgres` の接続文字列は渡さない。** `postgres` は全テーブルの持ち主で、API が世帯の切り替えを書き忘れても全世帯の行が読めてしまいます。
 > `soroban_gateway` なら、書き忘れは権限エラーで止まります（1-8）。
 > すでに `postgres` のもので作ってしまったときは、Hyperdrive の設定（Edit）で接続文字列を `soroban_gateway` のものに差し替える
-> （`HYPERDRIVE` の結び付けや id は変わらない）。
+> （ID は変わらない）。
 >
 > 接続文字列にはパスワードが入っています。Hyperdrive の中にだけ置き、ファイルに書かないこと。
 
-### 2-4. 環境変数
+### 2-4. 実行時の変数と秘密
 
-**Settings → Variables and Secrets**。「秘密」は **Encrypt（Secret）** で入れる。
+Worker の **Settings → Variables and Secrets**（実行時に使う値）。**次の 4 つを、種類 `Secret` で入れる**：
 
-| 名前 | 中身 | 秘密？ | Pages（画面・API） | 定期実行の Worker（2-6） |
-|---|---|---|---|---|
-| `VITE_SUPABASE_URL` | 1-6 の Project URL | 公開 | 要る（ビルド時） | 要らない |
-| `VITE_SUPABASE_ANON_KEY` | 1-6 の anon key | 公開 | 要る（ビルド時） | 要らない |
-| `SUPABASE_URL` | 1-6 の Project URL | 公開 | 要る（ログインの検証・画像の URL） | 要らない |
-| `SUPABASE_ANON_KEY` | 1-6 の anon key（`VITE_SUPABASE_ANON_KEY` と同じ値） | 公開 | 要る（レシート・商品画像の署名・削除・読み出し。ログインした人の権限で Storage を呼ぶときの `apikey`。無ければ画像まわりだけ使えない） | 要らない |
-| `VAPID_PUBLIC_KEY` | 2-5 で作った値（通知の公開鍵） | 公開してよい | 要る | 要る |
-| `VAPID_PRIVATE_KEY` | 2-5 で作った値（通知の署名鍵） | **秘密** | 要る（「試しに送る」と、操作の直後の通知） | 要る（通知の送信） |
-| `VAPID_SUBJECT` | `mailto:自分のメールアドレス`（連絡先） | 秘密にしておく（メールアドレスが入る） | 要る | 要る |
-| `SECRET_KEYS` | 2-5 で作った値（API キーを暗号化する鍵） | **秘密** | 要る（Gemini・17TRACK のキーの保存） | 要る（17TRACK のキーの読み出し） |
+| 名前 | 中身 | 備考 |
+|---|---|---|
+| `VAPID_PUBLIC_KEY` | 2-5 で作った値（通知の公開鍵） | 公開してよい値だが、まとめて Secret で入れてよい |
+| `VAPID_PRIVATE_KEY` | 2-5 で作った値（通知の署名鍵） | **秘密** |
+| `VAPID_SUBJECT` | `mailto:自分のメールアドレス`（連絡先） | メールアドレスが入るので秘密の扱い |
+| `SECRET_KEYS` | 2-5 で作った値（API キーを暗号化する鍵） | **秘密** |
 
-- DB への接続は、Pages も Worker も **`HYPERDRIVE` のバインディング**（2-3）だけ。`DATABASE_URL` は要りません
-- **`VAPID_*` と `SECRET_KEYS` は、Pages と定期実行の Worker に「同じ値」を入れる。** 違うと、Worker が通知を送れない・保存した API キーを読めない
+- **`Secret` 型の値は、デプロイで消えません**（`wrangler deploy` は Secret を必ず引き継ぎます）。入れ直すのは値を変えたいときだけ
+- **画面には入れないもの**（`wrangler.jsonc` の `vars` に入っている公開の値）：`SUPABASE_URL`（ログインの検証・画像の URL）、
+  `SUPABASE_ANON_KEY`（レシート・商品画像の署名・削除・読み出し。ログインした人の権限で Storage を呼ぶときの `apikey`）。
+  **同じ名前を画面にも入れない**（`vars` と Secret で名前が二重になって、デプロイが失敗することがあります）
+- DB への接続は **`HYPERDRIVE` のバインディング**（2-3）だけ。`DATABASE_URL` は要りません
 - `SECRET_KEYS` を失くす（または別の値にする）と、保存済みの Gemini・17TRACK の API キーが読めなくなります（設定で入れ直せば元に戻る）
 - 入れ忘れたとき：`VAPID_*` が無ければ通知は使えないだけ（設定画面に出ない）。`SECRET_KEYS` が無ければ API キーの保存を
-  「この環境では安全に保存できません」と断ります（平文では持たない）
+  「この環境では安全に保存できません」と断ります（平文では持たない）。定期実行の 17TRACK の確認は飛ばします
+- Secret を入れたあとは、反映のためにもう一度デプロイ（Deployments から再デプロイ、または何かを push）する
 
 ### 2-5. 鍵を作る（VAPID と SECRET_KEYS）
 
@@ -185,52 +231,29 @@ pnpm gen-keys
 画面に `VAPID_PUBLIC_KEY`・`VAPID_PRIVATE_KEY`・`VAPID_SUBJECT`（雛形）・`SECRET_KEYS` が出ます。
 
 - **出た値は、どこにも保存しない。** ファイル・メモ・チャットに貼らない（このリポジトリは Public）。道具もファイルには書きません
-- **2-4 の表のとおり、Cloudflare の Pages に入れ、2-6 の Worker にも同じ値を入れたら、ターミナルを閉じる**
+- **2-4 のとおり Cloudflare の Worker に（Secret として）入れたら、ターミナルを閉じる**
 - `VAPID_SUBJECT` だけは自分で決める（`mailto:` か `https://` で始まる連絡先）
 - もう一度 `pnpm gen-keys` を実行すると**別の鍵**ができます。作り直すと、通知の登録はやり直し（`VAPID_*`）、
   保存済みの API キーは入れ直し（`SECRET_KEYS`）になります。**鍵は 1 回作ったら変えない**
 
-### 2-6. 定期実行の Worker
+### 2-6. 定期実行（同じ Worker に入っています）
 
-> **利用者に確認中の事項です。** Cloudflare に Worker をもう 1 本（定期実行用）デプロイしてよいか、
-> 無料枠で足りなければ **Workers Paid（月 5 ドル）**にしてよいか。決まるまでは、この節は**実行しないでください**。
-> （Worker を入れなくても、画面と API は動きます。動かないのは「通知の再送」「17TRACK の確認」「期限切れの取り込み要求の片付け」だけ。
-> 操作の直後の通知は、Pages 側が急ぎで送ってみます）
-
-5 分ごとに、次の 3 つを順に行う小さな Worker です（`workers/cron/`）。どれかが失敗しても残りは続けます。
+**別の Worker は要りません。** `wrangler.jsonc` の `triggers.crons`（`*/5 * * * *`）で、同じ Worker の `scheduled` が 5 分ごとに動きます。
+次の 3 つを順に行います（`workers/cron/index.ts` の `runCron`。どれかが失敗しても残りは続けます）。
 
 1. 期限切れの取り込み要求の片付け
-2. 通知の送信（Push サービスへ。1 回 30 本まで）
-3. 17TRACK の配送状況の確認（1 回 15 本まで。秒間 3 リクエストを守る）
+2. 17TRACK の配送状況の確認（1 回 15 本まで。秒間 3 リクエストを守る）
+3. 通知の送信（Push サービスへ。1 回 10 本まで）
 
-外部への通信は合計 45 本まで（Cloudflare の無料枠は 1 回の呼び出しで 50 本）。DB は Hyperdrive 経由で、この本数に数えません。
-CPU 時間の上限（無料枠は 10ms）を超える日があれば、Workers Paid にします（通知を送るときは暗号化の計算で超えやすい）。
+外部への通信は合計 25 本まで（Cloudflare の無料枠は 1 回の呼び出しで 50 本）。DB は Hyperdrive 経由で、この本数に数えません。
+**CPU 時間の上限**（無料枠は 1 回の呼び出しで 10ms。API の要求も定期実行も同じ）を超える日があれば、Workers Paid（月 5 ドル）にします
+（通知を送るときの暗号の計算は特に重い。API の要求のログインの検証や Postgres のドライバも CPU を使います。実測はまだです）。
 
-**手順**（`workers/cron/` のフォルダで）：
-
-1. `wrangler.toml` の `id = "<ここに Hyperdrive の id>"` を、**2-3 で作った Hyperdrive の id** に書き換える
-   （Workers & Pages → Hyperdrive の一覧に出る識別子。パスワードではありませんが、**書き換えたファイルはコミットしない**）
-2. デプロイ：
-
-   ```bash
-   pnpm dlx wrangler deploy
-   ```
-
-3. 秘密と環境変数を **4 つ**入れる（実行すると値の入力を求められる。入力は画面に残らず、ファイルにも書かれません）：
-
-   ```bash
-   pnpm dlx wrangler secret put VAPID_PUBLIC_KEY
-   pnpm dlx wrangler secret put VAPID_PRIVATE_KEY
-   pnpm dlx wrangler secret put VAPID_SUBJECT
-   pnpm dlx wrangler secret put SECRET_KEYS
-   ```
-
-4. 確かめる：Cloudflare の **Workers & Pages → soroban-cron → Settings → Triggers** に `*/5 * * * *` が出ていること。
-   5 分待って `pnpm dlx wrangler tail`（または管理画面の Logs）を見て、`[cron] … に失敗しました` が出ていないこと
-   （出ていれば、続きの文が原因です。鍵の値は出しません）
-
-> `HYPERDRIVE` は `wrangler.toml` の `[[hyperdrive]]` で結び付くので、`secret put` は要りません。
-> `compatibility_flags = ["nodejs_compat"]`（postgres.js が Node の API を使う）も `wrangler.toml` に入っています。
+- 確かめる：Worker の **Settings → Trigger Events（Cron Triggers）** に `*/5 * * * *` が出ていること。
+  5 分待って、Worker の **Logs**（または `npx wrangler tail soroban`）に `[cron] … に失敗しました` が出ていないこと
+  （出ていれば、続きの文が原因です。鍵の値は出しません）。`[cron] HYPERDRIVE が設定されていません` なら、2-3 の ID がまだです
+- `workers/cron/`（`wrangler.toml` つきの別 Worker）は、Pages で作る場合のためにリポジトリに残してあるだけです。**Workers で動かすときは使いません。**
+  同じ Hyperdrive を指す別 Worker をデプロイすると、定期実行が二重に動きます
 
 ### 2-7. /api に回数の制限をかける（Cloudflare の Rate Limiting）
 
@@ -238,9 +261,9 @@ CPU 時間の上限（無料枠は 10ms）を超える日があれば、Workers 
 だけが通れますが、鍵やトークンを持たない相手に叩かれ続けても、Workers の呼び出しと DB の接続を食われます。Cloudflare 側で
 上限をかけておきます（コードは変えません）。
 
-**Cloudflare のダッシュボード → 対象のドメイン（または Pages のカスタムドメイン）→ Security → WAF → Rate limiting rules → Create rule**
-（`*.pages.dev` の URL は自分の Cloudflare のドメイン（ゾーン）ではないので、WAF のルールを付けられないことがあります。
-独自ドメインを繋いだサイトで設定してください。付けられないときは、この節は飛ばしてよい — 回数の制限が無いだけで、他の守りは変わりません）：
+**Cloudflare のダッシュボード → 対象のドメイン → Security → WAF → Rate limiting rules → Create rule**
+（`*.workers.dev`（Pages なら `*.pages.dev`）の URL は自分の Cloudflare のドメイン（ゾーン）ではないので、WAF のルールを付けられないことがあります。
+独自ドメインを Worker に繋いだサイトで設定してください。付けられないときは、この節は飛ばしてよい — 回数の制限が無いだけで、他の守りは変わりません）：
 
 | 項目 | 値 |
 |---|---|
@@ -260,10 +283,24 @@ CPU 時間の上限（無料枠は 10ms）を超える日があれば、Workers 
 
 ### 2-8. 画面のセキュリティヘッダー（確認だけ）
 
-Pages は `web/public/_headers`（ビルドで `dist-web/_headers` に出る）の内容を、画面（HTML・JS・画像）のレスポンスに付けます。
+Workers の静的アセットは `web/public/_headers`（ビルドで `dist-web/_headers` に出る）の内容を、画面（HTML・JS・画像）のレスポンスに付けます
+（`/sales` のように index.html に落とした応答にも付く。手元で `wrangler dev` を動かして確かめ済み）。
 `X-Frame-Options: DENY`・`Content-Security-Policy: frame-ancestors 'none'`（埋め込みの禁止）、`X-Content-Type-Options: nosniff`、
 `Referrer-Policy`、`Permissions-Policy`、`Strict-Transport-Security` が入っています。デプロイしたら、ブラウザの開発者ツールの
-Network で画面のレスポンスにこれらが付いていることを確かめてください。`/api/*` の応答のヘッダーはコード（`functions/`）が付けます。
+Network で画面のレスポンスにこれらが付いていることを確かめてください。`/api/*` の応答のヘッダー（`Cache-Control: no-store` など）はコード（`server/entry.ts`）が付けます。
+
+### 2-9. Pages で作る場合
+
+Workers ではなく Cloudflare Pages に載せるときの手順です（`functions/` が同じ `server/entry.ts` を呼ぶので、API の中身は同じ）。
+
+1. **Workers & Pages → Create → Pages → Connect to Git** でこのリポジトリを選ぶ。本番のブランチ `web`、Build command `pnpm build:web`、
+   Build output directory `dist-web`。ビルドの変数は 2-2 と同じ（Pages は `CF_PAGES` を自動で入れるので `SOROBAN_SKIP_APP_DEPS` は無くてもよい）
+2. **Settings → Runtime → Compatibility flags** に `nodejs_compat`。**Settings → Bindings** で Hyperdrive を **`HYPERDRIVE`** の名前で結び付ける（2-3 の作り方）
+3. **Settings → Variables and Secrets** に、`SUPABASE_URL`・`SUPABASE_ANON_KEY`（公開）と、2-4 の 4 つ（Secret）
+4. 定期実行は Pages に無いので、別の Worker（`workers/cron/`）をデプロイする：`workers/cron/wrangler.toml` の
+   `id = "<ここに Hyperdrive の id>"` を書き換え（書き換えたファイルはコミットしない）、`workers/cron/` のフォルダで
+   `pnpm dlx wrangler deploy`、続けて `pnpm dlx wrangler secret put` を `VAPID_PUBLIC_KEY`・`VAPID_PRIVATE_KEY`・`VAPID_SUBJECT`・`SECRET_KEYS`
+   の 4 つぶん（値は Pages と同じ。違うと通知を送れない・API キーを読めない）
 
 ---
 
@@ -276,7 +313,7 @@ Web 版の「取り込む」を押すと、PC のそろばんが拾ってメル�
 ### 3-1. 取り込み担当になる
 
 1. PC のそろばん（このブランチでビルドしたもの）を開き、**設定 →「Web 版の取り込み担当」**
-2. Web 版の URL（2-1 の `https://….pages.dev`）と、PC の名前（例「リビングの PC」。空ならパソコンの名前）を入れる
+2. Web 版の URL（Worker の画面に出る `https://soroban.<アカウントのサブドメイン>.workers.dev`。Pages なら `https://….pages.dev`）と、PC の名前（例「リビングの PC」。空ならパソコンの名前）を入れる
 3. **「取り込み担当になる」** → 確認で OK。窓が Web 版に切り替わり、タイトルが「そろばん（取り込み担当）」になる
 4. 窓の中の Web 版に**ログインしたままにする**（ログインが切れると取り込み担当も止まる）
 5. メニュー「取り込み担当」から、メルカリ・Yahoo!フリマ・メロジョイに**ログイン**する（今までと同じ窓）

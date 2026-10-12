@@ -1,0 +1,48 @@
+// そろばん Web 版 — Cloudflare Workers の設定。`npx wrangler deploy`（Workers Builds の Deploy command）が読む。
+// 1 本の Worker で「画面（静的アセット）＋ API ＋ 定期実行」をやる。入口は worker/index.ts。手順は docs/web/01-setup.md の 2 節。
+//
+// **このファイルに秘密の値を書かない（このリポジトリは Public）。** ここに書いてよいのは、ブラウザにも出る公開の値だけ。
+//   * VAPID_PRIVATE_KEY / SECRET_KEYS / VAPID_SUBJECT（メールアドレスが入る）などの秘密は、Cloudflare の画面
+//     （Settings → Variables and Secrets）で **Secret 型**として入れる。
+//   * Secret 型は `wrangler deploy` で消えない（wrangler は Secret のバインディングを必ず引き継ぐ。ファイルに無くても）。
+//   * 画面で入れた「プレーンテキスト」の変数は、既定ではデプロイのたびに消される（このファイルが正になるため）。
+//     下の `keep_vars: true` で、画面で入れたプレーンテキストの変数もデプロイで消えないようにしてある。
+{
+  "name": "soroban",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-10-01",
+  // postgres.js が Node の API を使う
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    // pnpm build:web の出力。_headers（セキュリティヘッダー）もここに出て、画面のファイルにそのまま効く
+    "directory": "./dist-web",
+    "binding": "ASSETS",
+    // 知らないパス（/sales など。画面の中の遷移）は index.html を返す
+    "not_found_handling": "single-page-application",
+    // /api/* は必ず Worker の処理へ。それ以外は Worker を通さず、画面のファイルを直接返す
+    "run_worker_first": ["/api/*"]
+  },
+
+  // 定期実行（同じ Worker の scheduled）。期限切れの取り込み要求の片付け・通知の送信・17TRACK の確認
+  "triggers": { "crons": ["*/5 * * * *"] },
+
+  // DB への接続（Hyperdrive）。**Hyperdrive を作ったら、次の 1 行をここ（この下）に足す**（id は秘密ではない）：
+  //
+  //   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<Hyperdrive の ID>" }],
+  //
+  // まだ書かない理由：存在しない id だとデプロイが失敗する。書くまでは、画面は出て、API は「設定が無い」で 500 を返し、
+  // 定期実行は何もしない（ログに出る）。
+  // **画面（Settings → Bindings）で Hyperdrive を結び付けるだけでは足りない。** 結び付けは、このファイルに無いと次のデプロイで消える。
+
+  // 画面で入れたプレーンテキストの変数をデプロイで消さない（Secret 型は、この指定に関わらず消えない）
+  "keep_vars": true,
+  // ダッシュボードの Logs に残す（最初のうちの不具合を追うため。ログに秘密・個人データは出さない作り）
+  "observability": { "enabled": true },
+
+  // 公開してよい値だけ（Supabase の Project URL と、ブラウザにも出る anon / publishable キー）
+  "vars": {
+    "SUPABASE_URL": "https://erugfqqphgdaebpvbzhs.supabase.co",
+    "SUPABASE_ANON_KEY": "sb_publishable_ee__exEHtnN24f6tHh0euw_9syzE5_7"
+  }
+}
