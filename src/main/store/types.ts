@@ -16,6 +16,18 @@ import type { AgentApi, AgentLease } from '../../shared/agent-types'
 // AgentApi のうち claim / heartbeat / finish / register（取り込み要求の受け渡し）は、帳簿を書く段ではないのでここに含めない。
 // ============================================================
 
+/**
+ * 「この収集はもう続けられない」ことを知らせる例外の基底（lease を失った・ログアウトした）。
+ * 収集のコードは、画像のように「1 件の失敗は握って次へ」のループでも、これだけは握らずに投げ直して収集を止める
+ * （止まったあとにメルカリなどへ画像を取りに行き続けない）。ローカルの store は投げない
+ */
+export class StoreStoppedError extends Error {
+  constructor(message = '収集を続けられません') {
+    super(message)
+    this.name = 'StoreStoppedError'
+  }
+}
+
 /** AgentApi のメソッドから先頭の lease 引数を取り除いた形 */
 type WithoutLease<F> = F extends (lease: AgentLease, ...args: infer A) => infer R ? (...args: A) => R : never
 

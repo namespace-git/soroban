@@ -27,6 +27,11 @@ export interface MediaCredentials {
 export interface MediaUploader {
   /** ローカルのファイル名（userData/thumbs の中）を Storage に上げて、パス（バケットの中）を返す */
   upload(kind: MediaKind, file: string): Promise<string>
+  /**
+   * 上げた画像（upload が返したパス）を消してみる。API の書き込みが失敗した・使われなかったときの後始末。
+   * **例外は投げない**（消せなくても収集は続ける＝どこからも参照されないファイルは後で回収する設計）
+   */
+  remove(path: string): Promise<void>
 }
 
 export interface MediaUploaderOptions {
@@ -126,6 +131,24 @@ export function createMediaUploader(options: MediaUploaderOptions): MediaUploade
         if (!r.retry) break
       }
       throw new Error(last)
+    },
+
+    async remove(path) {
+      try {
+        // 自分の世帯のフォルダの、upload が返した形のパスだけ（他のパスは消しに行かない）
+        if (!path.startsWith(`${householdId}/`) || path.includes('..')) return
+        const creds = options.credentials()
+        if (!creds) return
+        await options.fetch(`${creds.supabaseUrl}/storage/v1/object/media/${path}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${creds.accessToken}`, apikey: creds.anonKey },
+          redirect: 'error',
+          credentials: 'omit',
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        })
+      } catch {
+        // 消せなくても何もしない（応答の成否も見ない）
+      }
     },
   }
 }

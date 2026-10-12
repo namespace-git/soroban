@@ -8,7 +8,7 @@ import * as db from './db'
 import { extractCode, extractMaterial } from './code'
 import { buildUserAgent, CHALLENGE_MESSAGE, isChallengeText, randomWait, revealForChallenge } from './collector'
 import { localStore } from './store/local'
-import type { CollectorStore } from './store/types'
+import { StoreStoppedError, type CollectorStore } from './store/types'
 import { todayLocal } from '../shared/date'
 import type { AgentImageTarget, AgentImageUrl } from '../shared/agent-types'
 import type {
@@ -842,6 +842,8 @@ export async function savePurchaseImages(
       await store.saveLineImage(line.id, file)
       saved++
     } catch (e) {
+      // lease を失った・ログアウトした：残りの画像を取りに行かずに止める（ほかの失敗は記録して次へ）
+      if (e instanceof StoreStoppedError) throw e
       budget.failures.push(`商品画像：${e instanceof Error ? e.message : String(e)}`)
     }
     await sleep(300 + Math.floor(Math.random() * 500))
@@ -1084,6 +1086,8 @@ export async function collectShopOrders(
         if (placed.fulfillment_updated) fulfillmentDetailUpdated++
         imagesSaved += await savePurchaseImages(shopAccountId, placed.image_targets, imageBudget, store)
       } catch (e) {
+        // lease を失った・ログアウトした：次の注文の詳細を開きに行かずに止める（recordRun も同じ例外で外へ出る）
+        if (e instanceof StoreStoppedError) throw e
         failures.push(`${order.orderNo}：${e instanceof Error ? e.message : String(e)}`)
       }
     }
@@ -1121,6 +1125,7 @@ export async function collectShopOrders(
           imagesSaved += await savePurchaseImages(shopAccountId, revisit.image_targets, imageBudget, store)
         }
       } catch (e) {
+        if (e instanceof StoreStoppedError) throw e
         failures.push(`${order.orderNo}：${e instanceof Error ? e.message : String(e)}`)
       }
       // 詳細を読めなかった注文も、巡回の位置だけは進める（同じ注文で詰まらない。読んだ印は付けない＝次回また候補に残る）

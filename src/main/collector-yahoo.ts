@@ -8,7 +8,7 @@ import {
 } from './collector'
 import { localStore } from './store/local'
 import type { YahooCombinedSalesSplit as YahooSalesSplit } from './store/rules'
-import type { CollectorStore } from './store/types'
+import { StoreStoppedError, type CollectorStore } from './store/types'
 import type { AgentThumbTarget } from '../shared/agent-types'
 import type { CollectorRun, RunStatus, SaleStatus } from '../shared/types'
 
@@ -863,8 +863,9 @@ async function saveNewThumbs(
       const file = await downloadThumbFile(t.channel_item_id, t.thumb_url)
       await store.saveThumb({ kind: t.kind, channel_item_id: t.channel_item_id, thumb_url: t.thumb_url, path: file })
       saved++
-    } catch {
-      // 失敗しても再試行しない
+    } catch (e) {
+      // lease を失った・ログアウトした：残りの画像を取りに行かずに止める（ほかの失敗は再試行せず次へ）
+      if (e instanceof StoreStoppedError) throw e
     }
     await sleep(300 + Math.floor(Math.random() * 500))
   }

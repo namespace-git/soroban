@@ -42,10 +42,10 @@ describe('仕事の順番と、失敗の切り分け（偽の仕事）', () => {
     return { calls, deps }
   }
 
-  it('① 片付け → ② 通知 → ③ 17TRACK の順に、割り振った上限で呼ぶ', async () => {
+  it('① 片付け → ② 17TRACK → ③ 通知（CPU の重い仕事が最後）の順に、割り振った上限で呼ぶ', async () => {
     const { calls, deps } = ok()
     const result = await runCron(fakeRoot, ENV, deps)
-    expect(calls).toEqual(['reap', `drain:${PUSH_LIMIT}`, `track:${TRACKING_MAX_REQUESTS}`])
+    expect(calls).toEqual(['reap', `track:${TRACKING_MAX_REQUESTS}`, `drain:${PUSH_LIMIT}`])
     expect(result).toEqual({
       reaped: 2,
       push: { sent: 1, failed: 0, gone: 0, retried: 0 },
@@ -80,7 +80,7 @@ describe('仕事の順番と、失敗の切り分け（偽の仕事）', () => {
     const spy = spyConsole()
     try {
       const result = await runCron(fakeRoot, ENV, { reap: boom, drain: boom, track: boom } as CronDeps)
-      expect(result).toEqual({ reaped: null, push: null, tracking: null, failed: ['reap', 'push', 'tracking'] })
+      expect(result).toEqual({ reaped: null, push: null, tracking: null, failed: ['reap', 'tracking', 'push'] })
     } finally {
       spy.restore()
     }
@@ -93,6 +93,7 @@ describe('仕事の順番と、失敗の切り分け（偽の仕事）', () => {
       const result = await runCron(fakeRoot, { ...ENV, SECRET_KEYS: secretKeys }, deps).finally(() => spy.restore())
       expect(calls).toEqual(['reap', `drain:${PUSH_LIMIT}`])
       expect(result.tracking).toBeNull()
+      expect(result.push).not.toBeNull()
       expect(result.failed).toEqual([])
       expect(spy.text()).toContain('SECRET_KEYS が設定されていない')
     }
@@ -121,6 +122,11 @@ describe('外部通信の割り振り', () => {
   it('通知 + 17TRACK の上限の合計は、無料枠の 50 本を超えない（予備を残す）', () => {
     expect(PUSH_LIMIT + TRACKING_MAX_REQUESTS).toBeLessThanOrEqual(SUBREQUEST_LIMIT - 5)
     expect(SUBREQUEST_LIMIT).toBe(50)
+  })
+
+  it('通知の上限は控えめ（1 件ごとの暗号で無料枠の CPU 10ms を超えうる）。5 分ごとなので 1 時間で 120 件送れる', () => {
+    expect(PUSH_LIMIT).toBeLessThanOrEqual(10)
+    expect(PUSH_LIMIT * (60 / 5)).toBeGreaterThanOrEqual(120)
   })
 })
 
@@ -153,7 +159,7 @@ describe('本物の DB・偽の fetch', () => {
     expect(await reapStaleCollectJobs(dom.root)).toBe(0)
   })
 
-  it('通知も 17TRACK も仕事が溜まっていても、外部通信は 通知 30 + 17TRACK 15 = 45 本まで（50 本を超えない）', async () => {
+  it('通知も 17TRACK も仕事が溜まっていても、外部通信は 17TRACK 15 + 通知 10 = 25 本まで（50 本を超えない）', async () => {
     const m = await newMember(dom, 'budget')
     const ring = keyRing([1, newKey()])
 
@@ -187,7 +193,7 @@ describe('本物の DB・偽の fetch', () => {
     expect(total).toBe(PUSH_LIMIT + TRACKING_MAX_REQUESTS)
     expect(total).toBeLessThan(SUBREQUEST_LIMIT)
 
-    // 取りきれなかった分は残っていて、次の実行で続く（通知 10 件・仕入 200 件）
+    // 取りきれなかった分は残っていて、次の実行で続く（通知 40 - PUSH_LIMIT 件・仕入 800 - 40 × 15 件）
     const pending = await dom.pg.query<{ n: number }>(
       `select count(*)::int as n from app.notification_delivery where household_id = $1 and status = 'pending'`, [m.householdId])
     expect(pending.rows[0].n).toBe(40 - PUSH_LIMIT)

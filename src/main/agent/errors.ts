@@ -1,4 +1,5 @@
 import type { AgentErrorCode } from '../../shared/agent-types'
+import { StoreStoppedError } from '../store/types'
 
 // ============================================================
 // 取り込み担当（Web 版の取り込み）の通信まわりのエラー
@@ -7,7 +8,7 @@ import type { AgentErrorCode } from '../../shared/agent-types'
 // ============================================================
 
 /** 取り込みの権限（lease）が失効した／別の端末が引き継いだ。**取り込みをそのままやめる**（やり直さない） */
-export class LeaseLostError extends Error {
+export class LeaseLostError extends StoreStoppedError {
   constructor(message = '取り込みの権限が失効しています（時間切れか、別の端末が引き継ぎました）') {
     super(message)
     this.name = 'LeaseLostError'
@@ -15,7 +16,7 @@ export class LeaseLostError extends Error {
 }
 
 /** ログアウトなどで取り込み担当をやめた。以後の書き込みは通信せずに断る */
-export class AgentStoppedError extends Error {
+export class AgentStoppedError extends StoreStoppedError {
   constructor(message = '取り込み担当をやめたため、取り込みを止めました') {
     super(message)
     this.name = 'AgentStoppedError'

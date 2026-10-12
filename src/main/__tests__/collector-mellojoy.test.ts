@@ -137,6 +137,8 @@ import {
   refetchPurchaseImages, savePurchaseImages, shouldSkipDetail, toDetailImageUrl, toPurchaseInput,
 } from '../collector-mellojoy'
 import * as db from '../db'
+import { AgentStoppedError, LeaseLostError } from '../agent/errors'
+import { localStore } from '../store/local'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -924,6 +926,27 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
     expect(state.loadedUrls).toHaveLength(6)
   })
 
+  it('画像の保存で StoreStoppedError が来たら、次の注文の詳細を開かずに止める（failed を記録）', async () => {
+    const orders = Array.from({ length: 4 }, (_, i) => ({ orderNo: `#${700001 + i}`, href: `https://shop.example.com/order/${i}` }))
+    state.opts.listHtml = buildListHtml(orders)
+    state.opts.detailHtmlByUrl = Object.fromEntries(orders.map(o => [o.href, buildDetailHtml(o.orderNo, 1000)]))
+    vi.mocked(db.createPurchase).mockReturnValue('purchase-700001')
+    vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue(
+      Array.from({ length: 3 }, (_, i) => ({ id: `line-${i}`, image_url: `https://cdn.example.com/${i}.jpg` })))
+    const fetchMock = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }))
+    state.opts.fetchImpl = fetchMock
+    const saveLineImage = vi.fn().mockRejectedValueOnce(new LeaseLostError())
+    const store = { ...localStore, saveLineImage } as unknown as typeof localStore
+
+    const run = await collectShopOrders('shop-1', true, store)
+
+    // 一覧 + 1 件目の詳細だけ。2 件目以降の詳細も、残りの画像も取りに行かない
+    expect(state.loadedUrls).toEqual(['https://www.mellojoyjapan.com/account', orders[0].href])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(saveLineImage).toHaveBeenCalledTimes(1)
+    expect(run.status).toBe('failed')
+  })
+
   it('状態表示に「キャンセル」の文字がなくても合計￥0なら一覧の時点で除外する（詳細を開かない）', async () => {
     state.opts.listHtml = buildListHtml([
       { orderNo: '#500001', href: 'https://shop.example.com/order/500001', status: '確認済み', total: 0 },
@@ -1076,6 +1099,29 @@ describe('savePurchaseImages()', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(saved).toBe(0)
     expect(db.setPurchaseLineImage).not.toHaveBeenCalled()
+  })
+
+  it('StoreStoppedError（lease を失った・ログアウト）が来たら、そこで止まる。次の画像を取りに行かない', async () => {
+    for (const stopped of [new LeaseLostError(), new AgentStoppedError()]) {
+      const targets = Array.from({ length: 4 }, (_, i) => (
+        { id: `line-${i}`, image_url: `https://cdn.example.com/${i}.jpg` }
+      ))
+      const fetchMock = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }))
+      state.opts.fetchImpl = fetchMock
+      // 1 枚目：ふつうの失敗（握って次へ）／2 枚目：止まる／3 枚目以降：取りに行かない
+      const saveLineImage = vi.fn()
+        .mockRejectedValueOnce(new Error('画像を上げられませんでした'))
+        .mockRejectedValueOnce(stopped)
+      const store = { ...localStore, saveLineImage } as unknown as typeof localStore
+      const budget = { remaining: 10, failures: [] as string[] }
+
+      await expect(savePurchaseImages('shop-1', targets, budget, store)).rejects.toBe(stopped)
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(saveLineImage).toHaveBeenCalledTimes(2)
+      // ふつうの失敗は記録して続けた（止まった分は失敗として数えない）
+      expect(budget.failures).toHaveLength(1)
+    }
   })
 
   it('対象が0件なら何もしない', async () => {

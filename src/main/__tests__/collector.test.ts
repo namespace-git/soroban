@@ -170,6 +170,8 @@ import {
   randomWaitMs, revealForChallenge, thumbFileName,
 } from '../collector'
 import * as db from '../db'
+import { LeaseLostError } from '../agent/errors'
+import { localStore } from '../store/local'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -673,6 +675,36 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     // 販売側30件の試行だけで、出品側は0件（30 + 4 = 34 にならない）
     expect(fetchMock).toHaveBeenCalledTimes(30)
     expect(db.setListingThumb).not.toHaveBeenCalled()
+  })
+
+  it('画像の保存で StoreStoppedError が来たら、そこで止まる（次の画像・出品中タブへ進まない）。ほかの失敗は握って次へ', async () => {
+    const sales = Array.from({ length: 3 }, (_, i) => ({
+      mercariItemId: `m8${String(i).padStart(8, '0')}`,
+      title: `商品${i}`,
+      price: 1000,
+      fee: 100,
+      shippingFee: 200,
+      otherCost: null,
+      soldAt: '2026-01-01',
+      thumbUrl: `https://static.mercdn.net/thumb/${i}.jpg`,
+    }))
+    state.opts.scrapeResult = { sales, totalCount: 3 }
+    state.opts.listingsHtml = listingsFixtureHtml
+    const fetchMock = vi.fn(async (_url: string) => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }))
+    state.opts.fetchImpl = fetchMock
+
+    // 1 枚目：ふつうの失敗（握って次へ）／2 枚目：lease を失った（ここで止まる）／3 枚目：取りに行かない
+    const saveThumb = vi.fn()
+      .mockRejectedValueOnce(new Error('画像を上げられませんでした'))
+      .mockRejectedValueOnce(new LeaseLostError())
+    const store = { ...localStore, saveThumb } as unknown as typeof localStore
+
+    const run = await collect(true, store)
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(saveThumb).toHaveBeenCalledTimes(2)
+    expect(db.upsertListings).not.toHaveBeenCalled()
+    expect(run.status).toBe('failed')
   })
 
   it('キーワード設定時：タイトル不一致の販売は挿入されず、サムネイルも取得しない。除外数がmessageに出る', async () => {

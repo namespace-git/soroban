@@ -133,6 +133,37 @@ describe('画像を Storage に上げる', () => {
     expect(err.message).not.toContain('fetch failed')
   })
 
+  it('remove：自分の世帯のパスを DELETE で消す（人の JWT ＋ anon キー）', async () => {
+    const { puts, uploader } = setup()
+    const path = `${HOUSEHOLD}/sale/aaaaaaaa-0000-4000-8000-000000000001.jpg`
+    await uploader.remove(path)
+    expect(puts).toHaveLength(1)
+    expect(puts[0].url).toBe(`https://abcd.supabase.co/storage/v1/object/media/${path}`)
+    expect(puts[0].init.method).toBe('DELETE')
+    expect(puts[0].headers.Authorization).toBe(`Bearer ${CREDS.accessToken}`)
+    expect(puts[0].headers.apikey).toBe(CREDS.anonKey)
+    expect(puts[0].init.redirect).toBe('error')
+  })
+
+  it('remove：消せなくても例外にしない（4xx・5xx・通信切れ）。他の世帯・.. のパス・資格なしは通信しない', async () => {
+    const path = `${HOUSEHOLD}/sale/aaaaaaaa-0000-4000-8000-000000000001.jpg`
+    for (const respond of [() => new Response('', { status: 403 }), () => new Response('', { status: 500 }), () => new TypeError('fetch failed')]) {
+      const { puts, uploader } = setup({ respond })
+      await expect(uploader.remove(path)).resolves.toBeUndefined()
+      expect(puts).toHaveLength(1)
+    }
+
+    const { puts, uploader } = setup()
+    await uploader.remove('33333333-3333-4333-8333-333333333333/sale/x.jpg')
+    await uploader.remove(`${HOUSEHOLD}/../other/x.jpg`)
+    await uploader.remove('')
+    expect(puts).toHaveLength(0)
+
+    const noCreds = setup({ creds: null })
+    await expect(noCreds.uploader.remove(path)).resolves.toBeUndefined()
+    expect(noCreds.puts).toHaveLength(0)
+  })
+
   it('世帯の id が UUID でなければ作れない', () => {
     expect(() => createMediaUploader({
       householdId: 'x', credentials: () => CREDS, fetch: async () => new Response('{}'), readFile: async () => JPEG, randomId: () => 'aaaaaaaa',

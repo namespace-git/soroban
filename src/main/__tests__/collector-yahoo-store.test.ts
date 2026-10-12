@@ -100,6 +100,7 @@ import { CHALLENGE_MESSAGE } from '../collector'
 import {
   collect, combineYahooSales, parseYahooSalesHtml, parseYahooSellingHtml, parseYahooSoldHtml,
 } from '../collector-yahoo'
+import { LeaseLostError } from '../agent/errors'
 import type { CollectorStore } from '../store/types'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -267,6 +268,31 @@ describe('collect()（Yahoo!フリマ）が store の段へ渡すもの', () => 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(store.saveThumb).not.toHaveBeenCalled()
     expect(run.status).toBe('ok')
+  })
+
+  it('画像の保存で StoreStoppedError が来たら、そこで止まる（次の画像を取りに行かない）。ほかの失敗は握って次へ', async () => {
+    const { store, asStore } = createFakeStore()
+    store.ingestYahooSales.mockResolvedValueOnce({
+      already: false, inserted: 3, updated: 0, excluded_by_keyword: 0, excluded_deleted: 0, truncated_title_ids: [],
+      thumb_targets: Array.from({ length: 3 }, (_, i) => ({
+        kind: 'sale' as const, channel_item_id: `z90000000${i}`, thumb_url: `https://img.example.com/${i}.jpg?1`,
+      })),
+    })
+    const fetchMock = vi.fn(async (_url: string) => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }))
+    state.opts.fetchImpl = fetchMock
+    // 1 枚目：ふつうの失敗（握って次へ）／2 枚目：lease を失った（ここで止まる）／3 枚目：取りに行かない
+    store.saveThumb
+      .mockRejectedValueOnce(new Error('画像を上げられませんでした'))
+      .mockRejectedValueOnce(new LeaseLostError())
+
+    const run = await collect(true, asStore)
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(store.saveThumb).toHaveBeenCalledTimes(2)
+    // 出品などの先にも進まず、実行記録は failed で 1 回だけ
+    expect(store.ingestListingsPage).not.toHaveBeenCalled()
+    expect(store.recordRun).toHaveBeenCalledTimes(1)
+    expect(run.status).toBe('failed')
   })
 
   it('段が例外を投げたら、実行記録は failed（メッセージつき）で 1 回だけ書き、窓も閉じる', async () => {

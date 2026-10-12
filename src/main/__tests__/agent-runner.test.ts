@@ -114,6 +114,7 @@ function harness(over: {
     http,
     createMedia: ({ credentials }) => ({
       upload: async (kind, file) => { creds.push(credentials()); return `${HOUSEHOLD}/${kind}/${file}` },
+      remove: async () => {},
     }),
     collectors,
     log: (kind, message, payload) => { logs.push({ kind, message, payload }) },
@@ -287,6 +288,16 @@ describe('shouldSkipStartupRequest：起動時に頼まない条件', () => {
     expect(shouldSkipStartupRequest(at(HOUR), 1, now)).toBe(false)
     expect(shouldSkipStartupRequest(at(61 * MIN), 1, now)).toBe(false)
     expect(shouldSkipStartupRequest(at(5 * HOUR), 6, now)).toBe(true)
+  })
+
+  it('empty の実行記録も前回成功に数える（デスクトップの hoursSinceLastOk と同じ）。failed・auth_required は数えない', () => {
+    const at = (status: CollectorRun['status'], msAgo: number): CollectorStatusJob => ({
+      job: job({ runs: [{ ...okRun(new Date(now - msAgo).toISOString()), status }] }), agents_online: 1, cooldown_seconds: 0,
+    })
+    expect(shouldSkipStartupRequest(at('empty', 59 * MIN), 1, now)).toBe(true)
+    expect(shouldSkipStartupRequest(at('empty', 61 * MIN), 1, now)).toBe(false)
+    expect(shouldSkipStartupRequest(at('failed', 5 * MIN), 1, now)).toBe(false)
+    expect(shouldSkipStartupRequest(at('auth_required', 5 * MIN), 1, now)).toBe(false)
   })
 })
 type CollectorStatusJob = CollectStatus

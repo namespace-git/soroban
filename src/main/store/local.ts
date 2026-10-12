@@ -67,14 +67,18 @@ function findSaleId(mercariItemId: string): string | null {
 }
 
 export function createLocalStore(): CollectorStore {
-  // 画像の対象を返すとき、販売の id（channel_item_id → sale.id）を覚えておく。saveThumb が id を引き直さずに済む
+  // 画像の対象を返すとき、販売の id（channel_item_id → sale.id）を覚えておく。saveThumb が id を引き直さずに済む。
+  // localStore は 1 つで使い回すので、段ごとに空にして「その段が返した対象だけ」を覚える
+  // （画像の予算で切られた対象の id が溜まり続けない。忘れたぶんは saveThumb が findSaleId で引き直す）
   const saleIds = new Map<string, string>()
 
-  const saleThumbTargets = (list: Array<{ id: string; mercariItemId: string; thumbUrl: string }>): AgentThumbTarget[] =>
-    list.map((t) => {
+  const saleThumbTargets = (list: Array<{ id: string; mercariItemId: string; thumbUrl: string }>): AgentThumbTarget[] => {
+    saleIds.clear()
+    return list.map((t) => {
       saleIds.set(t.mercariItemId, t.id)
       return { kind: 'sale' as const, channel_item_id: t.mercariItemId, thumb_url: t.thumbUrl }
     })
+  }
 
   const listingThumbTargets = (list: Array<{ id: string; thumbUrl: string }>): AgentThumbTarget[] =>
     list.map(t => ({ kind: 'listing' as const, channel_item_id: t.id, thumb_url: t.thumbUrl }))

@@ -243,6 +243,31 @@ describe('saveThumb（画像は変わったときだけ取り直す）', () => {
     })).rejects.toThrow('販売が見つかりません')
   })
 
+  it('覚えている販売の id は「直近の段が返した対象」だけ。次の段で忘れる（溜まり続けない）が、saveThumb は引き直して書ける', async () => {
+    // 同じ段が返した対象は覚えている：行を消しても、覚えた id のまま書きに行く（引き直さない）
+    await store.ingestSoldPage(1, [sold('m10000000001', '【A037】もこ山')])
+    db.getDb().prepare('DELETE FROM sale WHERE mercari_item_id = ?').run('m10000000001')
+    done(await store.saveThumb({
+      kind: 'sale', channel_item_id: 'm10000000001', thumb_url: 'https://img.example.com/a.jpg?1', path: 'a.jpg',
+    }))
+
+    // 次の段（対象 0 件でも）を呼ぶと忘れる：行が無ければ引き直しても見つからない
+    await store.ingestSoldPage(1, [sold('m10000000002', '【A038】ぷにぷに')])
+    await store.ingestTrading([])
+    db.getDb().prepare('DELETE FROM sale WHERE mercari_item_id = ?').run('m10000000002')
+    await expect(store.saveThumb({
+      kind: 'sale', channel_item_id: 'm10000000002', thumb_url: 'https://img.example.com/b.jpg?1', path: 'b.jpg',
+    })).rejects.toThrow('販売が見つかりません')
+
+    // 忘れていても、行が残っていれば findSaleId で引き直して書ける
+    await store.ingestSoldPage(1, [sold('m10000000003', '【A039】ふわふわ')])
+    await store.ingestTrading([])
+    done(await store.saveThumb({
+      kind: 'sale', channel_item_id: 'm10000000003', thumb_url: 'https://img.example.com/c.jpg?1', path: 'c.jpg',
+    }))
+    expect(saleOf('m10000000003')).toMatchObject({ thumb_file: 'c.jpg' })
+  })
+
   it('出品の画像：listing に書き、同じ商品 ID の販売にも同じ画像を書く（売れる前後で共有）', async () => {
     done(await store.ingestListingsPage('mercari', 1, [listing('m20000000001', '【A037】もこ山')]))
     await store.ingestSoldPage(1, [sold('m20000000001', '【A037】もこ山', { thumbUrl: null })])

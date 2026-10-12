@@ -74,14 +74,14 @@ type Timer = ReturnType<typeof setTimeout>
 
 /**
  * 起動時の「取り込みを頼むか」。すでに積まれている・走っている／クールダウン中／直近に取り込めている（ok の実行記録が
- * 間隔の中にある）なら頼まない。デスクトップの「起動時に、前回から間隔が空いていれば取り込む」と同じ約束（収集頻度を上げない）
+ * 間隔の中にある。empty も含む）なら頼まない。デスクトップの「起動時に、前回から間隔が空いていれば取り込む」と同じ約束（収集頻度を上げない）
  */
 export function shouldSkipStartupRequest(status: CollectStatus, intervalH: number, nowMs: number): boolean {
   const job = status.job
   if (job && (job.status === 'queued' || job.status === 'running')) return true
   if (status.cooldown_seconds > 0) return true
   const okTimes = (job?.runs ?? [])
-    .filter(r => r.status === 'ok')
+    .filter(r => r.status === 'ok' || r.status === 'empty') // db.ts の hoursSinceLastOk と同じ（empty も前回成功に数える）
     .map(r => Date.parse(r.finished_at ?? ''))
     .filter(t => Number.isFinite(t))
   if (okTimes.length === 0) return false

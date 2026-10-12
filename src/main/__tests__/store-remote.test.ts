@@ -17,9 +17,13 @@ const LEASE = { job_id: 'job-1', lease_token: 'lease-secret-1' }
 
 interface Seen { method: string; authorization: string; args: unknown[] }
 
-function setup(handler: (seen: Seen, n: number) => Response, opts: { key?: () => string | null; upload?: MediaUploader['upload'] } = {}) {
+function setup(
+  handler: (seen: Seen, n: number) => Response | Promise<Response>,
+  opts: { key?: () => string | null; upload?: MediaUploader['upload']; remove?: MediaUploader['remove'] } = {},
+) {
   const seen: Seen[] = []
   const uploads: Array<{ kind: MediaKind; file: string }> = []
+  const removed: string[] = []
   const fetch: FetchFn = async (url, init) => {
     const s: Seen = {
       method: url.slice(url.lastIndexOf('/') + 1),
@@ -32,6 +36,7 @@ function setup(handler: (seen: Seen, n: number) => Response, opts: { key?: () =>
   const guard = new JobGuard()
   const media: MediaUploader = {
     upload: opts.upload ?? (async (kind, file) => { uploads.push({ kind, file }); return `hh/${kind}/rand-${file}` }),
+    remove: opts.remove ?? (async (path) => { removed.push(path) }),
   }
   const store = createRemoteStore({
     http: createAgentHttp({ origin: ORIGIN, fetch, sleep: async () => {}, retryDelaysMs: [1, 1] }),
@@ -40,7 +45,7 @@ function setup(handler: (seen: Seen, n: number) => Response, opts: { key?: () =>
     guard,
     media,
   })
-  return { store, seen, uploads, guard }
+  return { store, seen, uploads, removed, guard }
 }
 
 const ok = (result: unknown): Response => new Response(JSON.stringify({ result }), { status: 200 })
@@ -222,6 +227,64 @@ describe('画像：Storage に上げてからパスを API に渡す', () => {
     await expect(store.saveThumb({ kind: 'sale', channel_item_id: 'm1', thumb_url: 'u', path: 'm1.jpg' })).rejects.toBeInstanceOf(LeaseLostError)
     await expect(store.saveLineImage('l', 'x.jpg')).rejects.toBeInstanceOf(LeaseLostError)
     expect(uploads).toHaveLength(0)
+  })
+})
+
+describe('画像：API が書かなかった・使われなかったときは、上げた画像を消してみる', () => {
+  const thumb = { kind: 'sale' as const, channel_item_id: 'm1', thumb_url: 'u', path: 'm1.jpg' }
+
+  it('成功（already: false）では消さない', async () => {
+    const { store, removed } = setup(() => ok({ already: false }))
+    await store.saveThumb(thumb)
+    await store.saveLineImage('line-1', 'x.jpg')
+    expect(removed).toEqual([])
+  })
+
+  it('already: true（前に送った段がもう書かれている＝今回上げたものは使われない）なら消す', async () => {
+    const { store, removed } = setup(() => ok({ already: true }))
+    expect(await store.saveThumb(thumb)).toEqual({ already: true })
+    expect(await store.saveLineImage('line-1', 'x.jpg')).toEqual({ already: true })
+    expect(removed).toEqual(['hh/sale/rand-m1.jpg', 'hh/purchase-line/rand-x.jpg'])
+  })
+
+  it('lease_lost・4xx・5xx は消して、元の例外をそのまま投げる', async () => {
+    const lost = setup(() => fail(409, 'lease_lost'))
+    await expect(lost.store.saveThumb(thumb)).rejects.toBeInstanceOf(LeaseLostError)
+    expect(lost.removed).toEqual(['hh/sale/rand-m1.jpg'])
+
+    const bad = setup(() => fail(400, 'bad_request'))
+    await expect(bad.store.saveLineImage('line-1', 'x.jpg')).rejects.toMatchObject({ code: 'bad_request', status: 400 })
+    expect(bad.removed).toEqual(['hh/purchase-line/rand-x.jpg'])
+
+    const server = setup(() => fail(500, 'internal'))
+    await expect(server.store.saveThumb(thumb)).rejects.toMatchObject({ status: 500 })
+    expect(server.removed).toEqual(['hh/sale/rand-m1.jpg'])
+    // 画像の書き込みはやり直さない（やり直して already: true が返ると、自分が書いたパスを消してしまう）
+    expect(server.seen).toHaveLength(1)
+  })
+
+  it('答えが返らなかった（通信切れ）ときは消さない：サーバーが書いたか分からず、書いたあとに消すと参照だけが残る', async () => {
+    const { store, removed, seen } = setup(() => { throw new TypeError('fetch failed') })
+    await expect(store.saveThumb(thumb)).rejects.toMatchObject({ status: 0 })
+    expect(seen).toHaveLength(1) // やり直さない
+    expect(removed).toEqual([])
+  })
+
+  it('消せなくても例外にしない（元の結果・元の例外がそのまま出る）', async () => {
+    const boom = async () => { throw new Error('消せませんでした') }
+    const ok1 = setup(() => ok({ already: true }), { remove: boom })
+    await expect(ok1.store.saveThumb(thumb)).resolves.toEqual({ already: true })
+
+    const ng = setup(() => fail(409, 'lease_lost'), { remove: boom })
+    await expect(ng.store.saveThumb(thumb)).rejects.toBeInstanceOf(LeaseLostError)
+  })
+
+  it('上げられなかったとき（上げる前の失敗）は、消すものが無いので消しに行かない', async () => {
+    const { store, removed } = setup(() => ok({ already: false }), {
+      upload: async () => { throw new Error('画像を上げられませんでした（503）') },
+    })
+    await expect(store.saveThumb(thumb)).rejects.toThrow('画像を上げられません')
+    expect(removed).toEqual([])
   })
 })
 
