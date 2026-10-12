@@ -1045,8 +1045,9 @@ describe('商品（型番）：世帯の分離・引数の検査・API', () => {
     expect((await w.a.call('setProductNote', 'Q001', null)).status).toBe(200)
     expect((await w.b.call('getProduct', 'Q001')).body.result).toBeNull()
 
-    // 画像のアップロードは次の段（登録していない）
+    // ファイルを選ぶダイアログの setProductImage は Web では登録しない。自動に戻す側は使える（画像のアップロードは upload/）
     expect((await w.a.call('setProductImage', 'Q001')).status).toBe(501)
-    expect((await w.a.call('setProductImageAuto', 'Q001', true)).status).toBe(501)
+    expect((await w.a.call('setProductImageAuto', 'Q001', true)).status).toBe(200)
+    expect((await w.a.call('setProductImageAuto', 'Q001', 'yes')).status).toBe(400)
   })
 })

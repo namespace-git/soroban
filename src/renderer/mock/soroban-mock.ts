@@ -36,6 +36,7 @@ import { CHANNEL_LABEL, LISTING_STATUS_LABEL } from '../../shared/types'
 import { todayLocal, thisMonthLocal } from '../../shared/date'
 import { matchesSearch } from '../components/SearchBox.vue'
 import type { AgentDevice, CollectJob, CollectJobStatus, PushDevice, PushKinds, WebApi } from '../../shared/web-types'
+import type { UploadExt, UploadKind, UploadTarget } from '../../shared/web-types'
 import { createWebSoroban } from '../api/web'
 
 // ------------------------------------------------------------
@@ -4982,6 +4983,25 @@ function installWebMock(scenario: string): void {
     },
     async getTrackingNumber(purchaseId: string) {
       return wait(purchases.find(x => x.id === purchaseId)?.tracking_number ?? null)
+    },
+    // 画像のアップロード。モックは Storage を持たないので、置き場所の形だけ本物に合わせ、
+    // 結び付けはデスクトップのモック（attachReceipt・readReceiptImage・setProductImage）に任せる
+    async prepareUpload(kind: UploadKind, ext: UploadExt) {
+      return wait<UploadTarget>({
+        bucket: kind === 'receipt' ? 'receipts' : 'media',
+        path: `mock-household/${kind}/${uid()}.${ext}`,
+      })
+    },
+    async attachReceiptPath(expenseId: string) {
+      return api.attachReceipt(expenseId)
+    },
+    async readReceiptAt(path: string) {
+      const result = await api.readReceiptImage()
+      if (!result) throw new Error('レシートを読み取れませんでした')
+      return { ...result, temp_file: path }
+    },
+    async setProductImagePath(modelCode: string) {
+      return api.setProductImage(modelCode)
     },
   }
 

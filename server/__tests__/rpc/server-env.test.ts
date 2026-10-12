@@ -47,8 +47,9 @@ describe('serverEnvFrom・Ctx.env', () => {
     expect(serverEnvFrom(null)).toEqual(EMPTY_SERVER_ENV)
     expect(serverEnvFrom({
       SUPABASE_URL: ' https://x.supabase.test ', VAPID_PUBLIC_KEY: '   ', VAPID_SUBJECT: 'mailto:a@example.test', SECRET_KEYS: '',
+      SUPABASE_ANON_KEY: ' anon ',
     })).toEqual({
-      SUPABASE_URL: 'https://x.supabase.test', VAPID_PUBLIC_KEY: null, VAPID_PRIVATE_KEY: null,
+      SUPABASE_URL: 'https://x.supabase.test', SUPABASE_ANON_KEY: 'anon', VAPID_PUBLIC_KEY: null, VAPID_PRIVATE_KEY: null,
       VAPID_SUBJECT: 'mailto:a@example.test', SECRET_KEYS: null,
     })
     // Cloudflare の env にはバインディング（文字でない値）も入る。拾わない
@@ -82,7 +83,7 @@ describe('入口の env が Ctx.env に渡る', () => {
     })
     expect(JSON.parse(await response.text())).toEqual({
       result: {
-        env: { SUPABASE_URL, VAPID_PUBLIC_KEY: 'pub', VAPID_PRIVATE_KEY: null, VAPID_SUBJECT: null, SECRET_KEYS: null },
+        env: { SUPABASE_URL, SUPABASE_ANON_KEY: null, VAPID_PUBLIC_KEY: 'pub', VAPID_PRIVATE_KEY: null, VAPID_SUBJECT: null, SECRET_KEYS: null },
         base: MEDIA_BASE,
       },
     })

@@ -2,18 +2,23 @@
 // auth/boot.ts が動的 import する（Electron 版のビルドには入らない）。
 //
 //   window.sorobanWeb … WebApi（取り込みの要求・Push 通知・取り込み担当の PC）。通信は createHttpApi と同じ
-//   window.soroban    … SorobanApi。次の 4 つだけ Web の動きにし、デスクトップ専用の 15 本は日本語のエラーにする。
+//   window.soroban    … SorobanApi。次の 4 つ（と、uploader を渡したときの画像の 3 つ）だけ Web の動きにし、
+//                       デスクトップ専用の 15 本は日本語のエラーにする。
 //                       画面のコードは Electron 版と同じまま（呼び先が変わるだけ）
 //     exportCsv         サーバーは CSV の中身を返す → ブラウザでダウンロードさせる（戻り値はファイル名）
 //     openChannelPage   shared/channel-url.ts で URL を作って新しいタブで開く（ホスト・パスは固定）
 //     openTracking      追跡番号を取って 17TRACK のページを新しいタブで開く
 //     collect           取り込みの要求（sorobanWeb.requestCollect）に回す
+//     attachReceipt / readReceiptImage / setProductImage
+//                       ファイル選択ダイアログのかわりに、画像を選ぶ（スマホはカメラ・写真）→ 縮める → Storage に上げる
+//                       （api/upload.ts）→ パスを帳簿に結び付ける（sorobanWeb の attachReceiptPath・readReceiptAt・setProductImagePath）
 import type { CollectorRun, ExportKind, SorobanApi } from '../../shared/types'
-import type { WebApi } from '../../shared/web-types'
+import type { UploadExt, UploadKind, WebApi } from '../../shared/web-types'
 import { channelPageUrl } from '../../shared/channel-url'
 import { todayLocal } from '../../shared/date'
 import { createHttpApi } from './http'
 import type { HttpApiOptions } from './http'
+import type { ImageUploader } from './upload'
 
 /** WebApi の入口。メソッド名で `POST /api/rpc/<name>` を呼ぶだけなので、通信は SorobanApi と同じ */
 export function createWebApi(options: HttpApiOptions): WebApi {
@@ -105,11 +110,52 @@ export function desktopOnlyMessage(method: string): string | null {
 }
 
 /**
- * Web 版の window.soroban。`base`（HTTP クライアント）をそのまま使い、下の 4 本と、デスクトップ専用の呼び出しだけ差し替える。
- * 差し替えた 4 本の戻り値の型は Electron 版と同じ（画面は今のまま「書き出しました」などを出せる）
+ * 画像を選んで上げる 3 本（レシートを付ける・レシートを読む・商品画像をセット）。戻り値の型はデスクトップと同じ。
+ * どれも**最初にファイル選択を開く**（uploader.pickAndUpload を、最初の await より前に呼ぶ）。
+ * スマホのブラウザは、クリックの直後でないとファイル選択を開かないため。選ばなければ null／false（デスクトップのキャンセルと同じ）
  */
-export function createWebSoroban(base: SorobanApi, web: WebApi, env: WebEnv = browserEnv()): SorobanApi {
+function imageMethods(
+  web: WebApi,
+  uploader: ImageUploader,
+): Pick<SorobanApi, 'attachReceipt' | 'readReceiptImage' | 'setProductImage'> {
+  const prepare = (kind: UploadKind, ext: UploadExt) => web.prepareUpload(kind, ext)
+  return {
+    async attachReceipt(id: string) {
+      const target = await uploader.pickAndUpload('receipt', prepare)
+      if (!target) return null
+      // 結び付けに失敗したときは Storage に残す（通信の失敗は「結び付いたが返事が届かない」こともあり、消すと帳簿が空を指す）
+      return web.attachReceiptPath(id, target.path)
+    },
+
+    async readReceiptImage() {
+      const target = await uploader.pickAndUpload('receipt', prepare)
+      if (!target) return null
+      try {
+        return await web.readReceiptAt(target.path)
+      } catch (e) {
+        // 読み取りは経費にまだ付けない。失敗したら上げたレシートを残さない（レシートは個人情報なので）
+        await uploader.discard(target)
+        throw e
+      }
+    },
+
+    async setProductImage(modelCode: string) {
+      const target = await uploader.pickAndUpload('product', prepare)
+      if (!target) return false
+      return web.setProductImagePath(modelCode, target.path)
+    },
+  }
+}
+
+/**
+ * Web 版の window.soroban。`base`（HTTP クライアント）をそのまま使い、下の 4 本と、デスクトップ専用の呼び出しだけ差し替える。
+ * 差し替えた 4 本の戻り値の型は Electron 版と同じ（画面は今のまま「書き出しました」などを出せる）。
+ * `uploader` を渡すと、画像を選んで上げる 3 本も差し替える（渡さなければ base のまま。モックの画面確認用）
+ */
+export function createWebSoroban(base: SorobanApi, web: WebApi, env: WebEnv = browserEnv(), uploader?: ImageUploader): SorobanApi {
   const own: Partial<SorobanApi> = {
+    ...(uploader ? imageMethods(web, uploader) : {}),
+
     async exportCsv(kind: ExportKind = 'sales', month?: string) {
       const csv = await base.exportCsv(kind, month)
       // 対象が 0 件（サーバーは null）。何も書き出さない

@@ -118,6 +118,7 @@ select app.create_household('うち', array['<夫のユーザー id>', '<妻の�
 | `VITE_SUPABASE_URL` | 1-6 の Project URL | 公開 | 要る（ビルド時） | 要らない |
 | `VITE_SUPABASE_ANON_KEY` | 1-6 の anon key | 公開 | 要る（ビルド時） | 要らない |
 | `SUPABASE_URL` | 1-6 の Project URL | 公開 | 要る（ログインの検証・画像の URL） | 要らない |
+| `SUPABASE_ANON_KEY` | 1-6 の anon key（`VITE_SUPABASE_ANON_KEY` と同じ値） | 公開 | 要る（レシート・商品画像の署名・削除・読み出し。ログインした人の権限で Storage を呼ぶときの `apikey`。無ければ画像まわりだけ使えない） | 要らない |
 | `VAPID_PUBLIC_KEY` | 2-5 で作った値（通知の公開鍵） | 公開してよい | 要る | 要る |
 | `VAPID_PRIVATE_KEY` | 2-5 で作った値（通知の署名鍵） | **秘密** | 要る（「試しに送る」と、操作の直後の通知） | 要る（通知の送信） |
 | `VAPID_SUBJECT` | `mailto:自分のメールアドレス`（連絡先） | 秘密にしておく（メールアドレスが入る） | 要る | 要る |

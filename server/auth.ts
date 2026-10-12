@@ -31,7 +31,11 @@ export async function authenticate(request: Request, root: Sql, env: AuthEnv): P
   return { userId, householdId: await findHousehold(root, userId) }
 }
 
-function bearerToken(request: Request): string | null {
+/**
+ * `Authorization: Bearer <JWT>` のトークン部分。形を取り出すだけで、検証はしない
+ * （`authenticate` を通ったあとで、Storage を要求した人の権限で呼ぶために `Ctx.userJwt` へ渡すのに使う。ログ・応答には出さない）
+ */
+export function bearerToken(request: Request): string | null {
   const header = request.headers.get('authorization')
   const m = header ? /^Bearer\s+(\S+)\s*$/i.exec(header) : null
   return m ? m[1] : null

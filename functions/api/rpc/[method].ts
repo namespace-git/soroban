@@ -11,6 +11,7 @@ import '../../../server/domain/index'
 //   DATABASE_URL        … HYPERDRIVE が無いときの接続文字列。transaction モードのプーラ（6543）なら DATABASE_PREPARE=false も
 //   DATABASE_PREPARE    … "false" で名前付き prepared statement を切る（既定は使う）
 //   SUPABASE_URL        … https://xxxx.supabase.co （JWT の iss と JWKS の場所。商品画像の URL（Storage の media）の頭にも使う）
+//   SUPABASE_ANON_KEY   … Supabase の anon キー（公開してよい値）。レシート・商品画像の署名・削除・読み出しを、要求した人の JWT で Storage に頼むときの apikey。無ければ画像まわりだけ使えない
 //   VAPID_PUBLIC_KEY    … Web Push の公開鍵（画面の通知の設定に渡す）。無ければ通知は使わない
 //   VAPID_PRIVATE_KEY   … **秘密**。Web Push の署名鍵
 //   VAPID_SUBJECT       … Web Push の連絡先（`mailto:` か `https://`）
@@ -24,6 +25,7 @@ interface Env {
   DATABASE_URL?: string
   DATABASE_PREPARE?: string
   SUPABASE_URL?: string
+  SUPABASE_ANON_KEY?: string
   VAPID_PUBLIC_KEY?: string
   VAPID_PRIVATE_KEY?: string
   VAPID_SUBJECT?: string

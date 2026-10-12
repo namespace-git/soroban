@@ -3,10 +3,10 @@ import { readFileSync, statSync } from 'node:fs'
 import { extname } from 'node:path'
 import * as db from './db'
 import { todayLocal } from '../shared/date'
-import type { AiStatus, ExpenseCategory, ReceiptBox, ReceiptDraft } from '../shared/types'
+import type { AiStatus, ReceiptDraft } from '../shared/types'
 import {
-  AiResponseError, buildPingBody, callGemini, DEFAULT_MODEL, extractResponseText, fetchGeminiModels, logAiError,
-  maskSecrets, toAiErrorMessage,
+  buildPingBody, callGemini, DEFAULT_MODEL, extractResponseText, fetchGeminiModels, logAiError, RECEIPT_MAX_BYTES,
+  receiptImageType, requestReceiptDraft, toAiErrorMessage,
 } from './gemini-core'
 
 // ============================================================
@@ -20,58 +20,6 @@ import {
 
 const SETTING_KEY_ENC = 'gemini_api_key_enc'
 const SETTING_MODEL = 'ai_model'
-const MAX_BYTES = 10 * 1024 * 1024
-
-const MIME_BY_EXT: Record<string, string> = {
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
-}
-
-const CATEGORIES: ExpenseCategory[] = ['packaging', 'shipping', 'supplies', 'fee', 'other']
-
-const PROMPT = '日本のレシート。次を JSON で：shop（店名。チェーン名＋店舗名）、registration_no（T＋13 桁、無ければ null）、date（YYYY-MM-DD）、total（税込の合計。円、整数）、tax（内消費税の額、無ければ null）、lines（品名・単価・数量・金額・category・box_2d。**単価と金額は税込**。レシートの明細が税抜表示なら税込に直し、明細の金額の合計が total（税込）と一致するようにする。端数が出たら最後の行で合わせる）、boxes（shop・date・total それぞれの box_2d）、warnings（事業に関係なさそうな行、合計が合わない、読めない箇所）。box_2d は [ymin, xmin, ymax, xmax]（画像上でその文字を読んだ位置。0〜1000 の正規化座標）。読めなければ null。category は packaging（袋・箱・緩衝材・テープ・シール等の梱包資材）／shipping（送料・切手・レターパック・宅急便・ゆうパケット等）／supplies（文具・電池等の消耗品）／fee（手数料）／other。数字は半角整数。読めないものは null'
-
-/** box_2d（[ymin, xmin, ymax, xmax]、0〜1000）。読めなければ null */
-const BOX_SCHEMA = { type: 'ARRAY', items: { type: 'INTEGER' }, nullable: true }
-
-const RESPONSE_SCHEMA = {
-  type: 'OBJECT',
-  properties: {
-    shop: { type: 'STRING', nullable: true },
-    registration_no: { type: 'STRING', nullable: true },
-    date: { type: 'STRING', nullable: true },
-    total: { type: 'INTEGER', nullable: true },
-    tax: { type: 'INTEGER', nullable: true },
-    lines: {
-      type: 'ARRAY',
-      items: {
-        type: 'OBJECT',
-        properties: {
-          name: { type: 'STRING' },
-          unit_price: { type: 'INTEGER', nullable: true },
-          quantity: { type: 'INTEGER', nullable: true },
-          amount: { type: 'INTEGER', nullable: true },
-          category: { type: 'STRING', enum: CATEGORIES, nullable: true },
-          box_2d: BOX_SCHEMA,
-        },
-        required: ['name'],
-      },
-    },
-    boxes: {
-      type: 'OBJECT',
-      properties: {
-        shop: BOX_SCHEMA,
-        date: BOX_SCHEMA,
-        total: BOX_SCHEMA,
-      },
-      nullable: true,
-    },
-    warnings: { type: 'ARRAY', items: { type: 'STRING' } },
-  },
-  required: ['lines', 'warnings'],
-}
 
 // ------------------------------------------------------------
 // キー・モデルの設定（setting テーブル）
@@ -149,15 +97,6 @@ export async function listGeminiModels(): Promise<Array<{ name: string; display_
   }
 }
 
-/** テキストをJSONへ。壊れていれば先頭120文字を添えたAiResponseError */
-function parseDraftJson(text: string): unknown {
-  try {
-    return JSON.parse(text)
-  } catch {
-    throw new AiResponseError(`AI の応答を読めませんでした（${maskSecrets(text).slice(0, 120)}）`)
-  }
-}
-
 /** 保存したキーで最小の要求を送って疎通を確かめる */
 export async function testGemini(): Promise<{ ok: boolean; message: string }> {
   let apiKey: string
@@ -180,127 +119,26 @@ export async function testGemini(): Promise<{ ok: boolean; message: string }> {
 
 // ------------------------------------------------------------
 // 画像 → ReceiptDraft
+//
+// プロンプト・応答の型・下書きへの変換は gemini-core.ts（サーバーと共用）。ここはファイルの読み込みと、キー・モデルだけ
 // ------------------------------------------------------------
 
 function loadImage(filePath: string): { mimeType: string; base64: string } {
-  const ext = extname(filePath).toLowerCase()
-  if (ext === '.heic' || ext === '.heif') {
-    throw new Error('HEIC は読めません。JPEG か PNG にしてください')
-  }
-  const mimeType = MIME_BY_EXT[ext]
-  if (!mimeType) throw new Error('この画像の形式は読めません（JPEG・PNG・WebP のみ）')
-  if (statSync(filePath).size > MAX_BYTES) throw new Error('画像は 10MB までにしてください')
+  const type = receiptImageType(extname(filePath))
+  if ('error' in type) throw new Error(type.error)
+  if (statSync(filePath).size > RECEIPT_MAX_BYTES) throw new Error('画像は 10MB までにしてください')
   const base64 = readFileSync(filePath).toString('base64')
-  return { mimeType, base64 }
-}
-
-/** 未来日・2020年より前は無効な日付として null にする（receipt-parse.ts の判定を踏襲） */
-function normalizeDate(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/)
-  if (!m) return null
-  const year = Number(m[1])
-  if (year < 2020) return null
-  if (raw > todayLocal()) return null
-  return raw
-}
-
-function normalizeRegistrationNo(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null
-  const m = raw.match(/T\s*(\d{13})/)
-  return m ? `T${m[1]}` : null
-}
-
-function normalizeAmount(raw: unknown): number | null {
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
-  return Math.round(raw)
-}
-
-function normalizeCategory(raw: unknown): ExpenseCategory | undefined {
-  return typeof raw === 'string' && (CATEGORIES as string[]).includes(raw) ? (raw as ExpenseCategory) : undefined
-}
-
-/** box_2d（[ymin, xmin, ymax, xmax]）。4要素の数字でなければ null。範囲外は 0〜1000 に丸める */
-function normalizeBox(raw: unknown): ReceiptBox | null {
-  if (!Array.isArray(raw) || raw.length !== 4) return null
-  const nums = raw.map(v => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null))
-  if (nums.some(n => n === null)) return null
-  const [ymin, xmin, ymax, xmax] = nums.map(n => Math.min(1000, Math.max(0, n as number)))
-  return [ymin, xmin, ymax, xmax]
-}
-
-/**
- * lines の1行を ReceiptDraft の形へ。amount（行の金額）と quantity から単価を逆算する
- * （AI が返す unit_price は使わず、amount / quantity が割り切れればそれ、割り切れなければ
- * 金額そのもの・数量1にする。receipt-parse.ts の extractItems と同じ考え方）
- */
-function toDraftLine(raw: any): ReceiptDraft['lines'][number] {
-  const name = typeof raw?.name === 'string' && raw.name.trim() ? raw.name.trim() : '品名不明'
-  const quantityRaw = typeof raw?.quantity === 'number' && raw.quantity > 0 ? Math.round(raw.quantity) : 1
-  const amount = normalizeAmount(raw?.amount) ?? normalizeAmount(raw?.unit_price) ?? 0
-
-  let quantity = quantityRaw
-  let unit_price: number
-  if (quantity > 0 && amount % quantity === 0) {
-    unit_price = amount / quantity
-  } else {
-    unit_price = amount
-    quantity = 1
-  }
-
-  const category = normalizeCategory(raw?.category)
-  const box = normalizeBox(raw?.box_2d)
-  const line: ReceiptDraft['lines'][number] = { name, unit_price, quantity }
-  if (category) line.category = category
-  if (box) line.box = box
-  return line
-}
-
-function toReceiptDraft(parsed: any, rawText: string): ReceiptDraft {
-  const lines = Array.isArray(parsed?.lines) ? parsed.lines.map(toDraftLine) : []
-  const warnings = Array.isArray(parsed?.warnings) ? parsed.warnings.filter((w: unknown) => typeof w === 'string') : []
-  return {
-    shop: typeof parsed?.shop === 'string' && parsed.shop.trim() ? parsed.shop.trim() : null,
-    registration_no: normalizeRegistrationNo(parsed?.registration_no),
-    shop_learned: false,
-    occurred_at: normalizeDate(parsed?.date),
-    total: normalizeAmount(parsed?.total),
-    lines,
-    boxes: {
-      shop: normalizeBox(parsed?.boxes?.shop),
-      date: normalizeBox(parsed?.boxes?.date),
-      total: normalizeBox(parsed?.boxes?.total),
-    },
-    tax: normalizeAmount(parsed?.tax),
-    warnings,
-    raw_text: rawText,
-    confidence: 80,
-  }
+  return { mimeType: type.mimeType, base64 }
 }
 
 /** レシート画像を Gemini で読み取り、経費の下書きにする。キー未設定なら Error */
 export async function readReceiptWithGemini(filePath: string): Promise<ReceiptDraft> {
   const apiKey = requireApiKey()
   const model = getModel()
-  const { mimeType, base64 } = loadImage(filePath)
+  const image = loadImage(filePath)
 
   try {
-    const json = await callGemini(model, apiKey, {
-      contents: [{
-        parts: [
-          { inline_data: { mime_type: mimeType, data: base64 } },
-          { text: PROMPT },
-        ],
-      }],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-        temperature: 0.1,
-      },
-    })
-    const text = extractResponseText(json)
-    const parsed = parseDraftJson(text)
-    return toReceiptDraft(parsed, text)
+    return await requestReceiptDraft(model, apiKey, image, todayLocal())
   } catch (e) {
     logAiError('Gemini でのレシート読み取りに失敗しました', e)
     throw new Error(toAiErrorMessage(e, model))

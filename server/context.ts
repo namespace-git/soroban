@@ -10,6 +10,11 @@ import type { Sql } from './db/sql'
 export interface ServerEnv {
   /** 例 https://xxxx.supabase.co 。公開してよい値 */
   SUPABASE_URL: string | null
+  /**
+   * Supabase の anon キー（公開してよい値。ブラウザにも入っている）。Storage の REST を、要求した人の JWT で呼ぶときの
+   * `apikey` ヘッダーに付ける（server/storage.ts）。無ければ画像の署名・削除・読み出しはできない（帳簿の読み書きは動く）
+   */
+  SUPABASE_ANON_KEY: string | null
   /** Web Push の公開鍵（base64url の 65 バイト）。公開してよい値（画面の購読に渡す） */
   VAPID_PUBLIC_KEY: string | null
   /** 秘密。Web Push の署名鍵（base64url の 32 バイト） */
@@ -26,6 +31,7 @@ export type RawServerEnv = { [K in keyof ServerEnv]?: string }
 /** 何も設定されていない環境。テストと、環境を渡していない呼び出しの既定 */
 export const EMPTY_SERVER_ENV: ServerEnv = Object.freeze({
   SUPABASE_URL: null,
+  SUPABASE_ANON_KEY: null,
   VAPID_PUBLIC_KEY: null,
   VAPID_PRIVATE_KEY: null,
   VAPID_SUBJECT: null,
@@ -37,6 +43,7 @@ export function serverEnvFrom(raw: RawServerEnv | null | undefined): ServerEnv {
   const pick = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null)
   return {
     SUPABASE_URL: pick(raw?.SUPABASE_URL),
+    SUPABASE_ANON_KEY: pick(raw?.SUPABASE_ANON_KEY),
     VAPID_PUBLIC_KEY: pick(raw?.VAPID_PUBLIC_KEY),
     VAPID_PRIVATE_KEY: pick(raw?.VAPID_PRIVATE_KEY),
     VAPID_SUBJECT: pick(raw?.VAPID_SUBJECT),
@@ -44,8 +51,14 @@ export function serverEnvFrom(raw: RawServerEnv | null | undefined): ServerEnv {
   }
 }
 
+/** 外部への通信の差し替え口（テスト用）。入口は渡さない（省略すればグローバルの fetch・setTimeout） */
+export interface Net {
+  fetch?: typeof fetch
+  sleep?: (ms: number) => Promise<void>
+}
+
 /** 業務ロジックが受け取る文脈。`sql` は世帯のトランザクションの中（RLS が効くロール）の Sql */
-export interface Ctx {
+export interface Ctx extends Net {
   sql: Sql
   householdId: string
   userId: string
@@ -56,6 +69,47 @@ export interface Ctx {
   mediaBase: string | null
   /** 環境変数（VAPID_*・SECRET_KEYS など）。入口が渡す。渡していなければ全部 null（鍵なし＝通知も API キーの保存も使えない） */
   env: ServerEnv
+  /**
+   * 要求した人のアクセストークン（認証で検証済みのもの）。Storage の REST をその人の権限で呼ぶのに使う（server/storage.ts）。
+   * 取り込み担当の PC（agent）の要求・定期実行では null。**メモリだけ。ログ・応答・エラー文に出さない**
+   */
+  userJwt: string | null
+  /**
+   * コミットの**後**に走らせる後始末を積む（Storage のファイルを消すなど）。
+   * ロールバックされたら走らない。後始末が失敗しても帳簿は巻き戻さない（失敗はログだけ。例外は呼び出し元に出ない）。
+   * 積んだ順に 1 つずつ実行する
+   */
+  afterCommit(task: () => Promise<void>): void
+}
+
+/** `withHousehold` に渡す、その要求の持ち主と環境 */
+export interface HouseholdIds extends Net {
+  householdId: string
+  userId: string
+  /** 要求した人のアクセストークン（認証済みのもの）。agent・定期実行は渡さない（null） */
+  userJwt?: string | null
+  mediaBase?: string | null
+  env?: ServerEnv
+}
+
+/**
+ * `Ctx.afterCommit` の中身。`add` を ctx に渡し、トランザクションが**コミットされた後**に `run` を呼ぶ。
+ * 後始末の失敗は握りつぶしてログに残す（原因の名前とメッセージだけ。トークン・鍵は出さない）
+ */
+export function newAfterCommit(): { add: Ctx['afterCommit']; run: () => Promise<void> } {
+  const tasks: Array<() => Promise<void>> = []
+  return {
+    add: (task) => { tasks.push(task) },
+    async run() {
+      for (const task of tasks.splice(0)) {
+        try {
+          await task()
+        } catch (e) {
+          console.error('[afterCommit] コミット後の後始末に失敗しました', e instanceof Error ? `${e.name}: ${e.message}` : 'error')
+        }
+      }
+    },
+  }
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -83,7 +137,7 @@ export function mediaBaseFromEnv(env: { SUPABASE_URL?: string | null }): string 
  */
 export async function withHousehold<T>(
   root: Sql,
-  ids: { householdId: string; userId: string; mediaBase?: string | null; env?: ServerEnv },
+  ids: HouseholdIds,
   fn: (ctx: Ctx) => Promise<T>,
 ): Promise<T> {
   // set_config に渡る値。uuid 以外は入れない（RLS の policy が ::uuid で読むので、変な値は別のエラーになる前にここで断る）
@@ -92,12 +146,19 @@ export async function withHousehold<T>(
   const env = ids.env ?? EMPTY_SERVER_ENV
   // mediaBase を直接渡したときはそちらが先（テスト用）。渡さなければ env の SUPABASE_URL から作る
   const mediaBase = ids.mediaBase !== undefined ? ids.mediaBase : mediaBaseFromEnv(env)
-  return root.tx(async (sql) => {
+  const after = newAfterCommit()
+  const result = await root.tx(async (sql) => {
     await sql.run('set local search_path = app, public')
     await sql.run('set local role soroban_api')
     await sql.get("select set_config('app.household_id', ?, true), set_config('app.user_id', ?, true)", householdId, userId)
-    return fn({ sql, householdId, userId, mediaBase, env })
+    return fn({
+      sql, householdId, userId, mediaBase, env,
+      userJwt: ids.userJwt ?? null, afterCommit: after.add, fetch: ids.fetch, sleep: ids.sleep,
+    })
   })
+  // ここに来た＝コミットされた（ロールバックなら例外でここには来ない）。積んだ後始末を走らせる
+  await after.run()
+  return result
 }
 
 function asUuid(value: string, name: string): string {

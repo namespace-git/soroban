@@ -438,7 +438,8 @@ async function applyDraft(draft: ReceiptDraft, opts: { confirmLines?: boolean } 
 
 /** 新規登録：画像を選んで読む */
 async function readReceiptForForm() {
-  const status = await window.soroban.getAiStatus()
+  // 設定済みと分かっていれば問い合わせずに進む（Web 版はファイル選択を押した直後に開く必要がある。iPhone は通信をまたぐと開かない）
+  const status = aiStatus.value?.configured ? aiStatus.value : await window.soroban.getAiStatus()
   aiStatus.value = status
   if (!status.configured) {
     toast('AI 読み取りの設定がありません', 'warn')

@@ -1,13 +1,14 @@
 import type { Ctx } from '../context'
 import { UserError } from '../errors'
-import { registerHandler } from '../rpc'
+import { registerHandler, registerWebHandler } from '../rpc'
+import { assertUploadPath, isOwnPath, removeAfterCommit, requireStorageConfig, storageClient } from '../storage'
 import type {
   InventoryItem, ItemTimeline, LinkSource, ProductDetail, ProductMonthPoint, ProductSummary, PurchaseSummary,
   SaleProfit, SalesChannel, SaleSource, SaleStatus, Tag, TimelineEvent, VariantSummary,
 } from '../../src/shared/types'
 import { CHANNEL_LABEL } from '../../src/shared/types'
 import {
-  argId, argIds, argNullableText, argOptEnum, argText, assertTagsExist, isRealized, loadTagsFor, mediaUrl,
+  argBool, argId, argIds, argNullableText, argOptEnum, argText, assertTagsExist, isRealized, loadTagsFor, mediaUrl,
   thisMonthJst, yenText,
 } from './_shared'
 import {
@@ -73,8 +74,14 @@ export async function listVariantSummary(ctx: Ctx, sort: VariantSort = 'total_pr
 // ------------------------------------------------------------
 // 商品画像（人がセットしたもの）
 //
-// 画像のファイルの保存・旧ファイルの削除は、画像のアップロードの担当（次の段）。ここは行の読み書きだけ。
-// 優先順位（①人がセット ＞ ②仕入先 ＞ ③最新の出品 ＞ ④最新の販売）は derive.ts の productImageFiles
+// 行の読み書き（getProductImage / upsertProductImage / deleteProductImage）と、画像のアップロードの口
+// （setProductImagePath / setProductImageAuto）。
+// 優先順位（①人がセット ＞ ②仕入先 ＞ ③最新の出品 ＞ ④最新の販売）は derive.ts の productImageFiles。
+//
+// 人がセットした画像は公開バケット media の `<世帯>/product/<uuid>.<ext>`（画面が prepareUpload でもらった置き場所へ直接上げる）。
+// 「自動を固定する」は、今の自動画像（仕入先・出品・販売の画像）を**コピーせず同じパスを指す**。
+// そのパスは `<世帯>/product/` の下ではない（別の種類のフォルダ）ので、あとで外しても元の画像は消えない。
+// Storage のファイルを消すのは**コミットの後**（ctx.afterCommit）で、`<世帯>/product/` の下のものだけ
 // ------------------------------------------------------------
 
 /** 型番が人がセットした商品画像（product_image）。Storage のパス。無ければ null */
@@ -99,6 +106,66 @@ export async function upsertProductImage(ctx: Ctx, modelCode: string, path: stri
 export async function deleteProductImage(ctx: Ctx, modelCode: string): Promise<void> {
   const code = argModelCode(modelCode)
   await ctx.sql.run('delete from product_image where model_code = ?', code)
+}
+
+/**
+ * 外した・置き換えた前の画像を、コミットの後に Storage から消す。
+ * `<世帯>/product/` の下のものだけ（固定した自動画像は別のフォルダなので消えない）。
+ * まだ別の型番が同じパスを指していれば消さない（行を書き換えた後に呼ぶ）
+ */
+async function removeProductFileAfterCommit(ctx: Ctx, path: string | null | undefined): Promise<void> {
+  if (!isOwnPath(ctx, 'product', path)) return
+  const stillUsed = await ctx.sql.get('select model_code from product_image where path = ?', path)
+  if (!stillUsed) removeAfterCommit(ctx, 'media', [path])
+}
+
+/**
+ * 上げた画像を商品（型番）の画像にする（人がセットした画像。取り込みで上書きしない）。常に true。
+ * 前の人の画像（`<世帯>/product/` の下）は、コミットの後に Storage から消す。
+ * 署名の確認でファイルが本当に上がっているかを確かめてから結ぶ（無ければ結ばない）
+ */
+export async function setProductImagePath(ctx: Ctx, modelCode: string, path: string): Promise<boolean> {
+  const code = argModelCode(modelCode)
+  const imagePath = assertUploadPath(ctx, 'product', path)
+  const cfg = requireStorageConfig(ctx)
+  const prev = await getProductImage(ctx, code)
+  if (prev?.path === imagePath) return true
+
+  const used = await ctx.sql.get('select model_code from product_image where path = ? and model_code <> ?', imagePath, code)
+  if (used) throw new UserError('この画像はすでに別の商品に使われています', 'conflict')
+
+  try {
+    await storageClient(cfg, ctx.fetch).signUrl('media', imagePath, 60)
+  } catch (e) {
+    if (e instanceof UserError && e.code === 'not_found') {
+      throw new UserError('アップロードした画像が見つかりません。もう一度アップロードしてください', 'not_found')
+    }
+    throw e
+  }
+  await upsertProductImage(ctx, code, imagePath)
+  await removeProductFileAfterCommit(ctx, prev?.path)
+  return true
+}
+
+/**
+ * auto=true：人がセットした画像を外して自動（仕入先・出品・販売の最新画像）に戻す。前の画像は、`<世帯>/product/` の下なら
+ * コミットの後に Storage から消す。
+ * auto=false：今の自動画像を**同じパスを指す人の画像として固定する**（コピーしない。以後、出品・販売の画像が変わっても追従しない）。
+ * 自動画像が無い・すでに人の画像なら何もしない。
+ */
+export async function setProductImageAuto(ctx: Ctx, modelCode: string, auto: boolean): Promise<void> {
+  const code = argModelCode(modelCode)
+  const toAuto = argBool('自動に戻すか', auto)
+  if (toAuto) {
+    const prev = await getProductImage(ctx, code)
+    if (!prev) return
+    await deleteProductImage(ctx, code)
+    await removeProductFileAfterCommit(ctx, prev.path)
+    return
+  }
+  const image = (await productImageFiles(ctx, [code])).get(code)
+  if (!image || image.manual) return
+  await upsertProductImage(ctx, code, image.path)
 }
 
 // ------------------------------------------------------------
@@ -545,7 +612,8 @@ export async function setProductNote(ctx: Ctx, modelCode: string, note: string |
 
 // ------------------------------------------------------------
 // API として登録する（引数は信用しない。型が違えば UserError）。
-// setProductImage / setProductImageAuto（画像のアップロード）は次の段。ここでは登録しない
+// setProductImage（ファイルを選ぶダイアログ）は Web では登録しない（画面が prepareUpload → Storage へ直接 →
+// setProductImagePath に置き換える）
 // ------------------------------------------------------------
 
 registerHandler('listVariantSummary', (ctx, sort) => listVariantSummary(ctx, sort ?? undefined))
@@ -555,3 +623,5 @@ registerHandler('getItemTimeline', (ctx, inventoryItemId) => getItemTimeline(ctx
 registerHandler('setProductTags', (ctx, modelCode, tagIds) => setProductTags(ctx, modelCode, tagIds))
 registerHandler('setProductName', (ctx, modelCode, name) => setProductName(ctx, modelCode, name ?? null))
 registerHandler('setProductNote', (ctx, modelCode, note) => setProductNote(ctx, modelCode, note ?? null))
+registerWebHandler('setProductImagePath', (ctx, modelCode, path) => setProductImagePath(ctx, modelCode, path))
+registerHandler('setProductImageAuto', (ctx, modelCode, auto) => setProductImageAuto(ctx, modelCode, auto))

@@ -8,7 +8,7 @@
 //
 // 設計：docs/web/03-agent-and-push.md
 // ============================================================
-import type { CollectorRun } from './types'
+import type { CollectorRun, ReceiptRead } from './types'
 
 /**
  * 取り込みの要求の状態。
@@ -123,4 +123,29 @@ export interface WebApi {
   // --- ブラウザで開くもの ---
   /** 仕入の追跡番号（17TRACK のページを画面が開く）。無ければ null */
   getTrackingNumber(purchaseId: string): Promise<string | null>
+
+  // --- 画像のアップロード（レシート・商品画像） ---
+  // 流れ：prepareUpload で置き場所をもらう → 画面が Storage に直接上げる（ログイン中の人の権限。
+  // Storage の方針で自分の世帯のフォルダにしか書けない）→ 下のどれかでパスを帳簿に結び付ける。
+  // デスクトップの attachReceipt / readReceiptImage / setProductImage（ファイルを選ぶダイアログ）の Web 版
+  /** 置き場所を決める。パスはサーバーが世帯のフォルダの中に乱数で作る（画面はパスを組み立てない） */
+  prepareUpload(kind: UploadKind, ext: UploadExt): Promise<UploadTarget>
+  /** 上げたレシートを経費に付ける（前のレシートがあれば Storage から消す）。表示用の URL（署名つき・期限あり）を返す */
+  attachReceiptPath(expenseId: string, path: string): Promise<string | null>
+  /** 上げたレシートを AI で読む（まだ経費には付けない）。`temp_file` は `path` のまま返るので、
+   *  `createExpense` の `receipt_temp_file` に渡すと登録と同時に付く（デスクトップの readReceiptImage と同じ使い方） */
+  readReceiptAt(path: string): Promise<ReceiptRead>
+  /** 上げた画像を商品（型番）の画像にする（人がセットした画像。取り込みで上書きしない） */
+  setProductImagePath(modelCode: string, path: string): Promise<boolean>
+}
+
+/** receipt＝レシート（非公開の receipts バケット）／ product＝商品画像（公開の media バケット） */
+export type UploadKind = 'receipt' | 'product'
+/** 受け付ける画像の形式（画面は上げる前に JPEG に縮めるので、ふつうは jpg） */
+export type UploadExt = 'jpg' | 'png' | 'webp'
+
+export interface UploadTarget {
+  bucket: 'media' | 'receipts'
+  /** `<世帯の id>/<receipt|product>/<乱数>.<ext>` */
+  path: string
 }

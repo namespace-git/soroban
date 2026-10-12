@@ -3,7 +3,7 @@
 //
 //   1. Supabase の設定があれば window.soroban を HTTP クライアントにする
 //      （トークンは呼ぶたびに supabase-js のセッションから取る。ログイン前に差しても、呼ばれるまで何も起きない）
-//      中身が変わるもの（CSV・出品先のページ・追跡・取り込み）とデスクトップ専用の呼び出しは api/web.ts が包む。
+//      中身が変わるもの（CSV・出品先のページ・追跡・取り込み・画像を選んで上げる 3 本）とデスクトップ専用の呼び出しは api/web.ts が包む。
 //      Web 版だけの API（取り込みの要求・Push 通知・取り込み担当の PC）は window.sorobanWeb
 //   2. 取り込み担当の PC の窓（preload が window.sorobanAgentBridge を出す）なら、ログインの変化を本体に渡す
 //      （トークンの更新も。ログアウトで捨てさせる。橋が無ければ何もしない）
@@ -12,7 +12,8 @@
 //      設定が足りなければ「何が足りないか」の画面
 import type { Component } from 'vue'
 import { createHttpApi } from '../api/http'
-import { createWebApi, createWebSoroban } from '../api/web'
+import { browserEnv, createWebApi, createWebSoroban } from '../api/web'
+import { createImageUploader } from '../api/upload'
 import { registerServiceWorker } from '../api/service-worker'
 import { connectAgentBridge } from './agent-bridge'
 import { configProblems, getSupabase } from './supabase'
@@ -27,7 +28,10 @@ export function setupWeb(): Component {
       onUnauthorized: () => { void signOut() },
     }
     const web = createWebApi(options)
-    const api = createWebSoroban(createHttpApi(options), web)
+    // 画像（レシート・商品画像）は、ログイン中の人の権限で Storage に直接上げる（Storage の方針で自分の世帯のフォルダだけ）。
+    // supabase-js のクライアントは、実際に上げるときまで作らない
+    const uploader = createImageUploader({ from: (bucket) => getSupabase().storage.from(bucket) })
+    const api = createWebSoroban(createHttpApi(options), web, browserEnv(), uploader)
     // Electron 版の包み（main.ts）と同じく、あとから差し替えられないようにする
     Object.defineProperty(window, 'soroban', { value: api, configurable: false, writable: false })
     Object.defineProperty(window, 'sorobanWeb', { value: web, configurable: false, writable: false })

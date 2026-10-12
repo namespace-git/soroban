@@ -429,12 +429,13 @@ describe('明細の一括投入と経費の並び', () => {
     expect((await ma().listExpenses()).map(e => e.id)).toEqual([ids[2], ids[1], ids[0], older])
   })
 
-  it('レシート画像は次の段：receipt_url は常に null。receipt_temp_file を渡されても無視して経費は登録できる', async () => {
-    const id = await ma().createExpense({
-      occurred_at: '2026-01-10', category: 'other', amount: 100, receipt_temp_file: 'receipt-tmp-x.jpg',
-    })
+  it('レシートの無い経費の receipt_url は null。receipt_temp_file は Storage のパスの形だけ受ける（デスクトップの一時ファイル名は 400）。詳しくは upload/', async () => {
+    const id = await ma().createExpense({ occurred_at: '2026-01-10', category: 'other', amount: 100 })
     const e = (await ma().listExpenses()).find(x => x.id === id)!
     expect(e.receipt_url).toBeNull()
+    await expect(ma().createExpense({
+      occurred_at: '2026-01-10', category: 'other', amount: 100, receipt_temp_file: 'receipt-tmp-x.jpg',
+    })).rejects.toMatchObject(userError)
   })
 
   it('金額は整数の円：小数・負・文字・integer を超える数は断る。明細の合計も上限を超えたら断る', async () => {
@@ -673,10 +674,15 @@ describe('dispatch（API の入口）経由', () => {
     expect(notMine.body.error?.message).toBe('経費が見つかりません')
   })
 
-  it('レシートの画像（attachReceipt など）はまだ使えない（501）', async () => {
-    for (const method of ['attachReceipt', 'removeReceipt', 'readReceiptImage', 'readReceipt']) {
+  it('ファイルを選ぶダイアログのメソッド（attachReceipt・readReceiptImage）は Web では使えない（501）。removeReceipt・readReceipt は使える', async () => {
+    for (const method of ['attachReceipt', 'readReceiptImage']) {
       const r = await w.a.call(method, '00000000-0000-4000-8000-000000000000')
       expect(r.status).toBe(501)
+    }
+    // 無い経費は 404（登録されている）
+    for (const method of ['removeReceipt', 'readReceipt']) {
+      const r = await w.a.call(method, '00000000-0000-4000-8000-000000000000')
+      expect(r.status, method).toBe(404)
     }
   })
 })

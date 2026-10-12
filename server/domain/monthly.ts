@@ -1,16 +1,25 @@
 import type { Ctx } from '../context'
 import { UserError } from '../errors'
-import { registerHandler } from '../rpc'
+import { registerHandler, registerPhasedHandler, registerWebHandler } from '../rpc'
+import {
+  assertUploadPath, bytesToBase64, isOwnPath, removeAfterCommit, requireStorageConfig, storageClient, storageConfigOf,
+  type StorageConfig,
+} from '../storage'
 import type {
   AllocMethod, Expense, ExpenseCategory, ExpenseInput, ExpenseLine, MonthClose, MonthDetail, MonthSaleRow,
-  MonthTotals, MonthlySummary, SaleKind, Tag,
+  MonthTotals, MonthlySummary, ReceiptDraft, ReceiptRead, SaleKind, Tag,
 } from '../../src/shared/types'
+import {
+  applyLearnedShop, logAiError, RECEIPT_MAX_BYTES, receiptImageType, receiptRegistrationNo, requestReceiptDraft,
+  toAiErrorMessage,
+} from '../../src/main/gemini-core'
 import {
   MAX_INT4, argEnum, argId, argMonth, argNullableText, argObject, argOptArray, argOptId, argOptMonth, argOptObject,
   argText, assertDateText, assertQty, assertYen, forecastTotals, isRealized, monthBounds, nowIso, rowsToCsv,
-  thisMonthJst,
+  thisMonthJst, todayJst,
 } from './_shared'
-import { learnShopAlias } from './purchase'
+import { requireGeminiCredentials } from './integrations'
+import { learnShopAlias, lookupShopAlias } from './purchase'
 import { listSales, sumSaleTotals } from './sale'
 
 // ============================================================
@@ -26,9 +35,14 @@ import { listSales, sumSaleTotals } from './sale'
 //   * month_book は「締めた時点の数字」の記録。締めても編集はロックしない（締め後に数字が変われば changed_since_close）
 //   * 今月は日本時間（todayJst と同じ +9 時間。Workers は UTC）で決める
 //
-// レシートの画像（attachReceipt / removeReceipt / readReceiptImage / readReceipt）は次の段
-// （Storage の receipts バケット）。ここでは receipt_path を読み書きせず、Expense.receipt_url は常に null を返す。
-// createExpense が受ける receipt_temp_file も、次の段までは使わない
+// レシートの画像（非公開バケット receipts。docs/web/02-porting-guide.md の 4 節）：
+//   * 画面が prepareUpload でもらった置き場所（`<世帯>/receipt/<uuid>.<ext>`）へ直接上げ、そのパスを
+//     attachReceiptPath／createExpense・updateExpense の receipt_temp_file で帳簿（expense.receipt_path）に結ぶ
+//   * 受け取るパスは assertUploadPath で検査する（他の世帯・`..`・別の種類は 400）
+//   * Expense.receipt_url は署名つき URL（期限 1 時間）。1 回の一覧で 1 回のまとめ署名。署名できなければ null（一覧は止めない）
+//   * 前のレシートの Storage からの削除は**コミットの後**（ctx.afterCommit）。消せなくても帳簿は巻き戻さない
+//   * AI 読み取り（readReceipt / readReceiptAt）は Gemini と通信するあいだトランザクションを握らない
+//     （rpc.ts の registerPhasedHandler：読み出し → 通信 → 整えて返す）。中身はデスクトップと同じ（gemini-core.ts）
 // ============================================================
 
 const EXPENSE_CATEGORIES: readonly ExpenseCategory[] = [
@@ -192,10 +206,12 @@ interface ExpenseRow {
   note: string | null
   auto: number
   registration_no: string | null
+  /** レシートの Storage のパス（receipts バケット）。画面には出さず、署名つき URL（receipt_url）にして返す */
+  receipt_path: string | null
 }
 
 const EXPENSE_SELECT = `
-  select id, occurred_at, month, shop, category, amount, note, auto, registration_no
+  select id, occurred_at, month, shop, category, amount, note, auto, registration_no, receipt_path
     from expense
 `
 
@@ -219,10 +235,31 @@ async function loadExpenseLinesFor(ctx: Ctx, expenseIds: string[]): Promise<Map<
   return map
 }
 
+/**
+ * レシートの署名つき URL（期限 1 時間）を**まとめて 1 回**で作る。パス → URL。
+ * 保存先の設定が無い・署名できなかったパスは入れない（＝呼ぶ側は null にする）。
+ * Storage の不調で経費の一覧そのものを止めない（失敗は storage.ts がログに残す）。
+ * 自分の世帯の receipt フォルダの外のパスは署名しない（DB の値が想定外でも、一括の署名を巻き込まない）
+ */
+async function signReceiptUrls(ctx: Ctx, paths: Array<string | null>): Promise<Map<string, string | null>> {
+  const list = [...new Set(paths.filter((p): p is string => isOwnPath(ctx, 'receipt', p)))]
+  const cfg = list.length > 0 ? storageConfigOf(ctx) : null
+  if (!cfg) return new Map()
+  try {
+    return await storageClient(cfg, ctx.fetch).signUrls('receipts', list)
+  } catch {
+    return new Map()
+  }
+}
+
 async function hydrateExpenseRows(ctx: Ctx, rows: ExpenseRow[]): Promise<Expense[]> {
   const lineMap = await loadExpenseLinesFor(ctx, rows.map(r => r.id))
-  // レシートの画像は非公開（Storage の receipts バケット）。署名 URL は次の段で足すまで null
-  return rows.map(r => ({ ...r, receipt_url: null, lines: lineMap.get(r.id) ?? [] }))
+  const urls = await signReceiptUrls(ctx, rows.map(r => r.receipt_path))
+  return rows.map(({ receipt_path, ...r }) => ({
+    ...r,
+    receipt_url: (receipt_path && urls.get(receipt_path)) || null,
+    lines: lineMap.get(r.id) ?? [],
+  }))
 }
 
 /** month は YYYY-MM（計上月）で絞る。省略（空文字も）で全部。新しい順 */
@@ -313,13 +350,38 @@ async function insertExpenseLines(ctx: Ctx, expenseId: string, lines: ValidatedE
   )
 }
 
+/**
+ * ExpenseInput.receipt_temp_file（Web では `prepareUpload` でもらって上げたレシートのパス）。
+ * 無い・空なら undefined（レシートは変えない）。あれば**検査して**返す（他の世帯・`..`・別の種類・形式違いは 400）
+ */
+function receiptPathOf(ctx: Ctx, input: ExpenseInput): string | undefined {
+  const raw = input.receipt_temp_file
+  if (raw === undefined || raw === null || raw === '') return undefined
+  return assertUploadPath(ctx, 'receipt', raw)
+}
+
+/** このレシートがほかの経費に付いていないこと（1 つのファイルを 2 つの経費が指すと、片方を外したときもう片方の画像が消える） */
+async function assertReceiptFree(ctx: Ctx, path: string, exceptExpenseId: string | null): Promise<void> {
+  const used = exceptExpenseId
+    ? await ctx.sql.get('select id from expense where receipt_path = ? and id <> ?', path, exceptExpenseId)
+    : await ctx.sql.get('select id from expense where receipt_path = ?', path)
+  if (used) throw new UserError('このレシートはすでに別の経費に付いています', 'conflict')
+}
+
+/** 外した・付け替えた・消した経費の前のレシートを、コミットの後に Storage から消す（自分の世帯の receipt フォルダのものだけ） */
+function removeReceiptFileAfterCommit(ctx: Ctx, path: string | null | undefined): void {
+  if (isOwnPath(ctx, 'receipt', path)) removeAfterCommit(ctx, 'receipts', [path])
+}
+
 export async function createExpense(ctx: Ctx, input: ExpenseInput): Promise<string> {
   const v = validateExpenseInput(input)
+  const receiptPath = receiptPathOf(ctx, input) ?? null
+  if (receiptPath) await assertReceiptFree(ctx, receiptPath, null)
   const row = await ctx.sql.get<{ id: string }>(`
-    insert into expense (occurred_at, month, shop, category, amount, note, auto, registration_no, created_at)
-    values (?, ?, ?, ?, ?, ?, 0, ?, clock_timestamp())
+    insert into expense (occurred_at, month, shop, category, amount, note, auto, registration_no, receipt_path, created_at)
+    values (?, ?, ?, ?, ?, ?, 0, ?, ?, clock_timestamp())
     returning id
-  `, v.occurred_at, v.month, v.shop, v.category, v.amount, v.note, v.registration_no ?? null)
+  `, v.occurred_at, v.month, v.shop, v.category, v.amount, v.note, v.registration_no ?? null, receiptPath)
   const id = row!.id
   await insertExpenseLines(ctx, id, v.lines)
   if (v.registration_no && v.shop) await learnShopAlias(ctx, v.registration_no, v.shop)
@@ -332,10 +394,16 @@ export async function createExpense(ctx: Ctx, input: ExpenseInput): Promise<stri
  */
 export async function updateExpense(ctx: Ctx, id: string, input: ExpenseInput): Promise<void> {
   const expenseId = argId('経費', id)
-  const exists = await ctx.sql.get('select id from expense where id = ? for update', expenseId)
-  if (!exists) throw new UserError('経費が見つかりません', 'not_found')
+  const current = await ctx.sql.get<{ receipt_path: string | null }>(
+    'select receipt_path from expense where id = ? for update', expenseId,
+  )
+  if (!current) throw new UserError('経費が見つかりません', 'not_found')
 
   const v = validateExpenseInput(input)
+  // receipt_temp_file があれば付け替える（無ければ今のレシートのまま）。検査は書き込みの前
+  const receiptPath = receiptPathOf(ctx, input)
+  const swapReceipt = receiptPath !== undefined && receiptPath !== current.receipt_path
+  if (swapReceipt) await assertReceiptFree(ctx, receiptPath, expenseId)
   if (v.registration_no === undefined) {
     await ctx.sql.run(`
       update expense
@@ -352,11 +420,133 @@ export async function updateExpense(ctx: Ctx, id: string, input: ExpenseInput): 
   await ctx.sql.run('delete from expense_line where expense_id = ?', expenseId)
   await insertExpenseLines(ctx, expenseId, v.lines)
   if (v.registration_no && v.shop) await learnShopAlias(ctx, v.registration_no, v.shop)
+  if (swapReceipt) {
+    await ctx.sql.run('update expense set receipt_path = ? where id = ?', receiptPath, expenseId)
+    removeReceiptFileAfterCommit(ctx, current.receipt_path)
+  }
 }
 
-/** 明細は expense_line の on delete cascade で消える（レシート画像の削除は次の段） */
+/** 明細は expense_line の on delete cascade で消える。レシートがあれば、コミットの後に Storage から消す */
 export async function deleteExpense(ctx: Ctx, id: string): Promise<void> {
-  await ctx.sql.run('delete from expense where id = ?', argId('経費', id))
+  const row = await ctx.sql.get<{ receipt_path: string | null }>(
+    'delete from expense where id = ? returning receipt_path', argId('経費', id),
+  )
+  removeReceiptFileAfterCommit(ctx, row?.receipt_path)
+}
+
+// ------------------------------------------------------------
+// レシートの画像（付ける・外す・AI で読む）
+// ------------------------------------------------------------
+
+/**
+ * 上げたレシートを経費に付ける（前のレシートがあれば、コミットの後に Storage から消す）。
+ * 表示用の署名つき URL を返す。署名は「ファイルが本当に上がっているか」の確認も兼ねる（無ければ付けない）
+ */
+export async function attachReceiptPath(ctx: Ctx, expenseId: string, path: string): Promise<string | null> {
+  const id = argId('経費', expenseId)
+  const receiptPath = assertUploadPath(ctx, 'receipt', path)
+  const cfg = requireStorageConfig(ctx)
+  const current = await ctx.sql.get<{ receipt_path: string | null }>(
+    'select receipt_path from expense where id = ? for update', id,
+  )
+  if (!current) throw new UserError('経費が見つかりません', 'not_found')
+  await assertReceiptFree(ctx, receiptPath, id)
+
+  let url: string
+  try {
+    url = await storageClient(cfg, ctx.fetch).signUrl('receipts', receiptPath)
+  } catch (e) {
+    if (e instanceof UserError && e.code === 'not_found') {
+      throw new UserError('アップロードした画像が見つかりません。もう一度アップロードしてください', 'not_found')
+    }
+    throw e
+  }
+  if (current.receipt_path !== receiptPath) {
+    await ctx.sql.run('update expense set receipt_path = ? where id = ?', receiptPath, id)
+    removeReceiptFileAfterCommit(ctx, current.receipt_path)
+  }
+  return url
+}
+
+/** レシートを外す（コミットの後に Storage から消す）。経費が無ければ not_found。付いていなければ何もしない */
+export async function removeReceipt(ctx: Ctx, id: string): Promise<void> {
+  const expenseId = argId('経費', id)
+  const current = await ctx.sql.get<{ receipt_path: string | null }>(
+    'select receipt_path from expense where id = ? for update', expenseId,
+  )
+  if (!current) throw new UserError('経費が見つかりません', 'not_found')
+  if (!current.receipt_path) return
+  await ctx.sql.run('update expense set receipt_path = null where id = ?', expenseId)
+  removeReceiptFileAfterCommit(ctx, current.receipt_path)
+}
+
+/** 読み取り（read 段）が集める、通信に要るもの。API キーは通信が終わるまでメモリにあるだけで、結果・ログには出さない */
+interface ReceiptReadInput {
+  apiKey: string
+  model: string
+  storage: StorageConfig
+  /** receipts バケットのパス */
+  path: string
+  /** 日本時間の今日（未来日の判定） */
+  today: string
+  /** true なら、画面に出す署名つき URL も作る（readReceiptAt） */
+  withUrl: boolean
+}
+
+interface ReceiptReadCalled {
+  draft: ReceiptDraft
+  receipt_url: string | null
+}
+
+async function prepareReceiptRead(ctx: Ctx, path: string, withUrl: boolean): Promise<ReceiptReadInput> {
+  // 順番はデスクトップと同じ：キー（無ければ「設定がありません」）→ 画像
+  const { apiKey, model } = await requireGeminiCredentials(ctx)
+  return { apiKey, model, storage: requireStorageConfig(ctx), path, today: todayJst(), withUrl }
+}
+
+/**
+ * call 段（トランザクションの外）：Storage からレシートを読み、Gemini で読んで下書きにする。
+ * 失敗は日本語の UserError（デスクトップの readReceiptWithGemini と同じ文言）
+ */
+async function callReceiptRead(
+  input: ReceiptReadInput, net: { fetch?: typeof fetch; sleep?: (ms: number) => Promise<void> },
+): Promise<ReceiptReadCalled> {
+  const type = receiptImageType(input.path.slice(input.path.lastIndexOf('.') + 1))
+  if ('error' in type) throw new UserError(type.error)
+
+  const client = storageClient(input.storage, net.fetch)
+  const { bytes } = await client.download('receipts', input.path, RECEIPT_MAX_BYTES)
+
+  let draft: ReceiptDraft
+  try {
+    draft = await requestReceiptDraft(
+      input.model, input.apiKey, { mimeType: type.mimeType, base64: bytesToBase64(bytes) }, input.today,
+      { fetch: net.fetch, sleep: net.sleep },
+    )
+  } catch (e) {
+    logAiError('Gemini でのレシート読み取りに失敗しました', e)
+    throw new UserError(toAiErrorMessage(e, input.model))
+  }
+  const receipt_url = input.withUrl ? await client.signUrl('receipts', input.path) : null
+  return { draft, receipt_url }
+}
+
+/** 登録番号（T＋13 桁）が学習済み（shop_alias）なら、店名を学習したものにする。デスクトップの applyShopAlias と同じ */
+async function applyShopAlias(ctx: Ctx, draft: ReceiptDraft): Promise<ReceiptDraft> {
+  const registrationNo = receiptRegistrationNo(draft)
+  if (!registrationNo) return draft
+  return applyLearnedShop(draft, registrationNo, await lookupShopAlias(ctx, registrationNo))
+}
+
+/** 付いているレシートの path。無ければ日本語の UserError（デスクトップの readReceipt と同じ文言） */
+async function attachedReceiptPath(ctx: Ctx, id: string): Promise<string> {
+  const row = await ctx.sql.get<{ receipt_path: string | null }>(
+    'select receipt_path from expense where id = ?', argId('経費', id),
+  )
+  if (!row) throw new UserError('経費が見つかりません', 'not_found')
+  if (!row.receipt_path) throw new UserError('レシートが添付されていません')
+  if (!isOwnPath(ctx, 'receipt', row.receipt_path)) throw new UserError('レシートの画像を読み出せません')
+  return row.receipt_path
 }
 
 // ------------------------------------------------------------
@@ -637,12 +827,31 @@ export async function exportExpenseRows(ctx: Ctx, month?: string | null): Promis
   return rowsToCsv(rows)
 }
 
-// 登録するのは画面が使うものだけ。レシートの画像（attachReceipt・removeReceipt・readReceiptImage・readReceipt）は次の段
+// 登録するのは画面が使うものだけ。attachReceipt・readReceiptImage（ファイルを選ぶダイアログ）は Web では登録しない
+// （画面が prepareUpload → Storage へ直接 → attachReceiptPath／readReceiptAt に置き換える）
 registerHandler('listMonthly', (ctx) => listMonthly(ctx))
 registerHandler('listExpenses', (ctx, month) => listExpenses(ctx, month ?? undefined))
 registerHandler('createExpense', (ctx, input) => createExpense(ctx, input))
 registerHandler('updateExpense', (ctx, id, input) => updateExpense(ctx, id, input))
 registerHandler('deleteExpense', (ctx, id) => deleteExpense(ctx, id))
+registerHandler('removeReceipt', (ctx, id) => removeReceipt(ctx, id))
+registerWebHandler('attachReceiptPath', (ctx, expenseId, path) => attachReceiptPath(ctx, expenseId, path))
+// AI 読み取りは Gemini と通信するので、3 段（読み出し → 通信 → 整えて返す）で走らせてトランザクションを握らない
+registerPhasedHandler('readReceipt', {
+  read: async (ctx, id): Promise<ReceiptReadInput> => prepareReceiptRead(ctx, await attachedReceiptPath(ctx, id), false),
+  call: callReceiptRead,
+  finish: async (ctx, _input, called): Promise<ReceiptDraft> => applyShopAlias(ctx, called.draft),
+})
+registerPhasedHandler('readReceiptAt', {
+  read: async (ctx, path): Promise<ReceiptReadInput> =>
+    prepareReceiptRead(ctx, assertUploadPath(ctx, 'receipt', path), true),
+  call: callReceiptRead,
+  finish: async (ctx, input, called): Promise<ReceiptRead> => ({
+    temp_file: input.path,
+    receipt_url: called.receipt_url!,
+    draft: await applyShopAlias(ctx, called.draft),
+  }),
+})
 registerHandler('getMonthDetail', (ctx, month, opts) => getMonthDetail(ctx, month, opts ?? undefined))
 registerHandler('setMonthAllocMethod', (ctx, month, method) => setMonthAllocMethod(ctx, month, method))
 registerHandler('closeMonth', (ctx, month) => closeMonth(ctx, month))

@@ -7,7 +7,7 @@ import { closeAfterResponse } from '../../../server/rpc'
 // 中身は server/agent/ にあり、ここは `functions/api/rpc/[method].ts` と同じく薄く保つ。
 // 認証：register は人の JWT（Authorization: Bearer）、それ以外は取り込み担当の鍵（Authorization: Agent）。
 //
-// 設定は rpc と同じ（HYPERDRIVE / DATABASE_URL / DATABASE_PREPARE / SUPABASE_URL / VAPID_* / SECRET_KEYS。
+// 設定は rpc と同じ（HYPERDRIVE / DATABASE_URL / DATABASE_PREPARE / SUPABASE_URL / SUPABASE_ANON_KEY / VAPID_* / SECRET_KEYS。
 // **秘密の値はこのリポジトリに書かない**。手順は docs/web/01-setup.md の 2-4）。
 // 互換性フラグ `nodejs_compat` が要る（postgres.js が Node の API を使う）。
 
@@ -16,6 +16,7 @@ interface Env {
   DATABASE_URL?: string
   DATABASE_PREPARE?: string
   SUPABASE_URL?: string
+  SUPABASE_ANON_KEY?: string
   VAPID_PUBLIC_KEY?: string
   VAPID_PRIVATE_KEY?: string
   VAPID_SUBJECT?: string

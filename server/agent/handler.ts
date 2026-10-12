@@ -1,6 +1,6 @@
 import type { AgentApi, AgentErrorCode } from '../../src/shared/agent-types'
 import { authenticate } from '../auth'
-import { mediaBaseFromEnv, serverEnvFrom, withHousehold, type RawServerEnv, type ServerEnv } from '../context'
+import { mediaBaseFromEnv, newAfterCommit, serverEnvFrom, withHousehold, type RawServerEnv, type ServerEnv } from '../context'
 import type { Sql } from '../db/sql'
 import { ApiError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError, readDbError } from '../errors'
 import { authenticateAgent, type AgentIdentity } from './key'
@@ -151,12 +151,20 @@ export async function dispatchAgent(method: string, args: unknown[], deps: Agent
 async function withAgent<T>(
   root: Sql, agent: AgentIdentity, mediaBase: string | null, env: ServerEnv, fn: (ctx: AgentCtx) => Promise<T>,
 ): Promise<T> {
-  return root.tx(async (sql) => {
+  const after = newAfterCommit()
+  const result = await root.tx(async (sql) => {
     await sql.run('set local search_path = app, public')
     await sql.run('set local role soroban_api')
     await sql.get("select set_config('app.household_id', ?, true), set_config('app.user_id', '', true)", agent.householdId)
-    return fn({ sql, householdId: agent.householdId, userId: agent.agentId, agentId: agent.agentId, mediaBase, env })
+    // userJwt は null：agent は人ではないので、Storage を人の権限で呼ぶ処理（server/storage.ts）は使えない
+    return fn({
+      sql, householdId: agent.householdId, userId: agent.agentId, agentId: agent.agentId, mediaBase, env,
+      userJwt: null, afterCommit: after.add,
+    })
   })
+  // コミットされた後の後始末（積んでいれば）。ロールバックなら例外でここには来ない
+  await after.run()
+  return result
 }
 
 async function readArgs(request: Request): Promise<unknown[]> {
