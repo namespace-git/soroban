@@ -842,7 +842,7 @@ const estimateCompare = computed(() => {
   .toolbar .toolbar-count { order: 3; flex: 0 0 auto; margin-left: auto; text-align: right; }
 
   /* 行＝カード */
-  .prow-list { gap: 8px; max-height: none; overflow: visible; }
+  .prow-list { gap: 10px; max-height: none; overflow: visible; }
   .prow {
     grid-template-columns: 48px minmax(0, 1fr);
     grid-template-areas:

@@ -1178,6 +1178,8 @@ tr.focused { background: var(--brand-soft); }
    ============================================================ */
 @media (max-width: 767px) {
   .hint-row { font-size: var(--fs-12); }
+  /* 先頭の小さな記号（出どころ）が 10px だと読めない */
+  .chip-origin-mark { font-size: var(--fs-11); }
 
   /* ツールバー：検索 →（絞り込み）→ 表示（型番ごと／1点ずつ）→ 絞り込みの中身（状態・タグ・期間）→ 並び替え → 件数・合計
      （売上タブ・仕入タブと同じ形。滞留の絞り込みチップは、閉じていても見えるように外に出したまま） */
@@ -1233,6 +1235,7 @@ tr.focused { background: var(--brand-soft); }
     padding: 12px;
   }
   .gimg, .gimg-img, .gimg-ph { width: 48px; height: 48px; }
+  .ghead .row-title.one-line { -webkit-line-clamp: 2; min-height: 0; }
   .ghead .row-sub { -webkit-line-clamp: 3; min-height: 0; }
   .gnum {
     grid-column: 1 / -1;
@@ -1304,7 +1307,7 @@ tr.focused { background: var(--brand-soft); }
     column-gap: 8px;
     row-gap: 10px;
     padding: 12px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
     background: var(--surface);
     border-radius: var(--radius);
     box-shadow: var(--shadow-1);

@@ -1240,8 +1240,9 @@ async function deleteCurrent() {
   .page-head .grow { display: none; }
   .ai-warn { flex: 1 1 100%; flex-wrap: wrap; }
   .ai-warn button { min-height: 44px; }
-  .page-head .primary { flex: 1 1 auto; height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
-  .page-head .ghost { flex: 0 0 auto; height: 48px; background: var(--surface); border-color: var(--line); }
+  /* 字を 1px 大きくしても 375px で 2 つが 1 行に収まるよう、ボタンの左右の余白は詰める */
+  .page-head .primary { flex: 1 1 auto; height: 48px; padding: 0 12px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+  .page-head .ghost { flex: 0 0 auto; height: 48px; padding: 0 14px; background: var(--surface); border-color: var(--line); }
 
   /* 入れ替え：フォームを開いているあいだは、数字・一覧・登録ボタンを隠す。閉じているあいだは「選んでください」を隠す */
   .m-editing .stat-grid,
@@ -1320,7 +1321,7 @@ async function deleteCurrent() {
     grid-template-columns: 48px minmax(0, 1fr) auto;
     align-items: start;
     gap: 12px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
     padding: 12px;
     border-top: 0;
     border-radius: var(--radius);

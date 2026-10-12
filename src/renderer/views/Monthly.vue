@@ -947,7 +947,8 @@ async function doReopen() {
   /* 計算書の頭（黄色い帯） */
   .statement-head { padding: 12px 16px; }
   .csv-export { flex: 1 1 100%; flex-wrap: wrap; }
-  .csv-export-label { flex: 1 1 100%; }
+  /* 黄色い帯の上の薄い灰色（--text-faint）は読めない。帯の上は濃い灰色に */
+  .csv-export-label { flex: 1 1 100%; color: var(--text-dim); }
   .csv-export button { flex: 1 1 0; min-height: 44px; background: var(--surface); }
   .statement-body { padding: 4px 16px 16px; }
 
@@ -992,6 +993,8 @@ async function doReopen() {
     white-space: normal;
     overflow-wrap: anywhere;
   }
+  /* 補助（日付・口座・メモ）は字を大きくした分、3 行まで */
+  .entry-sub { -webkit-line-clamp: 3; }
   .entry-row button.icon { width: 44px; height: 44px; }
 
   /* 締める */

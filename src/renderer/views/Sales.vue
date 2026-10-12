@@ -1751,8 +1751,9 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
    デスクトップ幅（768px 以上）の見た目には一切効かせない。
    ============================================================ */
 @media (max-width: 767px) {
-  .page-head { margin-bottom: 10px; }
   .page-head .primary { height: 44px; }
+  /* 先頭の小さな記号（出どころ）が 10px だと読めない */
+  .chip-origin-mark { font-size: var(--fs-11); }
 
   /* 販売の手入力フォーム：1 列、入力欄は 44px */
   .form { gap: 12px; }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, inject, watch, defineAsyncComponent, type Ref } from 'vue'
+import { ref, computed, onMounted, onUnmounted, inject, watch, defineAsyncComponent, type Ref } from 'vue'
 import { CHANNEL_LABEL, SALE_KIND_LABEL } from '../../shared/types'
 import type { CashAccount, CashAccountKind, CashAccountPatch, Liability, LiabilityPatch, ShippingMethod, CollectorRun, ShopAccount, ShopAccountKind, Tag, UpdateStatus, ShopAccountStats, AiStatus, TrackingApiStatus, AutoBackupStatus, ExportKind, HealthCheck, ListingStatus } from '../../shared/types'
 import { runSourceLabel } from '../utils/collector-run'
@@ -29,6 +29,17 @@ const goto = inject<(t: string, payload?: { search?: string; status?: string; st
 // Web 版（auth/boot.ts が window.sorobanWeb を差す）。デスクトップ専用の節（バックアップ・更新・ログイン・初期化）を出さず、
 // 通知と取り込み担当の PC の節を出す。Electron 版では false で、今までと同じ
 const isWeb = !!window.sorobanWeb
+
+// スマホ幅（App.vue の MOBILE_QUERY と同じ）。Web 版のスマホ幅では、スマホで使う節（通知・取り込み担当の PC・お金の口座・
+// 借りたお金・発送方法・タグ）だけを出し、手数料・取り込み・仕入先・AI 読み取り・データなどパソコンで直す節は出さない。
+// パソコンのブラウザ（幅 768px 以上）と Electron では isLite が偽で、今までと同じ（全部出す）
+const MOBILE_QUERY = '(max-width: 767px)'
+const mobileMql = window.matchMedia(MOBILE_QUERY)
+const isMobile = ref(mobileMql.matches)
+function onMobileChange(e: { matches: boolean }) { isMobile.value = e.matches }
+onMounted(() => mobileMql.addEventListener('change', onMobileChange))
+onUnmounted(() => mobileMql.removeEventListener('change', onMobileChange))
+const isLite = computed(() => isWeb && isMobile.value)
 
 // Web 版だけの節（取り込み担当の PC・通知）。Electron 版のビルドに入れないよう、ビルド時の印（VITE_TARGET は Web のビルドだけが埋める。
 // DEV は ?webmock= の画面確認用）で分ける。Electron の本番ビルドでは条件が偽に決まり、import ごと消える
@@ -753,8 +764,14 @@ const runLabel: Record<string, string> = {
     </div>
 
     <template v-else>
-      <!-- 手数料 -->
-      <div class="panel">
+      <!-- Web 版のスマホ幅だけ：この端末への通知と、取り込み担当の PC を最初に（パソコンの並びは下のまま） -->
+      <template v-if="isLite">
+        <component :is="PushSettings" v-if="PushSettings" />
+        <component :is="AgentDevices" v-if="AgentDevices" />
+      </template>
+
+      <!-- 手数料（スマホ幅の Web 版では出さない：パソコンで直す） -->
+      <div v-if="!isLite" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
           <h2 class="section-head-title">手数料</h2>
@@ -991,8 +1008,8 @@ const runLabel: Record<string, string> = {
         </div>
       </div>
 
-      <!-- 在庫 -->
-      <div class="panel">
+      <!-- 在庫（スマホ幅の Web 版では出さない） -->
+      <div v-if="!isLite" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="inventory" :size="16" /></span>
           <h2 class="section-head-title">在庫</h2>
@@ -1010,7 +1027,7 @@ const runLabel: Record<string, string> = {
       </div>
 
       <!-- Web 版だけ：取り込みを担当する PC と、この端末への通知 -->
-      <template v-if="isWeb">
+      <template v-if="isWeb && !isLite">
         <component :is="AgentDevices" v-if="AgentDevices" />
         <component :is="PushSettings" v-if="PushSettings" />
       </template>
@@ -1051,8 +1068,8 @@ const runLabel: Record<string, string> = {
         </p>
       </div>
 
-      <!-- 取り込み -->
-      <div class="panel">
+      <!-- 取り込み（配送状況の 17TRACK・実行履歴を含む。スマホ幅の Web 版では出さない） -->
+      <div v-if="!isLite" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="refresh" :size="16" /></span>
           <h2 class="section-head-title">取り込み</h2>
@@ -1191,8 +1208,8 @@ const runLabel: Record<string, string> = {
         <p v-if="!runs.length" class="dim">まだ実行していません</p>
       </div>
 
-      <!-- メルカリ -->
-      <div class="panel">
+      <!-- メルカリ（スマホ幅の Web 版では出さない） -->
+      <div v-if="!isLite" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="login" :size="16" /></span>
           <h2 class="section-head-title">メルカリ</h2>
@@ -1220,8 +1237,8 @@ const runLabel: Record<string, string> = {
         </p>
       </div>
 
-      <!-- Yahoo!フリマ -->
-      <div class="panel">
+      <!-- Yahoo!フリマ（スマホ幅の Web 版では出さない） -->
+      <div v-if="!isLite" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
           <h2 class="section-head-title">{{ CHANNEL_LABEL.yahoo }}</h2>
@@ -1251,8 +1268,8 @@ const runLabel: Record<string, string> = {
         </p>
       </div>
 
-      <!-- 仕入先 -->
-      <div class="panel">
+      <!-- 仕入先（スマホ幅の Web 版では出さない） -->
+      <div v-if="!isLite" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="purchase" :size="16" /></span>
           <h2 class="section-head-title">仕入先</h2>
@@ -1379,8 +1396,8 @@ const runLabel: Record<string, string> = {
         </p>
       </div>
 
-      <!-- データ -->
-      <div class="panel">
+      <!-- データ（健康診断・CSV・取り込まない販売を含む。スマホ幅の Web 版では出さない） -->
+      <div v-if="!isLite" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="folder" :size="16" /></span>
           <h2 class="section-head-title">データ</h2>
@@ -1505,8 +1522,8 @@ const runLabel: Record<string, string> = {
         </div>
       </div>
 
-      <!-- AI 読み取り（Gemini） -->
-      <div class="panel">
+      <!-- AI 読み取り（Gemini）（スマホ幅の Web 版では出さない） -->
+      <div v-if="!isLite" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="receipt" :size="16" /></span>
           <h2 class="section-head-title">AI 読み取り（Gemini）</h2>
@@ -1609,6 +1626,9 @@ const runLabel: Record<string, string> = {
           Windows は終了時に自動で入れ替わります。macOS は dmg を開いて Applications に上書きしてください（データはそのまま）。
         </p>
       </div>
+
+      <!-- Web 版のスマホ幅だけ：出していない節の行き先 -->
+      <p v-if="isLite" class="pc-only-note">手数料・取り込み・仕入先・AI 読み取り・データの設定は、パソコンで開いてください。</p>
     </template>
 
     <TagPicker
@@ -1980,5 +2000,14 @@ const runLabel: Record<string, string> = {
 
   /* アプリの更新：ボタンと結果の文を折り返して縦に */
   .update-row { flex-wrap: wrap; }
+
+  /* 出していない節（手数料・取り込み・仕入先・AI 読み取り・データ）の行き先。最後に 1 行 */
+  .pc-only-note {
+    margin: 16px 8px 0;
+    font-size: var(--fs-13);
+    line-height: 1.6;
+    color: var(--text-dim);
+    text-align: center;
+  }
 }
 </style>

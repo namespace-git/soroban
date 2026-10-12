@@ -813,14 +813,36 @@ tr.total-row.loss > td {
    ============================================================ */
 
 @media (max-width: 767px) {
+  /* 文字：日なたのスマホで読めるように、小さい字を 1px ずつ大きくし（11→12・12→13・13→14・本文 14→15）、
+     補助の灰色を濃くする（--text-faint は白地・温かい地の上で 4.5:1 以上。--text-dim はその一段上）。
+     画面ごとの字の大きさは var(--fs-*) で書いてあるので、ここを変えるだけで全画面に効く */
+  :root {
+    --fs-11: 12px;
+    --fs-12: 13px;
+    --fs-13: 14px;
+    --fs-14: 15px;
+    --text-dim:   #55555c;
+    --text-faint: #70707a;
+  }
+
+  /* 日本語は文節で折り返し、1 文字だけの行（「ち」「る」）を作らない（対応していないブラウザでは今までどおり） */
+  body { word-break: auto-phrase; }
+
+  /* 金額・件数は桁をそろえる（縦に並んだとき、右端と桁位置がずれない） */
+  .num, .profit, .loss, .stat-value, .stat-card-value, .toolbar-count, .nav-badge {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
   /* 横向きにしたときに iOS が文字を勝手に大きくしない */
   html { -webkit-text-size-adjust: 100%; }
 
   /* iPhone は 16px 未満の入力欄に触れると画面を拡大してしまう */
   input, select, textarea { font-size: var(--fs-16); }
 
+  /* 間隔のリズム：ブロック同士は 12px（見出し→ツールバー→一覧）、一覧のカード同士は 10px。画面ごとにばらつかせない */
   .page { padding: 16px 12px; }
-  .page-head { flex-wrap: wrap; }
+  .page-head { flex-wrap: wrap; margin-bottom: 12px; }
 
   /* 面：左右の余白を詰めて、本文の幅を広く取る（画面ごとの scoped な指定があればそちらが勝つ） */
   .panel, .card { padding: 14px; }

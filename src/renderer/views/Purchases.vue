@@ -1120,7 +1120,7 @@ tr.focused { background: var(--brand-soft); }
     column-gap: 8px;
     row-gap: 10px;
     padding: 12px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
     background: var(--surface);
     border-radius: var(--radius);
     box-shadow: var(--shadow-1);
@@ -1144,6 +1144,8 @@ tr.focused { background: var(--brand-soft); }
     line-height: 1.4;
     color: var(--text-faint);
   }
+  /* 金額：総原価（この仕入でいくらかかったか）をいちばん大きく。商品計・送料は補助 */
+  .table-panel td.money-cell strong { font-size: var(--fs-16); }
   .table-panel td.actions {
     grid-column: 1 / -1;
     display: flex;
@@ -1158,8 +1160,8 @@ tr.focused { background: var(--brand-soft); }
   .table-panel td.actions button.ghost { border-color: var(--line); }
   .table-panel td.actions button.icon { flex: 0 0 44px; width: 44px; height: 44px; padding: 0; }
 
-  /* 補助とメモはホバーの title でしか全文が読めないので、スマホ幅では 2 行まで折り返して見せる */
-  .info-cell .row-sub { -webkit-line-clamp: 2; min-height: 0; }
+  /* 補助とメモはホバーの title でしか全文が読めないので、スマホ幅では折り返して見せる（補助は字を大きくした分、3 行まで） */
+  .info-cell .row-sub { -webkit-line-clamp: 3; min-height: 0; }
   .info-cell .note-row.fixed-row:empty { display: none; }
   .info-cell .note-row.fixed-row .note-text {
     display: -webkit-box;
@@ -1174,5 +1176,12 @@ tr.focused { background: var(--brand-soft); }
   .ship-bar { width: 8px; }
 
   .hint-row { margin-top: 8px; }
+}
+
+/* 320px 前後（古い小さな端末）：字を 1px 大きくした分、配送の進行が 1 行に収まらないので間を詰める。768px 以上には効かない */
+@media (max-width: 339px) {
+  .ship-progress { gap: 2px; }
+  .ship-stage { gap: 3px; }
+  .ship-bar { width: 5px; }
 }
 </style>

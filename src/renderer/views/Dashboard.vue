@@ -273,6 +273,8 @@ function gotoTopModel() {
                     <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint" :class="profitHintClass(item.profit_hint)">
                       ・ {{ profitHintText(group.kind, item.profit_hint) }}
                     </b>
+                    <!-- スマホ幅だけ：区切りの「・」なしで、自分の行に出す（デスクトップ幅では出さない。上の文は一切変えない） -->
+                    <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint-m" :class="profitHintClass(item.profit_hint)">{{ profitHintText(group.kind, item.profit_hint) }}</b>
                   </div>
                 </div>
 
@@ -526,6 +528,8 @@ function gotoTopModel() {
 .row-main { min-width: 0; }
 /* .row-labels / .row-title / .row-sub は style.css の共通クラス。色は .profit / .loss に委ねる。負の見込みを緑で出さない */
 .profit-hint { font-weight: 700; }
+/* スマホ幅だけで出す版（下の @media）。デスクトップ幅では出さない */
+.profit-hint-m { display: none; font-weight: 700; }
 
 .row-act {
   display: flex;
@@ -598,7 +602,7 @@ function gotoTopModel() {
    ============================================================ */
 @media (max-width: 767px) {
   .home-page { display: flex; flex-direction: column; }
-  .home-page > .page-head { margin-bottom: 8px; }
+  .home-page > .page-head { margin-bottom: 12px; }
   /* 2 列の入れ物をやめて、中の 2 つ（今やること／見直すもの）を並べ替えられるようにする */
   .inbox-grid { display: contents; }
   .inbox-panel { order: 1; }
@@ -620,6 +624,9 @@ function gotoTopModel() {
   .inbox-row .row-title.one-line { -webkit-line-clamp: 3; min-height: 0; }
   .inbox-row .row-sub { -webkit-line-clamp: 3; min-height: 0; }
   .inbox-row .row-sub.two-lines { -webkit-line-clamp: 4; min-height: 0; }
+  /* 粗利の見込みは、日付・金額・買い手・発送方法の続きに詰めず、自分の行に出す（文の途中で割れない・いちばん目立つ） */
+  .inbox-row .profit-hint { display: none; }
+  .inbox-row .profit-hint-m { display: block; margin-top: 2px; }
 
   .row-act { grid-column: 1 / -1; justify-content: stretch; flex-wrap: wrap; }
   .row-act > button,
