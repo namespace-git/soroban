@@ -78,8 +78,11 @@ create policy household_isolation on sale
   with check (household_id = current_setting('app.household_id', true)::uuid);
 ```
 
-- API が DB につなぐロールは **`soroban_api`（BYPASSRLS なし）**。クエリが世帯の絞り込みを
-  書き忘れても、**RLS が他の世帯の行を返さない**
+- API・定期実行は **`soroban_gateway`（ログイン専用・NOINHERIT・NOBYPASSRLS）** で DB につなぎ、
+  1 リクエストごとに `set local role soroban_api`（定期実行は `soroban_cron`）してから動く。
+  gateway そのものは世帯と鍵を引く関数しか使えないので、**`set role` を忘れたコードは権限エラーで止まる**
+  （他の世帯の行を読むことにはならない。2026-10-12 のセキュリティ・レビューで足した多層防御）
+- `soroban_api` も BYPASSRLS なし。クエリが世帯の絞り込みを書き忘れても、**RLS が他の世帯の行を返さない**
 - ビューは `security_invoker = true`（PG15+）で、ビュー越しにも RLS が効く
 - Supabase の `anon` / `authenticated` ロールには**何も許可しない**（PostgREST からは 1 行も読めない）。
   データは必ず API を通る
