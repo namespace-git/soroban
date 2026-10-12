@@ -5,7 +5,16 @@ import { resolve } from 'node:path'
 
 export const USAGE = `そろばん デスクトップ版（SQLite）→ Web 版（Postgres / Supabase）データ移行
 
-使い方
+使い方（ふつうはこれだけ）
+  pnpm migrate:web <バックアップの zip>
+
+  zip をそのまま渡します。①試走（このパソコンの中だけ）→ ②足りない値を聞く（パスワードは伏せ字）→ ③確認（yes と入力）
+  → ④本番に書いて突き合わせ、の順に進みます。試走が「すべて一致しました」でなければ、本番にはつなぎません。
+  ターミナル（対話できる画面）で実行してください。
+    --dry-run           試走だけで終わる（何も聞かない。本番には何も送らない）
+    --household <id>    世帯をログインした人から引かず、この世帯 id に書く（任意）
+
+展開済みのファイルを渡す形（従来どおり）
   pnpm migrate:web <soroban.db> <thumbs のフォルダ> --household <世帯の id>
   pnpm migrate:web <soroban.db> <thumbs のフォルダ> --dry-run
 
@@ -13,16 +22,19 @@ export const USAGE = `そろばん デスクトップ版（SQLite）→ Web 版�
   <thumbs のフォルダ>  同じ zip の中の thumbs フォルダ（画像）
   --household <id>    書き込み先の世帯 id（app.create_household が返した値）。空の世帯にだけ書ける
   --dry-run           試走。Postgres（PGlite）の上でだけ変換・書き込み・突き合わせを行う。本番には何も送らない
-  --migrations <dir>  --dry-run が使うマイグレーションのフォルダ（既定: ./supabase/migrations）
+
+共通
+  --migrations <dir>  試走が使うマイグレーションのフォルダ（既定: ./supabase/migrations）
+  --repo-root <dir>   wrangler.jsonc と supabase/.temp/pooler-url を探すフォルダ（既定: いまのフォルダ）
   --image-map <file>  画像の対応表（元のファイル → 新しいパス）を JSON で書き出す（任意。秘密は入らない）
 
-環境変数（--dry-run では要らない。ファイルに書かない）
-  SOROBAN_DATABASE_URL   Supabase の接続文字列（Direct connection）。秘密
-  SUPABASE_URL           Project URL（https://xxxx.supabase.co）
-  SUPABASE_ANON_KEY      anon（publishable）キー
+環境変数（zip の形では、あれば聞かずにそれを使う。従来の形の本番では 4 つとも要る。ファイルに書かない）
+  SOROBAN_DATABASE_URL   Supabase の接続文字列（Direct connection か Session pooler）。秘密
+  SUPABASE_URL           Project URL（https://xxxx.supabase.co）。zip の形では wrangler.jsonc の vars から読む
+  SUPABASE_ANON_KEY      anon（publishable）キー。zip の形では wrangler.jsonc の vars から読む
   SUPABASE_USER_JWT      Web 版にログインした利用者の JWT（Storage への書き込みに使う。1 時間ほどで切れる）
 
-終了コード  0 = 全部一致して完了 / 1 = 失敗（不一致・空でない世帯・入力の誤りなど。何も書き込んでいない）`
+終了コード  0 = 全部一致して完了 / 1 = 失敗（不一致・空でない世帯・入力の誤り・確認が yes でない、など。何も書き込んでいない）`
 
 export class UsageError extends Error {
   constructor(message: string) {
@@ -33,11 +45,15 @@ export class UsageError extends Error {
 
 export interface CliArgs {
   help: boolean
+  /** バックアップの zip をそのまま渡す形。null なら従来の形（sqliteFile と imagesDir） */
+  zipFile: string | null
   sqliteFile: string
   imagesDir: string
   householdId: string | null
   dryRun: boolean
   migrationsDir: string
+  /** wrangler.jsonc と supabase/.temp/pooler-url を探すフォルダ（zip の形が使う） */
+  repoRoot: string
   imageMapFile: string | null
 }
 
@@ -46,8 +62,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export function parseArgs(argv: string[], cwd: string = process.cwd()): CliArgs {
   const positional: string[] = []
   const out: CliArgs = {
-    help: false, sqliteFile: '', imagesDir: '', householdId: null, dryRun: false,
-    migrationsDir: resolve(cwd, 'supabase', 'migrations'), imageMapFile: null,
+    help: false, zipFile: null, sqliteFile: '', imagesDir: '', householdId: null, dryRun: false,
+    migrationsDir: resolve(cwd, 'supabase', 'migrations'), repoRoot: resolve(cwd), imageMapFile: null,
   }
   const valueOf = (i: number, name: string): string => {
     const v = argv[i + 1]
@@ -79,6 +95,9 @@ export function parseArgs(argv: string[], cwd: string = process.cwd()): CliArgs 
       case '--migrations':
         out.migrationsDir = resolve(cwd, take())
         break
+      case '--repo-root':
+        out.repoRoot = resolve(cwd, take())
+        break
       case '--image-map':
         out.imageMapFile = resolve(cwd, take())
         break
@@ -88,12 +107,17 @@ export function parseArgs(argv: string[], cwd: string = process.cwd()): CliArgs 
     }
   }
   if (out.help) return out
+  if (out.householdId !== null && !UUID.test(out.householdId)) throw new UsageError('--household は uuid の形で指定してください')
+  // バックアップの zip をそのまま渡す形（1 つだけ・.zip）。世帯 id は、ログインした人から引けるので要らない
+  if (positional.length === 1 && /\.zip$/i.test(positional[0])) {
+    out.zipFile = resolve(cwd, positional[0])
+    return out
+  }
   if (positional.length !== 2) {
-    throw new UsageError('引数は 2 つ必要です：<soroban.db> と <thumbs のフォルダ>')
+    throw new UsageError('引数は 2 つ必要です：<soroban.db> と <thumbs のフォルダ>（バックアップの zip をそのまま渡すなら、zip の 1 つだけ）')
   }
   out.sqliteFile = resolve(cwd, positional[0])
   out.imagesDir = resolve(cwd, positional[1])
-  if (out.householdId !== null && !UUID.test(out.householdId)) throw new UsageError('--household は uuid の形で指定してください')
   if (!out.dryRun && out.householdId === null) throw new UsageError('--household（書き込み先の世帯 id）が必要です。試走だけなら --dry-run')
   return out
 }
