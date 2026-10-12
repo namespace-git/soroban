@@ -68,6 +68,10 @@ const checkingHealth = ref(false)
 const cashAccounts = ref<CashAccount[]>([])
 const loans = ref<Liability[]>([])
 const showAccountForm = ref(false)
+// 「Web 版の取り込み担当」の節（デスクトップだけ）。値は設定 web_agent_url / web_agent_name に保存する
+const agentUrl = ref('')
+const agentName = ref('')
+const switchingAgent = ref(false)
 const healthWarnCount = computed(() => healthChecks.value.filter(h => h.level === 'warn').length)
 
 /**
@@ -109,6 +113,8 @@ async function load() {
   ])
   methods.value = methodsRes
   settings.value = settingsRes
+  agentUrl.value = settingsRes.web_agent_url ?? ''
+  agentName.value = settingsRes.web_agent_name ?? ''
   runs.value = runsRes
   accounts.value = accountsRes
   tags.value = tagsRes
@@ -291,6 +297,36 @@ async function toggleShowWindow(checked: boolean) {
   const value = checked ? '1' : '0'
   settings.value = { ...settings.value, collect_show_window: value }
   await saveSetting('collect_show_window', value)
+}
+
+// --- Web 版の取り込み担当（デスクトップだけ） ---
+
+/** 空・https 以外のスキーム・空白入りは断る（正規化と最終の検査は main の setSetting がやる） */
+function isAgentUrlOk(text: string): boolean {
+  const t = text.trim()
+  if (!t || /\s/.test(t)) return false
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(t) ? /^https:\/\//i.test(t) : true
+}
+
+async function becomeAgent() {
+  if (!isAgentUrlOk(agentUrl.value)) {
+    toast('Web 版の URL は https:// から始まるアドレスを入れてください', 'warn')
+    return
+  }
+  if (!await confirmDialog('Web 版の取り込み担当になりますか？', {
+    message: 'この PC の帳簿は凍結され、画面は Web 版になります',
+    okLabel: '取り込み担当になる',
+  })) return
+  switchingAgent.value = true
+  try {
+    await window.soroban.setSetting('web_agent_url', agentUrl.value)
+    await window.soroban.setSetting('web_agent_name', agentName.value)
+    // 返事のあとで主窓が Web 版に作り直される（この画面は消える）
+    await window.soroban.setSetting('web_agent_enabled', '1')
+  } catch (e) {
+    toast((e as Error).message, 'warn')
+    switchingAgent.value = false
+  }
 }
 
 async function toggleTrackShipping(checked: boolean) {
@@ -979,6 +1015,42 @@ const runLabel: Record<string, string> = {
         <component :is="PushSettings" v-if="PushSettings" />
       </template>
 
+      <!-- デスクトップだけ：この PC を Web 版の取り込み担当にする（Web 版では出さない） -->
+      <div v-if="!isWeb" class="panel">
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="external" :size="16" /></span>
+          <h2 class="section-head-title">Web 版の取り込み担当</h2>
+        </div>
+        <p class="faint hint">
+          この PC のそろばんを、Web 版（スマホやブラウザで見る帳簿）の取り込み担当にします。
+          メルカリ・Yahoo!フリマ・メロジョイの取り込みだけをこの PC が受け持ち、画面は Web 版を開きます。
+        </p>
+        <div class="fields">
+          <label class="field">
+            <span>Web 版の URL</span>
+            <input v-model="agentUrl" style="width:320px" placeholder="https://…" />
+          </label>
+          <label class="field">
+            <span>この PC の名前</span>
+            <input v-model="agentName" style="width:240px" placeholder="空ならこの PC の名前" />
+          </label>
+        </div>
+        <div class="row">
+          <button :disabled="switchingAgent || !agentUrl.trim()" @click="becomeAgent">
+            <Icon name="external" :size="16" /> {{ switchingAgent ? '切り替えています…' : '取り込み担当になる' }}
+          </button>
+        </div>
+        <p class="faint hint">
+          この PC の帳簿は凍結されます（消えません。読み取り専用の記録として残り、Web 版とは同期されません）。
+          起動時の取り込みと、この PC の画面は動かなくなります。バックアップの対象は、凍結したこの PC の帳簿だけです。
+        </p>
+        <p class="faint hint">
+          取り込み担当のあいだは、Web 版にログインしたままにしてください（ログインが切れると取り込みも止まります）。
+          メルカリなどへのログインは、窓の上のメニュー「取り込み担当」から行います。
+          戻すときも、同じメニューの「取り込み担当をやめる」を押してください。
+        </p>
+      </div>
+
       <!-- 取り込み -->
       <div class="panel">
         <div class="section-head">
@@ -987,7 +1059,7 @@ const runLabel: Record<string, string> = {
         </div>
         <div class="fields">
           <label class="field">
-            <span>自動取り込みの間隔（時間）</span>
+            <span>{{ isWeb ? '取り込み担当の PC を起動したときに取り込む間隔（時間）' : '自動取り込みの間隔（時間）' }}</span>
             <input
               type="number" inputmode="numeric" style="width:120px"
               :value="settings.collect_interval_h ?? 1"
@@ -1001,13 +1073,24 @@ const runLabel: Record<string, string> = {
             :checked="settings.collect_show_window === '1'"
             @change="toggleShowWindow(($event.target as HTMLInputElement).checked)"
           />
-          取り込み中にブラウザのウィンドウを表示する（動きを確認したいときだけ）
+          <template v-if="isWeb">取り込み担当の PC で、取り込み中にブラウザのウィンドウを表示する（動きを確認したいときだけ）</template>
+          <template v-else>取り込み中にブラウザのウィンドウを表示する（動きを確認したいときだけ）</template>
         </label>
-        <p class="faint hint">
+        <p v-if="isWeb" class="faint hint">
+          取り込みは、取り込み担当の PC のそろばんが行います。その PC のそろばんを起動して Web 版にログインしたとき、
+          前回の取り込みから指定時間が空いていれば、取り込みを頼みます。
+          「取り込む」ボタンはいつでも押せますが、続けて押せない間隔があります。頻度を上げすぎないでください。
+        </p>
+        <p v-else class="faint hint">
           アプリ起動時、前回から指定時間が空いていれば裏で取り込みます。
           頻度を上げすぎないでください。
         </p>
-        <p class="faint hint">
+        <p v-if="isWeb" class="faint hint">
+          収集は、取り込み担当の PC が人間と同じ速度で数ページだけ読みます。ウィンドウの表示は普段はオフで大丈夫です。
+          本人確認（CAPTCHA）が出たときは、その PC にウィンドウが自動で表示されるので、
+          その PC で手で進めてください。
+        </p>
+        <p v-else class="faint hint">
           収集は人間と同じ速度で数ページだけ読みます。普段はオフで大丈夫です。
           本人確認（CAPTCHA）が出たときはウィンドウが自動で表示されるので、
           そこで手で進めてください。
@@ -1070,7 +1153,11 @@ const runLabel: Record<string, string> = {
           未登録の追跡番号 {{ trackingApiStatus.unregistered }} 件・確認待ち {{ trackingApiStatus.watching }} 件。
           17TRACK の無料枠は登録した追跡番号の数で減ります。
         </p>
-        <p class="faint hint">
+        <p v-if="isWeb" class="faint hint">
+          まだ到着していない仕入は、取り込み担当の PC ではなくサーバーが、数分おきに少しずつ 17TRACK の API で確認します。
+          キーが違う・混み合っている等で読めなかったときはその回は打ち切り、次の回でまた試します。
+        </p>
+        <p v-else class="faint hint">
           取り込みのたびに、まだ到着していない仕入をまとめて 17TRACK の API で確認します（件数の上限はありません）。
           キーが違う・混み合っている等で読めなかったときはその回は打ち切り、次の取り込みでまた試します。
         </p>

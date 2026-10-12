@@ -21,5 +21,5 @@ export async function registerAgent(ctx: Ctx, deviceName: unknown): Promise<Agen
     name, await hashAgentKey(token), `${AGENT_KEY_TTL_HOURS} hours`,
   )
   if (!row) throw new Error('register_agent_device が行を返しませんでした')
-  return { agent_id: row.id, name: row.name, token, expires_at: row.token_expires_at }
+  return { agent_id: row.id, name: row.name, household_id: ctx.householdId, token, expires_at: row.token_expires_at }
 }

@@ -16,7 +16,12 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/preload/index.ts') },
+        // agent は取り込み担当モードの窓（Web 版を開く）専用。index.ts とは何も共有しない
+        // （sandbox の preload は別ファイルを require できないので、共有の塊が出ないようにしておく）
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          agent: resolve(__dirname, 'src/preload/agent.ts'),
+        },
       },
     },
   },

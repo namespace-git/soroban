@@ -43,6 +43,8 @@ describe('鍵の発行（register）', () => {
     const reg = r.body.result
     issued.push(reg.token)
     expect(reg.name).toBe('リビングの PC')
+    // PC が画像を Storage に上げるパス（<世帯の id>/…）の先頭に使う。鍵を出した人の世帯の id
+    expect(reg.household_id).toBe(a.householdId)
     expect(reg.token).toMatch(/^sbagent_[A-Za-z0-9_-]{43}$/)
     const hours = (new Date(reg.expires_at).getTime() - Date.now()) / 3_600_000
     expect(hours).toBeGreaterThan(11.9)
@@ -100,6 +102,17 @@ describe('鍵の発行（register）', () => {
     const r = await callAgent(f, 'register', ['リビングの PC'], await bearer(a))
     expect(r.status).toBe(409)
     expect(r.body.error?.message).toContain('取り消されている')
+  })
+
+  it('household_id は鍵を出した人の世帯の id（同じ端末名でも世帯ごとに別）。取り直しても変わらない', async () => {
+    const ra = await callAgent(f, 'register', ['PC'], await bearer(a))
+    const rb = await callAgent(f, 'register', ['PC'], await bearer(b))
+    const again = await callAgent(f, 'register', ['PC'], await bearer(a))
+    issued.push(ra.body.result.token, rb.body.result.token, again.body.result.token)
+    expect(ra.body.result.household_id).toBe(a.householdId)
+    expect(rb.body.result.household_id).toBe(b.householdId)
+    expect(ra.body.result.household_id).not.toBe(rb.body.result.household_id)
+    expect(again.body.result.household_id).toBe(a.householdId)
   })
 
   it('同じ端末名でも世帯が違えば別の PC', async () => {

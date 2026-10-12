@@ -42,6 +42,8 @@ export type AgentErrorCode =
 export interface AgentRegistration {
   agent_id: string
   name: string
+  /** この PC が属する世帯の id。画像を Storage に上げるパス（`<世帯の id>/<種類>/<乱数>.<拡張子>`）の先頭に使う */
+  household_id: string
   /** 取り込み担当の鍵。`Authorization: Agent <token>` で送る */
   token: string
   /** 鍵の期限（ISO。いまから 12 時間）。近づいたら、そのときのログインで register し直す */

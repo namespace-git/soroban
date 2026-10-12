@@ -1,8 +1,11 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol } from 'electron'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { writeFileSync } from 'node:fs'
 import * as db from './db'
+import { resolveAgentMode, validateAgentSetting, type AgentMode } from './agent/mode'
+import * as agentService from './agent/service'
 import * as collector from './collector'
 import * as collectorYahoo from './collector-yahoo'
 import * as collectorMellojoy from './collector-mellojoy'
@@ -40,8 +43,9 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow: BrowserWindow | null = null
 
-function createMainWindow(): void {
-  mainWindow = new BrowserWindow({
+/** この PC の帳簿（SQLite）の画面。今までの主窓 */
+function createLocalWindow(): BrowserWindow {
+  const win = new BrowserWindow({
     width: 1280,
     height: 860,
     minWidth: 960,
@@ -56,12 +60,85 @@ function createMainWindow(): void {
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+    win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  return win
+}
 
-  mainWindow.on('closed', () => { mainWindow = null })
+// ------------------------------------------------------------
+// 取り込み担当モード（Web 版の取り込みを、この PC が受け持つ）
+//
+// ローカルの設定 web_agent_enabled が '1' のとき、主窓は Web 版の URL を開き、起動時の取り込み・
+// ローカルの画面（SQLite の帳簿）は動かさない。ローカルの DB は凍結した記録として残す（消さない）。
+// 切り替えは設定画面のボタン（setSetting('web_agent_enabled', …)）とメニューの「取り込み担当をやめる」。
+// 設計：docs/web/03-agent-and-push.md の 1 節
+// ------------------------------------------------------------
+
+let agent: agentService.AgentService | null = null
+
+function currentMode(): AgentMode {
+  try {
+    return resolveAgentMode(db.getSettings(), hostname())
+  } catch {
+    return { agent: false }
+  }
+}
+
+function createMainWindow(): void {
+  const mode = currentMode()
+  const win = mode.agent ? agentService.createAgentWindow(mode.origin) : createLocalWindow()
+  mainWindow = win
+  // 窓を作り直したあとに古い窓の 'closed' が来ても、新しい窓の参照を消さない
+  win.on('closed', () => { if (mainWindow === win) mainWindow = null })
+}
+
+/** 取り込み担当のメニュー（状態・仕入先の一覧が変わるたびに作り直す）。ローカルモードなら標準のメニューに戻す */
+function syncAgentMenu(): void {
+  if (agent) {
+    agentService.installAgentMenu(agentService.buildAgentMenu(agent.menuState(), { leave: () => { void leaveAgentMode() } }))
+  } else {
+    agentService.restoreDefaultMenu()
+  }
+}
+
+function startAgent(mode: AgentMode): void {
+  if (!mode.agent) return
+  agent = agentService.startAgent({ origin: mode.origin, deviceName: mode.deviceName, onChange: syncAgentMenu })
+  applog.log('main', 'agent_mode', '取り込み担当モードで起動します', { origin: mode.origin, device: mode.deviceName })
+}
+
+/** 設定が変わったあとのモードに合わせて、窓・取り込み担当・メニューを作り直す（変わらなければ何もしない） */
+function applyMode(): void {
+  const mode = currentMode()
+  if (mode.agent === (agent !== null)) return
+  agent?.stop()
+  agent = null
+  const old = mainWindow
+  createMainWindow() // 古い窓を閉じる前に作る（全部閉じると window-all-closed でアプリが終わる）
+  startAgent(mode)
+  syncAgentMenu()
+  if (old && !old.isDestroyed()) old.destroy()
+}
+
+async function leaveAgentMode(): Promise<void> {
+  const options = {
+    type: 'question' as const,
+    buttons: ['取り込み担当をやめる', 'キャンセル'],
+    defaultId: 1,
+    cancelId: 1,
+    title: '取り込み担当をやめる',
+    message: '取り込み担当をやめて、この PC の帳簿に戻しますか？',
+    detail: '画面は、凍結していたこの PC の帳簿に戻ります。Web 版の帳簿とは同期されません。',
+  }
+  const { response } = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options)
+  if (response !== 0) return
+  db.setSetting('web_agent_enabled', '0')
+  applog.log('main', 'agent_mode', '取り込み担当をやめました')
+  applyMode()
 }
 
 // ------------------------------------------------------------
@@ -368,7 +445,12 @@ function registerIpc(): void {
   handle('deleteShippingMethod', (id) => db.deleteShippingMethod(id))
   // 暗号化済みの API キーは画面に出さない（getAiStatus で有無だけ返す）
   handle('getSettings', () => { const { gemini_api_key_enc: _k, track17_api_key_enc: _t, ...rest } = db.getSettings() as Record<string, string>; return rest })
-  handle('setSetting', (k, v) => db.setSetting(k, v))
+  handle('setSetting', (k, v) => {
+    // 取り込み担当の設定（web_agent_*）だけ検査する。それ以外はそのまま保存（今までどおり）
+    db.setSetting(k, validateAgentSetting(k, v, db.getSettings()))
+    // 取り込み担当モードの入り切りは、返事を返したあとで窓を作り直す（呼んだ窓がその場で消えないように）
+    if (k === 'web_agent_enabled') setTimeout(applyMode, 150)
+  })
 
   handle('collect', () => collectAll(db.getSettings().collect_show_window !== '1'))
   handle('getLastTrackingSummary', () => lastTrackingSummary)
@@ -476,11 +558,20 @@ app.whenReady().then(async () => {
   collectorYahoo.ensureSession()
   registerThumbProtocol()
   registerIpc()
+  agentService.registerAgentIpc(() => agent, () => mainWindow)
+  const mode = currentMode()
   createMainWindow()
 
-  // 起動時に、前回から間隔が空いていれば裏で収集する。
-  // OSのスケジューラは使わない（アプリを開いたときに追いつけばよい）
-  collectInBackground()
+  if (mode.agent) {
+    // 取り込み担当モード：ローカルの起動時の取り込みは動かさない（取り込みは Web 版の要求を待つ。
+    // 起動時の 1 回は、Web 版のログインが届いてから runner が頼む）
+    startAgent(mode)
+    syncAgentMenu()
+  } else {
+    // 起動時に、前回から間隔が空いていれば裏で収集する。
+    // OSのスケジューラは使わない（アプリを開いたときに追いつけばよい）
+    collectInBackground()
+  }
 
   // 週に1回、前回から7日空いていれば裏でバックアップを取る（失敗しても起動は止めない）
   backup.maybeRunAutoBackup()
