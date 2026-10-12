@@ -42,9 +42,16 @@
 do $$
 begin
   if not exists (select 1 from pg_roles where rolname = 'soroban_gateway') then
-    create role soroban_gateway nologin noinherit nosuperuser nocreatedb nocreaterole nobypassrls;
+    -- superuser・bypassrls などは既定で「無し」。指定はしない（Supabase の postgres は superuser ではないので、
+    -- 属性を書いただけで断られることがある。0100 の soroban_api と同じ）
+    create role soroban_gateway nologin noinherit;
   else
     alter role soroban_gateway noinherit;
+  end if;
+  -- LOGIN は利用者が付けるので見ない
+  if exists (select 1 from pg_roles where rolname = 'soroban_gateway'
+               and (rolsuper or rolbypassrls or rolcreaterole or rolcreatedb)) then
+    raise exception 'soroban_gateway に想定外の属性があります（superuser / bypassrls / createrole / createdb）。外してから流し直してください';
   end if;
 end
 $$;

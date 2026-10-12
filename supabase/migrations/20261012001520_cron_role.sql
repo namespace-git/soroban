@@ -37,7 +37,15 @@ begin
 end
 $$;
 
-alter role soroban_cron nologin nosuperuser nocreatedb nocreaterole nobypassrls;
+-- 危ない属性が付いていないことを確かめる（付け直しはしない。理由は 0100 の soroban_api と同じ）
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'soroban_cron'
+               and (rolsuper or rolbypassrls or rolcreaterole or rolcreatedb or rolcanlogin)) then
+    raise exception 'soroban_cron に想定外の属性があります（superuser / bypassrls / createrole / createdb / login）。外してから流し直してください';
+  end if;
+end
+$$;
 
 do $$
 begin

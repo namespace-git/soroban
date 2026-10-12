@@ -29,7 +29,16 @@ begin
 end
 $$;
 
-alter role soroban_api nologin nosuperuser nocreatedb nocreaterole nobypassrls;
+-- 危ない属性が付いていないことを確かめる（付け直しはしない：Supabase の postgres は superuser ではないので、
+-- `alter role … nosuperuser` のように属性を指定しただけで断られる。作ったばかりのロールは既定で全部「無し」）
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'soroban_api'
+               and (rolsuper or rolbypassrls or rolcreaterole or rolcreatedb or rolcanlogin)) then
+    raise exception 'soroban_api に想定外の属性があります（superuser / bypassrls / createrole / createdb / login）。外してから流し直してください';
+  end if;
+end
+$$;
 
 -- 接続するロール（Supabase の接続文字列は postgres）が `set role soroban_api` できるようにする
 do $$
