@@ -6,7 +6,7 @@
 // 右ペインは選んだ経費の編集、または新規登録（レシートを読み取る／手で登録）のどちらかを表示する。
 // AI が読んだ位置（ReceiptDraft.boxes / lines[].box）はレシート画像の上に半透明の枠で重ね、
 // フォームの欄にフォーカス・ホバーすると濃くなる。枠をクリックすると欄にフォーカスする。
-import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
+import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue'
 import type {
   AiStatus, Expense, ExpenseCategory, ExpenseInput, ExpenseLineInput,
   ReceiptBox, ReceiptDraft,
@@ -81,6 +81,16 @@ watch(revision, load)
 const searchText = ref('')
 const period = ref<Period>('this_month')
 const categoryFilter = ref<ExpenseCategory | ''>('')
+
+// --- スマホ幅：絞り込みは「絞り込み」ボタンの中にまとめる（デスクトップ幅では今までどおり常に並ぶ）。
+//     閉じていても、いくつ効いているかはボタンの数字で分かる（期間の既定は「今月」＝最初から 1 つ効いている） ---
+const filtersOpen = ref(false)
+const activeFilterCount = computed(() => {
+  let n = 0
+  if (categoryFilter.value) n++
+  if (period.value !== 'all') n++
+  return n
+})
 
 type SortOrder = 'date_desc' | 'date_asc' | 'amount_desc' | 'amount_asc'
 const sortOrder = ref<SortOrder>('date_desc')
@@ -223,6 +233,23 @@ const shopOptions = computed(() => {
 const editingId = ref<string | null>(null)
 const showForm = ref(false)
 const editingExpense = computed(() => expenses.value.find(e => e.id === editingId.value) ?? null)
+
+// スマホ幅：一覧とフォームは入れ替えて出す（デスクトップ幅では今までどおり並ぶ）。
+// 開くときは本文の先頭へ、一覧へ戻るときは元の位置へ（フォームの途中から始まらないように）
+const pageEl = ref<HTMLElement | null>(null)
+let listScrollTop = 0
+watch(showForm, async (open) => {
+  if (!window.matchMedia('(max-width: 767px)').matches) return
+  const main = pageEl.value?.closest('main')
+  if (!main) return
+  if (open) {
+    listScrollTop = main.scrollTop
+    main.scrollTop = 0
+  } else {
+    await nextTick()
+    main.scrollTop = listScrollTop
+  }
+})
 const expenseHasReceipt = computed(() => !!editingExpense.value?.receipt_url)
 
 /** 計上月を人が触ったら true。購入日を変えても以後は自動追随しない */
@@ -582,7 +609,7 @@ async function deleteCurrent() {
 </script>
 
 <template>
-  <div class="page">
+  <div ref="pageEl" class="page" :class="{ 'm-editing': showForm }">
     <div class="page-head">
       <h1 class="page-title">経費</h1>
       <span class="grow" />
@@ -626,16 +653,35 @@ async function deleteCurrent() {
     </div>
 
     <div class="layout">
+      <!-- スマホ幅だけ：フォームから一覧へ戻る（デスクトップ幅では出さない）。
+           一覧パネルとフォームパネルの間に挟むと、隣り合う .panel の余白の規則（.panel + .panel）が外れるので先頭に置く -->
+      <button v-if="showForm" type="button" class="m-back" @click="closePane">
+        <Icon name="arrow-right" :size="16" class="m-back-icon" />経費の一覧
+      </button>
+
       <!-- 左：一覧（月で区切り） -->
       <div class="panel list-panel">
         <div class="toolbar list-toolbar">
           <SearchBox v-model="searchText" placeholder="購入店・品名・メモを検索" />
-          <select v-model="categoryFilter">
-            <option value="">すべての項目</option>
-            <option v-for="o in CATEGORY_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
-          </select>
-          <PeriodSelect v-model="period" />
-          <select v-model="sortOrder">
+          <!-- スマホ幅だけ：絞り込みをこのボタンの中にまとめる。数字は効いている絞り込みの数 -->
+          <button
+            type="button"
+            class="m-filter-toggle"
+            :class="{ on: filtersOpen || activeFilterCount > 0 }"
+            :aria-expanded="filtersOpen"
+            @click="filtersOpen = !filtersOpen"
+          >
+            絞り込み<span v-if="activeFilterCount" class="m-filter-n">{{ activeFilterCount }}</span>
+          </button>
+          <!-- デスクトップ幅では display: contents（この入れ物は無いのと同じ） -->
+          <div class="toolbar-filters" :class="{ 'm-open': filtersOpen }">
+            <select v-model="categoryFilter">
+              <option value="">すべての項目</option>
+              <option v-for="o in CATEGORY_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </select>
+            <PeriodSelect v-model="period" :class="{ 'is-custom': typeof period === 'object' }" />
+          </div>
+          <select v-model="sortOrder" class="sort-select">
             <option value="date_desc">新しい順</option>
             <option value="date_asc">古い順</option>
             <option value="amount_desc">金額が大きい順</option>
@@ -811,27 +857,27 @@ async function deleteCurrent() {
                 @mouseenter="onBoxHover(i)" @mouseleave="onBoxHoverLeave(i)"
                 @focusin="onBoxFocus(i)" @focusout="onBoxBlur(i)"
               >
-                <td>
+                <td class="c-name">
                   <input
                     :ref="(el) => setLineNameInputEl(i, el as HTMLInputElement | null)"
                     v-model="l.name" class="full" placeholder="品名"
                     :class="{ 'ai-filled': aiFilledLines.has(i) }" @input="clearAiLine(i)"
                   />
                 </td>
-                <td>
+                <td class="c-price" data-label="単価（税込）">
                   <input
-                    type="number" v-model.number="l.unit_price" class="full"
+                    type="number" inputmode="numeric" v-model.number="l.unit_price" class="full"
                     :class="{ 'ai-filled': aiFilledLines.has(i) }" @input="clearAiLine(i)"
                   />
                 </td>
-                <td>
+                <td class="c-qty" data-label="数量">
                   <input
-                    type="number" v-model.number="l.quantity" class="full" min="1"
+                    type="number" inputmode="numeric" v-model.number="l.quantity" class="full" min="1"
                     :class="{ 'ai-filled': aiFilledLines.has(i) }" @input="clearAiLine(i)"
                   />
                 </td>
-                <td class="num">{{ yen(lineAmount(l)) }}</td>
-                <td>
+                <td class="num c-amount" data-label="金額">{{ yen(lineAmount(l)) }}</td>
+                <td class="c-cat" data-label="項目">
                   <select
                     v-model="l.category" class="full"
                     :class="{ 'ai-filled': aiFilledLines.has(i) }" @change="clearAiLine(i)"
@@ -839,7 +885,7 @@ async function deleteCurrent() {
                     <option v-for="o in CATEGORY_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
                   </select>
                 </td>
-                <td class="actions">
+                <td class="actions c-del">
                   <button class="icon ghost" aria-label="削除" @click="removeLine(i)">
                     <Icon name="trash" :size="16" />
                   </button>
@@ -874,7 +920,7 @@ async function deleteCurrent() {
           <div v-if="!form.lines.length" class="fields">
             <label class="field">
               <span>合計（税込）</span>
-              <input type="number" v-model.number="form.amount" />
+              <input type="number" inputmode="numeric" v-model.number="form.amount" />
             </label>
             <label class="field">
               <span>項目</span>
@@ -1170,9 +1216,195 @@ async function deleteCurrent() {
 
 .form-foot { align-items: center; }
 
+/* --- スマホ幅だけで出すもの。デスクトップ幅では出さない（絞り込みの入れ物は無いのと同じ） --- */
+.m-back, .m-filter-toggle { display: none; }
+.toolbar-filters { display: contents; }
+
 @media (max-width: 1099px) {
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .layout { grid-template-columns: 1fr; }
   .detail-panel { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   スマホ幅（768px 未満）：一覧とフォームを入れ替えて出す（一覧 → 行を押す／登録ボタン → フォーム → 「経費の一覧」で戻る）。
+   一覧は 1 件 1 枚のカード（style.css の 4 段：ラベル → 名前 → 補助。金額は右）。
+   フォームは 1 列。明細の表は、1 行 1 枚のミニカード（品名 → 単価・数量・金額 → 項目。削除は右上）。
+   保存・閉じるは画面の下に貼り付けて、長いフォームでも探さずに押せる。
+   デスクトップ幅（768px 以上）の見た目には一切効かせない。
+   ============================================================ */
+@media (max-width: 767px) {
+  /* 見出し：題の下に、登録の 2 ボタンを 1 行で（主役は「レシートを読み取って登録」） */
+  .page-head .page-title { flex: 1 1 100%; }
+  .page-head .grow { display: none; }
+  .ai-warn { flex: 1 1 100%; flex-wrap: wrap; }
+  .ai-warn button { min-height: 44px; }
+  .page-head .primary { flex: 1 1 auto; height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+  .page-head .ghost { flex: 0 0 auto; height: 48px; background: var(--surface); border-color: var(--line); }
+
+  /* 入れ替え：フォームを開いているあいだは、数字・一覧・登録ボタンを隠す。閉じているあいだは「選んでください」を隠す */
+  .m-editing .stat-grid,
+  .m-editing .list-panel,
+  .m-editing .page-head { display: none; }
+  .detail-empty { display: none; }
+  .m-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
+    justify-self: start;
+    min-height: 44px;
+    padding: 0 16px 0 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--text-dim);
+  }
+  .m-back-icon { transform: scaleX(-1); }
+  .layout { gap: 12px; }
+
+  /* 項目別サマリ：小さなカードを 2 列 2 段に（一覧を画面の下に追いやらない） */
+  .stat-grid { gap: 8px; margin-bottom: 12px; }
+  .stat-grid .stat-card { padding: 12px 14px; gap: 2px; min-width: 0; }
+  .stat-grid .stat-card-value { font-size: var(--fs-20); }
+  .stat-grid .stat-card-sub { overflow-wrap: anywhere; }
+
+  /* --- 一覧 --- */
+  .list-panel { background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
+
+  /* ツールバー：検索 →（絞り込み）→ 並び替え → 件数・合計（売上タブと同じ形） */
+  .list-toolbar { gap: 8px; margin-bottom: 8px; padding: 0; border-bottom: 0; }
+  .toolbar :deep(.search-box) { flex: 1 1 160px; width: auto; min-width: 0; }
+  .toolbar .m-filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    height: 44px;
+    padding: 0 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+  .toolbar .m-filter-toggle.on { background: var(--brand-soft); border-color: var(--brand); }
+  .m-filter-n {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--surface);
+    font-size: var(--fs-12);
+    font-weight: 700;
+  }
+  .toolbar-filters { display: none; order: 1; flex: 1 1 100%; }
+  .toolbar-filters.m-open { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .toolbar-filters select { width: 100%; min-width: 0; height: 44px; }
+  .toolbar-filters .period-select { display: flex; width: 100%; }
+  .toolbar-filters .period-select.is-custom { grid-column: 1 / -1; }
+  .toolbar-filters .period-select :deep(select) { flex: 1 1 100%; min-width: 0; width: 100%; height: 44px; }
+  .toolbar-filters .period-select :deep(input) { flex: 1 1 120px; min-width: 0; height: 44px; }
+  .toolbar .sort-select { order: 2; flex: 1 1 140px; min-width: 0; height: 44px; }
+  .toolbar .grow { display: none; }
+  .toolbar .toolbar-count { order: 3; flex: 0 0 auto; margin-left: auto; text-align: right; }
+
+  /* 月の区切りは、カードの間の小さな見出しに */
+  .month-head { padding: 10px 4px 4px; font-size: var(--fs-12); background: transparent; }
+
+  /* 行＝カード */
+  .expense-row {
+    grid-template-columns: 48px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 12px;
+    margin-bottom: 8px;
+    padding: 12px;
+    border-top: 0;
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+  }
+  .expense-row:hover:not(:disabled) { background: var(--surface); }
+  /* 開いている（開いていた）経費：塗りつぶすとサムネイル（同じクリーム色）が消えるので、黄の枠で示す */
+  .expense-row.on,
+  .expense-row.on:hover:not(:disabled) { background: var(--surface); box-shadow: inset 0 0 0 2px var(--brand), var(--shadow-1); }
+  .row-thumb { width: 48px; height: 48px; }
+  .row-main .row-labels { min-height: 0; }
+  /* 名前と補助は切らずに 2 行まで（ホバーの title は読めない） */
+  .row-main .row-title.one-line { -webkit-line-clamp: 2; min-height: 0; }
+  .row-main .row-sub { -webkit-line-clamp: 2; min-height: 0; }
+  .row-amt { font-size: var(--fs-16); }
+
+  /* --- フォーム --- */
+  .detail-panel { margin-top: 0; padding: 14px; gap: 14px; }
+  .receipt-frame:not(.empty) { height: auto; }
+  .receipt-frame.empty { min-height: 88px; }
+  .form-head .row-labels { min-height: 0; margin: 0; }
+  .form-title.row-title { min-height: 0; }
+  .receipt-img { height: auto; max-height: 240px; object-fit: contain; }
+  .receipt-img.expanded { max-height: 70vh; }
+  .receipt-ops button { min-height: 44px; border-color: var(--line); }
+  .form-title { overflow-wrap: anywhere; }
+
+  .form-pane .fields { gap: 12px; }
+  .form-pane .fields > .field { flex: 1 1 100%; min-width: 0; }
+  .form-pane .field input,
+  .form-pane .field select { width: 100%; height: 44px; }
+  .form-pane .add-line { min-height: 44px; border-color: var(--line); }
+  .tax-add-row button { min-height: 44px; }
+  .receipt-raw summary { min-height: 44px; display: flex; align-items: center; }
+
+  /* 明細の入力行：1 行＝1 枚のミニカード（品名 → 単価・数量・金額 → 項目。削除は右上）。Purchases の明細と同じ形 */
+  .lines-table,
+  .lines-table tbody { display: block; }
+  .lines-table colgroup,
+  .lines-table thead { display: none; }
+  .lines-table tbody tr {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    padding: 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+  .lines-table tbody tr:hover { background: var(--surface); }
+  .lines-table td { display: block; min-width: 0; padding: 0; border: none; }
+  .lines-table td.c-name { grid-column: 1 / -1; padding-right: 48px; }
+  .lines-table td.c-cat { grid-column: 1 / -1; }
+  .lines-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    font-size: var(--fs-12);
+    color: var(--text-dim);
+    font-weight: 400;
+    white-space: nowrap;
+  }
+  .lines-table td.c-amount { text-align: left; line-height: 44px; }
+  .lines-table td.c-amount::before { line-height: 1.6; }
+  .lines-table td.actions { position: absolute; top: 4px; right: 4px; }
+  .lines-table td.actions button { width: 44px; height: 44px; }
+  .lines-table input,
+  .lines-table select { height: 44px; padding: 6px 10px; font-size: var(--fs-16); }
+
+  /* 保存・閉じる：画面の下に貼り付ける */
+  .form-foot {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    margin: 0 -14px -14px;
+    padding: 10px 14px;
+    gap: 8px;
+    background: var(--surface);
+    border-top: 1px solid var(--line-soft);
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+  .form-foot .grow { display: none; }
+  .form-foot button { min-height: 48px; }
+  .form-foot .primary { flex: 1 1 auto; }
+  .form-foot .ghost, .form-foot .danger { border-color: var(--line); }
 }
 </style>

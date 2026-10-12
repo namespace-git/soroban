@@ -26,7 +26,8 @@ withDefaults(defineProps<{
 <style scoped>
 .sk-table { display: flex; flex-direction: column; gap: 10px; }
 .sk-row { display: flex; gap: 16px; align-items: center; }
-.sk-stats { display: flex; gap: 24px; }
+/* 幅が足りない（スマホ幅）ときは折り返す。4〜5 本並べると 375px を超えて本文が横に動く */
+.sk-stats { display: flex; flex-wrap: wrap; gap: 24px; }
 
 .sk-bar {
   display: inline-block;

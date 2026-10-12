@@ -714,7 +714,7 @@ const runLabel: Record<string, string> = {
           <label class="field">
             <span>{{ CHANNEL_LABEL.mercari }}販売手数料（%）</span>
             <input
-              type="number" step="0.1" style="width:120px"
+              type="number" inputmode="decimal" step="0.1" style="width:120px"
               :value="Number(settings.fee_rate_bp ?? 1000) / 100"
               @change="saveSetting('fee_rate_bp',
                 String(Math.round(Number(($event.target as HTMLInputElement).value) * 100)))"
@@ -723,7 +723,7 @@ const runLabel: Record<string, string> = {
           <label class="field">
             <span>{{ CHANNEL_LABEL.yahoo }}販売手数料（%）</span>
             <input
-              type="number" step="0.1" style="width:120px"
+              type="number" inputmode="decimal" step="0.1" style="width:120px"
               :value="Number(settings.fee_rate_bp_yahoo ?? 500) / 100"
               @change="saveSetting('fee_rate_bp_yahoo',
                 String(Math.round(Number(($event.target as HTMLInputElement).value) * 100)))"
@@ -753,21 +753,21 @@ const runLabel: Record<string, string> = {
           <span class="section-head-icon"><Icon name="external" :size="16" /></span>
           <h2 class="section-head-title">発送方法</h2>
         </div>
-        <table class="compact">
+        <table class="compact stack-table methods-table">
           <thead>
             <tr><th>名前</th><th>配送サービス</th><th class="num">送料</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="m in methods" :key="m.id">
-              <td><input v-model="m.name" @change="saveMethod(m)" /></td>
-              <td><input v-model="m.carrier" @change="saveMethod(m)" placeholder="—" /></td>
-              <td class="num">
+              <td class="c-name" data-label="名前"><input v-model="m.name" @change="saveMethod(m)" /></td>
+              <td class="c-carrier" data-label="配送サービス"><input v-model="m.carrier" @change="saveMethod(m)" placeholder="—" /></td>
+              <td class="num c-fee" data-label="送料（税込）">
                 <span class="num money-cell">
                   <span class="yen">¥</span>
-                  <input type="number" v-model.number="m.fee" @change="saveMethod(m)" style="width:72px" title="税込の実費" />
+                  <input type="number" inputmode="numeric" v-model.number="m.fee" @change="saveMethod(m)" style="width:72px" title="税込の実費" />
                 </span>
               </td>
-              <td class="actions">
+              <td class="actions c-del">
                 <button class="icon ghost" @click="removeMethod(m)" aria-label="削除">
                   <Icon name="trash" :size="16" />
                 </button>
@@ -789,7 +789,7 @@ const runLabel: Record<string, string> = {
           <span class="section-head-icon"><Icon name="inbox" :size="16" /></span>
           <h2 class="section-head-title">お金の口座</h2>
         </div>
-        <table v-if="cashAccounts.length" class="compact accounts-cash-table">
+        <table v-if="cashAccounts.length" class="compact stack-table accounts-cash-table">
           <thead>
             <tr>
               <th>名前</th><th>種類</th>
@@ -799,16 +799,16 @@ const runLabel: Record<string, string> = {
           </thead>
           <tbody>
             <tr v-for="a in cashAccounts" :key="a.id" :class="{ faint: !a.is_active }">
-              <td>
+              <td class="c-name">
                 <input :value="a.name" @change="saveAccountName(a, $event.target as HTMLInputElement)" />
                 <StatusChip v-if="!a.is_active" tone="neutral" label="使っていない" />
               </td>
-              <td>
+              <td class="c-kind" data-label="種類">
                 <select :value="a.kind" @change="saveAccountKind(a, ($event.target as HTMLSelectElement).value as CashAccountKind)">
                   <option v-for="k in ACCOUNT_KINDS" :key="k" :value="k">{{ ACCOUNT_KIND_LABEL[k] }}</option>
                 </select>
               </td>
-              <td class="num">
+              <td class="num c-open" data-label="はじめにあった金額">
                 <span class="num money-cell">
                   <span class="yen">¥</span>
                   <input
@@ -818,15 +818,15 @@ const runLabel: Record<string, string> = {
                   />
                 </span>
               </td>
-              <td>
+              <td class="c-date" data-label="いつの時点">
                 <input
                   type="date" :value="a.opening_date" style="width:140px"
                   title="この日より前の入出金は記録できません"
                   @change="saveAccountOpeningDate(a, $event.target as HTMLInputElement)"
                 />
               </td>
-              <td class="num"><strong :class="{ loss: a.balance < 0 }">{{ yen(a.balance) }}</strong></td>
-              <td class="actions">
+              <td class="num c-bal" data-label="いまの残高"><strong :class="{ loss: a.balance < 0 }">{{ yen(a.balance) }}</strong></td>
+              <td class="actions c-act">
                 <button class="sm ghost" @click="toggleAccountUse(a)">{{ a.is_active ? '使わない' : '使う' }}</button>
               </td>
             </tr>
@@ -863,7 +863,7 @@ const runLabel: Record<string, string> = {
             （{{ loanRemainingByPerson.map(p => `${p.name} ${yen(p.remaining)}`).join('・') }}）
           </span>
         </div>
-        <table v-if="loans.length" class="compact loans-table">
+        <table v-if="loans.length" class="compact stack-table loans-table">
           <thead>
             <tr>
               <th>借りた日</th><th>相手</th><th>メモ</th>
@@ -872,18 +872,18 @@ const runLabel: Record<string, string> = {
           </thead>
           <tbody>
             <tr v-for="l in loans" :key="l.id">
-              <td><input type="date" :value="l.occurred_at" style="width:140px" @change="saveLoanDate(l, $event.target as HTMLInputElement)" /></td>
-              <td><input :value="l.counterparty" style="width:80px" @change="saveLoanCounterparty(l, $event.target as HTMLInputElement)" /></td>
-              <td><input :value="l.note ?? ''" placeholder="—" @change="saveLoanNote(l, $event.target as HTMLInputElement)" /></td>
-              <td class="num">
+              <td class="c-date" data-label="借りた日"><input type="date" :value="l.occurred_at" style="width:140px" @change="saveLoanDate(l, $event.target as HTMLInputElement)" /></td>
+              <td class="c-who" data-label="相手"><input :value="l.counterparty" style="width:80px" @change="saveLoanCounterparty(l, $event.target as HTMLInputElement)" /></td>
+              <td class="c-note" data-label="メモ"><input :value="l.note ?? ''" placeholder="—" @change="saveLoanNote(l, $event.target as HTMLInputElement)" /></td>
+              <td class="num c-amt" data-label="借りた額">
                 <span class="num money-cell">
                   <span class="yen">¥</span>
                   <input :value="num(l.amount)" inputmode="numeric" style="width:96px" @change="saveLoanAmount(l, $event.target as HTMLInputElement)" />
                 </span>
               </td>
-              <td class="num faint">{{ yen(l.settled) }}</td>
-              <td class="num"><strong :class="{ faint: l.remaining === 0 }">{{ yen(l.remaining) }}</strong></td>
-              <td class="actions">
+              <td class="num faint c-settled" data-label="返した額">{{ yen(l.settled) }}</td>
+              <td class="num c-rest" data-label="残り"><strong :class="{ faint: l.remaining === 0 }">{{ yen(l.remaining) }}</strong></td>
+              <td class="actions c-del">
                 <button
                   class="icon ghost" aria-label="削除"
                   :title="l.settled > 0 ? '返した記録があるので消せません（月次タブで返した記録を消すと消せます）' : 'この借入を消す'"
@@ -952,7 +952,7 @@ const runLabel: Record<string, string> = {
           <label class="field">
             <span>長期滞留とみなす日数</span>
             <input
-              type="number" style="width:120px"
+              type="number" inputmode="numeric" style="width:120px"
               :value="settings.aging_warn_days ?? 90"
               @change="saveSetting('aging_warn_days', ($event.target as HTMLInputElement).value)"
             />
@@ -970,7 +970,7 @@ const runLabel: Record<string, string> = {
           <label class="field">
             <span>自動取り込みの間隔（時間）</span>
             <input
-              type="number" style="width:120px"
+              type="number" inputmode="numeric" style="width:120px"
               :value="settings.collect_interval_h ?? 1"
               @change="saveSetting('collect_interval_h', ($event.target as HTMLInputElement).value)"
             />
@@ -1062,23 +1062,23 @@ const runLabel: Record<string, string> = {
         </p>
 
         <p class="panel-title runs-title">実行履歴</p>
-        <table class="compact">
+        <table class="compact stack-table runs-table">
           <thead>
             <tr><th>日時</th><th class="col-target">対象</th><th>結果</th><th class="num">取得</th><th class="num">追加</th><th>メモ</th></tr>
           </thead>
           <tbody>
             <tr v-for="r in runs" :key="r.id">
-              <td class="faint">{{ dateTime(r.started_at) }}</td>
-              <td class="faint col-target">{{ runSourceLabel(r) }}</td>
-              <td>
+              <td class="faint c-time">{{ dateTime(r.started_at) }}</td>
+              <td class="faint col-target c-target">{{ runSourceLabel(r) }}</td>
+              <td class="c-status">
                 <StatusChip
                   :tone="r.status === 'ok' ? 'ok' : 'warn'"
                   :label="runLabel[r.status] ?? r.status"
                 />
               </td>
-              <td class="num">{{ r.fetched }}</td>
-              <td class="num">{{ r.inserted }}</td>
-              <td class="faint small">{{ r.message ?? '' }}</td>
+              <td class="num c-fetch" data-label="取得">{{ r.fetched }}</td>
+              <td class="num c-ins" data-label="追加">{{ r.inserted }}</td>
+              <td class="faint small c-msg">{{ r.message ?? '' }}</td>
             </tr>
           </tbody>
         </table>
@@ -1149,13 +1149,13 @@ const runLabel: Record<string, string> = {
           <h2 class="section-head-title">仕入先</h2>
         </div>
         <div class="accounts-table-wrap">
-        <table class="compact accounts-table">
+        <table class="compact stack-table accounts-table">
           <thead>
             <tr><th>名前</th><th>種別</th><th>取り込みキーワード</th><th>自動タグ</th><th class="num">送料の既定値</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="a in accounts" :key="a.id">
-              <td class="name-cell">
+              <td class="name-cell c-name">
                 <div>
                   <span :class="{ faint: !a.is_active }">{{ a.name }}</span>
                   <StatusChip v-if="!a.is_active" tone="neutral" label="無効" />
@@ -1167,14 +1167,14 @@ const runLabel: Record<string, string> = {
                   <template v-else>累計：なし</template>
                 </p>
               </td>
-              <td>
+              <td class="c-kind" data-label="種別">
                 <select :value="a.kind" @change="updateAccountKind(a, ($event.target as HTMLSelectElement).value as ShopAccountKind)">
                   <option value="mellojoy">メロジョイ</option>
                   <option value="tiktok">TikTok Shop</option>
                   <option value="other">その他</option>
                 </select>
               </td>
-              <td class="keywords-cell">
+              <td class="keywords-cell c-kw" data-label="取り込みキーワード">
                 <textarea
                   v-if="a.kind !== 'other'"
                   rows="1"
@@ -1184,24 +1184,24 @@ const runLabel: Record<string, string> = {
                 />
                 <span v-else class="faint">—</span>
               </td>
-              <td class="auto-tags-cell">
+              <td class="auto-tags-cell c-tags" data-label="自動タグ">
                 <div class="chip-row">
                   <StatusChip v-for="t in a.auto_tags" :key="t.id" tone="info" :label="t.name" />
                   <button class="sm ghost" @click="openAccountTagPicker(a, $event)" title="自動タグを編集する">タグ</button>
                 </div>
               </td>
-              <td class="num">
+              <td class="num c-fee" data-label="送料の既定値">
                 <span class="num money-cell">
                   <span class="yen">¥</span>
                   <input
-                    type="number" min="0" step="1" style="width:90px"
+                    type="number" inputmode="numeric" min="0" step="1" style="width:90px"
                     :value="a.default_shipping_fee ?? ''"
                     title="手入力の仕入でこの仕入先を選んだとき送料に入る（税込）"
                     @change="saveAccountShippingFee(a, ($event.target as HTMLInputElement).value)"
                   />
                 </span>
               </td>
-              <td class="actions">
+              <td class="actions c-act">
                 <div class="actions-row">
                   <button class="sm ghost" @click="renameAccount(a)">改名</button>
                   <button v-if="a.kind === 'mellojoy' && a.is_active" class="sm" @click="openShopLogin(a.id)">
@@ -1242,14 +1242,14 @@ const runLabel: Record<string, string> = {
           <span class="section-head-icon"><Icon name="note" :size="16" /></span>
           <h2 class="section-head-title">タグ</h2>
         </div>
-        <table class="compact">
+        <table class="compact stack-table tags-table">
           <thead>
             <tr><th>名前</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="t in tags" :key="t.id">
-              <td><StatusChip tone="info" :label="t.name" /></td>
-              <td class="actions">
+              <td class="c-name"><StatusChip tone="info" :label="t.name" /></td>
+              <td class="actions c-act">
                 <button class="sm ghost" @click="renameTag(t)">改名</button>
                 <button class="icon ghost" @click="deleteTag(t)" aria-label="削除">
                   <Icon name="trash" :size="16" />
@@ -1320,15 +1320,15 @@ const runLabel: Record<string, string> = {
           <button class="ghost sm" @click="runAutoBackupNow"><Icon name="download" :size="14" /> いま取る</button>
           <button class="ghost sm" @click="openBackupFolder"><Icon name="folder" :size="14" /> フォルダを開く</button>
         </div>
-        <table class="compact">
+        <table class="compact stack-table backups-table">
           <thead>
             <tr><th>ファイル名</th><th class="num">サイズ</th><th>日時</th></tr>
           </thead>
           <tbody>
             <tr v-for="f in autoBackup?.files ?? []" :key="f.name">
-              <td class="faint">{{ f.name }}</td>
-              <td class="num faint">{{ fileSizeText(f.size) }}</td>
-              <td class="faint nowrap">{{ dateTime(f.created_at) }}</td>
+              <td class="faint c-name">{{ f.name }}</td>
+              <td class="num faint c-size" data-label="サイズ">{{ fileSizeText(f.size) }}</td>
+              <td class="faint nowrap c-time" data-label="日時">{{ dateTime(f.created_at) }}</td>
             </tr>
           </tbody>
         </table>
@@ -1363,16 +1363,16 @@ const runLabel: Record<string, string> = {
 
         <div v-if="saleExclusions.length" class="exclusions-zone">
           <p class="panel-title">取り込まない販売</p>
-          <table class="compact">
+          <table class="compact stack-table exclusions-table">
             <thead>
               <tr><th>商品名</th><th>出品ID</th><th>除外日</th><th></th></tr>
             </thead>
             <tbody>
               <tr v-for="e in saleExclusions" :key="e.mercari_item_id">
-                <td>{{ e.title }}</td>
-                <td class="faint">{{ e.mercari_item_id }}</td>
-                <td class="faint nowrap">{{ e.excluded_at }}</td>
-                <td class="actions">
+                <td class="c-name">{{ e.title }}</td>
+                <td class="faint c-id" data-label="出品ID">{{ e.mercari_item_id }}</td>
+                <td class="faint nowrap c-time" data-label="除外日">{{ e.excluded_at }}</td>
+                <td class="actions c-act">
                   <button class="sm ghost" @click="restoreSaleExclusion(e)">戻す</button>
                 </td>
               </tr>
@@ -1646,4 +1646,209 @@ const runLabel: Record<string, string> = {
 .update-row { align-items: center; }
 .update-row > button { flex-shrink: 0; white-space: nowrap; }
 .update-result { min-width: 0; overflow-wrap: anywhere; }
+
+/* ============================================================
+   スマホ幅（768px 未満）：長い 1 枚のページを、項目ごとに縦に積む。
+   - 入力欄は全幅・44px（16px 以上の字で iPhone が拡大しない）、ボタンも 44px 以上
+   - 表は列を縦に積んだ行にする（見出しは各項目の上の小さな字に）。表の中の入力欄は、
+     ホバーが無いので最初から枠を見せる（枠なしだと「ただの文字」に見えて編集できると分からない）
+   - 長い説明・URL は折り返す
+   デスクトップ幅（768px 以上）の見た目には一切効かせない。
+   ============================================================ */
+@media (max-width: 767px) {
+  .page-head .grow { display: none; }
+  .hint { overflow-wrap: anywhere; }
+
+  /* 表を含む面の中の余白を、スマホ幅の面（14px）に揃える */
+  .table-panel .section-head { padding: 14px 14px 0; }
+  .table-panel .panel-title { padding: 14px 14px 0; }
+  .panel-foot { padding: 12px 14px 14px; }
+  .loan-summary { padding: 0 14px 12px; }
+  .loan-empty { padding: 4px 14px 0; }
+
+  /* 入力：1 列・全幅。数字だけの欄は短いまま（幅がはみ出さないようにだけする） */
+  .fields { gap: 12px; }
+  .fields > .field { flex: 1 1 100%; min-width: 0; }
+  .fields .field input:not([type="number"]):not([type="checkbox"]):not([type="radio"]),
+  .fields .field select { width: 100% !important; max-width: 100%; }
+  .fields .field input[type="number"] { max-width: 100%; }
+  .fields .field input:not([type="checkbox"]):not([type="radio"]),
+  .fields .field select { height: 44px; }
+  .fields .field .money-cell { display: flex; }
+  .fields .field .money-cell input { flex: 1 1 auto; min-width: 0; }
+  .repay-plan .field { align-items: stretch; }
+  .repay-plan .field input { width: 100% !important; height: 44px; }
+  .repay-plan .money-cell { display: flex; }
+  .repay-plan .money-cell input { flex: 1 1 auto; min-width: 0; }
+
+  /* ボタン：どれも 44px 以上（ホバーで薄くなる ghost にも枠を付けて、押せると分かるように） */
+  .panel button:not(.icon) { min-height: 44px; }
+  .panel button.ghost:not(.icon) { border-color: var(--line); }
+  .panel button.icon { width: 44px; height: 44px; }
+  .stack-table button.icon { border-color: var(--line); }
+  .row { flex-wrap: wrap; }
+  .health-head { flex-wrap: wrap; }
+  .loan-add-btn { flex: 1 1 100%; justify-content: center; }
+
+  /* チェック付きの説明：タップしやすい高さに。チェックは大きめ（説明の文章は折り返して縮める） */
+  label.row.hint { flex-wrap: nowrap; align-items: flex-start; min-height: 44px; gap: 10px; }
+  label.row.hint input[type="checkbox"] { width: 20px; height: 20px; margin-top: 2px; }
+  /* 説明・チェックの直後に入力が続くとき、くっつかないように */
+  .hint + .fields,
+  label.row.hint + .fields { margin-top: 12px; }
+
+  /* 長い URL・モデル名は折り返す */
+  .ai-key-url, .track-key-url { overflow-wrap: anywhere; user-select: all; }
+  .model-manual { flex-wrap: wrap; }
+  .model-manual input { flex: 1 1 160px; }
+
+  /* 健康診断：補助は切らずに見せる（ホバーの title は読めない） */
+  .health-row { align-items: flex-start; }
+  .health-row .row-title.one-line { -webkit-line-clamp: 3; min-height: 0; }
+  .health-row .row-sub { -webkit-line-clamp: 4; min-height: 0; }
+  .health-row > button { align-self: center; }
+
+  /* --- 表を縦に積んだ行にする --- */
+  .stack-table,
+  .stack-table tbody,
+  .stack-table tr,
+  .stack-table td { display: block; width: auto; }
+  .stack-table thead { display: none; }
+  .stack-table tbody tr { padding: 12px 0; border-top: 1px solid var(--line-soft); }
+  .table-panel .stack-table tbody tr { padding: 12px 14px; }
+  .stack-table tbody tr:hover { background: transparent; }
+  .stack-table td { padding: 0; border: 0; min-width: 0; }
+  .stack-table td.num,
+  .stack-table td.actions { text-align: left; }
+  .stack-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    font-size: var(--fs-11);
+    font-weight: 500;
+    line-height: 16px;
+    color: var(--text-faint);
+  }
+  /* 表の中の入力：全幅・44px・最初から枠つき */
+  .stack-table td input:not([type="checkbox"]),
+  .stack-table td select,
+  .stack-table td textarea {
+    width: 100% !important;
+    min-width: 0;
+    height: 44px;
+    border-color: var(--line);
+    background: var(--surface);
+  }
+  .stack-table td textarea { height: auto; min-height: 44px; }
+  .stack-table td .money-cell { display: flex; width: 100%; }
+  .stack-table td .money-cell input { flex: 1 1 auto; }
+
+  /* 発送方法：名前（と削除）→ 配送サービス・送料 */
+  .methods-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 44px;
+    gap: 10px 8px;
+  }
+  .methods-table .c-name { grid-column: 1 / 3; grid-row: 1; }
+  .methods-table .c-del { grid-column: 3; grid-row: 1; align-self: end; }
+  .methods-table .c-carrier { grid-column: 1; grid-row: 2; }
+  .methods-table .c-fee { grid-column: 2 / 4; grid-row: 2; }
+
+  /* お金の口座：名前 → 種類・いまの残高 → はじめの金額・日付 → 操作 */
+  .accounts-cash-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px 8px;
+  }
+  .accounts-cash-table .c-name { grid-column: 1 / -1; }
+  .accounts-cash-table .c-name .chip { margin: 4px 0 0; }
+  .accounts-cash-table .c-bal { font-size: var(--fs-20); line-height: 44px; }
+  .accounts-cash-table .c-act { grid-column: 1 / -1; }
+  .accounts-cash-table .c-act button { width: 100%; }
+
+  /* 借りたお金：日付・相手 → メモ → 借りた額・返した額 → 残り・削除 */
+  .loans-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px 8px;
+  }
+  .loans-table .c-note { grid-column: 1 / -1; }
+  .loans-table .c-settled { line-height: 44px; }
+  .loans-table .c-rest { font-size: var(--fs-16); line-height: 44px; }
+  .loans-table .c-del { justify-self: end; align-self: end; }
+
+  /* 実行履歴：結果 → 対象 → 日時・取得・追加 → メモ（一覧の行の 4 段と同じ並び） */
+  .runs-table tbody tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 14px;
+  }
+  .runs-table .c-status { order: 1; flex: 1 1 100%; margin-bottom: 2px; }
+  .runs-table .c-target { order: 2; flex: 1 1 100%; width: auto; font-weight: 600; color: var(--text); }
+  .runs-table .c-time { order: 3; font-size: var(--fs-13); }
+  .runs-table .c-fetch,
+  .runs-table .c-ins { order: 3; font-size: var(--fs-13); color: var(--text-dim); }
+  .runs-table td.c-fetch[data-label]::before,
+  .runs-table td.c-ins[data-label]::before { display: inline; margin: 0 4px 0 0; font-size: inherit; font-weight: inherit; line-height: inherit; color: inherit; }
+  .runs-table .c-msg { order: 4; flex: 1 1 100%; margin-top: 2px; overflow-wrap: anywhere; }
+  .runs-table .c-msg:empty { display: none; }
+
+  /* 仕入先：名前（と累計）→ 種別・送料の既定値 → キーワード → 自動タグ → 操作 */
+  .accounts-table-wrap { overflow: visible; }
+  .accounts-table { min-width: 0; }
+  .accounts-table .name-cell { white-space: normal; }
+  .accounts-table td.actions { white-space: normal; }
+  .accounts-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "name name"
+      "kind fee"
+      "kw   kw"
+      "tags tags"
+      "act  act";
+    gap: 10px 8px;
+  }
+  .accounts-table .c-name { grid-area: name; }
+  .accounts-table .c-kind { grid-area: kind; }
+  .accounts-table .c-fee { grid-area: fee; }
+  .accounts-table .c-kw { grid-area: kw; }
+  .accounts-table .c-tags { grid-area: tags; }
+  .accounts-table .c-act { grid-area: act; }
+  .accounts-table .name-cell > div { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-weight: 600; }
+  .accounts-table .name-cell > * + * { margin-left: 0; }
+  .stack-table .keywords-cell textarea { height: 72px; min-height: 72px; resize: none; font-size: var(--fs-16); }
+  .keywords-cell .faint { display: block; line-height: 44px; }
+  .auto-tags-cell { min-width: 0; }
+  /* 操作：2 列に並べる（改名・ログイン・無効にする・削除）。どれも同じ幅の 44px の札 */
+  .actions-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .stack-table .actions-row > button,
+  .stack-table .actions-row > button.icon { width: 100%; justify-content: center; }
+
+  /* タグ：名前 ・ 改名 ・ 削除 を 1 行に */
+  .tags-table tbody tr { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+  .tags-table .c-name { flex: 1 1 auto; }
+  .tags-table .c-act { flex: 0 0 auto; display: flex; gap: 4px; }
+
+  /* 自動バックアップのファイル：名前 → サイズ・日時 */
+  .backups-table tbody tr { display: flex; flex-wrap: wrap; gap: 2px 16px; padding: 10px 0; }
+  .backups-table .c-name { flex: 1 1 100%; overflow-wrap: anywhere; font-size: var(--fs-13); }
+  .backups-table .c-size, .backups-table .c-time { font-size: var(--fs-12); }
+  .backups-table td.c-size[data-label]::before,
+  .backups-table td.c-time[data-label]::before { display: inline; margin: 0 4px 0 0; font-size: inherit; font-weight: inherit; line-height: inherit; color: inherit; }
+
+  /* 取り込まない販売：商品名 → 出品 ID・除外日 → 戻す */
+  .exclusions-table tbody tr { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 16px; padding: 10px 0; }
+  .exclusions-table .c-name { flex: 1 1 100%; font-weight: 600; overflow-wrap: anywhere; }
+  .exclusions-table .c-id, .exclusions-table .c-time { font-size: var(--fs-12); }
+  .exclusions-table td.c-id[data-label]::before,
+  .exclusions-table td.c-time[data-label]::before { display: inline; margin: 0 4px 0 0; font-size: inherit; font-weight: inherit; line-height: inherit; color: inherit; }
+  .exclusions-table .c-id { overflow-wrap: anywhere; }
+  .exclusions-table .c-act { flex: 1 1 100%; margin-top: 4px; }
+  .exclusions-table .c-act button { width: 100%; border-color: var(--line); }
+
+  /* アプリの更新：ボタンと結果の文を折り返して縦に */
+  .update-row { flex-wrap: wrap; }
+}
 </style>

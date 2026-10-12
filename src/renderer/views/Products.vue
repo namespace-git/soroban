@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { isRealized } from '../../shared/recognition'
-import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
+import { ref, computed, onMounted, watch, inject, nextTick, type Ref } from 'vue'
 import type { ProductSummary, ProductKarte, InventoryItem, ShippingMethod, Tag } from '../../shared/types'
 import Icon from '../components/Icon.vue'
 import StatusChip from '../components/StatusChip.vue'
@@ -36,6 +36,11 @@ const period = ref<Period>('all')
 
 type ListSort = 'profit' | 'sold' | 'stock' | 'aging'
 const listSort = ref<ListSort>('profit')
+
+// --- スマホ幅：絞り込みは「絞り込み」ボタンの中にまとめる（デスクトップ幅では今までどおり常に並ぶ）。
+//     閉じていても、いくつ効いているかはボタンの数字で分かる ---
+const filtersOpen = ref(false)
+const activeFilterCount = computed(() => (period.value !== 'all' ? 1 : 0))
 
 /** 在庫タブ・設定タブと同じ「長期滞留」のしきい値（日数） */
 const agingWarnDays = ref(90)
@@ -112,6 +117,31 @@ async function selectProduct(modelCode: string) {
   resetEstimate()
 }
 
+// --- スマホ幅：一覧とカルテは入れ替えて出す（デスクトップ幅では今までどおり並ぶ）。
+//     入れ替えのたびに本文の先頭へ戻し、一覧へ戻るときは元の位置へ戻す ---
+const pageEl = ref<HTMLElement | null>(null)
+const mobileDetail = ref(false)
+let listScrollTop = 0
+const isMobileWidth = () => window.matchMedia('(max-width: 767px)').matches
+const scrollerEl = () => pageEl.value?.closest('main') ?? null
+
+/** 一覧の行・ホームの型番ランキングからカルテを開く */
+async function openKarte(modelCode: string) {
+  if (isMobileWidth()) {
+    const main = scrollerEl()
+    listScrollTop = main?.scrollTop ?? 0
+    mobileDetail.value = true
+    if (main) main.scrollTop = 0
+  }
+  await selectProduct(modelCode)
+}
+async function closeKarte() {
+  mobileDetail.value = false
+  await nextTick()
+  const main = scrollerEl()
+  if (main) main.scrollTop = listScrollTop
+}
+
 /** 選んでいる型番はそのままに、数字だけ更新する（データ更新後の再読み込み用。試算の入力は消さない） */
 async function refreshKarte() {
   if (!karte.value) return
@@ -121,7 +151,7 @@ async function refreshKarte() {
 onMounted(async () => {
   await Promise.all([load(), loadSettings(), loadTags(), loadMethods()])
   if (gotoPayload.value?.modelCode) {
-    await selectProduct(gotoPayload.value.modelCode)
+    await openKarte(gotoPayload.value.modelCode)
     gotoPayload.value = null
   } else if (filteredProducts.value.length) {
     await selectProduct(filteredProducts.value[0].model_code)
@@ -130,7 +160,7 @@ onMounted(async () => {
 
 watch(gotoPayload, async (p) => {
   if (p?.modelCode) {
-    await selectProduct(p.modelCode)
+    await openKarte(p.modelCode)
     gotoPayload.value = null
   }
 })
@@ -331,18 +361,32 @@ const estimateCompare = computed(() => {
 </script>
 
 <template>
-  <div class="page">
+  <div ref="pageEl" class="page">
     <div class="page-head">
       <h1 class="page-title">商品</h1>
     </div>
 
-    <div class="layout">
+    <div class="layout" :class="{ 'm-detail': mobileDetail }">
       <!-- 左：型番の一覧 -->
       <div class="panel list-panel">
         <div class="toolbar">
           <SearchBox v-model="searchText" placeholder="型番・商品名・タグを検索" />
-          <PeriodSelect v-model="period" />
-          <select v-model="listSort">
+          <!-- スマホ幅だけ：絞り込みをこのボタンの中にまとめる。数字は効いている絞り込みの数 -->
+          <button
+            type="button"
+            class="m-filter-toggle"
+            :class="{ on: filtersOpen || activeFilterCount > 0 }"
+            :aria-expanded="filtersOpen"
+            @click="filtersOpen = !filtersOpen"
+          >
+            絞り込み<span v-if="activeFilterCount" class="m-filter-n">{{ activeFilterCount }}</span>
+          </button>
+          <!-- デスクトップ幅では display: contents（この入れ物は無いのと同じ） -->
+          <div class="toolbar-filters" :class="{ 'm-open': filtersOpen }">
+            <span class="m-filter-label">最終販売日で絞る</span>
+            <PeriodSelect v-model="period" :class="{ 'is-custom': typeof period === 'object' }" />
+          </div>
+          <select v-model="listSort" class="sort-select">
             <option value="profit">粗利合計</option>
             <option value="sold">売れた数</option>
             <option value="stock">在庫が多い</option>
@@ -359,7 +403,7 @@ const estimateCompare = computed(() => {
             type="button"
             class="prow" :class="{ selected: karte?.summary.model_code === p.model_code }"
             title="この型番のカルテを開く"
-            @click="selectProduct(p.model_code)"
+            @click="openKarte(p.model_code)"
           >
             <span class="prow-thumb">
               <img
@@ -398,6 +442,10 @@ const estimateCompare = computed(() => {
 
       <!-- 右：選んだ型番のカルテ -->
       <div class="karte">
+        <!-- スマホ幅だけ：カルテから一覧へ戻る（デスクトップ幅では出さない） -->
+        <button type="button" class="m-back" @click="closeKarte">
+          <Icon name="arrow-right" :size="16" class="m-back-icon" />商品の一覧
+        </button>
         <Skeleton v-if="karteLoading" :rows="6" />
 
         <template v-else-if="karte">
@@ -454,7 +502,7 @@ const estimateCompare = computed(() => {
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel stat-panel">
             <div class="stat-grid">
               <div class="stat-card">
                 <span class="stat-card-label">手元の在庫</span>
@@ -492,7 +540,7 @@ const estimateCompare = computed(() => {
               <div class="calc-in">
                 <label class="calc-field">
                   売価
-                  <input type="number" v-model.number="estimatePrice" min="0" />
+                  <input type="number" inputmode="numeric" v-model.number="estimatePrice" min="0" />
                 </label>
                 <label class="calc-field">
                   発送
@@ -527,7 +575,7 @@ const estimateCompare = computed(() => {
             <p class="panel-title table-title">
               手元の在庫（{{ karte.in_stock.count }} 点<template v-if="karteListedCount">・うち出品中 {{ karteListedCount }}</template>）
             </p>
-            <table v-if="karte.items.length" class="compact">
+            <table v-if="karte.items.length" class="compact item-table">
               <thead>
                 <tr>
                   <th>コード</th>
@@ -540,15 +588,15 @@ const estimateCompare = computed(() => {
               </thead>
               <tbody>
                 <tr v-for="i in karte.items" :key="i.id">
-                  <td>
+                  <td class="c-code">
                     <CodeChip kind="item" :code="i.item_code" />
                     <span v-if="i.parent_id" class="faint split-hint">分割</span>
                   </td>
-                  <td class="faint">{{ i.shop_account_name ?? '—' }} ・ {{ i.acquired_at }}</td>
-                  <td class="num">{{ yen(i.landed_cost) }}</td>
-                  <td class="num">{{ i.aging_days }}日</td>
-                  <td><StatusPill :tone="itemStatePill(i).tone" :label="itemStatePill(i).label" /></td>
-                  <td class="num"><button class="sm ghost" @click="trackItem(i)">追跡</button></td>
+                  <td class="faint c-src">{{ i.shop_account_name ?? '—' }} ・ {{ i.acquired_at }}</td>
+                  <td class="num c-cost" data-label="原価">{{ yen(i.landed_cost) }}</td>
+                  <td class="num c-age" data-label="滞留">{{ i.aging_days }}日</td>
+                  <td class="c-state"><StatusPill :tone="itemStatePill(i).tone" :label="itemStatePill(i).label" /></td>
+                  <td class="num c-act"><button class="sm ghost" @click="trackItem(i)">追跡</button></td>
                 </tr>
               </tbody>
             </table>
@@ -557,7 +605,7 @@ const estimateCompare = computed(() => {
 
           <div class="panel table-panel">
             <p class="panel-title table-title">販売の履歴</p>
-            <table v-if="karte.sales.length" class="compact">
+            <table v-if="karte.sales.length" class="compact sale-table">
               <thead>
                 <tr>
                   <th>販売日</th>
@@ -570,17 +618,17 @@ const estimateCompare = computed(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="s in karte.sales" :key="s.id">
-                  <td class="faint">{{ s.sold_at }}</td>
-                  <td class="sale-title">{{ s.title }}</td>
-                  <td class="num">{{ yen(s.price) }}</td>
-                  <td class="num">
+                <tr v-for="s in karte.sales" :key="s.id" :class="{ 'needs-input': !s.is_shipping_confirmed }">
+                  <td class="faint c-date">{{ s.sold_at }}</td>
+                  <td class="sale-title c-title">{{ s.title }}</td>
+                  <td class="num c-price" data-label="価格">{{ yen(s.price) }}</td>
+                  <td class="num c-ship" data-label="送料">
                     {{ yen(s.shipping_fee) }}
                     <StatusPill v-if="!s.is_shipping_confirmed" tone="warn" label="送料未入力" />
                   </td>
-                  <td class="num">{{ yen(s.cost) }}</td>
-                  <td class="num" :class="s.gross_profit >= 0 ? 'profit' : 'loss'">{{ !isRealized(s) ? '見込み ' : '' }}{{ yen(s.gross_profit) }}</td>
-                  <td class="faint">{{ s.buyer ?? '—' }}</td>
+                  <td class="num c-cost" data-label="原価">{{ yen(s.cost) }}</td>
+                  <td class="num c-profit" data-label="粗利" :class="s.gross_profit >= 0 ? 'profit' : 'loss'">{{ !isRealized(s) ? '見込み ' : '' }}{{ yen(s.gross_profit) }}</td>
+                  <td class="faint c-buyer" data-label="買い手">{{ s.buyer ?? '—' }}</td>
                 </tr>
               </tbody>
             </table>
@@ -716,10 +764,222 @@ const estimateCompare = computed(() => {
 .sale-title { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .listing-note { padding: 4px 20px 16px; margin: 0; font-size: var(--fs-12); }
 
+/* --- スマホ幅だけで出すもの。デスクトップ幅では出さない（絞り込みの入れ物は無いのと同じ） --- */
+.m-back, .m-filter-toggle, .m-filter-label { display: none; }
+.toolbar-filters { display: contents; }
+
 @media (max-width: 1099px) {
   .layout { grid-template-columns: 1fr; }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .table-panel { overflow-x: auto; }
   .prow-list { max-height: 320px; overflow-y: auto; }
+}
+
+/* ============================================================
+   スマホ幅（768px 未満）：一覧とカルテを入れ替えて出す（一覧 → 行を押す → カルテ → 「商品の一覧」で戻る）。
+   一覧は 1 型番 1 枚のカード（style.css の 4 段：ラベル → 名前 → 補助 → 粗利）。
+   カルテの表（手元の在庫・販売の履歴）は、列を縦に積んだ行にする。
+   デスクトップ幅（768px 以上）の見た目には一切効かせない。
+   ============================================================ */
+@media (max-width: 767px) {
+  .layout { gap: 12px; }
+  .layout:not(.m-detail) .karte { display: none; }
+  .layout.m-detail .list-panel { display: none; }
+
+  /* --- 一覧 --- */
+  .list-panel { padding: 0; background: transparent; box-shadow: none; border-radius: 0; gap: 8px; }
+
+  /* ツールバー：検索 →（絞り込み）→ 並び替え → 件数・合計（売上タブと同じ形） */
+  .toolbar { gap: 8px; margin-bottom: 0; }
+  .toolbar :deep(.search-box) { flex: 1 1 160px; width: auto; min-width: 0; }
+  .toolbar .m-filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    height: 44px;
+    padding: 0 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+  .toolbar .m-filter-toggle.on { background: var(--brand-soft); border-color: var(--brand); }
+  .m-filter-n {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--surface);
+    font-size: var(--fs-12);
+    font-weight: 700;
+  }
+  .toolbar-filters { display: none; order: 1; flex: 1 1 100%; }
+  .toolbar-filters.m-open { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .toolbar-filters .m-filter-label { display: block; grid-column: 1 / -1; font-size: var(--fs-12); color: var(--text-dim); }
+  .toolbar-filters .period-select { display: flex; width: 100%; grid-column: 1 / -1; }
+  .toolbar-filters .period-select :deep(select) { flex: 1 1 100%; min-width: 0; width: 100%; height: 44px; }
+  .toolbar-filters .period-select :deep(input) { flex: 1 1 120px; min-width: 0; height: 44px; }
+  .toolbar .sort-select { order: 2; flex: 1 1 140px; min-width: 0; height: 44px; }
+  .toolbar .grow { display: none; }
+  .toolbar .toolbar-count { order: 3; flex: 0 0 auto; margin-left: auto; text-align: right; }
+
+  /* 行＝カード */
+  .prow-list { gap: 8px; max-height: none; overflow: visible; }
+  .prow {
+    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-areas:
+      "thumb body"
+      "profit profit";
+    align-items: start;
+    gap: 8px 12px;
+    padding: 12px;
+    min-height: 0;
+    background: var(--surface);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+  }
+  .prow:first-child { border-top: none; }
+  .prow:hover { background: var(--surface); }
+  /* 最後に見た型番：塗りつぶすとサムネイル（同じクリーム色）が消えるので、黄の枠で示す */
+  .prow.selected,
+  .prow.selected:hover { background: var(--surface); box-shadow: inset 0 0 0 2px var(--brand), var(--shadow-1); }
+  .prow-thumb { grid-area: thumb; }
+  .prow-thumb .thumb, .prow-thumb .thumb-placeholder { width: 48px; height: 48px; }
+  .prow-body { grid-area: body; }
+  .prow-body .row-labels { min-height: 0; }
+  /* 名前は 2 行まで（ホバーの title は読めないので、切れにくくする） */
+  .prow-body .row-title.one-line { -webkit-line-clamp: 2; min-height: 0; font-size: var(--fs-14); }
+  .prow-profit {
+    grid-area: profit;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line-soft);
+    text-align: left;
+    font-size: var(--fs-13);
+  }
+  .prow-profit strong { font-size: var(--fs-16); }
+  .prow-profit .faint:last-child { margin-left: auto; }
+
+  /* --- カルテ --- */
+  .karte { gap: 12px; }
+  .m-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
+    min-height: 44px;
+    padding: 0 16px 0 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--text-dim);
+  }
+  .m-back-icon { transform: scaleX(-1); }
+
+  /* 見出し：写真と名前を並べ、画像の操作・タグ/名前/メモは下に 44px の押せる行で */
+  .karte-head {
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr);
+    grid-template-areas:
+      "thumb text"
+      "tact  tact"
+      "hact  hact";
+    gap: 10px 12px;
+    align-items: start;
+  }
+  .karte-thumb-col { display: contents; }
+  .karte-thumb-wrap { grid-area: thumb; }
+  .karte-head-text { grid-area: text; }
+  .karte-name { font-size: var(--fs-16); overflow-wrap: anywhere; }
+  .karte-sub-line { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+  .karte-thumb-actions {
+    grid-area: tact;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 4px 12px;
+  }
+  .karte-thumb-actions button { height: 44px; border-color: var(--line); }
+  .thumb-auto-check { min-height: 44px; font-size: var(--fs-13); white-space: normal; }
+  .karte-head-actions { grid-area: hact; gap: 8px; }
+  .karte-head-actions button { flex: 1 1 0; height: 44px; border-color: var(--line); }
+
+  /* 数字のカード：パネルをやめて、小さなカードを 2 列に。最初の「手元の在庫」だけ全幅 */
+  .stat-panel { padding: 0; background: transparent; box-shadow: none; border-radius: 0; }
+  .stat-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat-grid .stat-card { padding: 12px 14px; gap: 4px; min-width: 0; }
+  .stat-grid .stat-card:first-child { grid-column: 1 / -1; }
+  .stat-grid .stat-card-value { font-size: var(--fs-20); }
+  .stat-grid .stat-card:first-child .stat-card-value { font-size: var(--fs-28); }
+  .stat-grid .stat-card-sub { overflow-wrap: anywhere; }
+
+  /* 「この金額で売ったら？」：1 列。入力は 44px */
+  .calc-in { flex-direction: column; gap: 10px; }
+  .calc-field { flex-direction: column; align-items: stretch; gap: 4px; font-size: var(--fs-12); color: var(--text-dim); }
+  .calc-field input[type="number"], .calc-field select { width: 100%; min-width: 0; height: 44px; }
+  .calc-out-sub { overflow-wrap: anywhere; }
+
+  /* 表（手元の在庫・販売の履歴）：列を縦に積んだ行にする。行ごとの区切りは細い罫 */
+  .table-panel { overflow: visible; }
+  .table-title { padding: 0; margin: 0 0 6px; }
+  .listing-note { padding: 8px 0 0; overflow-wrap: anywhere; }
+  .item-table, .item-table tbody, .item-table tr, .item-table td,
+  .sale-table, .sale-table tbody, .sale-table tr, .sale-table td { display: block; }
+  .item-table thead, .sale-table thead { display: none; }
+  .item-table tr, .sale-table tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 12px;
+    padding: 12px 0;
+    border-top: 1px solid var(--line-soft);
+  }
+  .item-table tbody tr:first-child, .sale-table tbody tr:first-child { border-top: 0; }
+  .item-table tbody tr:hover, .sale-table tbody tr:hover { background: transparent; }
+  .item-table td, .sale-table td { padding: 0; border: 0; min-width: 0; }
+  .item-table td.num, .sale-table td.num { text-align: left; }
+  .item-table td[data-label]::before,
+  .sale-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: var(--fs-11);
+    line-height: 1.4;
+    color: var(--text-faint);
+  }
+
+  /* 手元の在庫：状態（と「追跡」）→ コード → 仕入 → 原価・滞留（見出しは値の左に小さく） */
+  .item-table .c-state { order: 1; flex: 1 1 auto; }
+  .item-table .c-act { order: 2; flex: 0 0 auto; }
+  .item-table .c-act button { height: 44px; min-width: 64px; border-color: var(--line); }
+  .item-table .c-code { order: 3; flex: 1 1 100%; }
+  .item-table .c-src { order: 4; flex: 1 1 100%; font-size: var(--fs-13); overflow-wrap: anywhere; }
+  .item-table .c-cost,
+  .item-table .c-age { order: 5; flex: 0 0 auto; }
+  .item-table td.c-cost[data-label]::before,
+  .item-table td.c-age[data-label]::before { display: inline; margin-right: 6px; font-size: var(--fs-12); }
+
+  /* 販売の履歴：商品名 → 日付・買い手 → 価格・送料 → 原価・粗利（送料未入力は橙の左帯） */
+  .sale-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px 8px;
+    align-items: start;
+  }
+  .sale-table tr.needs-input { padding-left: 10px; box-shadow: inset 3px 0 0 var(--warn); }
+  .sale-table .c-title { grid-column: 1 / -1; grid-row: 1; max-width: none; white-space: normal; overflow: visible; font-weight: 600; overflow-wrap: anywhere; }
+  .sale-table .c-date { grid-column: 1 / 3; grid-row: 2; font-size: var(--fs-13); }
+  .sale-table .c-buyer { grid-column: 3 / -1; grid-row: 2; font-size: var(--fs-13); overflow-wrap: anywhere; }
+  .sale-table td.c-buyer[data-label]::before { display: inline; margin-right: 4px; font-size: inherit; color: inherit; }
+  .sale-table .c-price { grid-column: 1 / 3; grid-row: 3; }
+  .sale-table .c-ship { grid-column: 3 / -1; grid-row: 3; }
+  .sale-table .c-cost { grid-column: 1 / 3; grid-row: 4; }
+  .sale-table .c-profit { grid-column: 3 / -1; grid-row: 4; font-weight: 700; }
 }
 </style>

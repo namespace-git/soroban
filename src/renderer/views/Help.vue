@@ -153,7 +153,7 @@ function onLightboxScrimUp(e: MouseEvent) {
                     <span v-else class="help-figure-diagram" v-html="DIAGRAMS[f.id]" />
                     <span class="help-figure-zoom" aria-hidden="true"><Icon name="search" :size="12" /></span>
                   </button>
-                  <figcaption class="help-figure-caption">{{ f.caption }}</figcaption>
+                  <figcaption class="help-figure-caption">{{ f.caption }}<span class="help-figure-hint">タップで拡大</span></figcaption>
                 </figure>
               </div>
 
@@ -499,5 +499,94 @@ function onLightboxScrimUp(e: MouseEvent) {
   .lightbox-leave-active .lightbox-panel {
     transition: none;
   }
+}
+
+/* スマホ幅だけで出す「タップで拡大」の案内（デスクトップ幅では出さない） */
+.help-figure-hint { display: none; }
+
+/* ============================================================
+   スマホ幅（768px 未満）
+   本文と図が 375px に収まる（横に動かない）。目次は 44px の押せる札。
+   図（スクショ 900px・説明の図 820px）は縮めると文字が潰れるので、本文では全体が見える大きさにし、
+   押すと画面いっぱいの拡大表示に開く（拡大表示の中は等倍に近い大きさで、指で動かして読む）。
+   デスクトップ幅（768px 以上）の見た目には一切効かせない。
+   ============================================================ */
+@media (max-width: 767px) {
+  .help-lead { margin-bottom: 8px; }
+  .help-search-row { margin-bottom: 14px; }
+  .help-search-row :deep(.search-box) { width: 100%; }
+
+  /* 幅の連鎖を切らない（どこかが中身の幅のままだと、図の幅に引っ張られて本文ごと横にはみ出す） */
+  .help-layout { gap: 14px; }
+  .help-content,
+  .help-cards,
+  .help-card,
+  .help-figures,
+  .help-figure { min-width: 0; max-width: 100%; }
+  .help-content { gap: 20px; }
+  .help-card { padding: 14px; }
+  .help-card-q { overflow-wrap: anywhere; }
+  .help-steps li { overflow-wrap: anywhere; }
+
+  /* 目次：2 列の札。どれも 44px 以上 */
+  .help-toc {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .help-toc-item {
+    height: auto;
+    min-height: 44px;
+    padding: 6px 12px;
+    border-radius: var(--radius-md);
+    font-size: var(--fs-13);
+    justify-content: center;
+    text-align: center;
+  }
+
+  /* 図：本文の幅いっぱい。説明の図は viewBox の比のまま縮む。画像は幅に収める */
+  .help-figure { align-items: stretch; }
+  .help-figure-btn { width: 100%; min-height: 44px; display: flex; align-items: center; justify-content: center; }
+  .help-figure-diagram { width: 100%; padding: 6px; }
+  .help-figure-zoom { width: 28px; height: 28px; bottom: 8px; right: 8px; }
+  .help-figure-hint {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-faint);
+  }
+  .help-links button { min-height: 44px; }
+  .help-example { overflow-wrap: anywhere; }
+
+  /* 拡大表示：画面いっぱい。図は等倍に近い大きさで置き、指で縦横に動かして読む。
+     閉じるボタンは 44px。説明文は上に置き、閉じるボタンの下に隠れない */
+  .lightbox-scrim { padding: 0; align-items: stretch; }
+  .lightbox-panel {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+    border-radius: 0;
+  }
+  .lightbox-close { top: max(6px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right)); width: 44px; height: 44px; z-index: 1; }
+  .lightbox-caption {
+    order: -1;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    padding-right: 52px;
+    text-align: left;
+  }
+  .lightbox-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    align-items: flex-start;
+    justify-content: flex-start;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .lightbox-img { max-width: none; max-height: none; flex: none; }
+  .lightbox-diagram { width: 760px; flex: none; }
 }
 </style>

@@ -495,7 +495,13 @@ watch(dataRevision, loadProfitStrip)
         </div>
         <button class="ghost topbar-search-cancel" @click="closeMobileSearch">キャンセル</button>
         <button class="topbar-profit-btn" :title="isMobile ? profitTitle : 'ホームで詳しく見る'" @click="goto('dashboard')">
-          <ProfitStripBar compact :strip="profitStrip" />
+          <ProfitStripBar compact :strip="profitStrip" class="profit-full" />
+          <!-- スマホ幅だけ：粗利と純利益の 2 つの数字が読める短い文言（取引中・見込みは title とホームで） -->
+          <span class="profit-mini profit-short">
+            <span class="ps-item">粗利 {{ yen(profitStrip?.gross_profit ?? 0) }}</span>
+            <span class="ps-sep">・</span>
+            <span class="ps-item">純利益 {{ yen(profitStrip?.net_profit ?? 0) }}</span>
+          </span>
         </button>
         <!-- スマホ幅では、要確認のときだけ警告アイコンを出す。押すと「その他」に全文が出る -->
         <span
@@ -781,6 +787,9 @@ watch(dataRevision, loadProfitStrip)
   cursor: pointer;
 }
 
+/* スマホ幅だけで出す短い文言（下の @media で出す）。デスクトップ幅では出さない */
+.topbar .profit-short { display: none; }
+
 .run-status {
   display: flex;
   align-items: center;
@@ -900,6 +909,19 @@ main {
   /* 利益ピル：残り幅いっぱいに広げ、1 行に収まらない分は省く（全文は title） */
   .topbar .topbar-profit-btn { display: flex; flex: 1 1 0; justify-content: flex-start; min-width: 0; min-height: 44px; text-align: left; }
   .topbar-profit-btn :deep(.profit-strip-bar) { min-width: 0; max-width: 100%; }
+  /* 全文（今月の実績粗利 … ／ 純利益 … ＋ 取引中・見込み）は 375px で切れて純利益が読めないので、短い文言に差し替える。
+     400px 以上は 1 行、それより狭いときは下の @media で 2 段 */
+  .topbar-profit-btn .profit-full { display: none; }
+  .topbar .profit-short {
+    display: flex;
+    align-items: center;
+    gap: 0 6px;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .profit-short .ps-item { white-space: nowrap; }
+  /* 桁が増えて入りきらないときは、後ろの数字を … で省く（前の数字は残す） */
+  .profit-short .ps-item:last-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
   /* 取り込み状態：要確認のときだけ警告アイコン（押すと「その他」に全文が出る） */
   .run-status { flex: 0 0 auto; }
@@ -1033,6 +1055,19 @@ main {
     justify-content: center;
     gap: 8px;
   }
+}
+
+/* 400px 未満（375・390・320）：警告アイコンが出ている間は 1 行に 2 つの数字が入りきらないので、2 段にする（どちらも省かない） */
+@media (max-width: 399px) {
+  .topbar .profit-short {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+    padding: 3px 12px;
+    border-radius: var(--radius-md);
+    line-height: 1.35;
+  }
+  .profit-short .ps-sep { display: none; }
 }
 
 .sheet-enter-active,

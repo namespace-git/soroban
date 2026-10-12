@@ -84,4 +84,12 @@ function clear() {
   height: 24px;
   color: var(--text-faint);
 }
+
+/* スマホ幅：入力欄は 44px、幅は親が決める枠より外にはみ出さない（各画面のツールバーは flex で伸ばす）。
+   ✕ は入力欄と同じ高さの押せる範囲に。長い案内（placeholder）は切れ目を … で示す */
+@media (max-width: 767px) {
+  .search-box { max-width: 100%; }
+  .search-box-input { height: 44px; padding-right: 44px; text-overflow: ellipsis; }
+  .search-box-clear { right: 0; width: 44px; height: 44px; }
+}
 </style>
