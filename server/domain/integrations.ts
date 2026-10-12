@@ -27,26 +27,24 @@ import { getPurchaseTracking, trackingCounts } from './purchase'
 // ============================================================
 
 /**
- * この領域が Ctx に必要とする環境の値。**server/context.ts の Ctx に足してもらう**（入口が環境変数から渡す）。
- * 足されるまでは undefined ＝「この環境では安全に保存できません」になる。
+ * この領域がテストで差し替える外部とのやりとり。入口は渡さない（省略時はグローバルの fetch・setTimeout）。
+ * SECRET_KEYS（版:鍵 のカンマ区切り。先頭が今の鍵）は `ctx.env.SECRET_KEYS` から読む（生の文字列。形の検査はここで行う）
  */
-export interface IntegrationEnv {
-  /** 環境変数 SECRET_KEYS（版:鍵 のカンマ区切り。先頭が今の鍵）。生の文字列のまま持つ（形の検査はここで行う） */
-  secretKeys?: string | null
+export interface IntegrationDeps {
   /** 外部（Gemini）への通信。省略時はグローバルの fetch（テストが差し替える） */
   fetch?: typeof fetch
   /** 再試行の待ち。省略時は setTimeout（テストが差し替える） */
   sleep?: (ms: number) => Promise<void>
 }
 
-export type IntegrationCtx = Ctx & IntegrationEnv
+export type IntegrationCtx = Ctx & IntegrationDeps
 
 export { enqueueAllTracking, enqueueTracking } from '../cron/tracking-queue'
 
 /** 保存・復号に使う鍵の束。SECRET_KEYS が無い／形が違うなら null（原因は鍵の中身を含まずにログへ） */
 function keyRingOf(ctx: IntegrationCtx): KeyRing | null {
   try {
-    return parseSecretKeys(ctx.secretKeys)
+    return parseSecretKeys(ctx.env.SECRET_KEYS)
   } catch (e) {
     if (e instanceof SecretKeysError) {
       console.error(e.message)

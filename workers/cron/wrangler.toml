@@ -1,0 +1,22 @@
+# そろばん Web 版 — 定期実行の Worker（5 分ごと）。手順は docs/web/01-setup.md の 2-6。
+#
+# **このファイルに秘密の値を書かない**（リポジトリは Public）。
+#   * 下の Hyperdrive の id だけ、自分のものに書き換えてデプロイする（Cloudflare の管理画面に出る識別子で、パスワードではない。
+#     書き換えたものをコミットしないこと）
+#   * VAPID_PRIVATE_KEY / SECRET_KEYS などの秘密は `wrangler secret put` で Cloudflare に直接入れる（ファイルに残らない）
+#
+# デプロイ（このフォルダで）：  pnpm dlx wrangler deploy
+name = "soroban-cron"
+main = "index.ts"
+compatibility_date = "2025-10-01"
+# postgres.js が Node の API を使う
+compatibility_flags = ["nodejs_compat"]
+# 定期実行しかしない Worker。workers.dev の URL を開かない
+workers_dev = false
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "<ここに Hyperdrive の id>"

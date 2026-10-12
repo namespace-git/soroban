@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PushKinds } from '../../../src/shared/web-types'
-import type { Ctx } from '../../context'
+import { EMPTY_SERVER_ENV, type Ctx } from '../../context'
 import { handlers } from '../../rpc'
 import * as push from '../../domain/push'
 import { b64urlEncode } from '../../push/base64url'
@@ -40,15 +40,15 @@ async function spouseOfA(): Promise<Member> {
   return memberOf(dom, w.a.householdId, userId)
 }
 
-const withEnv = (c: Ctx) => ({ ...c, env: vapid.env })
+const withEnv = (c: Ctx): Ctx => ({ ...c, env: { ...EMPTY_SERVER_ENV, ...vapid.env } })
 const countSubs = async (hh: string) =>
   (await dom.pg.query<{ n: number }>('select count(*)::int as n from app.push_subscription where household_id = $1', [hh])).rows[0].n
 
 describe('getPushConfig', () => {
   it('公開鍵があれば返す。無ければ null（画面は通知の設定を出さない）', async () => {
     expect(await w.a.run((c) => push.getPushConfig(c))).toEqual({ vapid_public_key: null })
-    expect(await w.a.run((c) => push.getPushConfig({ ...c, env: {} }))).toEqual({ vapid_public_key: null })
-    expect(await w.a.run((c) => push.getPushConfig({ ...c, env: { VAPID_PUBLIC_KEY: '  ' } }))).toEqual({ vapid_public_key: null })
+    expect(await w.a.run((c) => push.getPushConfig({ ...c, env: EMPTY_SERVER_ENV }))).toEqual({ vapid_public_key: null })
+    expect(await w.a.run((c) => push.getPushConfig({ ...c, env: { ...EMPTY_SERVER_ENV, VAPID_PUBLIC_KEY: '  ' } }))).toEqual({ vapid_public_key: null })
     expect(await w.a.run((c) => push.getPushConfig(withEnv(c)))).toEqual({ vapid_public_key: vapid.env.VAPID_PUBLIC_KEY })
     // 秘密鍵は返さない
     expect(JSON.stringify(await w.a.run((c) => push.getPushConfig(withEnv(c))))).not.toContain(vapid.env.VAPID_PRIVATE_KEY)
@@ -58,7 +58,7 @@ describe('getPushConfig', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       for (const bad of ['AAAA', b64urlEncode(new Uint8Array(65)), 'あいう']) {
-        expect(await w.a.run((c) => push.getPushConfig({ ...c, env: { VAPID_PUBLIC_KEY: bad } }))).toEqual({ vapid_public_key: null })
+        expect(await w.a.run((c) => push.getPushConfig({ ...c, env: { ...EMPTY_SERVER_ENV, VAPID_PUBLIC_KEY: bad } }))).toEqual({ vapid_public_key: null })
       }
       expect(JSON.stringify(spy.mock.calls)).not.toContain('AAAA')
     } finally {
@@ -361,12 +361,12 @@ describe('sendTestPush（すぐ送る）', () => {
   it('鍵が無い・形が違うときは、日本語で理由を返す（出来事も積まない）', async () => {
     await saveAll(w.a, 'iPhone')
     const svc = fakePushService(201)
-    await expect(w.a.run((c) => push.sendTestPush({ ...c, env: {} }, { fetch: svc.fetch }))).rejects.toThrow('鍵がサーバーに設定されていません')
-    await expect(w.a.run((c) => push.sendTestPush({ ...c, env: { ...vapid.env, VAPID_SUBJECT: 'x' } }, { fetch: svc.fetch })))
+    await expect(w.a.run((c) => push.sendTestPush({ ...c, env: EMPTY_SERVER_ENV }, { fetch: svc.fetch }))).rejects.toThrow('鍵がサーバーに設定されていません')
+    await expect(w.a.run((c) => push.sendTestPush({ ...c, env: { ...EMPTY_SERVER_ENV, ...vapid.env, VAPID_SUBJECT: 'x' } }, { fetch: svc.fetch })))
       .rejects.toThrow('VAPID_SUBJECT')
     expect(svc.calls).toHaveLength(0)
     expect((await dom.pg.query('select id from app.notification_event where household_id = $1', [w.a.householdId])).rows).toHaveLength(0)
-    // API 経由（Ctx に env を渡していない入口）でも 500 にならず 400
+    // API 経由（Ctx に鍵を渡していない入口）でも 500 にならず 400
     const res = await w.a.call('sendTestPush')
     expect(res.status).toBe(400)
     expect(res.body.error?.message).toContain('鍵がサーバーに設定されていません')

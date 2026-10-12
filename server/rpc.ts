@@ -1,9 +1,10 @@
 import type { SorobanApi } from '../src/shared/types'
 import type { WebApi } from '../src/shared/web-types'
-import { authenticate, type AuthEnv, type Identity } from './auth'
-import { mediaBaseFromEnv, withHousehold, type Ctx } from './context'
+import { authenticate, type Identity } from './auth'
+import { serverEnvFrom, withHousehold, type Ctx, type RawServerEnv } from './context'
 import type { Sql } from './db/sql'
 import { ApiError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError } from './errors'
+import { drainDeliveries } from './push/deliver'
 
 /**
  * `POST /api/rpc/<method>` の中身。通信の形（画面側と合わせた契約）：
@@ -210,10 +211,43 @@ export const API_METHOD_NAMES: readonly (keyof SorobanApi | keyof WebApi)[] = [
   ...(Object.keys(WEB_API_METHOD_TABLE) as (keyof WebApi)[]),
 ]
 
+/**
+ * 読み取りだけのメソッド。操作ログ（app_log）にも、応答のあとの通知の送信にも使わない
+ * （画面を開くたびに書き込む・DB に聞くのを避ける）。
+ * デスクトップの `UNLOGGED_HANDLERS`（src/main/index.ts）の読み取り分と、同じ読み取りだけのものを足した。
+ * 名前は契約と食い違えば型エラー。ここに無い（書き込みの）メソッドは、成功すれば記録する
+ */
+const READ_ONLY: readonly (keyof SorobanApi | keyof WebApi)[] = [
+  'getDashboard', 'getInbox', 'getSalesProgress', 'getInventoryOverview', 'listInventoryGroups', 'getProductKarte',
+  'getMonthStatement', 'listPurchaseAccountCards', 'listSales', 'saleTotals', 'suggestInventory', 'suggestProductInventory',
+  'getAutoLinkBlockers', 'listSaleLines', 'listPurchases', 'getPurchase', 'listInventory', 'listMonthly', 'listExpenses',
+  'getTrackingApiStatus', 'getAiStatus', 'testGemini', 'listGeminiModels', 'getMonthDetail', 'listTags',
+  'getProduct', 'listProducts', 'getItemTimeline', 'listListings', 'suggestForListing', 'searchAll',
+  'listShopAccounts', 'listShopAccountStats', 'listVariantSummary', 'listShippingMethods', 'getSettings',
+  'getLastTrackingSummary', 'estimateSaleProfit', 'listSaleExclusions', 'listRuns', 'getHealthChecks', 'exportCsv',
+  'getAutoBackupStatus', 'listCashAccounts', 'listLiabilities', 'listCashEntries', 'getCashMonth',
+  'getCollectStatus', 'listAgentDevices', 'getPushConfig', 'listPushDevices', 'getTrackingNumber',
+]
+const READ_ONLY_METHODS: ReadonlySet<string> = new Set<string>(READ_ONLY)
+
+/**
+ * 読み取りだけでも書き込みでもないが記録しないもの。logClient は記録用の呼び出しで、記録すると無限に増える。
+ * API キーの設定は、デスクトップでは引数にキーが載るので記録しない。Web 版は引数を書かないが、揃えて記録しない
+ */
+const UNLOGGED_METHODS: ReadonlySet<string> = new Set<string>(
+  ['logClient', 'setGeminiApiKey', 'setTrack17ApiKey'] satisfies (keyof SorobanApi)[],
+)
+
+/** このメソッドの成功を操作ログ（source='ipc'）に残すか。デスクトップの `handle` と同じ規則（書き込み系だけ） */
+function isLogged(method: string): boolean {
+  return !READ_ONLY_METHODS.has(method) && !UNLOGGED_METHODS.has(method)
+}
+
 export interface RpcDeps {
   /** 接続ロールの Sql（世帯の解決と、withHousehold の元）。トランザクションの外のもの */
   root: Sql
-  env: AuthEnv
+  /** Cloudflare の環境変数。`Ctx.env`（VAPID_*・SECRET_KEYS など）と、JWT の検証・画像の URL（SUPABASE_URL）に使う */
+  env: RawServerEnv
   /** 既定は `handlers`。テストが差し替える */
   handlers?: Handlers
 }
@@ -237,8 +271,8 @@ export interface DispatchDeps {
   root: Sql
   /** `authenticate` の結果 */
   identity: Identity
-  /** 画像の URL（`Ctx.mediaBase`）を作るのに SUPABASE_URL を見る。`mediaBase` を渡したときはそちらが先 */
-  env?: AuthEnv
+  /** 環境変数。`Ctx.env` になり、画像の URL（`Ctx.mediaBase`）も SUPABASE_URL から作る。省略すると全部「無い」 */
+  env?: RawServerEnv
   /** 画像の URL の頭を直接渡す（テスト用）。省略すると `env` から作る */
   mediaBase?: string | null
   handlers?: Handlers
@@ -248,6 +282,7 @@ export interface DispatchDeps {
  * 認証済みの要求をハンドラに渡す。
  * `SorobanApi` に無い名前は 404、契約にあるがハンドラが無ければ 501。
  * ハンドラは `withHousehold` の中（1 リクエスト＝1 トランザクション）で呼ぶ。例外は投げず、必ず Response を返す。
+ * 書き込み系のメソッドが成功したら、同じトランザクションの中で操作ログ（app_log）に 1 行残す（`logIpc`）。
  */
 export async function dispatch(method: string, args: unknown[], deps: DispatchDeps): Promise<Response> {
   try {
@@ -256,11 +291,65 @@ export async function dispatch(method: string, args: unknown[], deps: DispatchDe
     // 継承されたキーを拾わない（isApiMethod で名前は絞ってあるが、差し替えたテーブルも自分のキーだけを見る）
     const handler = Object.prototype.hasOwnProperty.call(table, method) ? table[method] : undefined
     if (!handler) throw new ApiError('not_implemented', `Web 版ではまだ使えません：${method}`)
-    const mediaBase = deps.mediaBase !== undefined ? deps.mediaBase : deps.env ? mediaBaseFromEnv(deps.env) : null
-    const result = await withHousehold(deps.root, { ...deps.identity, mediaBase }, (ctx) => handler(ctx, ...args))
+    const startedAt = Date.now()
+    const result = await withHousehold(
+      deps.root,
+      { ...deps.identity, mediaBase: deps.mediaBase, env: serverEnvFrom(deps.env) },
+      async (ctx) => {
+        const value = await handler(ctx, ...args)
+        if (isLogged(method)) await logIpc(ctx, method, Date.now() - startedAt)
+        return value
+      },
+    )
     return jsonResponse(200, { result: result === undefined ? null : result })
   } catch (e) {
     return errorResponse(e, method)
+  }
+}
+
+// 操作ログ（app_log）。デスクトップの handle（src/main/index.ts）が書き込み系の IPC を source='ipc' で書くのと同じ。
+// ホームの「今日やったこと」（inbox.ts の done_today）がこれを数える。
+// **引数は書かない**（API キーなどが入りうる）。kind・message はメソッド名。
+// 14 日より古い行は書くたびに消す（master.ts の logClient と同じ）。書けなくてもリクエストは成功させる（savepoint の中で書く）
+const LOG_RETENTION_DAYS = 14
+
+async function logIpc(ctx: Ctx, method: string, durationMs: number): Promise<void> {
+  try {
+    await ctx.sql.tx(async (sql) => {
+      await sql.run(`delete from app_log where ts < now() - make_interval(days => ${LOG_RETENTION_DAYS})`)
+      await sql.run(
+        `insert into app_log (source, kind, message, duration_ms) values ('ipc', ?, ?, ?)`,
+        method, method, Math.max(0, Math.round(durationMs)),
+      )
+    })
+  } catch (e) {
+    console.error('操作ログの書き込みに失敗しました', e)
+  }
+}
+
+/** 応答を返したあとに、急ぎで送る通知の件数の上限。残りは Cron の Worker が 5 分以内に送る */
+export const QUICK_DRAIN_LIMIT = 5
+
+/** 応答を返したあとに通知を急ぎで送ってよいか：成功し（＝コミットされ）、読み取りだけのメソッドではないとき */
+export function mayQueueNotification(method: string, response: Response): boolean {
+  return response.ok && !READ_ONLY_METHODS.has(method)
+}
+
+/**
+ * 応答を返したあとの後始末（入口が `waitUntil` に渡す）。
+ * `notify` なら、コミットの済んだ通知を急ぎで送ってみる（失敗しても Cron が拾う。鍵が無ければ何もしない）。
+ * **接続はそのあとで閉じる**（先に閉じると送れない）。例外は投げない。
+ */
+export async function closeAfterResponse(
+  db: Sql & { end(): Promise<void> }, env: RawServerEnv, notify: boolean,
+): Promise<void> {
+  try {
+    if (notify) await drainDeliveries(db, env, { limit: QUICK_DRAIN_LIMIT })
+  } catch (e) {
+    // 原因だけ。鍵・宛先は出さない（drainDeliveries のエラーにも入っていない）
+    console.error('[push] 応答のあとの通知の送信に失敗しました', e instanceof Error ? `${e.name}: ${e.message}` : 'error')
+  } finally {
+    await db.end().catch(() => {})
   }
 }
 

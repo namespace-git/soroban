@@ -4,7 +4,9 @@ import './jobs'
 import './sales'
 import './orders'
 
-export { handleAgent, dispatchAgent, agentHandlers, registerAgentHandler, isAgentMethod, AGENT_METHOD_NAMES } from './handler'
+export {
+  handleAgent, dispatchAgent, agentHandlers, registerAgentHandler, isAgentMethod, agentMayQueueNotification, AGENT_METHOD_NAMES,
+} from './handler'
 export type { AgentDeps, AgentHandler, AgentHandlers } from './handler'
 export { authenticateAgent, generateAgentKey, hashAgentKey, AGENT_KEY_RE } from './key'
 export type { AgentIdentity } from './key'

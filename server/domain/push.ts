@@ -1,5 +1,5 @@
 import type { PushDevice, PushKinds, PushSubscriptionInput, WebApi } from '../../src/shared/web-types'
-import type { Ctx } from '../context'
+import type { Ctx, ServerEnv } from '../context'
 import { readDbError, UserError } from '../errors'
 import { registerWebHandler } from '../rpc'
 import { b64urlDecode, b64urlEncode } from '../push/base64url'
@@ -19,11 +19,15 @@ import { argBool, argId, argObject, argOptText, argText } from './_shared'
 // * 通知を積むのは業務の書き込みの側（sale.ts・purchase.ts。push/notify.ts）。送るのは Cron の Worker
 //   （push/deliver.ts）。この API が自分で送るのは、画面の「試しに送る」だけ
 //
-// 環境変数（VAPID_*）は Ctx の env から読む。Ctx に env が無い（呼び出し側が渡していない）ときは「鍵なし」として動く
+// 環境変数（VAPID_*）は `ctx.env` から読む（入口が渡す）。渡していない（全部 null）ときは「鍵なし」として動く
 // ============================================================
 
-/** 環境変数を持つ文脈。`Ctx.env`（VAPID_PUBLIC_KEY など）を呼び出し側（API の入口）が渡す */
-export type PushCtx = Ctx & { env?: VapidEnv }
+/** `ctx.env`（null を含む）を、鍵を読む側（push/vapid.ts）の形にする */
+const vapidEnvOf = (env: ServerEnv): VapidEnv => ({
+  VAPID_PUBLIC_KEY: env.VAPID_PUBLIC_KEY ?? undefined,
+  VAPID_PRIVATE_KEY: env.VAPID_PRIVATE_KEY ?? undefined,
+  VAPID_SUBJECT: env.VAPID_SUBJECT ?? undefined,
+})
 
 const ENDPOINT_MAX = 2000
 const LABEL_MAX = 200
@@ -78,8 +82,8 @@ function argKinds(v: unknown): PushKinds {
 // ------------------------------------------------------------
 
 /** VAPID の公開鍵（ブラウザの購読に渡す）。無い・形が正しくなければ null（画面は通知の設定を出さない） */
-export async function getPushConfig(ctx: PushCtx): Promise<{ vapid_public_key: string | null }> {
-  const key = ctx.env?.VAPID_PUBLIC_KEY?.trim()
+export async function getPushConfig(ctx: Ctx): Promise<{ vapid_public_key: string | null }> {
+  const key = ctx.env.VAPID_PUBLIC_KEY?.trim()
   if (!key) return { vapid_public_key: null }
   if (!isValidVapidPublicKey(key)) {
     console.error('[push] VAPID_PUBLIC_KEY の形が正しくありません（base64url の 65 バイト）')
@@ -176,10 +180,10 @@ export async function setPushKinds(ctx: Ctx, deviceId: string, kinds: PushKinds)
  *   * 失敗しても Cron に再送させない（画面で「届かなかった」と見せたあとに遅れて届くと混乱する）。
  *     404 / 410 は購読ごと消える
  */
-export async function sendTestPush(ctx: PushCtx, deps: SendDeps = {}): Promise<{ sent: number; failed: number }> {
+export async function sendTestPush(ctx: Ctx, deps: SendDeps = {}): Promise<{ sent: number; failed: number }> {
   let keys
   try {
-    keys = await loadVapidKeys(ctx.env ?? {})
+    keys = await loadVapidKeys(vapidEnvOf(ctx.env))
   } catch (e) {
     if (e instanceof VapidConfigError) throw new UserError(`通知の鍵の設定が正しくありません。${e.message}`)
     throw e
@@ -249,7 +253,7 @@ export const pushHandlers = {
   sendTestPush: (ctx) => sendTestPush(ctx),
 } satisfies {
   [K in 'getPushConfig' | 'savePushSubscription' | 'deletePushSubscription' | 'listPushDevices' | 'setPushKinds' | 'sendTestPush']:
-    (ctx: PushCtx, ...args: Parameters<WebApi[K]>) => ReturnType<WebApi[K]>
+    (ctx: Ctx, ...args: Parameters<WebApi[K]>) => ReturnType<WebApi[K]>
 }
 
 registerWebHandler('getPushConfig', pushHandlers.getPushConfig)

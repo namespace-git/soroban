@@ -22,6 +22,7 @@
     "src/**/*.vue",
     "server/**/*.ts",
     "functions/**/*.ts",
+    "workers/**/*.ts",
     "web/**/*.ts",
     "tools/**/*.ts",
     "electron.vite.config.ts"

@@ -15,9 +15,10 @@ export const fakeApiKey = (): string => `k${randomBytes(15).toString('hex')}`
 
 export const keyRing = (...versions: Array<[number, string]>): string => versions.map(([v, k]) => `${v}:${k}`).join(',')
 
-/** Ctx に SECRET_KEYS・偽の fetch を足す（入口がやる分） */
+/** Ctx に SECRET_KEYS（`ctx.env`。入口がやる分）・偽の fetch / sleep を足す */
 export function withEnv(ctx: Ctx, env: { secretKeys?: string | null; fetch?: typeof fetch; sleep?: (ms: number) => Promise<void> }): IntegrationCtx {
-  return { ...ctx, ...env }
+  const { secretKeys, ...deps } = env
+  return { ...ctx, env: { ...ctx.env, SECRET_KEYS: secretKeys ?? null }, ...deps }
 }
 
 // ---- 偽の時計 ----

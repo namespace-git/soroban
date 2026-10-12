@@ -1,6 +1,6 @@
 import type { AgentApi, AgentErrorCode } from '../../src/shared/agent-types'
-import { authenticate, type AuthEnv } from '../auth'
-import { mediaBaseFromEnv, withHousehold } from '../context'
+import { authenticate } from '../auth'
+import { mediaBaseFromEnv, serverEnvFrom, withHousehold, type RawServerEnv, type ServerEnv } from '../context'
 import type { Sql } from '../db/sql'
 import { ApiError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError, readDbError } from '../errors'
 import { authenticateAgent, type AgentIdentity } from './key'
@@ -72,10 +72,27 @@ export function isAgentMethod(name: string): name is keyof AgentApi {
 
 export const AGENT_METHOD_NAMES = Object.keys(AGENT_METHOD_TABLE) as (keyof AgentApi)[]
 
+/**
+ * 通知を積まないメソッド（鍵を出す・権限の更新・計画や既存の読み出しだけ）。入口が、応答のあとに通知を急ぎで送ってみるか
+ * （`mayQueueNotification` の agent 版）を決めるのに使う。ここに無いもの（販売・注文の取り込み、finish）は、成功すれば送ってみる。
+ * 名前は契約と食い違えば型エラー
+ */
+const AGENT_NO_NOTIFY: readonly (keyof AgentApi)[] = [
+  'register', 'claim', 'heartbeat', 'getCollectPlan', 'listSalesNeedingDetail', 'listSalesNeedingPurchasedAt',
+  'existingImportKeys', 'excludedOrders', 'purchaseRevisitCandidates',
+]
+const AGENT_NO_NOTIFY_METHODS: ReadonlySet<string> = new Set<string>(AGENT_NO_NOTIFY)
+
+/** 応答を返したあとに通知を急ぎで送ってよいか：成功し（＝コミットされ）、通知を積まないメソッドではないとき */
+export function agentMayQueueNotification(method: string, response: Response): boolean {
+  return response.ok && !AGENT_NO_NOTIFY_METHODS.has(method)
+}
+
 export interface AgentDeps {
   /** 接続ロールの Sql（鍵の照合と、世帯のトランザクションの元）。トランザクションの外のもの */
   root: Sql
-  env: AuthEnv
+  /** Cloudflare の環境変数。`Ctx.env` と、JWT の検証・画像の URL（SUPABASE_URL）に使う */
+  env: RawServerEnv
   /** 既定は `agentHandlers`。テストが差し替える */
   handlers?: AgentHandlers
 }
@@ -85,8 +102,9 @@ export async function handleAgent(request: Request, method: string, deps: AgentD
     if (method === 'register') {
       const identity = await authenticate(request, deps.root, deps.env)
       const args = await readArgs(request)
-      const mediaBase = mediaBaseFromEnv(deps.env)
-      const result = await withHousehold(deps.root, { ...identity, mediaBase }, (ctx) => registerAgent(ctx, args[0]))
+      const result = await withHousehold(
+        deps.root, { ...identity, env: serverEnvFrom(deps.env) }, (ctx) => registerAgent(ctx, args[0]),
+      )
       return jsonResponse(200, { result })
     }
     const agent = await authenticateAgent(request, deps.root)
@@ -102,7 +120,8 @@ export interface AgentDispatchDeps {
   root: Sql
   /** `authenticateAgent` の結果 */
   agent: AgentIdentity
-  env?: AuthEnv
+  /** 環境変数。`Ctx.env` になり、画像の URL（`Ctx.mediaBase`）も SUPABASE_URL から作る。省略すると全部「無い」 */
+  env?: RawServerEnv
   mediaBase?: string | null
   handlers?: AgentHandlers
 }
@@ -115,8 +134,9 @@ export async function dispatchAgent(method: string, args: unknown[], deps: Agent
     // 継承されたキーを拾わない
     const handler = Object.prototype.hasOwnProperty.call(table, method) ? table[method as RpcMethod] : undefined
     if (!handler) throw new ApiError('not_implemented', `Web 版ではまだ使えません：${method}`)
-    const mediaBase = deps.mediaBase !== undefined ? deps.mediaBase : deps.env ? mediaBaseFromEnv(deps.env) : null
-    const result = await withAgent(deps.root, deps.agent, mediaBase, (ctx) => handler(ctx, ...args))
+    const env = serverEnvFrom(deps.env)
+    const mediaBase = deps.mediaBase !== undefined ? deps.mediaBase : mediaBaseFromEnv(env)
+    const result = await withAgent(deps.root, deps.agent, mediaBase, env, (ctx) => handler(ctx, ...args))
     return jsonResponse(200, { result: result === undefined ? null : result })
   } catch (e) {
     return errorResponse(e, method)
@@ -129,13 +149,13 @@ export async function dispatchAgent(method: string, args: unknown[], deps: Agent
  * agent は人ではないので `app.user_id` は空（押した人を名乗らない）。`ctx.userId` は PC の id。
  */
 async function withAgent<T>(
-  root: Sql, agent: AgentIdentity, mediaBase: string | null, fn: (ctx: AgentCtx) => Promise<T>,
+  root: Sql, agent: AgentIdentity, mediaBase: string | null, env: ServerEnv, fn: (ctx: AgentCtx) => Promise<T>,
 ): Promise<T> {
   return root.tx(async (sql) => {
     await sql.run('set local search_path = app, public')
     await sql.run('set local role soroban_api')
     await sql.get("select set_config('app.household_id', ?, true), set_config('app.user_id', '', true)", agent.householdId)
-    return fn({ sql, householdId: agent.householdId, userId: agent.agentId, agentId: agent.agentId, mediaBase })
+    return fn({ sql, householdId: agent.householdId, userId: agent.agentId, agentId: agent.agentId, mediaBase, env })
   })
 }
 

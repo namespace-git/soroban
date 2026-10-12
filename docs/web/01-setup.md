@@ -61,6 +61,19 @@ select app.create_household('うち', array['<夫のユーザー id>', '<妻の�
 | **service_role（secret）key** | Project Settings → API | **秘密。そろばんでは使わない。どこにも貼らない** |
 | **接続文字列（Direct connection）** | Connect → Direct connection | **秘密**（パスワードが入っている）。Cloudflare の Hyperdrive に渡す |
 
+### 1-7. Storage（画像の置き場）を確かめる
+
+1-4 の `supabase db push` で、画像の置き場も一緒にできます（`20261012001530_storage.sql`）。**自分では作らなくてよい**ので、
+できているかだけ Supabase の画面で見ます。
+
+- **Storage → Files（バケットの一覧）**に 2 つ出ていること：
+  - **`media`**：**公開（Public）**。商品・販売・出品の写真。パスは `世帯の id/種類/ランダムな id.拡張子` で、推測できない
+  - **`receipts`**：**非公開（Private）**。レシート。見るときだけ署名つきの URL を出す
+    （公開になっていると `supabase db push` が止まって知らせます。**Public をオフ**に直してから流し直す）
+- **Storage → Policies**（`storage.objects`）に、`soroban_media_insert / select / delete` と
+  `soroban_receipts_insert / select / delete` の 6 本が出ていること。どれも「パスの先頭のフォルダが**自分の世帯の id**のときだけ」
+  通す条件で、他の世帯のフォルダには入れません（匿名のアクセスには何も出していません）
+
 ---
 
 ## 2. Cloudflare Pages
@@ -90,13 +103,79 @@ select app.create_household('うち', array['<夫のユーザー id>', '<妻の�
 
 **Settings → Variables and Secrets**。「秘密」は **Encrypt（Secret）** で入れる。
 
-| 名前 | 中身 | 秘密？ | 使う場所 |
-|---|---|---|---|
-| `VITE_SUPABASE_URL` | 1-6 の Project URL | 公開 | 画面（ビルド時） |
-| `VITE_SUPABASE_ANON_KEY` | 1-6 の anon key | 公開 | 画面（ビルド時） |
-| `SUPABASE_URL` | 1-6 の Project URL | 公開 | API |
+| 名前 | 中身 | 秘密？ | Pages（画面・API） | 定期実行の Worker（2-6） |
+|---|---|---|---|---|
+| `VITE_SUPABASE_URL` | 1-6 の Project URL | 公開 | 要る（ビルド時） | 要らない |
+| `VITE_SUPABASE_ANON_KEY` | 1-6 の anon key | 公開 | 要る（ビルド時） | 要らない |
+| `SUPABASE_URL` | 1-6 の Project URL | 公開 | 要る（ログインの検証・画像の URL） | 要らない |
+| `VAPID_PUBLIC_KEY` | 2-5 で作った値（通知の公開鍵） | 公開してよい | 要る | 要る |
+| `VAPID_PRIVATE_KEY` | 2-5 で作った値（通知の署名鍵） | **秘密** | 要る（「試しに送る」と、操作の直後の通知） | 要る（通知の送信） |
+| `VAPID_SUBJECT` | `mailto:自分のメールアドレス`（連絡先） | 秘密にしておく（メールアドレスが入る） | 要る | 要る |
+| `SECRET_KEYS` | 2-5 で作った値（API キーを暗号化する鍵） | **秘密** | 要る（Gemini・17TRACK のキーの保存） | 要る（17TRACK のキーの読み出し） |
 
-※ Push 通知・API キーの暗号化の値は、その機能ができた段で追記します。
+- DB への接続は、Pages も Worker も **`HYPERDRIVE` のバインディング**（2-3）だけ。`DATABASE_URL` は要りません
+- **`VAPID_*` と `SECRET_KEYS` は、Pages と定期実行の Worker に「同じ値」を入れる。** 違うと、Worker が通知を送れない・保存した API キーを読めない
+- `SECRET_KEYS` を失くす（または別の値にする）と、保存済みの Gemini・17TRACK の API キーが読めなくなります（設定で入れ直せば元に戻る）
+- 入れ忘れたとき：`VAPID_*` が無ければ通知は使えないだけ（設定画面に出ない）。`SECRET_KEYS` が無ければ API キーの保存を
+  「この環境では安全に保存できません」と断ります（平文では持たない）
+
+### 2-5. 鍵を作る（VAPID と SECRET_KEYS）
+
+PC で（このリポジトリのフォルダ）：
+
+```bash
+pnpm gen-keys
+```
+
+画面に `VAPID_PUBLIC_KEY`・`VAPID_PRIVATE_KEY`・`VAPID_SUBJECT`（雛形）・`SECRET_KEYS` が出ます。
+
+- **出た値は、どこにも保存しない。** ファイル・メモ・チャットに貼らない（このリポジトリは Public）。道具もファイルには書きません
+- **2-4 の表のとおり、Cloudflare の Pages に入れ、2-6 の Worker にも同じ値を入れたら、ターミナルを閉じる**
+- `VAPID_SUBJECT` だけは自分で決める（`mailto:` か `https://` で始まる連絡先）
+- もう一度 `pnpm gen-keys` を実行すると**別の鍵**ができます。作り直すと、通知の登録はやり直し（`VAPID_*`）、
+  保存済みの API キーは入れ直し（`SECRET_KEYS`）になります。**鍵は 1 回作ったら変えない**
+
+### 2-6. 定期実行の Worker
+
+> **利用者に確認中の事項です。** Cloudflare に Worker をもう 1 本（定期実行用）デプロイしてよいか、
+> 無料枠で足りなければ **Workers Paid（月 5 ドル）**にしてよいか。決まるまでは、この節は**実行しないでください**。
+> （Worker を入れなくても、画面と API は動きます。動かないのは「通知の再送」「17TRACK の確認」「期限切れの取り込み要求の片付け」だけ。
+> 操作の直後の通知は、Pages 側が急ぎで送ってみます）
+
+5 分ごとに、次の 3 つを順に行う小さな Worker です（`workers/cron/`）。どれかが失敗しても残りは続けます。
+
+1. 期限切れの取り込み要求の片付け
+2. 通知の送信（Push サービスへ。1 回 30 本まで）
+3. 17TRACK の配送状況の確認（1 回 15 本まで。秒間 3 リクエストを守る）
+
+外部への通信は合計 45 本まで（Cloudflare の無料枠は 1 回の呼び出しで 50 本）。DB は Hyperdrive 経由で、この本数に数えません。
+CPU 時間の上限（無料枠は 10ms）を超える日があれば、Workers Paid にします（通知を送るときは暗号化の計算で超えやすい）。
+
+**手順**（`workers/cron/` のフォルダで）：
+
+1. `wrangler.toml` の `id = "<ここに Hyperdrive の id>"` を、**2-3 で作った Hyperdrive の id** に書き換える
+   （Workers & Pages → Hyperdrive の一覧に出る識別子。パスワードではありませんが、**書き換えたファイルはコミットしない**）
+2. デプロイ：
+
+   ```bash
+   pnpm dlx wrangler deploy
+   ```
+
+3. 秘密と環境変数を **4 つ**入れる（実行すると値の入力を求められる。入力は画面に残らず、ファイルにも書かれません）：
+
+   ```bash
+   pnpm dlx wrangler secret put VAPID_PUBLIC_KEY
+   pnpm dlx wrangler secret put VAPID_PRIVATE_KEY
+   pnpm dlx wrangler secret put VAPID_SUBJECT
+   pnpm dlx wrangler secret put SECRET_KEYS
+   ```
+
+4. 確かめる：Cloudflare の **Workers & Pages → soroban-cron → Settings → Triggers** に `*/5 * * * *` が出ていること。
+   5 分待って `pnpm dlx wrangler tail`（または管理画面の Logs）を見て、`[cron] … に失敗しました` が出ていないこと
+   （出ていれば、続きの文が原因です。鍵の値は出しません）
+
+> `HYPERDRIVE` は `wrangler.toml` の `[[hyperdrive]]` で結び付くので、`secret put` は要りません。
+> `compatibility_flags = ["nodejs_compat"]`（postgres.js が Node の API を使う）も `wrangler.toml` に入っています。
 
 ---
 
@@ -113,8 +192,8 @@ select app.create_household('うち', array['<夫のユーザー id>', '<妻の�
 道具は**空の世帯にしか書きません**（二重に流す事故を防ぐ）。1 つのトランザクションで書き、SQLite と
 金額のビュー 5 本を全行・全列で突き合わせ、**1 つでも違えば全部巻き戻して止まります**。
 
-> **Storage のバケットと権限（`media` 公開・`receipts` 非公開、世帯のフォルダにだけ書ける）は、まだリポジトリに
-> ありません。** 次の段で足します。それまでは `--dry-run` だけ試せます。
+> **Storage のバケットと権限（`media` 公開・`receipts` 非公開、世帯のフォルダにだけ書ける）は、`supabase db push`（1-4）で
+> 入ります。** 本番に流す前に、1-7 のとおり Supabase の画面でできているか確かめてください。
 
 ### 4-1. 前の準備
 
