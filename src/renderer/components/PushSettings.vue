@@ -4,16 +4,20 @@
 //   - 許可の確認は「この端末で通知を受け取る」を押したときだけ出す（iPhone はボタンからでないと出せない）
 //   - iPhone はホーム画面に追加した PWA でだけ受け取れる。判定は機能の有無で、使えなければ案内を出す
 //   - サーバーに VAPID の公開鍵が無ければ（getPushConfig）、節ごと出さない
+//   - 取り込み担当の PC の窓（window.sorobanAgentBridge が在る）では権限を main が断って戻せないので、設定は出さず案内の 1 行だけ
 import { ref, computed, onMounted, inject } from 'vue'
 import type { PushDevice, PushKinds } from '../../shared/web-types'
 import Icon from './Icon.vue'
 import StatusChip from './StatusChip.vue'
 import { errorText } from './cash-util'
+import { isAgentWindow } from '../auth/agent-bridge'
 import { allPushKinds, defaultDeviceLabel, PUSH_KIND_ROWS, pushSupport, urlBase64ToUint8Array } from './web-glue'
 import { dateTime } from '../format'
 
 const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
 const web = window.sorobanWeb!
+// 取り込み担当の PC の窓（Electron）では、通知の権限を main が断っていて戻せない。この窓では通知の設定を出さない
+const inAgentWindow = isAgentWindow(window.sorobanAgentBridge)
 
 const loaded = ref(false)
 const vapidKey = ref<string | null>(null)
@@ -50,7 +54,7 @@ async function load() {
   try {
     const config = await web.getPushConfig()
     vapidKey.value = config.vapid_public_key
-    if (!config.vapid_public_key) return
+    if (!config.vapid_public_key || inAgentWindow) return
     const sub = await currentSubscription().catch(() => null)
     devices.value = await web.listPushDevices(sub?.endpoint ?? null)
   } catch (e) {
@@ -160,7 +164,15 @@ async function setKind(d: PushDevice, key: keyof PushKinds, on: boolean) {
 </script>
 
 <template>
-  <div v-if="vapidKey" class="panel">
+  <!-- 取り込み担当の PC の窓：main が権限を全部断る（戻せない）ので、設定は出さずスマホ・ブラウザへ案内する -->
+  <div v-if="vapidKey && inAgentWindow" class="panel">
+    <div class="section-head">
+      <span class="section-head-icon"><Icon name="sparkle" :size="16" /></span>
+      <h2 class="section-head-title">通知</h2>
+    </div>
+    <p class="faint hint first">通知はスマホ・ブラウザで受け取ってください（この PC の窓では受け取れません）</p>
+  </div>
+  <div v-else-if="vapidKey" class="panel">
     <div class="section-head">
       <span class="section-head-icon"><Icon name="sparkle" :size="16" /></span>
       <h2 class="section-head-title">通知</h2>

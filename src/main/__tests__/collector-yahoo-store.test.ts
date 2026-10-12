@@ -22,6 +22,13 @@ const state = vi.hoisted(() => ({
       | undefined,
   },
   createdWindows: [] as Array<{ isVisible: () => boolean; isDestroyed: () => boolean }>,
+  // partition 名 → 偽の session。権限のハンドラを付けた先と、付けた中身を見えるようにする
+  sessions: {} as Record<string, {
+    setUserAgent: ReturnType<typeof vi.fn>
+    setPermissionRequestHandler: ReturnType<typeof vi.fn>
+    setPermissionCheckHandler: ReturnType<typeof vi.fn>
+    fetch: (url: string) => unknown
+  }>,
 }))
 
 vi.mock('electron', () => {
@@ -72,8 +79,10 @@ vi.mock('electron', () => {
     BrowserWindow: FakeBrowserWindow,
     app: { getPath: () => '' },
     session: {
-      fromPartition: () => ({
-        setUserAgent: () => {},
+      fromPartition: (name: string) => (state.sessions[name] ??= {
+        setUserAgent: vi.fn(),
+        setPermissionRequestHandler: vi.fn(),
+        setPermissionCheckHandler: vi.fn(),
         fetch: (url: string) => (state.opts.fetchImpl
           ? state.opts.fetchImpl(url)
           : Promise.resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) })),
@@ -98,9 +107,10 @@ vi.mock('node:timers/promises', () => ({ setTimeout: vi.fn(async () => {}) }))
 
 import { CHALLENGE_MESSAGE } from '../collector'
 import {
-  collect, combineYahooSales, parseYahooSalesHtml, parseYahooSellingHtml, parseYahooSoldHtml,
+  collect, combineYahooSales, ensureSession, parseYahooSalesHtml, parseYahooSellingHtml, parseYahooSoldHtml,
 } from '../collector-yahoo'
 import { LeaseLostError } from '../agent/errors'
+import { denyPermissionCheck, denyPermissionRequest } from '../agent/mode'
 import type { CollectorStore } from '../store/types'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -143,6 +153,33 @@ function createFakeStore() {
   }
   return { store, calls, asStore: store as unknown as CollectorStore }
 }
+
+describe('ensureSession（Yahoo!フリマの窓の権限）', () => {
+  beforeEach(() => { state.sessions = {} })
+
+  it('Yahoo!フリマの session に、権限の要求・確認を全部断るハンドラを付ける（UA は今までどおり）', () => {
+    ensureSession()
+    const s = state.sessions['persist:yahoo']
+    expect(s).toBeDefined()
+    expect(s.setUserAgent).toHaveBeenCalledTimes(1)
+    expect(s.setPermissionRequestHandler).toHaveBeenCalledWith(denyPermissionRequest)
+    expect(s.setPermissionCheckHandler).toHaveBeenCalledWith(denyPermissionCheck)
+  })
+
+  it('付いたハンドラは、何を求められても断る', () => {
+    ensureSession()
+    const request = state.sessions['persist:yahoo'].setPermissionRequestHandler.mock.calls[0][0] as (
+      wc: unknown, permission: string, callback: (granted: boolean) => void,
+    ) => void
+    const check = state.sessions['persist:yahoo'].setPermissionCheckHandler.mock.calls[0][0] as () => boolean
+    for (const permission of ['media', 'geolocation', 'notifications', 'clipboard-read']) {
+      const callback = vi.fn()
+      request(null, permission, callback)
+      expect(callback).toHaveBeenCalledWith(false)
+    }
+    expect(check()).toBe(false)
+  })
+})
 
 describe('collect()（Yahoo!フリマ）が store の段へ渡すもの', () => {
   beforeEach(() => {

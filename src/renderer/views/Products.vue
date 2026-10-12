@@ -263,13 +263,24 @@ async function editProductNote(modelCode: string, currentNote: string | null): P
 
 // --- 商品画像：人がセット（取り込みで上書きしない）／取り込みの自動更新に戻す ---
 
+/** 画像を選んで上げている最中の型番（なければ null）。Web 版では回線によって 1〜3 秒かかるので、押せない・上げていると分かるようにする */
+const imageBusyCode = ref<string | null>(null)
+
 async function changeProductImage(modelCode: string) {
-  const ok = await window.soroban.setProductImage(modelCode)
-  if (!ok) return
-  await load()
-  if (karte.value?.summary.model_code === modelCode) await refreshKarte()
-  changed()
-  toast('画像をセットしました（取り込みで上書きしません）', 'ok')
+  if (imageBusyCode.value !== null) return
+  imageBusyCode.value = modelCode
+  try {
+    const ok = await window.soroban.setProductImage(modelCode)
+    if (!ok) return
+    await load()
+    if (karte.value?.summary.model_code === modelCode) await refreshKarte()
+    changed()
+    toast('画像をセットしました（取り込みで上書きしません）', 'ok')
+  } catch (e: any) {
+    toast(e.message, 'warn')
+  } finally {
+    imageBusyCode.value = null
+  }
 }
 
 async function onToggleAutoImage(modelCode: string, e: Event) {
@@ -464,10 +475,13 @@ const estimateCompare = computed(() => {
                 />
               </span>
               <div class="karte-thumb-actions">
-                <button class="sm ghost" @click="changeProductImage(karte.summary.model_code)">画像を変える</button>
+                <button
+                  class="sm ghost" :disabled="imageBusyCode !== null"
+                  @click="changeProductImage(karte.summary.model_code)"
+                >{{ imageBusyCode === karte.summary.model_code ? '上げています…' : '画像を変える' }}</button>
                 <label class="thumb-auto-check">
                   <input
-                    type="checkbox" :checked="!karte.summary.image_manual"
+                    type="checkbox" :checked="!karte.summary.image_manual" :disabled="imageBusyCode !== null"
                     @change="onToggleAutoImage(karte.summary.model_code, $event)"
                   />
                   取り込みの画像で自動更新

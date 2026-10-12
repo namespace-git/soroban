@@ -4,6 +4,7 @@ import { mkdirSync, copyFileSync, statSync, unlinkSync, readdirSync } from 'node
 import { randomUUID } from 'node:crypto'
 import * as db from './db'
 import { readReceiptWithGemini } from './ai-receipt'
+import { applyLearnedShop, receiptRegistrationNo } from './gemini-core'
 import type { ReceiptDraft, ReceiptRead } from '../shared/types'
 
 // ============================================================
@@ -22,22 +23,15 @@ const MAX_BYTES = 10 * 1024 * 1024
 const TEMP_PREFIX = 'receipt-tmp-'
 const TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
-/** AI が registration_no を抜けなかったときの保険。生テキスト（AI の応答）から T＋13桁を拾う */
-function extractRegistrationNoFallback(text: string): string | null {
-  const m = text.normalize('NFKC').match(/T\s*(\d{13})/)
-  return m ? `T${m[1]}` : null
-}
-
 /**
  * 登録番号が学習済み（shop_alias）なら店名を上書きする。当たらなければそのまま
- * （shop_learned はそのまま false／ai-receipt.ts の判定を尊重）
+ * （shop_learned はそのまま false／ai-receipt.ts の判定を尊重）。
+ * 登録番号の拾い方と上書きの形は gemini-core.ts（サーバーと共用）。ここは学習済みの店名を SQLite から引くだけ
  */
-function applyShopAlias(draft: ReceiptDraft): ReceiptDraft {
-  const registrationNo = draft.registration_no ?? extractRegistrationNoFallback(draft.raw_text)
+export function applyShopAlias(draft: ReceiptDraft): ReceiptDraft {
+  const registrationNo = receiptRegistrationNo(draft)
   if (!registrationNo) return draft
-  const learned = db.lookupShopAlias(registrationNo)
-  if (!learned) return { ...draft, registration_no: registrationNo }
-  return { ...draft, registration_no: registrationNo, shop: learned, shop_learned: true }
+  return applyLearnedShop(draft, registrationNo, db.lookupShopAlias(registrationNo))
 }
 
 /** サムネイル保存先ディレクトリ（無ければ作る） */

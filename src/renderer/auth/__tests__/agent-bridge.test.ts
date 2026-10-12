@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { connectAgentBridge, type AgentBridge, type AuthLike } from '../agent-bridge'
+import { connectAgentBridge, isAgentWindow, type AgentBridge, type AuthLike } from '../agent-bridge'
 
 // Web 版（boot.ts）から取り込み担当の PC（Electron の取り込み担当モードの窓）へのログインの受け渡し：
 // 橋があるときだけ。ログインの変化（トークンの更新も）ごとに provideSession、ログアウトで clearSession
@@ -19,6 +19,17 @@ function fakeBridge() {
   const clear = vi.fn<AgentBridge['clearSession']>()
   return { bridge: { provideSession: provide, clearSession: clear } satisfies AgentBridge, provide, clear }
 }
+
+describe('isAgentWindow（通知の設定を出すかの判定）', () => {
+  it('橋が在る窓（取り込み担当の PC）なら true：通知の権限は main が断っているので、通知の設定は出さない', () => {
+    const { bridge } = fakeBridge()
+    expect(isAgentWindow(bridge)).toBe(true)
+  })
+
+  it('橋が無い（ブラウザ・スマホ・デスクトップ版）なら false：今までどおり通知の設定を出す', () => {
+    expect(isAgentWindow(undefined)).toBe(false)
+  })
+})
 
 describe('connectAgentBridge', () => {
   it('橋が無い（ブラウザ・スマホ・デスクトップ版）なら何もしない：ログインの監視すら付けない', () => {

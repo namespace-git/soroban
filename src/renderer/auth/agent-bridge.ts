@@ -18,6 +18,14 @@ declare global {
   }
 }
 
+/**
+ * 取り込み担当の PC の窓（橋が在る窓）か。
+ * この窓は main が権限の要求を全部断る（通知も）ので、通知の設定は出さずスマホ・ブラウザへ案内する（PushSettings.vue）
+ */
+export function isAgentWindow(bridge: AgentBridge | undefined): boolean {
+  return !!bridge
+}
+
 /** supabase-js の Session のうち、渡すのに使う分 */
 interface SessionLike {
   access_token: string

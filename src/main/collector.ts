@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import * as db from './db'
 import { localStore } from './store/local'
 import { StoreStoppedError, type CollectorStore } from './store/types'
+import { lockDownPermissions } from './agent/mode'
 import type { AgentThumbTarget } from '../shared/agent-types'
 import type { CollectorRun, RunStatus, SaleStatus } from '../shared/types'
 
@@ -1068,4 +1069,7 @@ export function ensureSession(): void {
   const chromeMajor = process.versions.chrome.split('.')[0]
   const ua = buildUserAgent(process.platform, chromeMajor)
   s.setUserAgent(ua, 'ja,en-US;q=0.9,en;q=0.8')
+  // 外のサイトを開く窓。Electron は権限のハンドラが無いとカメラ・マイク・位置情報・通知などを全部許可するので、
+  // 窓を作る前（起動時）に全部断る。ログイン・CAPTCHA・本人確認に要る権限は無い（agent/mode.ts の説明を参照）
+  lockDownPermissions(s)
 }

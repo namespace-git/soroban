@@ -19,6 +19,15 @@ const state = vi.hoisted(() => ({
   },
   /** loadURL に渡された URL を呼び出し順に積む（詳細ページを開いたかどうかの確認用） */
   loadedUrls: [] as string[],
+  /** session のハンドラ付けと窓の生成の順（窓を作る前に権限を断っているかの確認用） */
+  order: [] as string[],
+  // partition 名 → 偽の session。権限のハンドラを付けた先と、付けた中身を見えるようにする
+  sessions: {} as Record<string, {
+    setUserAgent: ReturnType<typeof vi.fn>
+    setPermissionRequestHandler: ReturnType<typeof vi.fn>
+    setPermissionCheckHandler: ReturnType<typeof vi.fn>
+    fetch: (url: string) => unknown
+  }>,
 }))
 
 // collector-mellojoy.ts は electron（BrowserWindow・session）と collector.ts（同じく electron 依存）
@@ -34,6 +43,7 @@ vi.mock('electron', () => {
     }
 
     constructor() {
+      state.order.push('new BrowserWindow')
       this.webContents = {
         getURL: () => this.currentUrl,
         executeJavaScript: async (script: string) => {
@@ -73,8 +83,10 @@ vi.mock('electron', () => {
     BrowserWindow: FakeBrowserWindow,
     app: { getPath: () => '' },
     session: {
-      fromPartition: () => ({
-        setUserAgent: () => {},
+      fromPartition: (name: string) => (state.sessions[name] ??= {
+        setUserAgent: vi.fn(),
+        setPermissionRequestHandler: vi.fn(() => { state.order.push('setPermissionRequestHandler') }),
+        setPermissionCheckHandler: vi.fn(() => { state.order.push('setPermissionCheckHandler') }),
         fetch: (url: string) => (state.opts.fetchImpl
           ? state.opts.fetchImpl(url)
           : Promise.resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) })),
@@ -131,13 +143,14 @@ vi.mock('../db', () => ({
 }))
 
 import {
-  collectShopOrders,
+  collectShopOrders, ensureShopSession, openShopLoginWindow,
   filterPurchaseDraftByKeywords, filterPurchaseInputByKeywords, fulfillmentFromStatus, hashKeywords,
   inferOrderDate, isCancelledDetail, isShopLoginUrl, parseOrderDetailHtml, parseOrderListHtml,
   refetchPurchaseImages, savePurchaseImages, shouldSkipDetail, toDetailImageUrl, toPurchaseInput,
 } from '../collector-mellojoy'
 import * as db from '../db'
 import { AgentStoppedError, LeaseLostError } from '../agent/errors'
+import { denyPermissionCheck, denyPermissionRequest } from '../agent/mode'
 import { localStore } from '../store/local'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -715,6 +728,49 @@ describe('collector-mellojoy（electronに依存しない部分）', () => {
     it('空配列も安定したハッシュを返す', () => {
       expect(hashKeywords([])).toBe(hashKeywords([]))
     })
+  })
+})
+
+// ============================================================
+// 外のサイトを開く窓の権限（ensureShopSession / openShopLoginWindow）
+// ============================================================
+describe('ensureShopSession（メロジョイの窓の権限）', () => {
+  beforeEach(() => {
+    state.sessions = {}
+    state.order = []
+  })
+
+  it('口座ごとの session に、権限の要求・確認を全部断るハンドラを付ける（UA は今までどおり）', () => {
+    ensureShopSession('shop-1')
+    const s = state.sessions['persist:mellojoy-shop-1']
+    expect(s).toBeDefined()
+    expect(s.setUserAgent).toHaveBeenCalledTimes(1)
+    expect(s.setPermissionRequestHandler).toHaveBeenCalledWith(denyPermissionRequest)
+    expect(s.setPermissionCheckHandler).toHaveBeenCalledWith(denyPermissionCheck)
+    // 別の口座の session には付けない（口座ごとに別プロファイル）
+    expect(state.sessions['persist:mellojoy-shop-2']).toBeUndefined()
+  })
+
+  it('付いたハンドラは、何を求められても断る', () => {
+    ensureShopSession('shop-1')
+    const s = state.sessions['persist:mellojoy-shop-1']
+    const request = s.setPermissionRequestHandler.mock.calls[0][0] as (
+      wc: unknown, permission: string, callback: (granted: boolean) => void,
+    ) => void
+    const check = s.setPermissionCheckHandler.mock.calls[0][0] as () => boolean
+    for (const permission of ['media', 'geolocation', 'notifications', 'clipboard-read']) {
+      const callback = vi.fn()
+      request(null, permission, callback)
+      expect(callback).toHaveBeenCalledWith(false)
+    }
+    expect(check()).toBe(false)
+  })
+
+  it('ログイン窓は、窓を作る前に権限を断っている', () => {
+    void openShopLoginWindow('shop-1')
+    expect(state.order.indexOf('setPermissionRequestHandler')).toBeGreaterThanOrEqual(0)
+    expect(state.order.indexOf('setPermissionRequestHandler')).toBeLessThan(state.order.indexOf('new BrowserWindow'))
+    expect(state.order.indexOf('setPermissionCheckHandler')).toBeLessThan(state.order.indexOf('new BrowserWindow'))
   })
 })
 

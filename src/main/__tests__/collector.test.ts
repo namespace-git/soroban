@@ -22,6 +22,13 @@ const state = vi.hoisted(() => ({
   // collect() が内部で作るウィンドウは戻り値に出てこないので、生成されたインスタンスを
   // ここに積んで、show/isVisible/destroy の呼ばれ方をテストから見えるようにする
   createdWindows: [] as Array<{ isVisible: () => boolean; isDestroyed: () => boolean; title: string }>,
+  // partition 名 → 偽の session。権限のハンドラを付けた先と、付けた中身を見えるようにする
+  sessions: {} as Record<string, {
+    setUserAgent: ReturnType<typeof vi.fn>
+    setPermissionRequestHandler: ReturnType<typeof vi.fn>
+    setPermissionCheckHandler: ReturnType<typeof vi.fn>
+    fetch: (url: string) => unknown
+  }>,
 }))
 
 // collector.ts は electron（BrowserWindow・session）に依存する。
@@ -93,8 +100,10 @@ vi.mock('electron', () => {
     BrowserWindow: FakeBrowserWindow,
     app: { getPath: () => '' },
     session: {
-      fromPartition: () => ({
-        setUserAgent: () => {},
+      fromPartition: (name: string) => (state.sessions[name] ??= {
+        setUserAgent: vi.fn(),
+        setPermissionRequestHandler: vi.fn(),
+        setPermissionCheckHandler: vi.fn(),
         fetch: (url: string) => (state.opts.fetchImpl
           ? state.opts.fetchImpl(url)
           : Promise.resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) })),
@@ -165,12 +174,13 @@ vi.mock('../db', () => ({
 
 import { BrowserWindow } from 'electron'
 import {
-  buildUserAgent, collect, extractInProgressTotal, extractListingTotal, extractTotalCount,
+  buildUserAgent, collect, ensureSession, extractInProgressTotal, extractListingTotal, extractTotalCount,
   isChallengeText, parseInProgressHtml, parseListingsHtml, parsePurchasedAt, parseSoldHtml, parseSoldRow,
   randomWaitMs, revealForChallenge, thumbFileName,
 } from '../collector'
 import * as db from '../db'
 import { LeaseLostError } from '../agent/errors'
+import { denyPermissionCheck, denyPermissionRequest } from '../agent/mode'
 import { localStore } from '../store/local'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -533,6 +543,33 @@ describe('collector（electronに依存しない部分）', () => {
       const win = new BrowserWindow({ show: false })
       revealForChallenge(win, 'メロジョイ「サブ垢」')
       expect(win.title).toBe('そろばん — メロジョイ「サブ垢」の本人確認を完了してください')
+    })
+  })
+
+  describe('ensureSession（外のサイトを開く窓の権限）', () => {
+    beforeEach(() => { state.sessions = {} })
+
+    it('メルカリの session に、権限の要求・確認を全部断るハンドラを付ける（UA は今までどおり）', () => {
+      ensureSession()
+      const s = state.sessions['persist:mercari']
+      expect(s).toBeDefined()
+      expect(s.setUserAgent).toHaveBeenCalledTimes(1)
+      expect(s.setPermissionRequestHandler).toHaveBeenCalledWith(denyPermissionRequest)
+      expect(s.setPermissionCheckHandler).toHaveBeenCalledWith(denyPermissionCheck)
+    })
+
+    it('付いたハンドラは、カメラ・マイク・位置情報・通知などを何を求められても断る', () => {
+      ensureSession()
+      const request = state.sessions['persist:mercari'].setPermissionRequestHandler.mock.calls[0][0] as (
+        wc: unknown, permission: string, callback: (granted: boolean) => void,
+      ) => void
+      const check = state.sessions['persist:mercari'].setPermissionCheckHandler.mock.calls[0][0] as () => boolean
+      for (const permission of ['media', 'geolocation', 'notifications', 'midi', 'clipboard-read', 'display-capture']) {
+        const callback = vi.fn()
+        request(null, permission, callback)
+        expect(callback).toHaveBeenCalledWith(false)
+      }
+      expect(check()).toBe(false)
     })
   })
 })

@@ -9,6 +9,7 @@ import {
 import { localStore } from './store/local'
 import type { YahooCombinedSalesSplit as YahooSalesSplit } from './store/rules'
 import { StoreStoppedError, type CollectorStore } from './store/types'
+import { lockDownPermissions } from './agent/mode'
 import type { AgentThumbTarget } from '../shared/agent-types'
 import type { CollectorRun, RunStatus, SaleStatus } from '../shared/types'
 
@@ -716,6 +717,8 @@ export function ensureSession(): void {
   const chromeMajor = process.versions.chrome.split('.')[0]
   const ua = buildUserAgent(process.platform, chromeMajor)
   s.setUserAgent(ua, 'ja,en-US;q=0.9,en;q=0.8')
+  // 外のサイトを開く窓の権限を、窓を作る前（起動時）に全部断る（collector.ts の ensureSession と同じ）
+  lockDownPermissions(s)
 }
 
 /**
