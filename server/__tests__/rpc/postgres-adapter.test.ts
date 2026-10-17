@@ -1,3 +1,4 @@
+import postgres from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { connectionOptions, fromPostgresJs } from '../../db/postgres'
 import { OID } from '../../db/types'
@@ -111,7 +112,7 @@ describe('connectionOptions', () => {
   it('型：int8 は number、date・timestamp は文字列、timestamptz は ISO（numeric は触らない）', () => {
     const types = connectionOptions(pooler).types as Record<string, { to: number; from: number[]; parse: (x: string) => unknown; serialize: (x: unknown) => string }>
     const byOid = new Map(Object.values(types).map((t) => [t.from[0], t]))
-    expect([...byOid.keys()].sort()).toEqual([OID.int8, OID.date, OID.timestamp, OID.timestamptz].sort())
+    expect([...byOid.keys()].sort()).toEqual([OID.int8, OID.date, OID.timestamp, OID.timestamptz, OID.json].sort())
     expect(byOid.get(OID.int8)!.parse('5750')).toBe(5750)
     expect(byOid.get(OID.date)!.parse('2026-10-12')).toBe('2026-10-12')
     expect(byOid.get(OID.timestamp)!.parse('2026-10-12 01:02:03')).toBe('2026-10-12 01:02:03')
@@ -119,5 +120,22 @@ describe('connectionOptions', () => {
     // 引数の側：文字列はそのまま（JS のタイムゾーンで動かさない）、Date は ISO
     expect(byOid.get(OID.date)!.serialize('2026-10-12')).toBe('2026-10-12')
     expect(byOid.get(OID.timestamptz)!.serialize(new Date('2026-10-12T03:04:05.000Z'))).toBe('2026-10-12T03:04:05.000Z')
+  })
+
+  it('json / jsonb：文字列で渡した JSON を二重に包まない（postgres.js の既定は JSON.stringify し直す）', () => {
+    const types = connectionOptions(pooler).types as Record<string, { to: number; from: number[]; parse: (x: string) => unknown; serialize: (x: unknown) => string }>
+    const json = Object.values(types).find((t) => t.from.includes(OID.jsonb))!
+    expect(json.from).toEqual([OID.json, OID.jsonb])
+    expect(json.serialize('{"a":1}')).toBe('{"a":1}')
+    expect(json.parse('{"a":1}')).toEqual({ a: 1 })
+  })
+
+  it('json / jsonb：postgres.js に渡したとき、jsonb の引数の serializer が文字列をそのまま通す', async () => {
+    // postgres() は作っただけではつながらない。組み上がった serializers（既定に利用者の型を重ねたもの）を見る
+    const client = postgres(pooler, connectionOptions(pooler))
+    const serializers = (client.options as unknown as { serializers: Record<number, (x: unknown) => string> }).serializers
+    expect(serializers[OID.jsonb]('{"a":1}')).toBe('{"a":1}')
+    expect(serializers[OID.json]('{"a":1}')).toBe('{"a":1}')
+    await client.end()
   })
 })

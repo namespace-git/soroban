@@ -88,6 +88,15 @@ function postgresTypes(): Record<string, postgres.PostgresType> {
     soroban_date: type('date'),
     soroban_timestamp: type('timestamp'),
     soroban_timestamptz: type('timestamptz'),
+    // json / jsonb の引数は、呼び出し側が JSON.stringify した文字列で渡す約束（types.ts の normalizeParam）。
+    // postgres.js の既定はここでもう一度 JSON.stringify するので、文字列が「JSON の文字列」として二重に包まれて入る
+    // （PGlite はそのまま入れるのでテストでは気づけない。2026-10-18、データ移行の本番だけ sale.raw が全行不一致になって分かった）
+    soroban_json: {
+      to: OID.json,
+      from: [OID.json, OID.jsonb],
+      serialize: (x: unknown) => (typeof x === 'string' ? x : JSON.stringify(x)),
+      parse: (x: string) => JSON.parse(x),
+    },
   }
 }
 

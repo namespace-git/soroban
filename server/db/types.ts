@@ -24,6 +24,8 @@ export const OID = {
   date: 1082,
   timestamp: 1114,
   timestamptz: 1184,
+  json: 114,
+  jsonb: 3802,
 } as const
 
 export function parseInt8(text: string): number {
