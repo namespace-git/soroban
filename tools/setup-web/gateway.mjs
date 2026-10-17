@@ -64,10 +64,14 @@ try {
 // --- 2. Hyperdrive を作る（または差し替える） ---
 const user = `soroban_gateway.${ref}`
 console.log(updateId ? `2/2 Hyperdrive ${updateId} のパスワードを差し替えています…` : '2/2 Hyperdrive「soroban」を作っています…')
+// 接続の上限は Supabase の session プーラ（無料枠の既定で 15 本）より少なく。既定の 20 だと、設定画面のように
+// 十数本を同時に投げたときにプーラに断られて CONNECTION_CLOSED になる（2026-10-18、本番で分かった）。
+// キャッシュは切る：結果を SQL の文字列と引数だけで覚えるので、世帯（set_config）の違いを見ない
+const limits = ['--origin-connection-limit', '10', '--caching-disabled', 'true']
 const args = updateId
-  ? ['--yes', 'wrangler', 'hyperdrive', 'update', updateId, '--origin-user', user, '--origin-password', password]
+  ? ['--yes', 'wrangler', 'hyperdrive', 'update', updateId, '--origin-user', user, '--origin-password', password, ...limits]
   : ['--yes', 'wrangler', 'hyperdrive', 'create', 'soroban',
-     '--connection-string', `postgresql://${user}:${password}@${host}:${port}/${database}`]
+     '--connection-string', `postgresql://${user}:${password}@${host}:${port}/${database}`, ...limits]
 const h = run('npx', args)
 const out = `${h.stdout ?? ''}${h.stderr ?? ''}`.replaceAll(password, '***')
 if (h.status !== 0) fail(`Hyperdrive を${updateId ? '差し替え' : '作れ'}ませんでした：\n${out}`)
