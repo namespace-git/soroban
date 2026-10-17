@@ -46,5 +46,13 @@ describe('Supabase の postgres（superuser ではない）で流せる', () => 
     expect(failed).toEqual([])
     const r = await db.query<{ rolsuper: boolean }>(`select rolsuper from pg_roles where rolname = current_user`)
     expect(r.rows[0].rolsuper).toBe(false)
+
+    // マイグレーションを流したロール（Supabase の postgres の役）が、各ロールに切り替えられる
+    // （データ移行の道具・管理画面からの確認が使う。PG16 以降は作っただけでは ADMIN しか付かない）
+    for (const role of ['soroban_api', 'soroban_cron', 'soroban_gateway']) {
+      const s = await db.query<{ ok: boolean }>(`select pg_has_role(current_user, $1, 'SET') as ok`, [role])
+      expect(s.rows[0].ok, role).toBe(true)
+    }
+    await db.exec('begin; set local role soroban_api; rollback;')
   })
 })
