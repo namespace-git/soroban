@@ -6474,6 +6474,28 @@ export function listSaleLines(saleId: string): InventoryItem[] {
   return attachInventoryTags(items)
 }
 
+/** 一度に引ける販売の上限（Web 版のサーバーと揃える） */
+const LIST_SALE_LINES_BULK_MAX = 500
+
+/**
+ * 複数の販売の紐付き在庫をまとめて返す（売上一覧が販売ごとに listSaleLines を呼ばないため）。
+ * 値は listSaleLines(id) と同じ中身・同じ並び。紐付けの無い販売・知らない id はキーを持たない。
+ * id の重複は 1 つにまとめる。SQLite はローカルなので 1 本にまとめず listSaleLines をそのまま使う。
+ */
+export function listSaleLinesBulk(saleIds: string[]): Record<string, InventoryItem[]> {
+  if (!Array.isArray(saleIds)) throw new Error('販売の指定が正しくありません')
+  if (saleIds.length > LIST_SALE_LINES_BULK_MAX) {
+    throw new Error(`一度に引ける販売は ${LIST_SALE_LINES_BULK_MAX} 件までです（${saleIds.length} 件が指定されました）`)
+  }
+  const out: Record<string, InventoryItem[]> = {}
+  for (const id of new Set(saleIds)) {
+    if (typeof id !== 'string') throw new Error('販売の指定が正しくありません')
+    const items = listSaleLines(id)
+    if (items.length > 0) out[id] = items
+  }
+  return out
+}
+
 /**
  * 粗利の見積もり（AllocateDrawer が使う。画面で再計算しないための共通計算）。
  * 手数料は channel（省略時 mercari）の現在の率で floor。input.fee に実額（0 も実額）が

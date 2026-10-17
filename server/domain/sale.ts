@@ -1170,6 +1170,39 @@ export async function listSaleLines(ctx: Ctx, saleId: string): Promise<Inventory
   return attachInventoryTags(ctx, items)
 }
 
+/** listSaleLinesBulk の 1 回で受ける販売の数の上限 */
+const SALE_LINES_BULK_MAX = 500
+
+/**
+ * 複数の販売の紐付け在庫を 1 回でまとめて引く（売上の画面が販売ごとに listSaleLines を呼ぶ N+1 の置き換え）。
+ * キーは販売 id、値は listSaleLines(id) と同じ中身・同じ並び。紐付けの無い販売・知らない id（他の世帯の販売も）は
+ * キーを持たない。id の重複は 1 つにまとめる。SQL は在庫の取得 1 本＋タグ・画像の補完（全在庫まとめて）。
+ */
+export async function listSaleLinesBulk(ctx: Ctx, saleIds: string[]): Promise<Record<string, InventoryItem[]>> {
+  const ids = [...new Set(argIds('販売', saleIds, { max: SALE_LINES_BULK_MAX }))]
+  const result: Record<string, InventoryItem[]> = {}
+  if (ids.length === 0) return result
+
+  const rows = await ctx.sql.all<InventoryRow & { sale_id: string }>(`
+    select sl.sale_id, ${inventoryViewColumns('iv')}
+      from inventory_view iv
+      join sale_line sl on sl.household_id = iv.household_id and sl.inventory_item_id = iv.id
+     where sl.sale_id = any(?::uuid[])
+     order by iv.name collate "C", iv.item_code collate "C"
+  `, ids)
+  if (rows.length === 0) return result
+
+  // sale_id は InventoryItem の列ではない。attachInventoryTags に渡す前に外し、同じ並びのまま後で販売ごとに振り分ける
+  const saleIdOf = rows.map(r => r.sale_id)
+  const items = rows.map(({ sale_id: _saleId, ...item }) => item as InventoryRow)
+  const attached = await attachInventoryTags(ctx, items)
+  attached.forEach((item, i) => {
+    const key = saleIdOf[i]
+    ;(result[key] ??= []).push(item)
+  })
+  return result
+}
+
 /**
  * 粗利の見積もり（AllocateDrawer が使う。画面で再計算しないための共通計算）。
  * 手数料は channel（省略時 mercari）の現在の率で floor。input.fee に実額（0 も実額）が
@@ -1278,6 +1311,7 @@ registerHandler('autoLinkPending', (ctx, saleIds) =>
   autoLinkPending(ctx, saleIds === undefined || saleIds === null ? undefined : argIds('販売', saleIds, { max: 10_000 })))
 registerHandler('getAutoLinkBlockers', (ctx, saleId) => getAutoLinkBlockers(ctx, saleId))
 registerHandler('listSaleLines', (ctx, saleId) => listSaleLines(ctx, saleId))
+registerHandler('listSaleLinesBulk', (ctx, saleIds) => listSaleLinesBulk(ctx, saleIds))
 registerHandler('estimateSaleProfit', (ctx, input) => estimateSaleProfit(ctx, input))
 registerHandler('listSaleExclusions', (ctx) => listSaleExclusions(ctx))
 registerHandler('removeSaleExclusion', (ctx, mercariItemId) => removeSaleExclusion(ctx, mercariItemId))

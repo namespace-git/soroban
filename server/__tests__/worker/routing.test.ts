@@ -180,9 +180,10 @@ describe('接続の設定（Worker でも Pages と同じ）', () => {
   it('1 リクエスト 1 接続で、応答のあとに閉じる。HYPERDRIVE があれば DATABASE_URL より先に使う', async () => {
     await call('/api/rpc/getSettings')
     await call('/api/agent/claim', undefined, makeEnv({ HYPERDRIVE: { connectionString: 'postgres://hd@abc.hyperdrive.local:5432/postgres' } }))
+    // API の接続には、本数と時間を数える onQuery がつく（server/entry.ts。測るだけで、SQL も引数も渡らない）
     expect(holder.created).toEqual([
-      { url: 'postgres://u:p@db.example:5432/postgres', options: { prepare: true } },
-      { url: 'postgres://hd@abc.hyperdrive.local:5432/postgres', options: { prepare: true } },
+      { url: 'postgres://u:p@db.example:5432/postgres', options: { prepare: true, onQuery: expect.any(Function) } },
+      { url: 'postgres://hd@abc.hyperdrive.local:5432/postgres', options: { prepare: true, onQuery: expect.any(Function) } },
     ])
     expect(holder.ended).toBe(2)
   })

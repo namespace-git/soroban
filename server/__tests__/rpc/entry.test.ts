@@ -145,7 +145,8 @@ describe('Pages Functions の入口', () => {
   describe('接続の設定', () => {
     it('既定は DATABASE_URL・prepare あり（Hyperdrive 前提）', async () => {
       await invoke(onRequestPost)
-      expect(holder.created[0]).toEqual({ url: 'postgres://u:p@db.example:5432/postgres', options: { prepare: true } })
+      // onQuery は本数と時間を数えるだけの口（server/entry.ts）
+      expect(holder.created[0]).toEqual({ url: 'postgres://u:p@db.example:5432/postgres', options: { prepare: true, onQuery: expect.any(Function) } })
     })
 
     it('HYPERDRIVE のバインディングがあれば、DATABASE_URL より先に使う', async () => {
@@ -155,7 +156,7 @@ describe('Pages Functions の入口', () => {
 
     it('DATABASE_PREPARE=false で prepare を切る（transaction モードのプーラ直つなぎ）', async () => {
       await invoke(onRequestPost, { env: { DATABASE_PREPARE: 'false' } })
-      expect(holder.created[0].options).toEqual({ prepare: false })
+      expect(holder.created[0].options).toEqual({ prepare: false, onQuery: expect.any(Function) })
     })
 
     it('接続先が無ければ 500 internal（設定の名前や値は出さない）', async () => {

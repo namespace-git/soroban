@@ -121,18 +121,36 @@ export function mediaBaseFromEnv(env: { SUPABASE_URL?: string | null }): string 
 }
 
 /**
+ * トランザクションに入った直後の設定。**1 本の select** で全部行う（DB との往復を 3 回から 1 回にするため）。
+ *
+ *   - `search_path` を `app, public` に
+ *   - `role` を `soroban_api` に … BYPASSRLS を持たないロールに切り替える（ここから RLS が効く）
+ *   - `app.household_id` / `app.user_id` に、その要求の世帯と人を
+ *
+ * どれも `set_config(名前, 値, true)`。**第 3 引数 true＝`SET LOCAL` と同じ**で、トランザクションが終われば
+ * （commit でも rollback でも）元に戻る（PostgREST も `role` をこの形で切り替えている）。
+ *
+ * set_config は左から順に評価されるが、**この順番には依存しない**：4 つは互いの値を読まず、
+ * `soroban_api` に切り替わった後でも `search_path` と `app.*` は誰でも設定できる。
+ * （以前の 3 本の文と同じ並びにしてあるが、入れ替えても結果は同じ）
+ *
+ * 引数は世帯と人の 2 つだけ（`?` は 2 個）。`search_path` と `role` は固定の文字列で、利用者の値を混ぜない。
+ */
+const ENTER_HOUSEHOLD_SQL =
+  "select set_config('search_path', 'app, public', true), set_config('role', 'soroban_api', true), " +
+  "set_config('app.household_id', ?, true), set_config('app.user_id', ?, true)"
+
+/**
  * **1 リクエスト＝1 トランザクション**で、その世帯として動く。
  *
- * 中で必ずこの順に行う：
- *   1. `set local search_path = app, public`
- *   2. `set local role soroban_api`   … BYPASSRLS を持たないロールに切り替える（ここから RLS が効く）
- *   3. `set_config('app.household_id' / 'app.user_id', …, true)`   … true＝local
+ * 入ってすぐ、`ENTER_HOUSEHOLD_SQL`（上）の 1 本で `search_path`・`role`（RLS が効く soroban_api）・
+ * `app.household_id`・`app.user_id` を **local で**設定する。
  *
- * **`set local` はトランザクションが終われば（commit でも rollback でも）消える。`set`（local なし）は使わない。**
- * プーラ越しで次の人の接続に世帯が残らないための約束。
+ * **local はトランザクションが終われば（commit でも rollback でも）消える。`set`（local なし）や
+ * `set_config` の第 3 引数 false は使わない。** プーラ越しで次の人の接続に世帯が残らないための約束。
  *
  * `root` は接続ロールの Sql で、**トランザクションの外**のもの（入れ子で呼ばない。
- * 呼ぶと `set local role` が外側のトランザクションの終わりまで残る）。
+ * 呼ぶと role の切り替えが外側のトランザクションの終わりまで残る）。
  * fn が例外を投げればロールバックされ、そのまま再スローされる。
  */
 export async function withHousehold<T>(
@@ -148,9 +166,7 @@ export async function withHousehold<T>(
   const mediaBase = ids.mediaBase !== undefined ? ids.mediaBase : mediaBaseFromEnv(env)
   const after = newAfterCommit()
   const result = await root.tx(async (sql) => {
-    await sql.run('set local search_path = app, public')
-    await sql.run('set local role soroban_api')
-    await sql.get("select set_config('app.household_id', ?, true), set_config('app.user_id', ?, true)", householdId, userId)
+    await sql.get(ENTER_HOUSEHOLD_SQL, householdId, userId)
     return fn({
       sql, householdId, userId, mediaBase, env,
       userJwt: ids.userJwt ?? null, afterCommit: after.add, fetch: ids.fetch, sleep: ids.sleep,

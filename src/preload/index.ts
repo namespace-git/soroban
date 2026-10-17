@@ -46,6 +46,7 @@ const api: SorobanApi = {
   suggestProductInventory: invoke('suggestProductInventory'),
   getAutoLinkBlockers: invoke('getAutoLinkBlockers'),
   listSaleLines: invoke('listSaleLines'),
+  listSaleLinesBulk: invoke('listSaleLinesBulk'),
 
   listPurchases: invoke('listPurchases'),
   getPurchase: invoke('getPurchase'),

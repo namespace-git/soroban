@@ -5,6 +5,7 @@ import { serverEnvFrom, withHousehold, type Ctx, type HouseholdIds, type Net, ty
 import type { Sql } from './db/sql'
 import { ApiError, describeError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError } from './errors'
 import { drainDeliveries } from './push/deliver'
+import { READ_ONLY_METHODS } from '../src/shared/read-only-methods'
 
 /**
  * `POST /api/rpc/<method>` の中身。通信の形（画面側と合わせた契約）：
@@ -113,6 +114,7 @@ const API_METHOD_TABLE = {
   suggestInventory: true,
   suggestProductInventory: true,
   listSaleLines: true,
+  listSaleLinesBulk: true,
   listPurchases: true,
   getPurchase: true,
   createPurchase: true,
@@ -260,23 +262,9 @@ export const API_METHOD_NAMES: readonly (keyof SorobanApi | keyof WebApi)[] = [
 ]
 
 /**
- * 読み取りだけのメソッド。操作ログ（app_log）にも、応答のあとの通知の送信にも使わない
- * （画面を開くたびに書き込む・DB に聞くのを避ける）。
- * デスクトップの `UNLOGGED_HANDLERS`（src/main/index.ts）の読み取り分と、同じ読み取りだけのものを足した。
- * 名前は契約と食い違えば型エラー。ここに無い（書き込みの）メソッドは、成功すれば記録する
+ * 読み取りだけのメソッドの一覧は `src/shared/read-only-methods.ts`（画面の HTTP クライアントと共有）。
+ * ここでは操作ログ（app_log）と、応答のあとの通知の送信に使わない判定に使う。
  */
-const READ_ONLY: readonly (keyof SorobanApi | keyof WebApi)[] = [
-  'getDashboard', 'getInbox', 'getSalesProgress', 'getInventoryOverview', 'listInventoryGroups', 'getProductKarte',
-  'getMonthStatement', 'listPurchaseAccountCards', 'listSales', 'saleTotals', 'suggestInventory', 'suggestProductInventory',
-  'getAutoLinkBlockers', 'listSaleLines', 'listPurchases', 'getPurchase', 'listInventory', 'listMonthly', 'listExpenses',
-  'getTrackingApiStatus', 'getAiStatus', 'testGemini', 'listGeminiModels', 'getMonthDetail', 'listTags',
-  'getProduct', 'listProducts', 'getItemTimeline', 'listListings', 'suggestForListing', 'searchAll',
-  'listShopAccounts', 'listShopAccountStats', 'listVariantSummary', 'listShippingMethods', 'getSettings',
-  'getLastTrackingSummary', 'estimateSaleProfit', 'listSaleExclusions', 'listRuns', 'getHealthChecks', 'exportCsv',
-  'getAutoBackupStatus', 'listCashAccounts', 'listLiabilities', 'listCashEntries', 'getCashMonth',
-  'getCollectStatus', 'listAgentDevices', 'getPushConfig', 'listPushDevices', 'getTrackingNumber',
-]
-const READ_ONLY_METHODS: ReadonlySet<string> = new Set<string>(READ_ONLY)
 
 /**
  * 読み取りだけでも書き込みでもないが記録しないもの。logClient は記録用の呼び出しで、記録すると無限に増える。

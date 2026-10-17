@@ -34,13 +34,35 @@ export function errorJson(status: number, code: string, message: string, headers
   return new Response(JSON.stringify({ error: { code, message } }), { status, headers: { ...JSON_HEADERS, ...headers } })
 }
 
+/** ログに出してよいメソッド名の形（英数字・`_`・`.`・`-` の 64 文字まで）。URL から来る値なので、外れたものは出さない */
+const LOGGABLE_METHOD = /^[A-Za-z0-9_.-]{1,64}$/
+
+/**
+ * 1 リクエストの計測のログ 1 行：`[rpc] listSales status=200 queries=9 db_ms=187 total_ms=240`
+ *
+ * 出すのは **入口の名前・メソッド名・HTTP の状態・SQL の本数・DB にかかった合計時間・全体の時間（ミリ秒）だけ**。
+ * SQL の文・引数・ユーザー id・世帯 id・トークンは出さない（ここに渡さない）。
+ * メソッド名は URL から来る値なので、`LOGGABLE_METHOD` に合わないものは `-` にする（改行などを混ぜさせない）。
+ */
+export function requestLogLine(
+  label: 'rpc' | 'agent', method: string, status: number, queries: number, dbMs: number, totalMs: number,
+): string {
+  const name = LOGGABLE_METHOD.test(method) ? method : '-'
+  return `[${label}] ${name} status=${status} queries=${queries} db_ms=${Math.round(dbMs)} total_ms=${Math.round(totalMs)}`
+}
+
 /**
  * 1 リクエスト 1 接続。POST 以外は 405、接続先が無ければ 500。
  * Workers は接続をリクエストをまたいで使えない。応答を返したあとに、（書き込みが成功したときだけ）積んだ通知を急ぎで送ってみて、
  * **そのあとで**接続を閉じる。送れなくても定期実行（Cron）が拾う
+ *
+ * 応答ができたところで、本数と時間を `requestLogLine` で 1 行ログに出す
+ * （どこで時間を使っているかを Worker のログで測るため。応答のあとの通知の送信は含めない）。
+ * 処理が例外で抜けたときは status=500 として出し、例外はそのまま投げる
  */
 async function serve(
   label: 'rpc' | 'agent',
+  method: string,
   request: Request,
   env: EntryEnv,
   waitUntil: WaitUntil,
@@ -55,13 +77,25 @@ async function serve(
     console.error(`[${label}] HYPERDRIVE も DATABASE_URL も設定されていません`)
     return errorJson(500, 'internal', INTERNAL_MESSAGE)
   }
-  const db = createPostgresSql(url, { prepare: env.DATABASE_PREPARE?.trim().toLowerCase() !== 'false' })
+  const started = performance.now()
+  let queries = 0
+  let dbMs = 0
+  const db = createPostgresSql(url, {
+    prepare: env.DATABASE_PREPARE?.trim().toLowerCase() !== 'false',
+    onQuery: (ms) => {
+      queries++
+      dbMs += ms
+    },
+  })
   let notify = false
+  let status = 500
   try {
     const response = await run(db)
+    status = response.status
     notify = mayNotify(response)
     return response
   } finally {
+    console.log(requestLogLine(label, method, status, queries, dbMs, performance.now() - started))
     waitUntil(closeAfterResponse(db, env, notify))
   }
 }
@@ -69,7 +103,7 @@ async function serve(
 /** `POST /api/rpc/<method>`（画面の API。認証は人の JWT） */
 export function handleRpcEntry(request: Request, env: EntryEnv, method: string, waitUntil: WaitUntil): Promise<Response> {
   return serve(
-    'rpc', request, env, waitUntil,
+    'rpc', method, request, env, waitUntil,
     (db) => handleRpc(request, method, { root: db, env }),
     (response) => mayQueueNotification(method, response),
   )
@@ -78,7 +112,7 @@ export function handleRpcEntry(request: Request, env: EntryEnv, method: string, 
 /** `POST /api/agent/<method>`（取り込み担当の PC だけが呼ぶ。register は人の JWT、それ以外は取り込み担当の鍵） */
 export function handleAgentEntry(request: Request, env: EntryEnv, method: string, waitUntil: WaitUntil): Promise<Response> {
   return serve(
-    'agent', request, env, waitUntil,
+    'agent', method, request, env, waitUntil,
     (db) => handleAgent(request, method, { root: db, env }),
     (response) => agentMayQueueNotification(method, response),
   )

@@ -24,7 +24,7 @@ afterAll(async () => {
 const CORE_METHODS = [
   'listSales', 'saleTotals', 'createSale', 'updateSale', 'deleteSale',
   'linkInventory', 'autoLinkPending', 'unlinkInventory', 'getAutoLinkBlockers',
-  'suggestInventory', 'suggestProductInventory', 'listSaleLines', 'estimateSaleProfit',
+  'suggestInventory', 'suggestProductInventory', 'listSaleLines', 'listSaleLinesBulk', 'estimateSaleProfit',
   'listSaleExclusions', 'removeSaleExclusion', 'setSaleTags',
   'listInventory', 'updateInventory', 'splitInventory', 'mergeSplitInventory',
   'disposeInventory', 'restoreInventory', 'setInventoryTags',
@@ -42,8 +42,8 @@ const COLLECTOR_ONLY = [
 ]
 
 describe('API の登録（在庫・出品・販売）', () => {
-  it('契約のメソッド 30 本がすべて登録されている', () => {
-    expect(CORE_METHODS).toHaveLength(30)
+  it('契約のメソッド 31 本がすべて登録されている', () => {
+    expect(CORE_METHODS).toHaveLength(31)
     for (const m of CORE_METHODS) expect(Object.prototype.hasOwnProperty.call(handlers, m), m).toBe(true)
   })
 

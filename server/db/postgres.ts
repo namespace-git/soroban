@@ -26,6 +26,15 @@ export interface PostgresOptions {
   prepare?: boolean
   /** 暗号化。未指定なら自動（URL に sslmode が無く、ローカルでも Hyperdrive でもないホストなら 'require'） */
   ssl?: 'require' | false
+  /**
+   * SQL を 1 本流し終えるたびに、DB にかかった時間（ミリ秒）を渡す。失敗した 1 本も数える。
+   * 1 リクエストの本数と合計時間を測るためのもの（`server/entry.ts` がログに 1 行出す）。
+   * トランザクションの中・savepoint の中も数える（postgres.js が内部で流す begin / commit / savepoint 自体は数えない）。
+   *
+   * **渡るのは時間だけ**（SQL の文・引数・結果は渡さない）。省略すれば何もしない。
+   * これが投げても、クエリには影響させない（握りつぶす）
+   */
+  onQuery?: (ms: number) => void
 }
 
 export function createPostgresSql(url: string, options: PostgresOptions = {}): PostgresSql {
@@ -103,34 +112,51 @@ function postgresTypes(): Record<string, postgres.PostgresType> {
 /** 作り済みの postgres.js のクライアントを包む（テストでは偽物を渡す） */
 export function fromPostgresJs(client: postgres.Sql, options: PostgresOptions = {}): PostgresSql {
   const prepare = options.prepare ?? true
+  const onQuery = options.onQuery
   const root = createSql({
-    ...driverOf(client, prepare),
+    ...driverOf(client, prepare, onQuery),
     // トランザクションの中は、begin が渡す scoped（予約した 1 本の接続）だけを使う。
     // ここで外側の client に戻ると、別の接続に流れて世帯の文脈（set local）が効かない
     // postgres.js の戻り値の型は「Promise の配列なら中身を解く」型。fn は 1 つの Promise を返すので T のまま
     begin: <T>(fn: (driver: TxDriver) => Promise<T>) =>
-      client.begin(async (scoped) => fn(txDriverOf(scoped, prepare))) as Promise<T>,
+      client.begin(async (scoped) => fn(txDriverOf(scoped, prepare, onQuery))) as Promise<T>,
   })
   return Object.assign(root, { end: () => client.end() })
 }
 
-function txDriverOf(scoped: postgres.TransactionSql, prepare: boolean): TxDriver {
+function txDriverOf(scoped: postgres.TransactionSql, prepare: boolean, onQuery?: (ms: number) => void): TxDriver {
   return {
-    ...driverOf(scoped, prepare),
+    ...driverOf(scoped, prepare, onQuery),
     // 入れ子は postgres.js 自身の savepoint で張る（生の SQL の savepoint だと、内側の失敗を外側が覚えてしまい、
     // catch して続けても最後に全部ロールバックされる）。中でも渡された sp だけを使う
     savepoint: <T>(fn: (driver: TxDriver) => Promise<T>) =>
-      scoped.savepoint(async (sp) => fn(txDriverOf(sp, prepare))) as Promise<T>,
+      scoped.savepoint(async (sp) => fn(txDriverOf(sp, prepare, onQuery))) as Promise<T>,
   }
 }
 
-function driverOf(client: Pick<postgres.Sql, 'unsafe'>, prepare: boolean): Driver {
+function driverOf(client: Pick<postgres.Sql, 'unsafe'>, prepare: boolean, onQuery?: (ms: number) => void): Driver {
   return {
     async query(text, params) {
-      // simple: false … 引数が 0 個でも extended protocol にする（simple だと複数文が通り、PGlite と挙動が分かれる）。
-      // 型定義に無い実行時のオプション
-      const result = await client.unsafe(text, params as never, { prepare, simple: false } as never)
+      // onQuery が無ければ時計も見ない。あれば、DB に流して返ってくるまで（結果を配列にする前まで）を測る
+      const started = onQuery ? performance.now() : 0
+      let result: Awaited<ReturnType<typeof client.unsafe>>
+      try {
+        // simple: false … 引数が 0 個でも extended protocol にする（simple だと複数文が通り、PGlite と挙動が分かれる）。
+        // 型定義に無い実行時のオプション
+        result = await client.unsafe(text, params as never, { prepare, simple: false } as never)
+      } finally {
+        if (onQuery) reportQuery(onQuery, performance.now() - started)
+      }
       return { rows: Array.from(result) as Record<string, unknown>[], changes: result.count ?? 0 }
     },
+  }
+}
+
+/** 測定の呼び出し。測定のほうが投げても、クエリの成否には影響させない */
+function reportQuery(onQuery: (ms: number) => void, ms: number): void {
+  try {
+    onQuery(ms)
+  } catch {
+    // 握りつぶす（測っているだけ）
   }
 }

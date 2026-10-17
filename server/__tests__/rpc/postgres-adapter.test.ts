@@ -1,5 +1,5 @@
 import postgres from 'postgres'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { connectionOptions, fromPostgresJs } from '../../db/postgres'
 import { OID } from '../../db/types'
 
@@ -84,6 +84,97 @@ describe('postgres.js のアダプタ', () => {
   it('run の changes は postgres.js の count', async () => {
     const { client } = fakeClient()
     expect(await fromPostgresJs(client).run('update t set a = 1')).toEqual({ changes: 1 })
+  })
+})
+
+describe('onQuery（SQL の本数と時間を測る口）', () => {
+  it('流した SQL 1 本ごとに 1 回。トランザクションの中・savepoint の中も数える（begin / savepoint 自体は数えない）', async () => {
+    const { client } = fakeClient()
+    const onQuery = vi.fn()
+    const db = fromPostgresJs(client, { onQuery })
+
+    await db.get('select 1') // 外
+    expect(onQuery).toHaveBeenCalledTimes(1)
+
+    await db.tx(async (tx) => {
+      await tx.get('select 2') // トランザクションの中
+      await tx.all('select 3')
+      await tx.tx(async (inner) => {
+        await inner.get('select 4') // savepoint の中
+        await inner.tx((deeper) => deeper.run('update t set a = 1')) // 入れ子の入れ子
+      })
+      await tx.get('select 5')
+    })
+    // 外 1 ＋ 中 2 ＋ savepoint 内 2 ＋ 戻って 1 ＝ 6 本
+    expect(onQuery).toHaveBeenCalledTimes(6)
+  })
+
+  it('渡るのは時間（ミリ秒の数）ひとつだけ。SQL の文も引数も渡さない', async () => {
+    const { client } = fakeClient()
+    const onQuery = vi.fn()
+    const db = fromPostgresJs(client, { onQuery })
+    await db.tx((tx) => tx.get("select set_config('app.household_id', ?, true)", 'secret-household-id'))
+    expect(onQuery).toHaveBeenCalledTimes(1)
+    for (const call of onQuery.mock.calls) {
+      expect(call).toHaveLength(1)
+      expect(typeof call[0]).toBe('number')
+      expect(Number.isFinite(call[0])).toBe(true)
+      expect(call[0]).toBeGreaterThanOrEqual(0)
+    }
+    expect(JSON.stringify(onQuery.mock.calls)).not.toContain('secret-household-id')
+  })
+
+  it('かかった時間は、DB に流す前と戻ってきた後の差', async () => {
+    const { client } = fakeClient()
+    const now = vi.spyOn(performance, 'now').mockReturnValueOnce(100).mockReturnValueOnce(112.5)
+    try {
+      const onQuery = vi.fn()
+      await fromPostgresJs(client, { onQuery }).get('select 1')
+      expect(onQuery).toHaveBeenCalledWith(12.5)
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  it('SQL が失敗しても、その 1 本の時間は数える。例外はそのまま出る', async () => {
+    const failing = {
+      unsafe: async () => {
+        throw new Error('syntax error')
+      },
+      begin: async () => {},
+      end: async () => {},
+    } as never
+    const onQuery = vi.fn()
+    await expect(fromPostgresJs(failing, { onQuery }).get('select oops')).rejects.toThrow('syntax error')
+    expect(onQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('onQuery が投げても、クエリには影響しない', async () => {
+    const { client } = fakeClient()
+    const onQuery = vi.fn(() => {
+      throw new Error('measurement broke')
+    })
+    const db = fromPostgresJs(client, { onQuery })
+    expect(await db.get('select 1')).toEqual({ v: 1 })
+    expect(await db.run('update t set a = 1')).toEqual({ changes: 1 })
+    expect(onQuery).toHaveBeenCalledTimes(2)
+  })
+
+  it('省略すれば何もしない（時計も見ない）', async () => {
+    const { client } = fakeClient()
+    const now = vi.spyOn(performance, 'now')
+    try {
+      expect(await fromPostgresJs(client).get('select 1')).toEqual({ v: 1 })
+      expect(await fromPostgresJs(client, { prepare: false }).tx((tx) => tx.get('select 1'))).toEqual({ v: 1 })
+      expect(now).not.toHaveBeenCalled()
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  it('connectionOptions には持ち込まれない（postgres.js の設定に onQuery は混ざらない）', () => {
+    const o = connectionOptions('postgres://u@localhost:5432/db', { onQuery: () => {} })
+    expect(Object.keys(o)).not.toContain('onQuery')
   })
 })
 

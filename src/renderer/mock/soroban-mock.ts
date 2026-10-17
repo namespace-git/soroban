@@ -3442,6 +3442,18 @@ const api: SorobanApi = {
     return wait(items)
   },
 
+  async listSaleLinesBulk(saleIds: string[]) {
+    if (!Array.isArray(saleIds)) throw new Error('販売の指定が正しくありません')
+    if (saleIds.length > 500) throw new Error(`一度に引ける販売は 500 件までです（${saleIds.length} 件が指定されました）`)
+    const out: Record<string, InventoryItem[]> = {}
+    for (const saleId of new Set(saleIds)) {
+      const ids = saleLines.get(saleId) ?? []
+      const items = ids.map(id => inventory.find(it => it.id === id)).filter((it): it is InventoryItem => !!it)
+      if (items.length > 0) out[saleId] = items
+    }
+    return wait(out)
+  },
+
   async listPurchases() {
     const rows = purchases.slice().sort((a, b) => (a.ordered_at < b.ordered_at ? 1 : -1))
     return wait(rows)

@@ -7,6 +7,7 @@
 //
 // 失敗は throw new Error(message) にする。画面は e.message をそのままトーストに出している
 // （Electron の IPC でも同じ）。code === 'unauthorized' ならログインに戻す。
+import { READ_ONLY_METHODS } from '../../shared/read-only-methods'
 import type { SorobanApi } from '../../shared/types'
 
 /** サーバー（または通信）の失敗。message は人に見せてよい日本語 */
@@ -55,10 +56,45 @@ function statusMessage(status: number): string {
   return `サーバーから想定外の応答がありました（${status}）`
 }
 
+/** 飛んでいる最中の読み取り 1 本。waiters はこの結果を待っている呼び出しの数（終わる前にしか増えない） */
+type Inflight = { promise: Promise<unknown>; waiters: number }
+
 export function createHttpApi(options: HttpApiOptions): SorobanApi {
   const base = options.base.replace(/\/+$/, '')
 
+  // 同時に出た「同じメソッド・同じ引数」の読み取りを 1 本にまとめる（ホームを開くと getDashboard が 3 本飛ぶ、など）。
+  // まとめるのは**飛んでいる最中だけ**。終わったら（成功も失敗も）すぐ忘れる＝結果は使い回さない
+  // （帳簿の数字が古く出るのがいちばん怖いので、キャッシュにはしない）。書き込みは READ_ONLY_METHODS に無いので絶対にまとめない
+  const inflight = new Map<string, Inflight>()
+
   async function call(method: string, args: unknown[]): Promise<unknown> {
+    // 本文は呼び出した時点の値で固める（トークン待ちのあいだに、画面が引数を書き換えても送る中身が変わらないように）
+    const payload = bodyOf(args)
+    if (!READ_ONLY_METHODS.has(method)) return send(method, payload)
+
+    const key = `${method}\n${payload}`
+    const shared = inflight.get(key) ?? start(key, method, payload)
+    shared.waiters += 1
+    const result = await shared.promise
+    // 1 人しか待っていなければそのまま渡す。2 人以上が同じ結果を待っていたら、全員に別々のコピーを渡す
+    // （画面が戻り値をその場で並べ替えたり書き換えたりしても、相乗りした別の呼び出しに影響しないように）。
+    // waiters は結果が決まる前にしか増えない（決まる前に inflight から消える）ので、ここで読めば確定している
+    return shared.waiters > 1 ? structuredClone(result) : result
+  }
+
+  /** 読み取りを 1 本送り出し、飛んでいる最中の表に載せる */
+  function start(key: string, method: string, payload: string): Inflight {
+    // finally は結果が呼び出し側に見える前に走る（finally が返す Promise は、コールバックのあとに決まる）。
+    // だから「終わったあと」の同じ呼び出しは、必ず新しく送られる
+    const promise = send(method, payload).finally(() => {
+      if (inflight.get(key) === entry) inflight.delete(key)
+    })
+    const entry: Inflight = { promise, waiters: 0 }
+    inflight.set(key, entry)
+    return entry
+  }
+
+  async function send(method: string, payload: string): Promise<unknown> {
     const token = await options.getToken()
     if (!token) {
       options.onUnauthorized()
@@ -70,7 +106,7 @@ export function createHttpApi(options: HttpApiOptions): SorobanApi {
       res = await fetch(`${base}/rpc/${encodeURIComponent(method)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: bodyOf(args),
+        body: payload,
       })
     } catch {
       // 圏外・機内モード・サーバー停止など。英語の生のエラー（Failed to fetch）は出さない

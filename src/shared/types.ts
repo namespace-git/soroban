@@ -1250,6 +1250,12 @@ export interface SorobanApi {
   suggestProductInventory(modelCode: string, quantity: number, excludeIds?: string[]): Promise<string[]>
   /** その販売に紐付いている在庫（解除・付け替え用） */
   listSaleLines(saleId: string): Promise<InventoryItem[]>
+  /**
+   * 複数の販売の紐付いた在庫を 1 回で（売上の一覧が販売ごとに listSaleLines を呼ばないため）。
+   * キーは販売 id、値は listSaleLines(id) と同じ中身・同じ並び。紐付けの無い販売・知らない id はキーを持たない。
+   * id の重複は 1 つにまとめる。上限 500 件（超えたら Error）
+   */
+  listSaleLinesBulk(saleIds: string[]): Promise<Record<string, InventoryItem[]>>
 
   // 仕入
   listPurchases(): Promise<PurchaseSummary[]>

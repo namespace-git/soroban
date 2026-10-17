@@ -6,7 +6,7 @@ import { isRealized, realizedTotals } from '../../shared/recognition'
 import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue'
 import type {
   SaleProfit, ShippingMethod, SaleKind, SaleInput, SaleFilter, SaleTotals, Tag,
-  Listing, ListingStatus, CollectorRun, SaleStatus, SalesProgress, SalesChannel,
+  Listing, ListingStatus, CollectorRun, SaleStatus, SalesProgress, SalesChannel, InventoryItem,
 } from '../../shared/types'
 import { CHANNEL_LABEL, LISTING_STATUS_LABEL, SALE_KIND_LABEL } from '../../shared/types'
 import { todayLocal } from '../../shared/date'
@@ -434,18 +434,22 @@ async function load() {
 }
 
 // --- 原価セルに出す在庫コード・id。sale_profit には個々の item_code が無いため、
-//     紐付いている行だけ listSaleLines で引き直す（表示専用。金額の再計算はしない） ---
+//     紐付いている行だけ listSaleLinesBulk でまとめて引き直す（表示専用。金額の再計算はしない）。
+//     1 回の上限は 500 件なので、それを超えたら 500 件ずつ順に呼ぶ ---
 const saleItemCodes = ref<Map<string, string[]>>(new Map())
 const saleItemIds = ref<Map<string, string[]>>(new Map())
+const SALE_LINES_BULK_CHUNK = 500
 async function loadSaleItemInfo() {
   const targets = sales.value.filter(s => s.item_count > 0)
   if (!targets.length) { saleItemCodes.value = new Map(); saleItemIds.value = new Map(); return }
-  const pairs = await Promise.all(targets.map(async s => {
-    const items = await window.soroban.listSaleLines(s.id)
-    return [s.id, items] as const
-  }))
-  saleItemCodes.value = new Map(pairs.map(([id, items]) => [id, items.map(it => it.item_code)]))
-  saleItemIds.value = new Map(pairs.map(([id, items]) => [id, items.map(it => it.id)]))
+  const ids = targets.map(s => s.id)
+  const byId: Record<string, InventoryItem[]> = {}
+  for (let i = 0; i < ids.length; i += SALE_LINES_BULK_CHUNK) {
+    Object.assign(byId, await window.soroban.listSaleLinesBulk(ids.slice(i, i + SALE_LINES_BULK_CHUNK)))
+  }
+  // キーが無い販売（紐付けが外れた直後など）は、これまでの listSaleLines が [] を返していたのと同じ空として持つ
+  saleItemCodes.value = new Map(ids.map(id => [id, (byId[id] ?? []).map(it => it.item_code)]))
+  saleItemIds.value = new Map(ids.map(id => [id, (byId[id] ?? []).map(it => it.id)]))
 }
 
 // --- 未紐付けの候補（確定はしない。表示のヒントだけ）。原価セルの「候補」sub と、

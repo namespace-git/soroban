@@ -282,7 +282,7 @@ async function runCollectAll(silent: boolean): Promise<CollectorRun[]> {
 const UNLOGGED_HANDLERS = new Set<keyof SorobanApi>([
   'logClient', 'getDashboard', 'listSales', 'listListings', 'listInventory',
   'getAutoBackupStatus', 'getHealthChecks', 'getTrackingApiStatus', 'getLastTrackingSummary',
-  'suggestProductInventory', 'getAutoLinkBlockers',
+  'suggestProductInventory', 'getAutoLinkBlockers', 'listSaleLinesBulk',
   'listPurchases', 'listMonthly', 'listExpenses', 'searchAll', 'getSettings',
   'getMonthDetail', 'listProducts', 'listTags', 'listShopAccounts', 'listShippingMethods',
   'listCashAccounts', 'listLiabilities', 'listCashEntries', 'getCashMonth',
@@ -353,6 +353,7 @@ function registerIpc(): void {
   handle('suggestProductInventory', (modelCode, quantity, excludeIds) => db.suggestProductInventory(modelCode, quantity, excludeIds))
   handle('getAutoLinkBlockers', (saleId) => db.getAutoLinkBlockers(saleId))
   handle('listSaleLines', (saleId) => db.listSaleLines(saleId))
+  handle('listSaleLinesBulk', (saleIds) => db.listSaleLinesBulk(saleIds))
 
   handle('listPurchases', () => db.listPurchases())
   handle('getPurchase', (id) => db.getPurchase(id))
