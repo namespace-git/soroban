@@ -31,6 +31,11 @@
   // **画面（Settings → Bindings）で Hyperdrive を結び付けるだけでは足りない。** 結び付けは、このファイルに無いと次のデプロイで消える。
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "9751b25c5b69461a8f5f6507d8bcfb9a" }],
 
+  // Worker（/api と定期実行）を DB（Supabase・シンガポール）の近くで動かす。画面のファイル（assets）は今までどおり近くの拠点から返る。
+  // API 1 本で DB と 10 回前後やりとりする（postgres.js は引数のある SQL ごとに describe で 1 往復増える）ので、
+  // 大阪で動かすと 1 往復 70ms 前後 × 回数がそのまま待ち時間になっていた（2026-10-18 の実測：ふつうの読み出しで 0.8〜1 秒、ホームで 3〜6 秒）
+  "placement": { "region": "aws:ap-southeast-1" },
+
   // workers.dev の URL で公開する（https://soroban.<アカウント>.workers.dev）。ブランチごとのプレビュー URL は作らない
   "workers_dev": true,
   "preview_urls": false,
