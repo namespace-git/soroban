@@ -203,6 +203,8 @@ ID は Claude に伝えれば足してコミットします。
 
 Worker の **Settings → Variables and Secrets**（実行時に使う値）。**次の 4 つを、種類 `Secret` で入れる**：
 
+2-5 の `pnpm setup:secrets` を使えば、この 4 つは自動で入ります（画面で手で入れなくてよい）。
+
 | 名前 | 中身 | 備考 |
 |---|---|---|
 | `VAPID_PUBLIC_KEY` | 2-5 で作った値（通知の公開鍵） | 公開してよい値だが、まとめて Secret で入れてよい |
@@ -211,6 +213,7 @@ Worker の **Settings → Variables and Secrets**（実行時に使う値）。*
 | `SECRET_KEYS` | 2-5 で作った値（API キーを暗号化する鍵） | **秘密** |
 
 - **`Secret` 型の値は、デプロイで消えません**（`wrangler deploy` は Secret を必ず引き継ぎます）。入れ直すのは値を変えたいときだけ
+- **ビルドの変数（Settings → Build → Variables and secrets。2-2）に入れても、実行時には読まれません。** ここ（Settings → Variables and Secrets）に入れる
 - **画面には入れないもの**（`wrangler.jsonc` の `vars` に入っている公開の値）：`SUPABASE_URL`（ログインの検証・画像の URL）、
   `SUPABASE_ANON_KEY`（レシート・商品画像の署名・削除・読み出し。ログインした人の権限で Storage を呼ぶときの `apikey`）。
   **同じ名前を画面にも入れない**（`vars` と Secret で名前が二重になって、デプロイが失敗することがあります）
@@ -219,10 +222,28 @@ Worker の **Settings → Variables and Secrets**（実行時に使う値）。*
 - 入れ忘れたとき：`VAPID_*` が無ければ通知は使えないだけ（設定画面に出ない）。`SECRET_KEYS` が無ければ API キーの保存を
   「この環境では安全に保存できません」と断ります（平文では持たない）。定期実行の 17TRACK の確認は飛ばします
 - Secret を入れたあとは、反映のためにもう一度デプロイ（Deployments から再デプロイ、または何かを push）する
+  （2-5 の `pnpm setup:secrets` で入れたときは、数十秒で反映されるので再デプロイは要りません）
 
-### 2-5. 鍵を作る（VAPID と SECRET_KEYS）
+### 2-5. 鍵を作って Worker に入れる（VAPID と SECRET_KEYS）
 
-PC で（このリポジトリのフォルダ）：
+PC で（このリポジトリのフォルダ。`npx wrangler login` 済みであること）：
+
+```bash
+pnpm setup:secrets
+```
+
+鍵を作って、そのまま Worker `soroban` の Secret に入れます。**値は画面にもファイルにも出ません**（`wrangler secret bulk` に標準入力で渡します）。
+入れたあとに出るのは、入れた名前と飛ばした名前の一覧だけです。
+
+- 聞かれるのは、通知の送り主の連絡先（メールアドレス）だけ。`mailto:` は付けなくてよい。聞かれずに渡すなら `pnpm setup:secrets --subject foo@example.com`
+- **すでに入っているものは上書きしません**（`SECRET_KEYS` を替えると保存済みの API キーが読めなくなり、`VAPID_*` を替えると通知の登録がやり直しになるため）。
+  4 つとも入っていれば「何もしません」で終わります。もう一度実行しても安全です
+- `VAPID_PUBLIC_KEY` と `VAPID_PRIVATE_KEY` は組です。片方だけ入っていると止まります（Cloudflare の画面で両方消してからもう一度）
+- 鍵を作り直したいとき**だけ** `pnpm setup:secrets --force`（ある分も上書き）。上の影響が出ると画面に警告されます。**鍵は 1 回作ったら変えない**
+- 確かめる：`npx wrangler secret list --name soroban` に、`SECRET_KEYS`・`VAPID_PUBLIC_KEY`・`VAPID_PRIVATE_KEY`・`VAPID_SUBJECT` の 4 つの名前が出ること
+  （値は出ません。Cloudflare の画面でも Secret の値は見られません）
+
+**手で入れたいとき**（Cloudflare の画面に自分で貼る場合）は、鍵を画面に出すだけの道具もあります：
 
 ```bash
 pnpm gen-keys
@@ -231,7 +252,7 @@ pnpm gen-keys
 画面に `VAPID_PUBLIC_KEY`・`VAPID_PRIVATE_KEY`・`VAPID_SUBJECT`（雛形）・`SECRET_KEYS` が出ます。
 
 - **出た値は、どこにも保存しない。** ファイル・メモ・チャットに貼らない（このリポジトリは Public）。道具もファイルには書きません
-- **2-4 のとおり Cloudflare の Worker に（Secret として）入れたら、ターミナルを閉じる**
+- **2-4 のとおり Cloudflare の Worker に（Secret として）入れたら、ターミナルを閉じる**（ビルドの変数の欄ではなく、実行時の Variables and Secrets に）
 - `VAPID_SUBJECT` だけは自分で決める（`mailto:` か `https://` で始まる連絡先）
 - もう一度 `pnpm gen-keys` を実行すると**別の鍵**ができます。作り直すと、通知の登録はやり直し（`VAPID_*`）、
   保存済みの API キーは入れ直し（`SECRET_KEYS`）になります。**鍵は 1 回作ったら変えない**

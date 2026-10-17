@@ -1160,7 +1160,7 @@ const runLabel: Record<string, string> = {
           <button v-if="trackingApiStatus?.configured" class="sm ghost" @click="deleteTrackingKey">削除</button>
         </div>
         <p v-if="trackingApiStatus && !trackingApiStatus.safe_storage" class="faint hint">
-          このPCでは OS の安全な保存が使えないため、API キーを保存できません。
+          {{ isWeb ? 'サーバーに暗号化の鍵（SECRET_KEYS）が入っていないため、API キーを保存できません。' : 'このPCでは OS の安全な保存が使えないため、API キーを保存できません。' }}
         </p>
         <p v-else-if="trackingApiStatus && !trackingApiStatus.configured" class="faint hint">
           API キーが無いあいだは、上のチェックを入れても自動確認は動きません。
@@ -1560,7 +1560,7 @@ const runLabel: Record<string, string> = {
           <button v-if="aiStatus?.configured" class="sm ghost" @click="deleteAiKey">削除</button>
         </div>
         <p v-if="aiStatus && !aiStatus.safe_storage" class="faint hint">
-          このPCでは OS の安全な保存が使えないため、API キーを保存できません。
+          {{ isWeb ? 'サーバーに暗号化の鍵（SECRET_KEYS）が入っていないため、API キーを保存できません。' : 'このPCでは OS の安全な保存が使えないため、API キーを保存できません。' }}
         </p>
 
         <div class="row">
