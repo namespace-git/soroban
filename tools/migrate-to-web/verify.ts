@@ -163,6 +163,12 @@ interface ViewSpec {
   key: string[]
   /** 比べない列。aging_days は「今日」で変わるので SQLite の値とは比べず、Postgres の中で別に確かめる */
   ignore: string[]
+  /**
+   * この差までは一致とみなす列（円）。variant_summary の avg_price / avg_profit は表示用の平均で、分割した箱の重み
+   * （1/n）を倍精度で足すため、平均がちょうど x.5 のときに SQLite（補償加算）と Postgres（単純加算）で四捨五入の向きが
+   * 割れることがある（実データで B001 が 6551 / 6550）。帳簿の金額・合計には使っていないので ±1 円は許す
+   */
+  tolerance?: Record<string, number>
 }
 
 const VIEW_SPECS: Record<ViewName, ViewSpec> = {
@@ -170,7 +176,7 @@ const VIEW_SPECS: Record<ViewName, ViewSpec> = {
   monthly_summary: { key: ['month', 'kind'], ignore: [] },
   inventory_view: { key: ['id'], ignore: ['aging_days'] },
   sale_line_share: { key: ['sale_line_id'], ignore: [] },
-  variant_summary: { key: ['model_code'], ignore: [] },
+  variant_summary: { key: ['model_code'], ignore: [], tolerance: { avg_price: 1, avg_profit: 1 } },
 }
 
 async function readViews(sql: Sql): Promise<Record<ViewName, Row[]>> {
@@ -236,6 +242,11 @@ function renameColumn(r: Row, from: string, to: string): void {
 const same = (a: unknown, b: unknown): boolean =>
   a === b || (Array.isArray(a) && Array.isArray(b) && JSON.stringify(a) === JSON.stringify(b))
 
+function withinTolerance(spec: ViewSpec, column: string, a: unknown, b: unknown): boolean {
+  const tol = spec.tolerance?.[column]
+  return tol !== undefined && typeof a === 'number' && typeof b === 'number' && Math.abs(a - b) <= tol
+}
+
 function compareView(view: ViewName, sqlite: Row[], pg: Row[]): ViewCheck {
   const spec = VIEW_SPECS[view]
   const sqliteMap = new Map(sqlite.map((r) => [keyOf(spec.key, r), r]))
@@ -257,7 +268,7 @@ function compareView(view: ViewName, sqlite: Row[], pg: Row[]): ViewCheck {
     const names = new Set([...Object.keys(a), ...Object.keys(b)].filter((c) => !spec.ignore.includes(c)))
     names.forEach((c) => columns.add(c))
     const diffs = [...names]
-      .filter((c) => !(c in a) || !(c in b) || !same(a[c], b[c]))
+      .filter((c) => !(c in a) || !(c in b) || !(same(a[c], b[c]) || withinTolerance(spec, c, a[c], b[c])))
       .map((c) => ({ column: c, sqlite: c in a ? show(a[c]) : '(列なし)', postgres: c in b ? show(b[c]) : '(列なし)' }))
     if (diffs.length > 0) add({ key: key.replace(/\u0000/g, ' / '), problem: 'different', columns: diffs })
   }
