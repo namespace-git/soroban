@@ -96,9 +96,10 @@ function modelMatchCandidates(sale: SaleProfit): InventoryItem[] {
   return db.suggestInventory(sale.id, 50).filter(item => item.model_code && codes.has(item.model_code))
 }
 
+/** 名前は在庫の商品名（型番に付けた表示名があればそれ、無ければ明細の名前。release の items と同じ） */
 function toCandidate(item: InventoryItem): NonNullable<InboxItem['candidate']> {
   return {
-    inventory_item_id: item.id, item_code: item.item_code,
+    inventory_item_id: item.id, item_code: item.item_code, name: item.product_name ?? item.name,
     landed_cost: item.landed_cost, acquired_at: item.acquired_at,
   }
 }
@@ -148,6 +149,16 @@ function shipProfitHint(sale: SaleProfit): { min: number; max: number } {
     min: sale.price - sale.fee - range.max - sale.packaging_cost - cost,
     max: sale.price - sale.fee - range.min - sale.packaging_cost - cost,
   }
+}
+
+/**
+ * 未紐付けの販売に候補が 1 点あるとき、その候補を紐付けたときの粗利。shipProfitHint と同じ見積もり
+ * （送料が分かっていれば1値、未入力なら有効な発送方法の最安〜最高の幅。原価は候補1点＝estimateCost）。
+ * 送料が分からず有効な発送方法も無ければ null（未入力の送料を 0 円と見て、粗利を大きく見せない）
+ */
+function linkProfitHint(sale: SaleProfit): { min: number; max: number } | null {
+  if (knownShippingFee(sale) === null && activeShippingFees().length === 0) return null
+  return shipProfitHint(sale)
 }
 
 // ------------------------------------------------------------
@@ -437,12 +448,7 @@ export function getInbox(): Inbox {
   const linkItems: InboxItem[] = linkSales.map(s => {
     const candidates = modelMatchCandidates(s)
     const candidate = candidates.length === 1 ? toCandidate(candidates[0]) : null
-    const profit_hint = candidate
-      ? {
-          min: s.price - s.fee - s.shipping_fee - s.packaging_cost - candidates[0].landed_cost,
-          max: s.price - s.fee - s.shipping_fee - s.packaging_cost - candidates[0].landed_cost,
-        }
-      : null
+    const profit_hint = candidate ? linkProfitHint(s) : null
     return {
       kind: 'link',
       id: s.id,

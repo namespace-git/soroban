@@ -496,6 +496,99 @@ describe('inbox（getInbox・snoozeReminder）', () => {
     })
   })
 
+  describe('link：候補の名前と、その候補を紐付けたときの粗利の見込み', () => {
+    // デスクトップ版（src/main/__tests__/inbox.test.ts）の同じ describe と、同じデータ・同じ数字を期待する
+    beforeEach(() => {
+      setClock([2026, 9, 5, 3, 0]) // JST 2026-09-05 12:00
+    })
+
+    /** 有効な発送方法をこの一覧だけにする（世帯の初期値は無効にする）。無効にした方法は相場に入らない。名前 → id を返す */
+    async function onlyShippingMethods(
+      active: Array<[string, number]>, inactive: Array<[string, number]> = [],
+    ): Promise<Record<string, string>> {
+      for (const m of await db.listShippingMethods()) await db.deleteShippingMethod(m.id)
+      for (const [name, fee] of [...active, ...inactive]) await db.saveShippingMethod({ name, fee })
+      const ids = Object.fromEntries((await db.listShippingMethods()).map(m => [m.name, m.id]))
+      for (const [name] of inactive) await db.deleteShippingMethod(ids[name]) // 無効にする（行は残る）
+      return ids
+    }
+
+    /** 価格 3,000（手数料 300）・梱包材 30 の未紐付けの販売と、同じ型番 Z300 の在庫 1 点（原価 1,000）。候補はその 1 点 */
+    async function linkSale(): Promise<string> {
+      const shopId = await db.createShopAccount('メロジョイA', 'mellojoy')
+      const saleId = await db.createSale({ title: '【Z300】候補の確認', sold_at: '2026-09-12', price: 3000 })
+      await db.updateSale(saleId, { packaging_cost: 30 })
+      await db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-09-05', shipping_fee: 0,
+        lines: [{ name: 'Z300 の明細名', unit_price: 1000, quantity: 1, model_code: 'Z300' }],
+      })
+      return saleId
+    }
+
+    async function inboxItem(kind: 'link' | 'shipping', saleId: string): Promise<InboxItem> {
+      return (await db.getInbox()).groups.find(g => g.kind === kind)!.items.find(i => i.id === saleId)!
+    }
+
+    it('candidate.name は在庫の商品名。型番に表示名を付ければそれ、無ければ明細の名前', async () => {
+      const saleId = await linkSale()
+      const stock = (await db.listInventory('in_stock')).find(i => i.model_code === 'Z300')!
+
+      const before = (await inboxItem('link', saleId)).candidate!
+      expect(before).toMatchObject({ inventory_item_id: stock.id, item_code: stock.item_code, landed_cost: 1000 })
+      expect(before.name).toBe('Z300 の明細名')
+
+      await db.setProductName('Z300', 'Z300 の登録した商品名')
+      expect((await inboxItem('link', saleId)).candidate!.name).toBe('Z300 の登録した商品名')
+    })
+
+    it('送料が確定している：min = max = 価格 − 手数料 − 送料 − 梱包材 − 原価', async () => {
+      const saleId = await linkSale()
+      await db.updateSale(saleId, { shipping_fee: 200 })
+
+      const link = await inboxItem('link', saleId)
+      // 3,000 − 300 − 200 − 30 − 1,000 = 1,470
+      expect(link.profit_hint).toEqual({ min: 1470, max: 1470 })
+    })
+
+    it('送料が未入力で発送方法も未選択：有効な発送方法の最高〜最安の送料で幅になる（無効にした方法は入れない）', async () => {
+      await onlyShippingMethods([['A便', 200], ['B便', 600]], [['無効の高い便', 900]])
+      const saleId = await linkSale()
+
+      const link = await inboxItem('link', saleId)
+      expect(link.candidate).not.toBeNull()
+      // min = 3,000 − 300 − 600（最高）− 30 − 1,000 = 1,070 ／ max = 3,000 − 300 − 200（最安）− 30 − 1,000 = 1,470
+      expect(link.profit_hint).toEqual({ min: 1070, max: 1470 })
+      // 送料未入力の行（shipping）と同じ見込みになる
+      expect((await inboxItem('shipping', saleId)).profit_hint).toEqual({ min: 1070, max: 1470 })
+    })
+
+    it('発送方法は選んであるが送料は未確定：その発送方法の料金で 1 値（0 円の shipping_fee は使わない）', async () => {
+      const ids = await onlyShippingMethods([['A便', 200], ['B便', 600]])
+      const saleId = await linkSale()
+      await db.updateSale(saleId, { shipping_method_id: ids['B便'] })
+      // updateSale が送料を確定させるので、「発送方法だけ決まっている・送料未確定（0 円）」に戻す
+      await db.sqlRun('update sale set is_shipping_confirmed = 0, shipping_fee = 0 where id = ?', saleId)
+
+      const link = await inboxItem('link', saleId)
+      // 3,000 − 300 − 600（B便）− 30 − 1,000 = 1,070
+      expect(link.profit_hint).toEqual({ min: 1070, max: 1070 })
+    })
+
+    it('有効な発送方法が 1 つも無く送料も分からない → profit_hint は null（候補は出る）。送料が分かっていれば出る', async () => {
+      await onlyShippingMethods([])
+      expect(await db.listShippingMethods()).toEqual([])
+      const saleId = await linkSale()
+
+      const link = await inboxItem('link', saleId)
+      expect(link.candidate).not.toBeNull()
+      expect(link.profit_hint).toBeNull()
+
+      // 送料を入れれば（確定すれば）有効な発送方法が無くても 1 値で出る
+      await db.updateSale(saleId, { shipping_fee: 200 })
+      expect((await inboxItem('link', saleId)).profit_hint).toEqual({ min: 1470, max: 1470 })
+    })
+  })
+
   describe('スヌーズは日本時間で数える', () => {
     it('今日（日本時間）＋7 日を世帯の設定に保存する。UTC の 15:00〜23:59 は日本ではもう翌日', async () => {
       setClock([2026, 10, 2, 16, 0]) // UTC 2026-10-02 16:00 = JST 2026-10-03 01:00

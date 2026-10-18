@@ -128,9 +128,10 @@ function makeCandidateFinder(ctx: Ctx): CandidateFinder {
   }
 }
 
+/** 名前は在庫の商品名（型番に付けた表示名があればそれ、無ければ明細の名前。release の items と同じ） */
 function toCandidate(item: InventoryItem): NonNullable<InboxItem['candidate']> {
   return {
-    inventory_item_id: item.id, item_code: item.item_code,
+    inventory_item_id: item.id, item_code: item.item_code, name: item.product_name ?? item.name,
     landed_cost: item.landed_cost, acquired_at: item.acquired_at,
   }
 }
@@ -154,11 +155,13 @@ async function shippingMethodMap(ctx: Ctx): Promise<MethodMap> {
   return new Map(rows.map(r => [r.id, { name: r.name, fee: r.fee }]))
 }
 
-/** 相場は有効な発送方法の最小〜最大 */
-async function shippingFeeRange(ctx: Ctx): Promise<{ min: number; max: number }> {
+/** 相場は有効な発送方法の最小〜最大。count は有効な発送方法の数（0 なら min/max は 0 で、相場が無い） */
+type FeeRange = { min: number; max: number; count: number }
+
+async function shippingFeeRange(ctx: Ctx): Promise<FeeRange> {
   const fees = (await listShippingMethods(ctx)).map(m => m.fee)
-  if (fees.length === 0) return { min: 0, max: 0 }
-  return { min: Math.min(...fees), max: Math.max(...fees) }
+  if (fees.length === 0) return { min: 0, max: 0, count: 0 }
+  return { min: Math.min(...fees), max: Math.max(...fees), count: fees.length }
 }
 
 /** 送料が既に分かっていれば（出品時に決めた／選択済み）その額、まだなら null */
@@ -185,6 +188,18 @@ async function shipProfitHint(
     min: sale.price - sale.fee - range.max - sale.packaging_cost - cost,
     max: sale.price - sale.fee - range.min - sale.packaging_cost - cost,
   }
+}
+
+/**
+ * 未紐付けの販売に候補が 1 点あるとき、その候補を紐付けたときの粗利。shipProfitHint と同じ見積もり
+ * （送料が分かっていれば1値、未入力なら有効な発送方法の最安〜最高の幅。原価は候補1点＝estimateCost）。
+ * 送料が分からず有効な発送方法も無ければ null（未入力の送料を 0 円と見て、粗利を大きく見せない）
+ */
+async function linkProfitHint(
+  sale: SaleProfit, methods: MethodMap, range: FeeRange, findCandidates: CandidateFinder,
+): Promise<{ min: number; max: number } | null> {
+  if (knownShippingFee(sale, methods) === null && range.count === 0) return null
+  return shipProfitHint(sale, methods, range, findCandidates)
 }
 
 // ------------------------------------------------------------
@@ -491,12 +506,7 @@ export async function getInbox(ctx: Ctx): Promise<Inbox> {
   for (const s of linkSales) {
     const candidates = await findCandidates(s)
     const candidate = candidates.length === 1 ? toCandidate(candidates[0]) : null
-    const profit_hint = candidate
-      ? {
-          min: s.price - s.fee - s.shipping_fee - s.packaging_cost - candidates[0].landed_cost,
-          max: s.price - s.fee - s.shipping_fee - s.packaging_cost - candidates[0].landed_cost,
-        }
-      : null
+    const profit_hint = candidate ? await linkProfitHint(s, methods, feeRange, findCandidates) : null
     linkItems.push({
       kind: 'link',
       id: s.id,

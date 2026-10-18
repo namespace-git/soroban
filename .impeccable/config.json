@@ -1,0 +1,18 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "layout-transition",
+        "value": "*",
+        "files": [
+          "src/renderer/views/Dashboard.vue",
+          "src/renderer/views/Sales.vue"
+        ],
+        "createdAt": "2026-10-18T03:39:55.059Z",
+        "reason": "Agent: one-shot 180ms collapse of a single processed row after the user picks a shipping method; height animates via grid-template-rows (the rule's own recommendation) and min-height/margin-top only follow it to 0"
+      }
+    ]
+  }
+}

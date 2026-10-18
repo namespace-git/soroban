@@ -2248,6 +2248,20 @@ function profitHintFor(sale: SaleProfit): { min: number; max: number } {
   }
 }
 
+/**
+ * 「在庫と紐付け」の行で、候補が 1 点あるときの粗利の見込み（本物の getInbox と同じ規則）。
+ * 送料が分かっていれば（確定／発送方法が選んである）1 値、未入力なら有効な発送方法の最安〜最高の幅
+ * （profitHintFor が候補1点の原価で出す）。送料が分からず有効な発送方法も無ければ null
+ */
+function linkProfitHintFor(sale: SaleProfit): { min: number; max: number } | null {
+  const method = sale.shipping_method_id ? shippingMethods.find(m => m.id === sale.shipping_method_id) : undefined
+  if (!sale.is_shipping_confirmed && !method) {
+    return shippingMethods.some(m => m.is_active) ? profitHintFor(sale) : null
+  }
+  const fee = sale.is_shipping_confirmed ? sale.shipping_fee : method!.fee
+  return profitHintFor({ ...sale, is_shipping_confirmed: 1, shipping_fee: fee })
+}
+
 /** 在庫 1 点の状態バケット。listInventoryGroups・getInventoryOverview で共通 */
 type InventoryBucket = 'unlisted_arrived' | 'not_arrived' | 'listed' | 'sold' | 'other'
 function inventoryBucket(i: InventoryItem): InventoryBucket {
@@ -2385,9 +2399,9 @@ function buildInbox(): Inbox {
           thumb_url: s.thumb_url,
           sale: s,
           candidate: cand
-            ? { inventory_item_id: cand.id, item_code: cand.item_code, landed_cost: cand.landed_cost, acquired_at: cand.acquired_at }
+            ? { inventory_item_id: cand.id, item_code: cand.item_code, name: cand.product_name ?? cand.name, landed_cost: cand.landed_cost, acquired_at: cand.acquired_at }
             : null,
-          profit_hint: profitHintFor(s),
+          profit_hint: cand ? linkProfitHintFor(s) : null,
         }
       }),
     })

@@ -961,9 +961,16 @@ export interface InboxItem {
   thumb_url: string | null
   /** 販売の場合の中身（発送方法セレクト・紐付けに使う） */
   sale?: SaleProfit
-  /** 未紐付けで候補が 1 点だけのとき（型番一致・先入先出）。ボタン 1 つで紐付け */
-  candidate?: { inventory_item_id: string; item_code: string; landed_cost: number; acquired_at: string } | null
-  /** 片付けたときの粗利（見込み）。null なら出さない */
+  /**
+   * 未紐付けで候補が 1 点だけのとき（型番一致・先入先出）。ボタン 1 つで紐付け。
+   * name は在庫の商品名（ボタンに「どの在庫か」を見せる。在庫コードだけだと家族が判断できない）
+   */
+  candidate?: { inventory_item_id: string; item_code: string; name: string; landed_cost: number; acquired_at: string } | null
+  /**
+   * 片付けたときの粗利（見込み）。null なら出さない。
+   * kind='link' で candidate があるときは「その候補を紐付けたときの粗利」：送料が確定していれば min = max（その額）、
+   * 送料が未入力なら有効な発送方法の最安〜最高の送料で min〜max（未入力の送料を 0 円として数えない）
+   */
   profit_hint?: { min: number; max: number } | null
   /**
    * kind='release' のとき。**止めた出品が在庫を押さえている**ので外してほしい、の中身。

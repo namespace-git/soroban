@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { todayLocal } from '../../shared/date'
+import type { InboxItem } from '../../shared/types'
 
 // db.ts は electron の app.getPath を参照する（:memory: を使うときは呼ばれないが、
 // import 時点で electron モジュールへの依存があるため潰しておく）
@@ -293,6 +294,100 @@ describe('inbox（:memory:）', () => {
       const kinds = inbox.getInbox().groups.map(g => g.kind)
       expect(kinds.indexOf('release')).toBeGreaterThan(kinds.indexOf('link'))
       expect(kinds.indexOf('release')).toBeLessThan(kinds.indexOf('confirm'))
+    })
+  })
+
+  describe('link：候補の名前と、その候補を紐付けたときの粗利の見込み', () => {
+    // サーバー版（server/__tests__/domain/inbox.test.ts）の同じ describe と、同じデータ・同じ数字を期待する
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-05T03:00:00Z')) // 2026-09-05 12:00（JST）
+    })
+
+    /** 有効な発送方法をこの一覧だけにする（初期値は無効にする）。無効にした方法は相場に入らない。名前 → id を返す */
+    function onlyShippingMethods(
+      active: Array<[string, number]>, inactive: Array<[string, number]> = [],
+    ): Record<string, string> {
+      for (const m of db.listShippingMethods()) db.deleteShippingMethod(m.id)
+      for (const [name, fee] of [...active, ...inactive]) db.saveShippingMethod({ name, fee })
+      const ids = Object.fromEntries(db.listShippingMethods().map(m => [m.name, m.id]))
+      for (const [name] of inactive) db.deleteShippingMethod(ids[name]) // 無効にする（行は残る）
+      return ids
+    }
+
+    /** 価格 3,000（手数料 300）・梱包材 30 の未紐付けの販売と、同じ型番 Z300 の在庫 1 点（原価 1,000）。候補はその 1 点 */
+    function linkSale(): string {
+      const shopId = db.createShopAccount('メロジョイA', 'mellojoy')
+      const saleId = db.createSale({ title: '【Z300】候補の確認', sold_at: '2026-09-12', price: 3000 })
+      db.updateSale(saleId, { packaging_cost: 30 })
+      db.createPurchase({
+        shop_account_id: shopId, ordered_at: '2026-09-05', shipping_fee: 0,
+        lines: [{ name: 'Z300 の明細名', unit_price: 1000, quantity: 1, model_code: 'Z300' }],
+      })
+      return saleId
+    }
+
+    function inboxItem(kind: 'link' | 'shipping', saleId: string): InboxItem {
+      return inbox.getInbox().groups.find(g => g.kind === kind)!.items.find(i => i.id === saleId)!
+    }
+
+    it('candidate.name は在庫の商品名。型番に表示名を付ければそれ、無ければ明細の名前', () => {
+      const saleId = linkSale()
+      const stock = db.listInventory('in_stock').find(i => i.model_code === 'Z300')!
+
+      const before = inboxItem('link', saleId).candidate!
+      expect(before).toMatchObject({ inventory_item_id: stock.id, item_code: stock.item_code, landed_cost: 1000 })
+      expect(before.name).toBe('Z300 の明細名')
+
+      db.setProductName('Z300', 'Z300 の登録した商品名')
+      expect(inboxItem('link', saleId).candidate!.name).toBe('Z300 の登録した商品名')
+    })
+
+    it('送料が確定している：min = max = 価格 − 手数料 − 送料 − 梱包材 − 原価', () => {
+      const saleId = linkSale()
+      db.updateSale(saleId, { shipping_fee: 200 })
+
+      const link = inboxItem('link', saleId)
+      // 3,000 − 300 − 200 − 30 − 1,000 = 1,470
+      expect(link.profit_hint).toEqual({ min: 1470, max: 1470 })
+    })
+
+    it('送料が未入力で発送方法も未選択：有効な発送方法の最高〜最安の送料で幅になる（無効にした方法は入れない）', () => {
+      onlyShippingMethods([['A便', 200], ['B便', 600]], [['無効の高い便', 900]])
+      const saleId = linkSale()
+
+      const link = inboxItem('link', saleId)
+      expect(link.candidate).not.toBeNull()
+      // min = 3,000 − 300 − 600（最高）− 30 − 1,000 = 1,070 ／ max = 3,000 − 300 − 200（最安）− 30 − 1,000 = 1,470
+      expect(link.profit_hint).toEqual({ min: 1070, max: 1470 })
+      // 送料未入力の行（shipping）と同じ見込みになる
+      expect(inboxItem('shipping', saleId).profit_hint).toEqual({ min: 1070, max: 1470 })
+    })
+
+    it('発送方法は選んであるが送料は未確定：その発送方法の料金で 1 値（0 円の shipping_fee は使わない）', () => {
+      const ids = onlyShippingMethods([['A便', 200], ['B便', 600]])
+      const saleId = linkSale()
+      db.updateSale(saleId, { shipping_method_id: ids['B便'] })
+      // updateSale が送料を確定させるので、「発送方法だけ決まっている・送料未確定（0 円）」に戻す
+      db.getDb().prepare('UPDATE sale SET is_shipping_confirmed = 0, shipping_fee = 0 WHERE id = ?').run(saleId)
+
+      const link = inboxItem('link', saleId)
+      // 3,000 − 300 − 600（B便）− 30 − 1,000 = 1,070
+      expect(link.profit_hint).toEqual({ min: 1070, max: 1070 })
+    })
+
+    it('有効な発送方法が 1 つも無く送料も分からない → profit_hint は null（候補は出る）。送料が分かっていれば出る', () => {
+      onlyShippingMethods([])
+      expect(db.listShippingMethods()).toEqual([])
+      const saleId = linkSale()
+
+      const link = inboxItem('link', saleId)
+      expect(link.candidate).not.toBeNull()
+      expect(link.profit_hint).toBeNull()
+
+      // 送料を入れれば（確定すれば）有効な発送方法が無くても 1 値で出る
+      db.updateSale(saleId, { shipping_fee: 200 })
+      expect(inboxItem('link', saleId).profit_hint).toEqual({ min: 1470, max: 1470 })
     })
   })
 
