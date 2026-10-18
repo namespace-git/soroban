@@ -11,6 +11,7 @@ import StatusPill from '../components/StatusPill.vue'
 import CodeChip from '../components/CodeChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
+import Drawer from '../components/Drawer.vue'
 import TagPicker from '../components/TagPicker.vue'
 import TimelineDrawer from '../components/TimelineDrawer.vue'
 import SearchBox, { matchesSearch } from '../components/SearchBox.vue'
@@ -480,6 +481,74 @@ function closeTagPicker() {
   tagPickerForId.value = null
   tagPickerAnchor.value = null
 }
+/** スマホ幅のタグ選択の題の下に出す、どの在庫に付けるのか（コードと名前） */
+const tagPickerSubject = computed(() => {
+  const i = tagPickerItem.value
+  return i ? `${i.item_code} ・ ${i.name}` : undefined
+})
+
+// --- スマホ幅（767px 以下）：在庫 1 点の操作は、よく使う 1〜2 個だけ行に出し、残りは「…」の下からのシートへ。
+//     デスクトップ幅では今までどおり全部並ぶ（行のボタンの出し分けは CSS。シートはスマホ幅の「…」からしか開かない）。
+//     廃棄・自家消費はシートの一番下に赤で置き、押したあとの確認ダイアログ（dispose）はそのまま ---
+type InlineOp = 'arrival' | 'model' | 'tag'
+function isUnarrived(i: InventoryItem): boolean {
+  return i.fulfillment === 'pending' || i.fulfillment === 'shipped'
+}
+/** スマホ幅で行に直接出す操作。未着なら「仕入を開く」と型番、届いていれば型番とタグ（1点ずつ表の型番は名前の下のチップにある） */
+function inlineOps(i: InventoryItem): InlineOp[] {
+  return isUnarrived(i) ? ['arrival', 'model'] : ['model', 'tag']
+}
+/** 行のボタンに付けるクラス。スマホ幅で「…」のシートへ回す操作だけ op-rest（CSS で隠す） */
+function opRest(i: InventoryItem, op: InlineOp): Record<string, boolean> {
+  return { 'op-rest': !inlineOps(i).includes(op) }
+}
+
+const moreOpen = ref(false)
+// 閉じても id は残す（閉じるアニメーションの間、シートの中身を空にしない。次に開くときに上書きされる）
+const moreItemId = ref<string | null>(null)
+const moreItem = computed(() => findItem(moreItemId.value))
+function openMore(item: InventoryItem) {
+  moreItemId.value = item.id
+  moreOpen.value = true
+}
+function closeMore() {
+  moreOpen.value = false
+}
+
+interface MoreOp {
+  key: string
+  label: string
+  hint: string
+  danger?: boolean
+  run: (item: InventoryItem, e: MouseEvent) => void
+}
+/** シートに並べる操作（行に直接出していないもの）。戻せない廃棄・自家消費は最後に置く */
+const moreOps = computed<{ normal: MoreOp[]; danger: MoreOp[] }>(() => {
+  const i = moreItem.value
+  if (!i || i.status !== 'in_stock') return { normal: [], danger: [] }
+  const normal: MoreOp[] = []
+  if (!inlineOps(i).includes('tag')) {
+    normal.push({ key: 'tag', label: 'タグ', hint: 'タグを編集する', run: (it, e) => openTagPicker(it, e) })
+  }
+  normal.push({ key: 'split', label: '分割', hint: 'この在庫を複数点に分ける', run: (it) => { void split(it) } })
+  if (i.parent_id) {
+    normal.push({ key: 'merge', label: '分割を戻す', hint: '同じ親から分けた在庫を全部まとめて、分割前の1点に戻します', run: (it) => { void mergeSplit(it) } })
+  }
+  normal.push({ key: 'note', label: 'メモ', hint: 'メモを編集する', run: (it) => { void editNote(it) } })
+  const danger: MoreOp[] = [
+    { key: 'personal', label: '自家消費', hint: '在庫から外して自家消費にする', danger: true, run: (it) => { void dispose(it, 'personal_use') } },
+    { key: 'dispose', label: '廃棄', hint: '在庫から外して廃棄にする', danger: true, run: (it) => { void dispose(it, 'disposed') } },
+  ]
+  return { normal, danger }
+})
+
+/** シートの操作を押す：シートを閉じてから実行する（タグ選択・確認ダイアログ・入力はシートの上ではなく、閉じたあとの画面に出る）。
+ *  タグ選択が押した場所を覚えるのは、このクリックの最中だけなので、閉じても await や遅延を挟まず同期で呼ぶ */
+function runMoreOp(op: MoreOp, e: MouseEvent) {
+  const item = moreItem.value
+  closeMore()
+  if (item) op.run(item, e)
+}
 
 async function onTagsChange(tagIds: string[]) {
   if (!tagPickerForId.value) return
@@ -778,23 +847,26 @@ async function editNote(item: InventoryItem) {
               <div class="git-ops">
                 <template v-if="i.status === 'in_stock'">
                   <button
-                    v-if="i.fulfillment === 'pending' || i.fulfillment === 'shipped'"
-                    class="sm ghost" @click="openArrivalPurchase(i)"
+                    v-if="isUnarrived(i)"
+                    class="sm ghost" :class="opRest(i, 'arrival')" @click="openArrivalPurchase(i)"
                     title="この在庫の注文を仕入タブで開きます。そこで到着済にできます"
                   >仕入を開く</button>
                   <button
-                    class="sm ghost" @click="editModelCode(i)"
+                    class="sm ghost" :class="opRest(i, 'model')" @click="editModelCode(i)"
                     :title="i.model_code ? '型番を編集する' : '型番を設定する'"
                   >{{ i.model_code ? '型番編集' : '型番' }}</button>
-                  <button class="sm ghost" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
-                  <button class="sm ghost" @click="split(i)" title="この在庫を複数点に分ける">分割</button>
+                  <button class="sm ghost" :class="opRest(i, 'tag')" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
+                  <button class="sm ghost op-rest" @click="split(i)" title="この在庫を複数点に分ける">分割</button>
                   <button
-                    v-if="i.parent_id" class="sm ghost" @click="mergeSplit(i)"
+                    v-if="i.parent_id" class="sm ghost op-rest" @click="mergeSplit(i)"
                     title="同じ親から分けた在庫を全部まとめて、分割前の1点に戻します"
                   >分割を戻す</button>
-                  <button class="sm ghost" @click="editNote(i)" title="メモを編集する">メモ</button>
-                  <button class="sm ghost" @click="dispose(i, 'disposed')" title="在庫から外して廃棄にする">廃棄</button>
-                  <button class="sm ghost" @click="dispose(i, 'personal_use')" title="在庫から外して自家消費にする">自家消費</button>
+                  <button class="sm ghost op-rest" @click="editNote(i)" title="メモを編集する">メモ</button>
+                  <button class="sm ghost op-rest" @click="dispose(i, 'disposed')" title="在庫から外して廃棄にする">廃棄</button>
+                  <button class="sm ghost op-rest" @click="dispose(i, 'personal_use')" title="在庫から外して自家消費にする">自家消費</button>
+                  <button type="button" class="sm ghost op-more-btn" aria-label="その他の操作" title="その他の操作" @click="openMore(i)">
+                    <svg viewBox="0 0 20 20" width="18" height="18" fill="currentColor" aria-hidden="true"><circle cx="4" cy="10" r="1.7" /><circle cx="10" cy="10" r="1.7" /><circle cx="16" cy="10" r="1.7" /></svg>
+                  </button>
                 </template>
                 <template v-else-if="i.status === 'sold'">
                   <button
@@ -914,19 +986,22 @@ async function editNote(item: InventoryItem) {
             <td class="actions">
               <template v-if="i.status === 'in_stock'">
                 <button
-                  v-if="i.fulfillment === 'pending' || i.fulfillment === 'shipped'"
-                  class="sm ghost" @click="openArrivalPurchase(i)"
+                  v-if="isUnarrived(i)"
+                  class="sm ghost" :class="opRest(i, 'arrival')" @click="openArrivalPurchase(i)"
                   title="この在庫の注文を仕入タブで開きます。そこで到着済にできます"
                 >仕入を開く</button>
-                <button class="sm ghost" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
-                <button class="sm ghost" @click="split(i)" title="この在庫を複数点に分ける">分割</button>
+                <button class="sm ghost" :class="opRest(i, 'tag')" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
+                <button class="sm ghost op-rest" @click="split(i)" title="この在庫を複数点に分ける">分割</button>
                 <button
-                  v-if="i.parent_id" class="sm ghost" @click="mergeSplit(i)"
+                  v-if="i.parent_id" class="sm ghost op-rest" @click="mergeSplit(i)"
                   title="同じ親から分けた在庫を全部まとめて、分割前の1点に戻します"
                 >分割を戻す</button>
-                <button class="sm ghost" @click="editNote(i)" title="メモを編集する">メモ</button>
-                <button class="sm ghost" @click="dispose(i, 'disposed')" title="在庫から外して廃棄にする">廃棄</button>
-                <button class="sm ghost" @click="dispose(i, 'personal_use')" title="在庫から外して自家消費にする">自家消費</button>
+                <button class="sm ghost op-rest" @click="editNote(i)" title="メモを編集する">メモ</button>
+                <button class="sm ghost op-rest" @click="dispose(i, 'disposed')" title="在庫から外して廃棄にする">廃棄</button>
+                <button class="sm ghost op-rest" @click="dispose(i, 'personal_use')" title="在庫から外して自家消費にする">自家消費</button>
+                <button type="button" class="sm ghost op-more-btn" aria-label="その他の操作" title="その他の操作" @click="openMore(i)">
+                  <svg viewBox="0 0 20 20" width="18" height="18" fill="currentColor" aria-hidden="true"><circle cx="4" cy="10" r="1.7" /><circle cx="10" cy="10" r="1.7" /><circle cx="16" cy="10" r="1.7" /></svg>
+                </button>
               </template>
               <template v-else-if="i.status === 'sold'">
                 <button class="sm ghost" @click="openTagPicker(i, $event)" title="タグを編集する">タグ</button>
@@ -954,10 +1029,35 @@ async function editNote(item: InventoryItem) {
       :anchor="tagPickerAnchor"
       :all-tags="allTags"
       :selected="tagPickerSelected"
+      :subject="tagPickerSubject"
       @change="onTagsChange"
       @create="onTagCreate"
       @close="closeTagPicker"
     />
+
+    <!-- スマホ幅の「…」：行に出していない操作。廃棄・自家消費は区切りの下に赤で（確認ダイアログは今までどおり） -->
+    <Drawer :open="moreOpen" title="この1点の操作" :width="420" @close="closeMore">
+      <template v-if="moreItem" #header-sub>
+        <p class="faint op-sheet-sub" :title="`${moreItem.item_code} ・ ${moreItem.name}`">{{ moreItem.item_code }} ・ {{ moreItem.name }}</p>
+      </template>
+      <div v-if="moreItem" class="op-sheet">
+        <button
+          v-for="op in moreOps.normal" :key="op.key"
+          type="button" class="ghost op-sheet-btn" @click="runMoreOp(op, $event)"
+        >
+          <span class="op-sheet-label">{{ op.label }}</span>
+          <span class="op-sheet-hint">{{ op.hint }}</span>
+        </button>
+        <div v-if="moreOps.danger.length" class="op-sheet-sep" role="separator" />
+        <button
+          v-for="op in moreOps.danger" :key="op.key"
+          type="button" class="ghost danger op-sheet-btn" @click="runMoreOp(op, $event)"
+        >
+          <span class="op-sheet-label">{{ op.label }}</span>
+          <span class="op-sheet-hint">{{ op.hint }}</span>
+        </button>
+      </div>
+    </Drawer>
 
     <TimelineDrawer
       :open="!!timelineItemId"
@@ -1172,6 +1272,38 @@ tr.focused { background: var(--brand-soft); }
 /* --- スマホ幅だけで出すもの。デスクトップ幅では出さない（絞り込みの入れ物は無いのと同じ） --- */
 .m-filter-toggle { display: none; }
 .toolbar-filters { display: contents; }
+/* 在庫 1 点の「…」ボタン（スマホ幅で、行に出していない操作を下からのシートで開く） */
+button.op-more-btn { display: none; }
+
+/* 「…」のシートの中身（シートはスマホ幅の「…」からしか開かない）。1 行 52px 以上、押す範囲は行全体 */
+.op-sheet-sub {
+  margin: 0;
+  font-size: var(--fs-12);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+.op-sheet { display: flex; flex-direction: column; gap: 2px; }
+.op-sheet-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  height: auto;
+  min-height: 52px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  color: var(--text);
+}
+.op-sheet-label { font-size: var(--fs-16); font-weight: 600; }
+.op-sheet-hint { font-size: var(--fs-12); font-weight: 400; color: var(--text-dim); }
+.op-sheet-btn.danger { color: var(--loss); }
+.op-sheet-sep { margin: 6px 0; border-top: 1px solid var(--line-soft); }
 
 /* ============================================================
    スマホ幅（768px 未満）。表・行を組み替えて、横にはみ出さず親指で押せるようにする。
@@ -1297,6 +1429,15 @@ tr.focused { background: var(--brand-soft); }
     font-size: var(--fs-12);
     white-space: nowrap;
     border-color: var(--line);
+  }
+  /* 在庫 1 点の操作：よく使う 1〜2 個だけ行に残し（.op-rest 以外）、あとは「…」のシートへ（1点ずつ表の操作も同じ） */
+  .git-ops button.op-rest,
+  .table-panel td.actions button.op-rest { display: none; }
+  .git-ops button.op-more-btn,
+  .table-panel td.actions button.op-more-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 
   /* 1点ずつ：表をやめて、1 点 = カード 1 枚。名前 → コード・状態・タグ → メモ → 仕入先・仕入日・滞留・原価 → 操作 */

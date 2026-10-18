@@ -1,10 +1,13 @@
 import type { FetchFn } from './http'
+import type { ImageShrinker } from './shrink-image'
 
 // ============================================================
 // 画像を Supabase Storage の `media` バケットに上げる（取り込み担当の PC → Storage）
 //
 // 収集は今まで通りローカルの userData/thumbs にファイルを落とす。リモートの store（store/remote.ts）は、
 // そのファイルをここで Storage に上げてから、**上げたパス**を API（saveThumb / saveLineImage）に渡す。
+// 上げる直前に、画像を小さくする（shrink。shrink-image.ts）。縮められなかったときは元のまま上げる（収集を止めない）。
+// ローカルの帳簿（userData/thumbs）のファイルは縮めない（ここは Storage に上げる分だけ）。
 //
 //   POST {supabaseUrl}/storage/v1/object/media/<世帯の id>/<sale|listing|purchase-line>/<乱数>.<拡張子>
 //   Authorization: Bearer <人の JWT>   apikey: <anon キー>   Content-Type: <画像の種類>
@@ -45,6 +48,13 @@ export interface MediaUploaderOptions {
   randomId: () => string
   /** 1 枚の上限（バイト）。サムネイルは小さいので、これを超えるものは画像ではないとみなす */
   maxBytes?: number
+  /**
+   * 上げる直前に画像を小さくする処理（electron の nativeImage は呼び出し側が包んで渡す）。無ければ縮めない。
+   * 例外を投げる・画像でないものを返す・元より大きく（同じに）なるときは、元のまま上げる
+   */
+  shrink?: ImageShrinker
+  /** 縮められなかった原因を残す（原因だけ。画像の中身・URL・トークンは渡さない） */
+  log?: (message: string) => void
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -78,6 +88,37 @@ export function createMediaUploader(options: MediaUploaderOptions): MediaUploade
   if (!UUID.test(options.householdId)) throw new Error('世帯の id が正しくありません')
   const householdId = options.householdId.toLowerCase()
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES
+
+  function note(message: string): void {
+    try {
+      options.log?.(message)
+    } catch {
+      // ログに書けなくても上げるのは続ける
+    }
+  }
+
+  /** 縮めて上げる形（バイト列・拡張子・Content-Type）を決める。縮められなければ元のまま */
+  async function prepare(bytes: Uint8Array, image: { ext: string; mime: string }): Promise<{ bytes: Uint8Array; ext: string; mime: string }> {
+    const original = { bytes, ext: image.ext, mime: image.mime }
+    if (!options.shrink) return original
+    try {
+      const shrunk = await options.shrink(bytes, image)
+      if (!shrunk) return original
+      // 元と同じか大きくなったら元を使う（空も同じ）
+      if (shrunk.byteLength === 0 || shrunk.byteLength >= bytes.byteLength) return original
+      // 拡張子と Content-Type は、縮めた結果そのものの形で決める（PNG が JPEG になったら .jpg）
+      const detected = detectImage(shrunk)
+      if (!detected) {
+        note('画像を縮めた結果が画像として読めなかったので、元のまま上げます')
+        return original
+      }
+      return { bytes: shrunk, ext: detected.ext, mime: detected.mime }
+    } catch (e) {
+      const reason = e instanceof Error ? e.message.replace(/\s+/g, ' ').slice(0, 120) : '原因が分かりません'
+      note(`画像を縮められなかったので、元のまま上げます（${reason}）`)
+      return original
+    }
+  }
 
   /** 1 回送る。5xx・通信切れは { retry: true } で返す（呼び出し側が 1 度だけやり直す） */
   async function putOnce(
@@ -119,14 +160,17 @@ export function createMediaUploader(options: MediaUploaderOptions): MediaUploade
       const image = detectImage(bytes)
       if (!image) throw new Error('画像の形式が読めません')
 
+      // 上げる形に縮める（やり直しでも同じものを送る）。縮められなければ元のまま
+      const body = await prepare(bytes, image)
+
       // 失敗しても 1 度だけ別のパスでやり直す（5xx・通信切れのみ）。応答だけが失われた場合に孤児が 1 つ残りうる
       // が、どこからも参照されないファイルは後で回収する設計
       let last = ''
       for (let i = 0; i < 2; i++) {
         const id = options.randomId()
         if (!RANDOM_ID.test(id)) throw new Error('画像のパスを作れませんでした')
-        const path = `${householdId}/${kind}/${id}.${image.ext}`
-        const r = await putOnce(creds, path, bytes, image.mime)
+        const path = `${householdId}/${kind}/${id}.${body.ext}`
+        const r = await putOnce(creds, path, body.bytes, body.mime)
         if (r.ok) return path
         last = r.message
         if (!r.retry) break

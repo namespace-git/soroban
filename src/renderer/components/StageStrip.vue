@@ -7,6 +7,8 @@ import { yen } from '../format'
 export interface StageStripStage {
   key: string
   label: string
+  /** チップ表示（chips）のスマホ幅で使う短い名前。無ければ label のまま */
+  short?: string
   count: number
   /** 件数の横に出す金額。null/未指定なら出さない */
   money?: number | null
@@ -15,7 +17,12 @@ export interface StageStripStage {
   tone?: 'brand' | 'warn' | 'ok' | 'neutral'
 }
 
-const props = defineProps<{ stages: StageStripStage[]; active: string | null }>()
+const props = defineProps<{
+  stages: StageStripStage[]
+  active: string | null
+  /** スマホ幅（767px 以下）で、カードの代わりに高さ 44px の 1 行の横に動くチップ列にする。デスクトップ幅では何も変わらない */
+  chips?: boolean
+}>()
 const emit = defineEmits<{ select: [string] }>()
 
 // スマホ幅では段階カードを横に並べて動かすので、選ばれたカードが見える位置まで寄せる（デスクトップ幅では動かさない）
@@ -29,15 +36,19 @@ watch(() => props.active, async () => { await nextTick(); revealActive() })
 </script>
 
 <template>
-  <div ref="root" class="stage-strip">
+  <div ref="root" class="stage-strip" :class="{ 'as-chips': chips }">
     <button
       v-for="(s, i) in stages" :key="s.key"
       type="button"
       class="stage-card"
       :class="[s.tone, { active: active === s.key }]"
+      :aria-pressed="active === s.key"
       @click="emit('select', s.key)"
     >
-      <span class="stage-label">{{ s.label }}</span>
+      <span class="stage-label">
+        <span :class="{ 'stage-label-full': chips && s.short }">{{ s.label }}</span>
+        <span v-if="chips && s.short" class="stage-label-short">{{ s.short }}</span>
+      </span>
       <span class="stage-value">
         {{ s.count }}<span v-if="s.money != null" class="stage-money">{{ yen(s.money) }}</span>
       </span>
@@ -70,6 +81,7 @@ watch(() => props.active, async () => { await nextTick(); revealActive() })
   font-size: var(--fs-12);
   color: var(--text-dim);
 }
+.stage-label-short { display: none; }
 .stage-value {
   font-size: var(--fs-20);
   font-weight: 700;
@@ -121,5 +133,37 @@ watch(() => props.active, async () => { await nextTick(); revealActive() })
     min-height: 44px;
     scroll-snap-align: start;
   }
+
+  /* チップ（chips）：高さ 44px の 1 行。段階名と件数を横に並べ、金額・注記・矢印は出さない。選んだものは塗る。
+     押す範囲は 44px 高（見た目の丸は 36px、上下の余白が押せる範囲） */
+  .stage-strip.as-chips {
+    margin-bottom: 0;
+    padding: 4px 12px;
+    gap: 6px;
+  }
+  .as-chips .stage-card {
+    flex: 0 0 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    min-height: 0;
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    box-shadow: none;
+    white-space: nowrap;
+  }
+  .as-chips .stage-card::after { content: ''; position: absolute; inset: -4px 0; }
+  .as-chips .stage-label { font-size: var(--fs-13); color: var(--text); }
+  .as-chips .stage-label-full { display: none; }
+  .as-chips .stage-label-short { display: inline; }
+  .as-chips .stage-value { font-size: var(--fs-14); line-height: 1.2; }
+  .as-chips .stage-money,
+  .as-chips .stage-sub,
+  .as-chips .stage-arrow { display: none; }
+  .as-chips .stage-card.active { background: var(--primary); border-color: var(--primary); }
+  .as-chips .stage-card.active .stage-label,
+  .as-chips .stage-card.active .stage-value { color: var(--surface); }
 }
 </style>

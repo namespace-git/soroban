@@ -273,6 +273,8 @@ function selectTab(key: Tab) {
     return
   }
   tab.value = key
+  // タブから開いたときは、前に goto で渡した指定（focusId・段階など）を持ち越さない
+  gotoPayload.value = null
   moreOpen.value = false
   scrollMainTop()
 }

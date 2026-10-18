@@ -263,6 +263,19 @@ const zeroPriceLineCount = computed(() =>
   form.value.lines.filter(l => l.name.trim() && l.quantity > 0 && !l.unit_price).length,
 )
 
+/**
+ * 金額・数量の欄に入ったとき、今の値（0 や 1）を全選択する。そのまま打てば置き換わり、消してから打つ必要がない。
+ * 値も空欄の意味も変えない（空欄は今までどおり保存時に弾かれる）。
+ * iOS Safari は focus の直後の select() が効かないことがあるので、次の描画の前にもう一度呼ぶ（まだその欄にいるときだけ）
+ */
+function selectOnFocus(e: FocusEvent) {
+  const el = e.target as HTMLInputElement
+  el.select()
+  requestAnimationFrame(() => {
+    if (document.activeElement === el) el.select()
+  })
+}
+
 function addLine() {
   form.value.lines.push({ name: '', unit_price: 0, quantity: 1 })
 }
@@ -462,6 +475,12 @@ function closePurchaseTagPicker() {
   tagPickerPurchase.value = null
   tagPickerAnchor.value = null
 }
+/** スマホ幅のタグ選択の題の下に出す、どの仕入に付けるのか（仕入先・注文日・代表商品） */
+const tagPickerSubject = computed(() => {
+  const p = tagPickerPurchase.value
+  if (!p) return undefined
+  return `${p.shop_account_name} ・ ${p.ordered_at} 注文${p.first_line_name ? ` ・ ${p.first_line_name}` : ''}`
+})
 
 async function onPurchaseTagChange(tagIds: string[]) {
   if (!tagPickerPurchase.value) return
@@ -614,8 +633,8 @@ async function remove(p: PurchaseSummary) {
           <tr v-for="(l, i) in form.lines" :key="i">
             <td class="name-cell"><input v-model="l.name" class="full" placeholder="商品名" /></td>
             <td class="faint model-cell">{{ previewModelCode(l) }}</td>
-            <td class="price-cell" data-label="単価（税込）"><input type="number" inputmode="numeric" v-model.number="l.unit_price" class="full" :class="{ invalid: editingId && !l.unit_price }" /></td>
-            <td class="qty-cell" data-label="数量"><input type="number" inputmode="numeric" v-model.number="l.quantity" class="full" min="1" /></td>
+            <td class="price-cell" data-label="単価（税込）"><input type="number" inputmode="numeric" v-model.number="l.unit_price" class="full" :class="{ invalid: editingId && !l.unit_price }" @focus="selectOnFocus" /></td>
+            <td class="qty-cell" data-label="数量"><input type="number" inputmode="numeric" v-model.number="l.quantity" class="full" min="1" @focus="selectOnFocus" /></td>
             <td class="num dim subtotal-cell" data-label="小計">{{ yen((l.unit_price || 0) * (l.quantity || 0)) }}</td>
             <td class="actions">
               <button class="icon ghost" aria-label="削除" @click="removeLine(i)">
@@ -635,18 +654,18 @@ async function remove(p: PurchaseSummary) {
         <label class="field">
           <span>送料（税込）</span>
           <input
-            type="number" inputmode="numeric" v-model.number="form.shipping_fee" @input="shippingTouched = true"
+            type="number" inputmode="numeric" v-model.number="form.shipping_fee" @input="shippingTouched = true" @focus="selectOnFocus"
             :class="{ invalid: editingId && !form.shipping_fee }"
           />
           <span v-if="selectedAccountDefaultFee !== null" class="faint">仕入先の既定値：{{ yen(selectedAccountDefaultFee) }}</span>
         </label>
         <label class="field">
           <span>その他費用（税込）</span>
-          <input type="number" inputmode="numeric" v-model.number="form.other_cost" />
+          <input type="number" inputmode="numeric" v-model.number="form.other_cost" @focus="selectOnFocus" />
         </label>
         <label class="field">
           <span>割引（税込）</span>
-          <input type="number" inputmode="numeric" v-model.number="form.discount" />
+          <input type="number" inputmode="numeric" v-model.number="form.discount" @focus="selectOnFocus" />
         </label>
         <label class="field">
           <span>按分方式</span>
@@ -818,6 +837,7 @@ async function remove(p: PurchaseSummary) {
       :anchor="tagPickerAnchor"
       :all-tags="allTags"
       :selected="tagPickerPurchase?.tags.map(t => t.id) ?? []"
+      :subject="tagPickerSubject"
       @change="onPurchaseTagChange"
       @create="onPurchaseTagCreate"
       @close="closePurchaseTagPicker"

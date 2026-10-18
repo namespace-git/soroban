@@ -192,7 +192,7 @@ export const HELP: HelpCategory[] = [
         id: 'wrong-auto-link',
         q: '自動で紐付いた在庫が違う',
         steps: ['その行の「紐付けを編集」（原価の欄のボタン）を押す', 'ドロワーでチェックを外して、正しい在庫にチェック'],
-        notes: ['解除は 1 クリック。自動で入ったものは「自動紐付け」の印が付いています'],
+        notes: ['解除はワンタップ（PC ではワンクリック）。自動で入ったものは「自動紐付け」の印が付いています'],
         figures: [
           { kind: 'shot', id: 'sales-cost-pick', caption: '原価の欄。ボタンから紐付けを選び直せる（自動で入っていれば「自動紐付け」の印）', step: 1 },
           { kind: 'shot', id: 'sales-alloc-drawer', caption: 'ドロワーでチェックを外し、正しい在庫にチェックし直す', step: 2 },
@@ -444,7 +444,7 @@ export const HELP: HelpCategory[] = [
         steps: ['商品タブの行の「名前」', '空にすると元に戻る'],
         notes: ['何もしないと、その型番で最後に仕入れた明細の名前が出ます。仕入明細・在庫の元の名前は変わりません'],
         figures: [
-          { kind: 'shot', id: 'products-list', caption: '商品タブの一覧。型番をクリックするとカルテが開く' },
+          { kind: 'shot', id: 'products-list', caption: '商品タブの一覧。型番を押すとカルテが開く' },
           { kind: 'shot', id: 'products-karte', caption: 'カルテ上部の「名前」ボタンで表示名を変えられる', step: 1 },
         ],
         links: [{ label: '商品タブを開く', tab: 'products' }],

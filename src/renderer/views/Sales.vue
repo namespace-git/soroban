@@ -17,6 +17,7 @@ import CodeChip from '../components/CodeChip.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Skeleton from '../components/Skeleton.vue'
 import TagPicker from '../components/TagPicker.vue'
+import ActionSheet from '../components/ActionSheet.vue'
 import TimelineDrawer from '../components/TimelineDrawer.vue'
 import AllocateDrawer from '../components/AllocateDrawer.vue'
 import AllocationCell from '../components/AllocationCell.vue'
@@ -30,8 +31,9 @@ import { yen, shortDate, dateTime } from '../format'
 /** 進捗ストリップの段階（メルカリ側の状態）。旧「未処理／完了」の段階タブは廃止し、
     利益の入力（送料未入力／未紐付け）は下の inputs バンドで別軸として扱う */
 type Stage = 'listed' | 'to_ship' | 'in_transit' | 'done' | 'all'
-/** 利益の入力バンドの絞り込みキー */
-type InputFilterKey = 'needs_shipping' | 'needs_link'
+/** 利益の入力バンドの絞り込みキー。'pending' は「送料未入力 または 未紐付け」（App の下のタブ・縦のナビのバッジと同じ未処理）。
+    下のタブ・縦のナビから開いたときだけ入り、2 つのピルが両方とも選ばれた形で見える（スマホ幅は「要対応」チップ） */
+type InputFilterKey = 'needs_shipping' | 'needs_link' | 'pending'
 
 /**
  * goto('sales', payload) で渡ってくる情報。ホームの要対応・横断検索から開かれる。
@@ -61,6 +63,9 @@ const toast = inject<(text: string, kind: 'ok' | 'warn', action?: { label: strin
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
 const gotoPayload = inject<Ref<SalesGotoPayload | null>>('gotoPayload', ref(null))
+// 下のタブ・縦のナビから開かれたか（goto の指定＝ホームの通知・検索結果などが付いていない）。
+// 付いていれば、その指定が優先（要対応で開かない）。判定は開いた瞬間の 1 回だけ（このあと watch(gotoPayload) が null に戻す前に読む）
+const openedFromTab = !gotoPayload.value
 
 const STATUS_TONE: Record<ListingStatus, 'brand' | 'neutral' | 'ok' | 'info'> = {
   active: 'info', suspended: 'neutral', sold: 'ok', ended: 'neutral',
@@ -106,19 +111,54 @@ const loaded = ref(false)
 
 // --- 進捗ストリップのデータ（メルカリ側の状態） ---
 const progress = ref<SalesProgress | null>(null)
-async function loadProgress() { progress.value = await window.soroban.getSalesProgress() }
+/** 段階チップ列の中で「要対応」を表すキー（段階の名前とぶつからないもの） */
+const PENDING_KEY = 'pending'
+/** 未処理（送料未入力 または 未紐付け）の件数。App の下のタブ・縦のナビのバッジと同じ呼び出し（listSales({ onlyPending })）で数える。
+    getSalesProgress の inputs は転売だけの数なので足し合わせても合わない（私物の送料未入力がバッジには入る） */
+const pendingTotal = ref(0)
+async function loadProgress() {
+  const [p, pending] = await Promise.all([
+    window.soroban.getSalesProgress(),
+    window.soroban.listSales({ onlyPending: true }),
+  ])
+  progress.value = p
+  pendingTotal.value = pending.length
+}
+
+// --- スマホ幅かどうか（段階チップに「要対応」を足す・グラフの入口を出す、など画面の幅で中身が変わるものに使う） ---
+const MOBILE_QUERY = '(max-width: 767px)'
+const isMobile = ref(typeof window.matchMedia === 'function' && window.matchMedia(MOBILE_QUERY).matches)
+let mobileMql: MediaQueryList | undefined
+function onMobileChange(e: { matches: boolean }) { isMobile.value = e.matches }
+onMounted(() => {
+  if (typeof window.matchMedia !== 'function') return
+  mobileMql = window.matchMedia(MOBILE_QUERY)
+  isMobile.value = mobileMql.matches
+  mobileMql.addEventListener('change', onMobileChange)
+})
+onBeforeUnmount(() => mobileMql?.removeEventListener('change', onMobileChange))
 
 const stageCards = computed<StageStripStage[]>(() => {
   const p = progress.value
-  return [
-    { key: 'listed', label: '出品中', count: p?.listed.count ?? 0, money: p ? p.listed.expected_profit : null, sub: `未紐付け ${p?.listed.unallocated ?? 0}` },
-    { key: 'to_ship', label: '売れた・発送する', count: p?.to_ship.count ?? 0, money: p ? p.to_ship.revenue : null, sub: '見込み売上・発送待ち' },
-    { key: 'in_transit', label: '配送中・受取待ち', count: p?.in_transit.count ?? 0, money: p ? p.in_transit.revenue : null, sub: '見込み売上・取引完了待ち' },
-    { key: 'done', label: '取引完了', count: p?.completed_this_month.count ?? 0, money: p ? p.completed_this_month.revenue : null, sub: '今月・反映済み' },
-    { key: 'all', label: 'すべて', count: p?.all ?? 0, sub: '出品も含む' },
+  const cards: StageStripStage[] = [
+    { key: 'listed', label: '出品中', short: '出品中', count: p?.listed.count ?? 0, money: p ? p.listed.expected_profit : null, sub: `未紐付け ${p?.listed.unallocated ?? 0}` },
+    { key: 'to_ship', label: '売れた・発送する', short: '発送する', count: p?.to_ship.count ?? 0, money: p ? p.to_ship.revenue : null, sub: '見込み売上・発送待ち' },
+    { key: 'in_transit', label: '配送中・受取待ち', short: '配送中', count: p?.in_transit.count ?? 0, money: p ? p.in_transit.revenue : null, sub: '見込み売上・取引完了待ち' },
+    { key: 'done', label: '取引完了', short: '取引完了', count: p?.completed_this_month.count ?? 0, money: p ? p.completed_this_month.revenue : null, sub: '今月・反映済み' },
+    { key: 'all', label: 'すべて', short: 'すべて', count: p?.all ?? 0, sub: '出品も含む' },
   ]
+  // スマホ幅だけ、先頭に「要対応」（段階は「すべて」＋送料未入力 or 未紐付け）。デスクトップ幅は 2 つのピルで同じことを押せる
+  if (isMobile.value) cards.unshift({ key: PENDING_KEY, label: '要対応', short: '要対応', count: pendingTotal.value, tone: 'warn' })
+  return cards
 })
-function onSelectStage(key: string) { stage.value = key as Stage }
+/** いま塗るチップ。要対応で絞っているあいだは「要対応」、それ以外は段階 */
+const stripActive = computed<string>(() => (inputFilter.value === 'pending' ? PENDING_KEY : stage.value))
+function onSelectStage(key: string) {
+  if (key === PENDING_KEY) { void toggleInputFilter('pending'); return }
+  // 「すべて」のまま利益の入力の絞り込み（要対応など）が効いているとき、もう一度「すべて」を押したら外して全部を見せる
+  if (stage.value === key && key === 'all') { inputFilter.value = null; return }
+  stage.value = key as Stage
+}
 
 // --- 紐付けの入口は全ステップ共通。利益だけ実績／見込みを区別する。
 //     出品と販売が混ざる「すべて」はどちらの行にも通じる既定の言い回しのまま ---
@@ -140,16 +180,31 @@ const activeFilterCount = computed(() => {
   if (channelFilter.value) n++
   if (period.value !== 'all') n++
   if (monthFilter.value) n++
+  // 要対応（pending）は段階チップの「要対応」で見えているので数えない。送料未入力だけ・未紐付けだけと、並び替えは、シートの中にあるので数える
+  if (inputFilter.value && inputFilter.value !== 'pending') n++
+  if (sortOption.value !== 'default') n++
   return n
 })
 
-/** 利益の入力バンドのピルをクリック：「すべて」に開いて絞る（もう一度押すと解除） */
+/** 利益の入力バンドのピルをクリック：「すべて」に開いて絞る（もう一度押すと解除）。
+    要対応（両方）が選ばれているときに片方を押したら、その片方だけに絞る */
 async function toggleInputFilter(key: InputFilterKey) {
   const next = inputFilter.value === key ? null : key
   if (stage.value !== 'all') stage.value = 'all'
   await nextTick()
   inputFilter.value = next
 }
+/** 利益の入力のピルを「選ばれている」と見せるか。要対応（両方）のときは 2 つとも */
+function inputPillOn(key: 'needs_shipping' | 'needs_link'): boolean {
+  return inputFilter.value === key || inputFilter.value === 'pending'
+}
+const inputPills = computed(() => [
+  { key: 'needs_shipping' as const, label: `送料未入力 ${progress.value?.inputs.needs_shipping ?? 0}` },
+  { key: 'needs_link' as const, label: `未紐付け ${progress.value?.inputs.needs_link ?? 0}` },
+])
+
+// スマホ幅だけ：直近12か月のグラフの開閉（上のバーの「グラフ」ボタン。覚えない＝開き直すと閉じている）
+const chartOpen = ref(false)
 
 // 販売の手入力フォーム
 const showForm = ref(false)
@@ -304,6 +359,8 @@ function passesFilters(r: Row): boolean {
     if (statusFilter.value && s.status !== statusFilter.value) return false
     if (inputFilter.value === 'needs_shipping' && s.is_shipping_confirmed) return false
     if (inputFilter.value === 'needs_link' && !(s.kind === 'resale' && s.unmatched === 1)) return false
+    // 要対応＝送料未入力 または 未紐付け。App のバッジ（listSales の onlyPending）と同じ条件（isPendingSale）
+    if (inputFilter.value === 'pending' && !isPendingSale(s)) return false
     return matchesSearch(
       [s.title, s.note, s.buyer, ...s.model_codes, ...s.tags.map(t => t.name), ...s.inherited_tags.map(t => t.name)],
       searchText.value,
@@ -632,6 +689,15 @@ onMounted(async () => {
   await loadTags()
   await loadProgress()
   await loadChannelFeeRates()
+  // 下のタブ・縦のナビから開いた（goto の指定が無い）とき、未処理（バッジの数）があれば、それが全部見える
+  // 「すべて」＋要対応（送料未入力 または 未紐付け）で開く。0 件なら今までどおり（既定の段階）
+  if (openedFromTab && pendingTotal.value > 0) {
+    stage.value = 'all'
+    // 段階を替えると月・入力の絞り込みを外す watch が走る。それが済んでから入れる（読み込みも、その段階の変更が引き受ける）
+    await nextTick()
+    inputFilter.value = 'pending'
+    return
+  }
   await load()
 })
 watch(revision, loadTags)
@@ -733,8 +799,15 @@ const emptyTitle = computed(() => STAGE_EMPTY[stage.value].title)
 const emptyHint = computed(() => STAGE_EMPTY[stage.value].hint)
 /** 絞り込みの結果が0件のときの文言。出品中の段は「出品」、それ以外は「販売」 */
 const filteredEmptyTitle = computed(() =>
-  stage.value === 'listed' ? '検索条件に一致する出品がありません' : '検索条件に一致する販売がありません',
+  allPendingDone.value ? '要対応の販売はありません'
+    : stage.value === 'listed' ? '検索条件に一致する出品がありません' : '検索条件に一致する販売がありません',
 )
+/** 要対応（送料未入力 または 未紐付け）で絞っていて、ほかの絞り込みは無いのに 0 件＝全部片付いた（検索の取りこぼしではない） */
+const allPendingDone = computed(() =>
+  inputFilter.value === 'pending' && !searchText.value && !monthFilter.value && !statusFilter.value
+  && !channelFilter.value && !tagFilter.value && period.value === 'all',
+)
+const filteredEmptyHint = computed(() => (allPendingDone.value ? '送料の入力と在庫の紐付けは、すべて済んでいます' : undefined))
 
 // --- 横断検索・ホームからの遷移：段階を合わせ、検索語を引き継ぎ、該当行を一時的にハイライトする ---
 const focusedId = ref<string | null>(null)
@@ -1034,8 +1107,9 @@ const productTagOptions = computed(() => tagOptionsOf(s => s.inherited_tags.filt
 const inventoryTagOptions = computed(() => tagOptionsOf(s => s.inherited_tags.filter(t => t.from === 'inventory')))
 
 // --- 派生タグの出どころ表示（chip-inherited の前に小さく出す印） ---
-const TAG_ORIGIN_LABEL: Record<string, string> = { purchase: '仕入から', product: '商品から', inventory: '在庫から' }
-const TAG_ORIGIN_MARK: Record<string, string> = { purchase: '仕', product: '品', inventory: '在' }
+const TAG_ORIGIN_LABEL: Record<string, string> = { purchase: '仕入のタグ', product: '商品のタグ', inventory: '在庫のタグ' }
+// 1 文字（「在」「仕」）では何のことか読めないので、どこから来たタグかを 2 文字で
+const TAG_ORIGIN_MARK: Record<string, string> = { purchase: '仕入', product: '商品', inventory: '在庫' }
 function tagOriginTitle(from?: Tag['from']): string {
   return from ? TAG_ORIGIN_LABEL[from] : ''
 }
@@ -1072,6 +1146,28 @@ function openTagPicker(sale: SaleProfit, e: MouseEvent) {
 function closeTagPicker() {
   tagPickerSale.value = null
   tagPickerAnchor.value = null
+}
+
+// --- スマホ幅：カードの補助ボタン（タグ・履歴・梱包・手数料・削除）は「…」の下からのシートにまとめる ---
+const moreOpen = ref(false)
+const moreSale = ref<SaleProfit | null>(null)
+/** 「…」ボタン。シートからタグを開くときの、タグ選択の基準の要素（スマホ幅では下に出るので位置には使われないが、外を押した判定に使う） */
+const moreAnchor = ref<HTMLElement | null>(null)
+function openMore(sale: SaleProfit, e: MouseEvent) {
+  moreSale.value = sale
+  moreAnchor.value = e.currentTarget as HTMLElement
+  moreOpen.value = true
+}
+/** シートの操作を実行してから閉じる（先に次の層［入力・確認・タグ選択］を出してから、シートの層を外す） */
+function runMore(fn: (sale: SaleProfit) => unknown) {
+  const sale = moreSale.value
+  if (!sale) return
+  void fn(sale)
+  moreOpen.value = false
+}
+function moreOpenTags(sale: SaleProfit) {
+  tagPickerSale.value = sale
+  tagPickerAnchor.value = moreAnchor.value
 }
 
 async function onTagChange(tagIds: string[]) {
@@ -1153,6 +1249,11 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
     <div class="page-head">
       <h1 class="page-title">売上</h1>
       <span class="grow" />
+      <!-- スマホ幅だけ：直近12か月のグラフの入口（デスクトップ幅ではグラフのカード自身が開閉を持つ） -->
+      <button type="button" class="ghost m-chart-btn" :aria-pressed="chartOpen" @click="chartOpen = !chartOpen">
+        <Icon name="sales" :size="16" />
+        グラフ
+      </button>
       <button class="primary" @click="showForm = !showForm">
         <Icon :name="showForm ? 'close' : 'plus'" :size="16" />
         {{ showForm ? '閉じる' : '販売を登録' }}
@@ -1215,29 +1316,22 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
       </div>
     </div>
 
-    <SalesSummary />
+    <SalesSummary v-model:mobileOpen="chartOpen" />
 
-    <!-- 進捗ストリップ（メルカリ側の状態）。押すと絞る -->
-    <StageStrip :stages="stageCards" :active="stage" @select="onSelectStage" />
+    <!-- 進捗ストリップ（メルカリ側の状態）。押すと絞る。スマホ幅では、高さ 44px の 1 行の横に動くチップ列（先頭に「要対応」） -->
+    <StageStrip chips :stages="stageCards" :active="stripActive" @select="onSelectStage" />
 
-    <!-- 利益の入力（アプリ側の状態）。進捗とは別の軸 -->
+    <!-- 利益の入力（アプリ側の状態）。進捗とは別の軸。スマホ幅ではここを隠し、同じ 2 つのピルを「絞り込み」の中に出す -->
     <p class="inputs-band">
       <span class="inputs-label">利益の入力：</span>
       <button
+        v-for="p in inputPills" :key="p.key"
         type="button"
         class="input-pill-btn"
-        :class="{ active: inputFilter === 'needs_shipping' }"
-        @click="toggleInputFilter('needs_shipping')"
+        :class="{ active: inputPillOn(p.key) }"
+        @click="toggleInputFilter(p.key)"
       >
-        <StatusPill tone="warn" :label="`送料未入力 ${progress?.inputs.needs_shipping ?? 0}`" />
-      </button>
-      <button
-        type="button"
-        class="input-pill-btn"
-        :class="{ active: inputFilter === 'needs_link' }"
-        @click="toggleInputFilter('needs_link')"
-      >
-        <StatusPill tone="warn" :label="`未紐付け ${progress?.inputs.needs_link ?? 0}`" />
+        <StatusPill tone="warn" :label="p.label" />
       </button>
       <StatusPill tone="ok" :label="`入力済み ${progress?.inputs.done ?? 0}`" />
       <span class="grow" />
@@ -1306,18 +1400,32 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
         >
           <StatusChip tone="brand" :label="`${monthFilter} ×`" />
         </button>
+        <!-- 型番で自動紐付け・並び替えは、デスクトップ幅では絞り込みの右に並ぶ（この入れ物は無いのと同じ）。
+             スマホ幅では「絞り込み」を開いた中に入る -->
+        <button v-if="stage === 'listed'" class="sm auto-link-btn" :disabled="!visibleListingIds.length" @click="autoReserveListings">型番で自動紐付け</button>
+        <button v-if="stage !== 'listed'" class="sm auto-link-btn" :disabled="!visibleSaleIds.length" @click="autoLinkPending">型番で自動紐付け</button>
+        <select v-model="sortOption" class="sort-select" title="並び替え">
+          <option value="default">既定（未確定が先）</option>
+          <option value="date_desc">日付が新しい順</option>
+          <option value="date_asc">日付が古い順</option>
+          <option value="profit_desc">粗利が高い順</option>
+          <option value="profit_asc">粗利が低い順</option>
+          <option value="price_desc">価格が高い順</option>
+          <option value="price_asc">価格が低い順</option>
+        </select>
+        <!-- スマホ幅だけ：利益の入力（上の 2 つのピルと同じもの） -->
+        <div class="m-input-filters">
+          <span class="m-input-filters-label">利益の入力</span>
+          <button
+            v-for="p in inputPills" :key="p.key"
+            type="button"
+            class="m-input-filter"
+            :class="{ on: inputPillOn(p.key) }"
+            :aria-pressed="inputPillOn(p.key)"
+            @click="toggleInputFilter(p.key)"
+          >{{ p.label }}</button>
+        </div>
       </div>
-      <button v-if="stage === 'listed'" class="sm auto-link-btn" :disabled="!visibleListingIds.length" @click="autoReserveListings">型番で自動紐付け</button>
-      <button v-if="stage !== 'listed'" class="sm auto-link-btn" :disabled="!visibleSaleIds.length" @click="autoLinkPending">型番で自動紐付け</button>
-      <select v-model="sortOption" class="sort-select" title="並び替え">
-        <option value="default">既定（未確定が先）</option>
-        <option value="date_desc">日付が新しい順</option>
-        <option value="date_asc">日付が古い順</option>
-        <option value="profit_desc">粗利が高い順</option>
-        <option value="profit_asc">粗利が低い順</option>
-        <option value="price_desc">価格が高い順</option>
-        <option value="price_asc">価格が低い順</option>
-      </select>
       <span class="grow" />
       <!-- 読み込み中は件数も合計も出さない（まだ何も入っていないのに「0 件 ・ 合計 ¥0」と言わない）。スマホ幅で行の高さが動かないよう、空の行は残す -->
       <span class="toolbar-count" :aria-busy="!loaded">
@@ -1398,13 +1506,17 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 
               <div class="cell-product">
                 <div class="row-labels">
-                  <StatusChip tone="neutral" :label="CHANNEL_LABEL[rowChannel(r)]" :title="`出品先：${CHANNEL_LABEL[rowChannel(r)]}`" />
+                  <StatusChip
+                    :class="{ 'm-default-channel': rowChannel(r) === 'mercari' }"
+                    tone="neutral" :label="CHANNEL_LABEL[rowChannel(r)]" :title="`出品先：${CHANNEL_LABEL[rowChannel(r)]}`"
+                  />
                   <StatusPill v-if="r.kind === 'sale' && r.sale?.status && SALE_STATUS_PILL[r.sale.status]"
                     :tone="SALE_STATUS_PILL[r.sale.status].tone" :label="SALE_STATUS_PILL[r.sale.status].label"
                     :title="SALE_STATUS_PILL[r.sale.status].title" />
                   <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="LISTING_STATUS_LABEL[r.listing.status]" />
                   <StatusChip v-if="r.sale && !r.sale.status" tone="neutral" :label="r.sale.source === 'manual' ? '手入力' : '状態未取得'" />
-                  <!-- スマホ幅だけ：粗利がまだ出ない理由を状態ラベル（①）に出す。表の列が無いので、ここで一目で分かるように -->
+                  <!-- スマホ幅だけ：粗利がまだ出ない理由を状態ラベル（①）に出す。表の列が無いので、ここで一目で分かるように。
+                       「未紐付け」はここに 1 回だけ出し、在庫の紐付けのセル（AllocationCell）のチップは隠す -->
                   <template v-if="r.sale && r.sale.kind === 'resale'">
                     <StatusPill v-if="!r.sale.is_shipping_confirmed && !hold" class="m-flag" tone="warn" label="送料未入力" />
                     <StatusPill v-if="r.sale.unmatched === 1" class="m-flag" tone="warn" label="未紐付け" />
@@ -1528,7 +1640,15 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                   </template>
                 </div>
 
-                <div class="cell-cost">
+                <!-- has-flag：スマホ幅では「未紐付け」が状態ラベルに出ているので、ここのチップは隠す。
+                     info-none：隠したあと、原価・コード・ひとことが何も無い（候補も無い）なら、情報の行ごと畳む -->
+                <div
+                  class="cell-cost"
+                  :class="{
+                    'has-flag': r.sale?.kind === 'resale' && r.sale?.unmatched === 1,
+                    'info-none': r.sale?.kind === 'resale' && r.sale?.unmatched === 1 && r.sale?.item_count === 0 && !costCandidateText(r.sale),
+                  }"
+                >
                   <span class="m-label">{{ costHeaderLabel }}</span>
                   <span v-if="r.sale?.kind === 'personal'" class="faint">対象外（私物）</span>
                   <AllocationCell v-else-if="r.sale"
@@ -1570,28 +1690,35 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 
               <div class="cell-ops">
                 <template v-if="r.kind === 'sale' && r.sale">
+                  <!-- .m-more-item：スマホ幅では隠し、「…」のシート（下の ActionSheet）に同じ操作を並べる。外部ページ・メモはカードに残す -->
                   <button
                     v-if="r.sale.mercari_item_id"
-                    class="icon ghost"
+                    class="icon ghost ops-ext"
                     :aria-label="`${CHANNEL_LABEL[r.sale.channel]}で開く`"
                     :title="`${CHANNEL_LABEL[r.sale.channel]}の取引画面を開く`"
                     @click.stop="r.sale && openChannelPageExternal(r.sale.channel, 'transaction', r.sale.mercari_item_id)"
                   >
                     <Icon name="external" :size="14" />
                   </button>
-                  <button class="sm ghost fade-btn" @click="r.sale && openTagPicker(r.sale, $event)" title="タグを編集する">タグ</button>
-                  <button v-if="canOpenTimeline(r.sale)" class="sm ghost" @click="openTimelineForSale(r.sale)">履歴</button>
+                  <button class="sm ghost fade-btn m-more-item" @click="r.sale && openTagPicker(r.sale, $event)" title="タグを編集する">タグ</button>
+                  <button v-if="canOpenTimeline(r.sale)" class="sm ghost m-more-item" @click="openTimelineForSale(r.sale)">履歴</button>
                   <button class="sm ghost fade-btn" @click="r.sale && editNote(r.sale)" title="メモを編集する">メモ</button>
-                  <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editPackaging(r.sale)" title="梱包材費を編集する">梱包</button>
-                  <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editFee(r.sale)" title="販売手数料を実額に直す（空欄で率の計算に戻ります）">手数料</button>
-                  <button v-if="r.sale.kind === 'personal'" class="sm ghost fade-btn" @click="r.sale && setKind(r.sale, 'resale')">{{ SALE_KIND_LABEL.resale }}にする</button>
-                  <button class="icon ghost" aria-label="削除" @click="r.sale && remove(r.sale)">
+                  <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn m-more-item" @click="r.sale && editPackaging(r.sale)" title="梱包材費を編集する">梱包</button>
+                  <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn m-more-item" @click="r.sale && editFee(r.sale)" title="販売手数料を実額に直す（空欄で率の計算に戻ります）">手数料</button>
+                  <button v-if="r.sale.kind === 'personal'" class="sm ghost fade-btn m-more-item" @click="r.sale && setKind(r.sale, 'resale')">{{ SALE_KIND_LABEL.resale }}にする</button>
+                  <button class="icon ghost m-more-item" aria-label="削除" @click="r.sale && remove(r.sale)">
                     <Icon name="trash" :size="16" />
+                  </button>
+                  <!-- スマホ幅だけ：その他（タグ・履歴・梱包・手数料・削除）。デスクトップ幅では出さない -->
+                  <button type="button" class="ghost m-more-btn" aria-label="その他の操作" aria-haspopup="dialog" @click="r.sale && openMore(r.sale, $event)">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                      <circle cx="4" cy="10" r="1.6" /><circle cx="10" cy="10" r="1.6" /><circle cx="16" cy="10" r="1.6" />
+                    </svg>
                   </button>
                 </template>
                 <template v-else-if="r.listing && (r.listing.status === 'active' || r.listing.status === 'suspended')">
                   <button
-                    class="icon ghost"
+                    class="icon ghost ops-ext"
                     :aria-label="`${CHANNEL_LABEL[r.listing.channel]}で開く`"
                     :title="`${CHANNEL_LABEL[r.listing.channel]}の商品ページを開く`"
                     @click.stop="r.listing && openChannelPageExternal(r.listing.channel, 'item', r.listing.mercari_item_id)"
@@ -1609,6 +1736,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
       <EmptyState
         v-else-if="searchText || monthFilter || statusFilter || inputFilter || period !== 'all' || listingStatusFilter !== 'active' || listedFilter !== 'all'"
         :title="filteredEmptyTitle"
+        :hint="filteredEmptyHint"
       />
       <EmptyState
         v-else
@@ -1631,10 +1759,23 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
       :anchor="tagPickerAnchor"
       :all-tags="allTags"
       :selected="tagPickerSale?.tags.map(t => t.id) ?? []"
+      :subject="tagPickerSale?.title"
       @change="onTagChange"
       @create="onTagCreate"
       @close="closeTagPicker"
     />
+
+    <!-- スマホ幅：カードの「…」から開く、その他の操作（タグ・履歴・梱包・手数料・削除）。削除はいちばん下、赤文字で、今までの確認ダイアログのまま -->
+    <ActionSheet :open="moreOpen" :title="moreSale?.title" @close="moreOpen = false">
+      <template v-if="moreSale">
+        <button type="button" @click="runMore(moreOpenTags)">タグ</button>
+        <button v-if="canOpenTimeline(moreSale)" type="button" @click="runMore(openTimelineForSale)">履歴</button>
+        <button v-if="moreSale.kind !== 'personal'" type="button" @click="runMore(editPackaging)">梱包材費</button>
+        <button v-if="moreSale.kind !== 'personal'" type="button" @click="runMore(editFee)">販売手数料</button>
+        <button v-if="moreSale.kind === 'personal'" type="button" @click="runMore(s => setKind(s, 'resale'))">{{ SALE_KIND_LABEL.resale }}にする</button>
+        <button type="button" class="danger" @click="runMore(remove)">削除</button>
+      </template>
+    </ActionSheet>
 
     <TimelineDrawer
       :open="!!timelineItemId"
@@ -1671,8 +1812,9 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   gap: 2px;
 }
 .chip-origin-mark {
-  font-size: 10px;
+  font-size: var(--fs-12);
   color: var(--text-faint);
+  white-space: nowrap;
 }
 
 /* --- 利益の入力バンド --- */
@@ -1924,7 +2066,10 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 /* --- スマホ幅だけで出すもの。デスクトップ幅では出さない（絞り込みの入れ物は無いのと同じ） --- */
 .m-label,
 .m-flag,
-.m-filter-toggle { display: none; }
+.m-filter-toggle,
+.m-chart-btn,
+.m-input-filters,
+.m-more-btn { display: none; }
 .toolbar-filters { display: contents; }
 
 /* ============================================================
@@ -1937,9 +2082,12 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
    デスクトップ幅（768px 以上）の見た目には一切効かせない。
    ============================================================ */
 @media (max-width: 767px) {
+  /* 上のバー：売上 ……[グラフ][販売を登録]。グラフは直近12か月の開閉（開くまでは 1 行も場所を取らない）。
+     段階チップ（StageStrip）と検索まで、最初のカードが 260px より上に来るよう、上のバーの下の余白も詰める */
+  .page-head { margin-bottom: 4px; }
   .page-head .primary { height: 44px; }
-  /* 先頭の小さな記号（出どころ）が 10px だと読めない */
-  .chip-origin-mark { font-size: var(--fs-11); }
+  .m-chart-btn { display: inline-flex; align-items: center; gap: 6px; height: 44px; }
+  .m-chart-btn[aria-pressed="true"] { background: var(--brand-soft); color: var(--text); }
 
   /* 販売の手入力フォーム：1 列、入力欄は 44px */
   .form { gap: 12px; }
@@ -1950,18 +2098,14 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   .form .row .grow { display: none; }
   .form .row .primary { flex: 1 1 auto; height: 48px; }
 
-  /* 段階カード（StageStrip）の横並び・横に動かす・選んだ段階を見える位置へ寄せる、は StageStrip.vue 自身が持つ（在庫タブと同じ形） */
+  /* 段階チップ（StageStrip の chips）の横に動かす・選んだ段階を見える位置へ寄せる、は StageStrip.vue 自身が持つ */
 
-  /* 利益の入力：3 つのピルを 1 行に（見出しの文言とひとことは省く。ピル自体が「送料未入力 6」と読める）。押す範囲は 44px 高 */
-  .inputs-band { flex-wrap: wrap; gap: 0 8px; margin-bottom: 4px; }
-  .inputs-band .grow, .inputs-label, .inputs-hint { display: none; }
-  .inputs-band > :not(.input-pill-btn) { margin: 11px 0; }
-  .input-pill-btn { padding: 11px 0; }
-  .input-pill-btn.active { outline: none; }
-  .input-pill-btn.active :deep(.pill-base) { outline: 2px solid var(--primary); outline-offset: 2px; }
+  /* 利益の入力のピルは、ここでは出さない。同じ 2 つのボタンは「絞り込み」を開いた中にあり（.m-input-filters）、
+     いちばん使う「要対応」（送料未入力 または 未紐付け）は、段階チップの先頭に出ている */
+  .inputs-band { display: none; }
 
-  /* ツールバー：検索 →（絞り込み）→ 並び替え → 型番で自動紐付け → 件数・合計 */
-  .toolbar { gap: 8px; }
+  /* ツールバー：検索 →（絞り込み）→ 件数・合計。並び替えと型番で自動紐付け、利益の入力は「絞り込み」の中 */
+  .toolbar { gap: 4px 8px; margin-bottom: 8px; }
   .toolbar .search-box { flex: 1 1 160px; width: auto; min-width: 0; }
   .toolbar .search-box :deep(.search-box-input) { height: 44px; }
   .toolbar .search-box :deep(.search-box-clear) { width: 36px; height: 36px; }
@@ -1991,30 +2135,66 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
     font-weight: 700;
   }
   .toolbar-filters { display: none; order: 1; flex: 1 1 100%; }
-  .toolbar-filters.m-open { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  /* 開いた「絞り込み」：白い面にまとめる（絞り込み・並び替え・型番で自動紐付け・利益の入力が入る） */
+  .toolbar-filters.m-open {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    padding: 12px;
+    background: var(--surface);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+  }
   .toolbar-filters select { width: 100%; min-width: 0; height: 44px; }
   .toolbar-filters .period-select { display: flex; width: 100%; }
   .toolbar-filters .period-select.is-custom { grid-column: 1 / -1; }
   .toolbar-filters .period-select :deep(select) { flex: 1 1 100%; min-width: 0; width: 100%; height: 44px; }
   .toolbar-filters .period-select :deep(input) { flex: 1 1 120px; min-width: 0; height: 44px; }
   .toolbar-filters .month-chip-btn { grid-column: 1 / -1; justify-self: start; padding: 8px 0; }
-  .toolbar .sort-select { order: 2; flex: 1 1 160px; min-width: 0; height: 44px; }
-  .toolbar .auto-link-btn { order: 3; flex: 0 0 auto; height: 44px; padding: 0 14px; }
+  .toolbar-filters .sort-select { grid-column: 1 / -1; }
+  .toolbar-filters .auto-link-btn { grid-column: 1 / -1; height: 44px; padding: 0 14px; }
+  .toolbar-filters .m-input-filters {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .m-input-filters-label { flex: 0 0 auto; font-size: var(--fs-13); color: var(--text-dim); }
+  .m-input-filter {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 44px;
+    padding: 0 8px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-line);
+    color: var(--warn);
+    font-size: var(--fs-13);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .m-input-filter.on { background: var(--primary); border-color: var(--primary); color: var(--surface); }
   .toolbar .grow { display: none; }
-  .toolbar .toolbar-count { order: 4; flex: 1 1 100%; text-align: right; }
+  .toolbar .toolbar-count { order: 4; flex: 1 1 100%; text-align: right; line-height: 1.3; }
 
   .totals-bar { flex-wrap: wrap; gap: 4px 12px; padding: 10px 14px; }
 
   /* 作業リスト：1 件 1 枚のカード */
   .work-panel { padding: 0; background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
   .work-row-hdr { display: none; }
+  /* カードの組み方（上から）：サムネ＋① 状態ラベル・② 名前・③ 補助・④ チップ／
+     価格 …… 粗利／送料の選択／在庫の情報（原価・コード）／在庫の紐付けボタン …… 補助の操作（外部・メモ・…）。
+     下の 2 行（在庫の情報と、ボタン＋補助の操作）で、カードの背を 1 段ぶん低くしている。
+     縦の間隔は各項目の margin-top で持つ（空の行が余白だけ残さないように、行の gap は 0） */
   .work-row {
-    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-columns: 48px minmax(0, 1fr) auto;
     grid-template-areas:
-      "thumb product"
-      "meta  meta"
-      "ops   ops";
-    gap: 10px 12px;
+      "thumb product product"
+      "price price   profit"
+      "ship  ship    ship"
+      "info  info    info"
+      "link  link    ops";
+    gap: 0 12px;
+    align-items: center;
     padding: 12px;
     margin-bottom: 10px;
     border-top: 0;
@@ -2029,8 +2209,10 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   .cell-thumb { align-self: start; }
   .thumb, .thumb-placeholder { width: 48px; height: 48px; }
   .cell-product { overflow: visible; }
-  .cell-product .row-labels { min-height: 0; margin-bottom: 6px; }
+  .cell-product .row-labels { min-height: 0; margin-bottom: 4px; }
   .m-flag { display: inline-flex; }
+  /* 出品先は、メルカリ（既定）のときは出さない（毎枚同じで、状態ラベルの行を 2 段に押し下げるだけ）。ほかの出品先のときは出す */
+  .row-labels .m-default-channel { display: none; }
   .work-row .row-title { -webkit-line-clamp: 3; min-height: 0; }
   /* 題を押せる範囲：文字の大きさと並びはそのまま、上下に 12px ずつ広げて高さ 44px 以上にする。
      広げた分は負の margin で打ち消す。前後の要素（状態ラベル・補助の行）に重なるが、どちらも押せない文字なので、
@@ -2050,19 +2232,11 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
     white-space: normal;
   }
 
-  /* 価格・粗利／送料／在庫の紐付け。表の列見出しが無いので、各項目の上に小さな見出しを出す */
-  .cell-meta {
-    grid-area: meta;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "price profit"
-      "ship  ship"
-      "cost  cost";
-    gap: 10px 12px;
-    align-items: start;
-  }
-  .cell-price, .cell-ship, .cell-cost { min-width: 0; }
+  /* 価格・粗利／送料／在庫の紐付け。カードを低くするため、価格と粗利は 1 行（小さな見出しは数字の左に並べる）、
+     送料と在庫の紐付けは見出し無し（選ぶ欄・ボタンの文言そのものが何の欄かを言っている） */
+  .cell-meta, .cell-cost, .cell-cost :deep(.allocation-cell) { display: contents; }
+  .cell-price, .cell-ship, .cell-profit { margin-top: 8px; }
+  .cell-price, .cell-ship { min-width: 0; }
   .m-label {
     display: block;
     margin-bottom: 2px;
@@ -2071,6 +2245,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
     line-height: 1.4;
     color: var(--text-faint);
   }
+  .cell-ship .m-label, .cell-cost .m-label { display: none; }
   .cell-price {
     display: flex;
     flex-wrap: wrap;
@@ -2080,46 +2255,67 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
     font-size: var(--fs-16);
     font-weight: 700;
   }
-  .cell-price .m-label { flex: 1 1 100%; }
+  /* 価格は、太字の金額と「手数料 −¥x」が並ぶので見出しを省く（393px でも 1 行に収める）。粗利は数字の左に見出し */
+  .cell-price .m-label { display: none; }
+  .cell-profit .m-label { display: inline; flex: 0 0 auto; margin: 0; }
   .cell-price .fee-line { justify-content: flex-start; margin-top: 0; font-size: var(--fs-12); font-weight: 400; }
-  .cell-profit { justify-self: end; }
+  .cell-profit { display: flex; align-items: baseline; justify-content: flex-end; gap: 6px; justify-self: end; }
   .cell-profit strong { font-size: var(--fs-20); }
   .profit-na .why { font-size: var(--fs-12); }
   .cell-ship .ship-select { height: 44px; }
   .cell-ship .shipping-actual { min-height: 44px; }
-  .cell-cost :deep(.allocation-cell) {
-    flex-direction: row;
+
+  /* 在庫の紐付け：情報（原価・在庫コード・自動紐付けのひとこと・候補）は 1 行にまとめ、ボタン（44px 高）は下の行の左。
+     「未紐付け」のチップは、状態ラベルに同じ語が出ているので隠す（.has-flag）。隠して何も残らないなら行ごと畳む（.info-none）。
+     「済」の間に薄くする（.held の opacity）は、入れ物が無い（display: contents）ので、ここで中身に直接かける */
+  .cell-cost :deep(.allocation-info) {
+    grid-area: info;
+    display: flex;
     flex-wrap: wrap;
     align-items: center;
-    align-self: stretch;
-    gap: 6px 10px;
+    gap: 4px 8px;
+    min-width: 0;
+    margin-top: 6px;
   }
+  .cell-cost > .faint { grid-area: info; margin-top: 6px; }
+  .cell-cost.info-none :deep(.allocation-info) { display: none; }
   .cell-cost :deep(.allocation-state) { min-height: 0; }
-  .cell-cost :deep(.link-btn) {
-    flex: 1 1 auto;
+  .cell-cost :deep(.allocation-cost-label) { display: inline; font-size: var(--fs-12); font-weight: 400; color: var(--text-faint); }
+  .cell-cost.has-flag :deep(.allocation-unlinked) { display: none; }
+  .cell-cost :deep(.allocation-hint) { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-cost :deep(.allocation-btn) {
+    grid-area: link;
     justify-content: center;
     height: 44px;
+    margin-top: 8px;
+    padding: 0 14px;
     font-size: var(--fs-14);
-  }
-  .cell-cost :deep(.allocation-codes),
-  .cell-cost :deep(.allocation-cell > .faint) { flex: 1 1 100%; }
-
-  /* 補助の操作（タグ・メモ・梱包・手数料・履歴・外部ページ・削除）。ホバーが無いので薄くせず、44px 高 */
-  .cell-ops {
-    justify-content: stretch;
-    gap: 6px;
-    padding-top: 10px;
-    border-top: 1px solid var(--line-soft);
-  }
-  .cell-ops button {
-    flex: 1 1 auto;
-    min-width: 44px;
-    height: 44px;
-    padding: 0 8px;
-    font-size: var(--fs-12);
     border-color: var(--line);
   }
-  .cell-ops button.icon { flex: 0 0 44px; width: 44px; }
+  /* 橙（link-btn）のときは、橙の枠のまま */
+  .cell-cost :deep(.allocation-btn.link-btn) { border-color: var(--warn-line); }
+  .work-row.held .cell-cost :deep(.allocation-info),
+  .work-row.held .cell-cost :deep(.allocation-btn) { opacity: .55; }
+
+  /* 補助の操作：カードに残すのは「外部ページ」「メモ」と「…」だけ。タグ・履歴・梱包・手数料・削除は「…」のシートへ
+     （.m-more-item）。ホバーが無いので薄くせず、44px 高。在庫の紐付けボタンの右に、同じ行で並べる */
+  .cell-ops {
+    justify-self: end;
+    flex-wrap: nowrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .cell-ops:empty { display: none; }
+  .cell-ops button {
+    flex: 0 0 auto;
+    min-width: 44px;
+    height: 44px;
+    padding: 0 12px;
+    font-size: var(--fs-13);
+    border-color: var(--line);
+  }
+  .cell-ops .m-more-item { display: none; }
+  .cell-ops .m-more-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 56px; padding: 0; }
   .fade-btn { opacity: 1; }
 
   /* 「転売」チップ（押すと私物に変える）は見た目のまま、押せる範囲だけ広げる */

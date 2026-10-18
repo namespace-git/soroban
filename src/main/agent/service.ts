@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, ipcMain, net, session, shell } from 'electron'
+import { BrowserWindow, Menu, app, ipcMain, nativeImage, net, session, shell } from 'electron'
 import type { IpcMainEvent, MenuItemConstructorOptions } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -15,6 +15,7 @@ import type { ShopAccount } from '../../shared/types'
 import { errorText } from './errors'
 import { createAgentHttp, type FetchFn } from './http'
 import { createMediaUploader } from './media'
+import { createImageShrinker } from './shrink-image'
 import {
   AGENT_PARTITION, AGENT_WINDOW_TITLE, externalUrlToOpen, isAllowedNavigation, isTrustedSender, lockDownPermissions,
 } from './mode'
@@ -140,6 +141,9 @@ export class AgentService {
         // 収集が落としたファイル（collector*.ts の userData/thumbs）
         readFile: file => readFile(join(app.getPath('userData'), 'thumbs', file)),
         randomId: randomUUID,
+        // 上げる前に長辺 640px・JPEG 品質 80 に縮める（スマホの一覧のサムネイル用。縮められなければ元のまま）
+        shrink: createImageShrinker(nativeImage),
+        log: m => applog.log('collector', 'agent_media', m),
       }),
       collectors: {
         mercari: (silent, store) => collector.collect(silent, store),

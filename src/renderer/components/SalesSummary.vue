@@ -11,12 +11,17 @@
 // 0 を中心にした独自の簡易 SVG で描画している（親セッションへの申し送り事項）。
 // 積み上げ（仕入先・タグごと）は MonthlySummary に内訳が無いため、従来どおり単色のまま
 // （無理に変えない。データが増えたら本来の積み上げに直せる）。
-import { ref, computed, onMounted, watch, inject, type Ref } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, inject, type Ref } from 'vue'
 import { SALE_KIND_LABEL } from '../../shared/types'
 import type { MonthlySummary, SaleKind } from '../../shared/types'
 import { thisMonthLocal } from '../../shared/date'
 import Icon from './Icon.vue'
 import Skeleton from './Skeleton.vue'
+
+// スマホ幅（767px 以下）では、グラフを開く・閉じるを親（売上タブの上のバーの「グラフ」ボタン）が持つ。
+// 閉じているあいだはこのコンポーネント全体を畳み、1 行も場所を取らない。デスクトップ幅では今までどおり（開閉はここ）
+const props = defineProps<{ mobileOpen?: boolean }>()
+const emit = defineEmits<{ 'update:mobileOpen': [boolean] }>()
 
 const revision = inject<Ref<number>>('revision')!
 // 売上タブ内で引き当て・送料・紐付けを変えた直後にも数字を更新する
@@ -46,7 +51,24 @@ try {
   if (saved !== null) showChart.value = saved === '1'
 } catch { /* localStorage が使えない環境では既定（表示）のまま */ }
 
+// 画面の幅が変わっても追従する（スマホ幅かどうか）
+const MOBILE_QUERY = '(max-width: 767px)'
+const isMobile = ref(typeof window.matchMedia === 'function' && window.matchMedia(MOBILE_QUERY).matches)
+let mobileMql: MediaQueryList | undefined
+function onMobileChange(e: { matches: boolean }) { isMobile.value = e.matches }
+onMounted(() => {
+  if (typeof window.matchMedia !== 'function') return
+  mobileMql = window.matchMedia(MOBILE_QUERY)
+  isMobile.value = mobileMql.matches
+  mobileMql.addEventListener('change', onMobileChange)
+})
+onBeforeUnmount(() => mobileMql?.removeEventListener('change', onMobileChange))
+
+/** グラフを出しているか。スマホ幅は親の指示（mobileOpen）、デスクトップ幅はここで覚えている開閉 */
+const chartVisible = computed(() => (isMobile.value ? !!props.mobileOpen : showChart.value))
+
 function toggleChart() {
+  if (isMobile.value) { emit('update:mobileOpen', false); return }
   showChart.value = !showChart.value
   try { localStorage.setItem(SHOW_CHART_KEY, showChart.value ? '1' : '0') } catch { /* noop */ }
 }
@@ -194,27 +216,27 @@ const gridLines = computed(() => domainMin.value < 0
 </script>
 
 <template>
-  <div class="sales-summary">
+  <div class="sales-summary" :class="{ 'm-collapsed': !mobileOpen }">
     <div class="panel chart-panel">
       <div class="section-head">
         <span class="section-head-icon"><Icon name="sales" :size="16" /></span>
         <h2 class="section-head-title">直近12か月</h2>
-        <span v-if="showChart" class="legend">
+        <span v-if="chartVisible" class="legend">
           <span class="legend-item"><span class="dot revenue" />売上</span>
           <span class="legend-item"><span class="dot gross" />粗利</span>
           <span class="legend-item"><span class="dot net" />純利益</span>
         </span>
         <span class="grow" />
-        <select v-if="showChart" v-model="chartKind">
+        <select v-if="chartVisible" v-model="chartKind">
           <option value="resale">{{ SALE_KIND_LABEL.resale }}</option>
           <option value="personal">{{ SALE_KIND_LABEL.personal }}</option>
         </select>
-        <button class="sm ghost" @click="toggleChart">{{ showChart ? 'グラフを隠す' : 'グラフを見せる' }}</button>
+        <button class="sm ghost" @click="toggleChart">{{ chartVisible ? 'グラフを隠す' : 'グラフを見せる' }}</button>
       </div>
 
       <Skeleton v-if="!loaded" kind="table" :rows="3" />
 
-      <div v-else-if="showChart" class="chart-wrap">
+      <div v-else-if="chartVisible" class="chart-wrap">
         <svg :viewBox="`0 0 ${W} ${H}`" class="chart" preserveAspectRatio="xMidYMid meet" @mouseleave="onLeaveChart">
           <line v-for="gl in gridLines" :key="gl.y" :x1="PAD_L" :y1="gl.y" :x2="W - PAD_R" :y2="gl.y" class="grid" />
           <text v-for="gl in gridLines" :key="'gl' + gl.y" :x="PAD_L - 6" :y="gl.y + 3" class="grid-label">{{ gl.label }}</text>
@@ -277,7 +299,7 @@ const gridLines = computed(() => domainMin.value < 0
           <div class="chart-tooltip-row" :class="tooltip.p.netProfit < 0 ? 'loss' : 'profit'">純利益 {{ yen(tooltip.p.netProfit) }}</div>
         </div>
       </div>
-      <p v-if="loaded && showChart" class="chart-hint">濃色：実績（取引完了・状態未設定の手入力） ／ 淡色・破線：見込みを含む合計。月を押すと販売を表示します</p>
+      <p v-if="loaded && chartVisible" class="chart-hint">濃色：実績（取引完了・状態未設定の手入力） ／ 淡色・破線：見込みを含む合計。月を押すと販売を表示します</p>
     </div>
   </div>
 </template>
@@ -361,6 +383,8 @@ const gridLines = computed(() => domainMin.value < 0
 /* スマホ幅（768px 未満）：見出しは折り返す（タイトルを縦書きにつぶさない）。ボタンは 44px */
 @media (max-width: 767px) {
   .sales-summary { margin-bottom: 8px; }
+  /* 閉じているあいだは 1 行も場所を取らない（開く入口は売上タブの上のバーの「グラフ」） */
+  .sales-summary.m-collapsed { display: none; }
   .chart-panel { padding: 4px 12px; }
   .chart-panel .section-head { flex-wrap: wrap; gap: 6px 10px; margin-bottom: 0; }
   .chart-panel .section-head-title { flex: 0 0 auto; }

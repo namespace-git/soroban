@@ -24,8 +24,9 @@ import { fileURLToPath } from 'node:url'
 const here = dirname(fileURLToPath(import.meta.url))
 const webDir = resolve(here, 'web')
 
-// style.css の --brand（テーマ色）と --canvas。manifest.webmanifest にも同じ値が書いてある
-const THEME_COLOR = '#fbcf52'
+// style.css の --canvas（画面の地。上のバーと同じ色）。Android の上端（ステータスバー）がこの色になるので、
+// ブランドの黄ではなく地の色にする（黄はアイコンにだけ残す）。manifest.webmanifest の theme_color にも同じ値が書いてある
+const THEME_COLOR = '#f6f6f3'
 
 /** 画面（ブラウザ）に渡す環境変数。VITE_ で始まるものだけ。**秘密の値を足さないこと** */
 const WEB_ENV_KEYS = ['VITE_SUPABASE_URL', 'VITE_SUPABASE_ANON_KEY', 'VITE_API_BASE'] as const

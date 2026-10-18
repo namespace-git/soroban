@@ -263,6 +263,7 @@ async function doReopen() {
           @click="pickMonth(m.month)"
         >
           <span class="month-card-label">{{ m.month }}{{ m.month === thisMonth ? '（今月）' : '' }}</span>
+          <span class="month-card-key">純利益</span>
           <strong class="month-card-value" :class="m.net_profit >= 0 ? 'profit' : 'loss'">{{ yen(m.net_profit) }}</strong>
           <span v-if="m.forecast?.count" class="faint">見込み粗利 {{ yen(m.forecast.gross_profit) }}</span>
           <StatusChip :tone="statusTone(m)" :label="statusLabel(m)" />
@@ -688,6 +689,8 @@ async function doReopen() {
 }
 .month-card.active { border-color: var(--primary); }
 .month-card-label { font-size: var(--fs-12); color: var(--text-dim); }
+/* 数字が何の数字かの札（粗利ではなく純利益）。数字のすぐ上に寄せる */
+.month-card-key { margin-bottom: -3px; font-size: var(--fs-11); color: var(--text-faint); }
 .month-card-value {
   font-size: var(--fs-16);
   font-weight: 700;

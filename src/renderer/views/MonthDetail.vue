@@ -187,6 +187,11 @@ function expenseContent(e: Expense): string {
             <tr v-for="s in filteredSales" :key="s.id">
               <td class="dim nowrap sold-cell">{{ s.sold_at }}</td>
               <td class="title-cell">
+                <!-- 要対応の印（数字は変えない）：未紐付けは原価 ¥0・粗利が実際より大きく、送料未入力は送料 ¥0 で集計されている -->
+                <div v-if="s.unmatched === 1 || !s.is_shipping_confirmed" class="row-labels">
+                  <StatusChip v-if="s.unmatched === 1" tone="warn" label="未紐付け" />
+                  <StatusChip v-if="!s.is_shipping_confirmed" tone="warn" label="送料未入力" />
+                </div>
                 <div class="row-title one-line" :title="s.title">{{ s.title }}</div>
                 <div class="chip-row">
                   <CodeChip v-for="mc in s.model_codes" :key="mc" kind="model" :code="mc" />

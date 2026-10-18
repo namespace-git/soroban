@@ -1636,6 +1636,7 @@ const runLabel: Record<string, string> = {
       :anchor="tagPickerAccountAnchor"
       :all-tags="tags"
       :selected="tagPickerAccount?.auto_tags.map(t => t.id) ?? []"
+      :subject="tagPickerAccount ? `仕入先 ${tagPickerAccount.name} の自動タグ` : undefined"
       @change="onAccountTagChange"
       @create="onAccountTagCreate"
       @close="closeAccountTagPicker"

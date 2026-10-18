@@ -214,6 +214,14 @@ const tagPickerSelected = computed(() => {
   return source?.tags.map(t => t.id) ?? []
 })
 
+/** スマホ幅のタグ選択の題の下に出す、どの商品に付けるのか（型番と表示名） */
+const tagPickerSubject = computed(() => {
+  const target = tagPickerModelCode.value
+  if (!target) return undefined
+  const source = karte.value?.summary.model_code === target ? karte.value.summary : products.value.find(p => p.model_code === target)
+  return source ? `${source.model_code} ・ ${source.name}` : target
+})
+
 function openProductTagPicker(modelCode: string, e: MouseEvent) {
   tagPickerModelCode.value = modelCode
   tagPickerAnchor.value = e.currentTarget as HTMLElement
@@ -665,6 +673,7 @@ const estimateCompare = computed(() => {
       :anchor="tagPickerAnchor"
       :all-tags="allTags"
       :selected="tagPickerSelected"
+      :subject="tagPickerSubject"
       @change="onProductTagChange"
       @create="onProductTagCreate"
       @close="closeProductTagPicker"
