@@ -3,7 +3,7 @@ import type { WebApi } from '../src/shared/web-types'
 import { authenticate, bearerToken, type Identity } from './auth'
 import { serverEnvFrom, withHousehold, type Ctx, type HouseholdIds, type Net, type RawServerEnv } from './context'
 import type { Sql } from './db/sql'
-import { ApiError, describeError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError } from './errors'
+import { ApiError, describeError, HTTP_STATUS, INTERNAL_MESSAGE, mapDbError, readDbError } from './errors'
 import { drainDeliveries } from './push/deliver'
 import { READ_ONLY_METHODS } from '../src/shared/read-only-methods'
 
@@ -407,9 +407,18 @@ async function runHandler(handler: Handler, method: string, args: unknown[], dep
 //         （code・message は、同じ呼び出しを `/api/rpc/<method>` で呼んだときと同じ）。
 //
 // 走らせ方：
-//   - 認証は 1 回。ふつうのハンドラは**1 つの withHousehold（1 接続・1 回の世帯の切り替え）の中で順に**走らせ、
-//     1 本ずつ savepoint で包む（失敗した 1 本だけを巻き戻して続ける。巻き戻さないと以降が「トランザクションが中断している」で全滅する）。
-//     最後は**コミット**（読み取りだけなので中身は変わらない。ロールバックにしても同じだが、コミットのほうが往復が少なく例外にもならない）。
+//   - 認証は 1 回。ふつうのハンドラは**1 つの withHousehold（1 接続・1 回の世帯の切り替え）の中で順に**走らせる。
+//     **1 本ずつ savepoint で包むことはしない**（savepoint は `savepoint` と `release` の 2 往復を足す。
+//     SQL 1 本が約 17ms の本番では、束の本数ぶんだけ遅くなる）。最後は**コミット**。
+//   - 1 本が失敗したら、その 1 本だけ error にする。そのうえで**いまのトランザクションがまだ使えるか**を見る：
+//       ApiError（UserError を含む。JS が SQL の前・結果を見て投げたもの）… トランザクションは壊れていない。そのまま次へ。
+//       それ以外（SQL のエラー＝SQLSTATE を持つ例外、素の Error、通信の失敗など）… 使えない、とみなす（迷うものも安全側でこちら）。
+//         今の withHousehold をロールバックで終わらせ（このトランザクションの中で成功した分の結果は返す。afterCommit に積まれた
+//         後始末は、ロールバックされたので走らせない）、残りを**新しい withHousehold** で続ける。
+//     読み取りだけの呼び出しなので、ロールバックで失うものは無い（`getCollectStatus` が先に流す期限切れの要求の片付けは、
+//     次の読み出しでまたやり直される）。失敗した 1 本が途中まで書いていても、その 1 本だけを巻き戻すことはしない。
+//     もし使えないはずのトランザクションに次の呼び出しが入ってしまったら（ApiError に包まれた DB の失敗など）、その呼び出しは
+//     SQLSTATE 25P02 で落ちる。それは呼び出し自身の失敗ではないので error にせず、新しいトランザクションでやり直す。
 //   - phased のハンドラ（通信を挟むもの）は、まとめのトランザクションに**入れない**。まとめのトランザクションがコミットされたあとで、
 //     1 本ずつふつうの経路（`runHandler`）で走らせ、結果は元の位置に入れる（通信のあいだトランザクションを握らない約束）。
 //     同時に走らせない（接続は 1 本なので、まとめのトランザクションの中で走らせると互いに待って固まる）。
@@ -481,12 +490,9 @@ async function runBatch(calls: BatchCall[], deps: DispatchDeps): Promise<BatchIt
     }
   })
 
-  // ふつうのハンドラ：1 つの世帯のトランザクションの中で順に。1 本ずつ savepoint
-  if (plain.length > 0) {
-    await withHousehold(deps.root, householdIdsOf(deps), async (ctx) => {
-      for (const i of plain) items[i] = await runInSavepoint(ctx, calls[i], handlerOf[i])
-    })
-  }
+  // ふつうのハンドラ：1 つの世帯のトランザクションの中で順に。トランザクションが使えなくなったら、残りは新しいトランザクションで
+  let pending = plain
+  while (pending.length > 0) pending = await runPlainSegment(pending, calls, handlerOf, items, deps)
 
   // phased：まとめのトランザクションの外（上でコミット済み）。1 本ずつふつうの経路で
   for (const i of phased) {
@@ -500,21 +506,70 @@ async function runBatch(calls: BatchCall[], deps: DispatchDeps): Promise<BatchIt
   return items
 }
 
-/**
- * 呼び出し 1 本を savepoint の中で走らせる。失敗したらその savepoint だけ巻き戻して error にする（外のトランザクションは生きたまま）。
- * ハンドラには**内側の sql を載せた ctx**を渡す（外側の `ctx.sql` を savepoint の中で使うと例外になる）。
- * `afterCommit` はこの 1 本のぶんを手元に貯め、成功したときだけ外の ctx に渡す（巻き戻した 1 本の後始末をコミット後に走らせない）。
- */
-async function runInSavepoint(ctx: Ctx, call: BatchCall, handler: Handler): Promise<BatchItem> {
-  const deferred: Array<() => Promise<void>> = []
-  try {
-    const value = await ctx.sql.tx((sql) =>
-      handler({ ...ctx, sql, afterCommit: (task) => { deferred.push(task) } }, ...call.args))
-    for (const task of deferred) ctx.afterCommit(task)
-    return { result: value === undefined ? null : value }
-  } catch (e) {
-    return errorItem(e, call.method)
+/** 1 つのトランザクションの区切りを、わざと終わらせる目印（ロールバックさせるための例外。外には出さない） */
+class SegmentEnd extends Error {
+  constructor() {
+    super('batch segment ended')
+    this.name = 'SegmentEnd'
   }
+}
+
+/** 「失敗したトランザクションの中でさらに SQL を流した」＝ 25P02 in_failed_sql_transaction */
+const FAILED_TRANSACTION = '25P02'
+
+/**
+ * `pending`（plain の呼び出しの番号。元の順）を、1 つの世帯のトランザクションの中で順に走らせる（savepoint は張らない）。
+ * 結果は `items` の元の位置に入れる。戻り値は**まだ走らせていない残りの番号**（全部走らせたら空）。
+ *
+ * 失敗の扱い（ファイル先頭の「走らせ方」を参照）：
+ *   - `ApiError` … その 1 本を error にして、同じトランザクションで次へ。
+ *   - それ以外 … その 1 本を error にして、このトランザクションをロールバックで終わらせ、残りを返す（呼び出し側が新しいトランザクションで続ける）。
+ *   - 25P02（先の失敗でとっくに使えなかったトランザクションに入ってしまった）… error にせず、この 1 本から残りを返す。
+ *     この区切りの先頭の 1 本が 25P02 のときは、先の失敗のせいにできない（その 1 本自身の失敗）ので、ふつうに error にする。
+ * 成功した 1 本の `afterCommit` は、コミットされる（＝この区切りが最後まで走った）ときだけ走る。
+ * ロールバックで終えた区切りの分は走らせない（巻き戻っているので）。
+ */
+async function runPlainSegment(
+  pending: number[], calls: BatchCall[], handlerOf: Handler[], items: BatchItem[], deps: DispatchDeps,
+): Promise<number[]> {
+  const stop: { resume: number[] | null } = { resume: null }
+  try {
+    await withHousehold(deps.root, householdIdsOf(deps), async (ctx) => {
+      for (let k = 0; k < pending.length; k++) {
+        const i = pending[k]
+        try {
+          items[i] = await runOne(ctx, calls[i], handlerOf[i])
+        } catch (e) {
+          if (k > 0 && readDbError(e)?.code === FAILED_TRANSACTION) {
+            stop.resume = pending.slice(k)
+            throw new SegmentEnd()
+          }
+          items[i] = errorItem(e, calls[i].method)
+          if (!(e instanceof ApiError)) {
+            stop.resume = pending.slice(k + 1)
+            throw new SegmentEnd()
+          }
+        }
+      }
+    })
+  } catch (e) {
+    // 自分で終わらせたとき以外（コミットの失敗・接続の失敗など）は、要求全体の失敗
+    if (stop.resume === null) throw e
+    // ロールバックそのものが失敗した（接続が壊れている）。この先の区切りがあれば、そこで同じ失敗として出る
+    if (!(e instanceof SegmentEnd)) console.error('[rpc] _batch: トランザクションの片付けに失敗しました', describeError(e))
+  }
+  return stop.resume ?? []
+}
+
+/**
+ * 呼び出し 1 本を走らせて結果にする（失敗は投げる）。`afterCommit` はこの 1 本のぶんを手元に貯め、成功したときだけ ctx に渡す
+ * （失敗した 1 本が積んだ後始末をコミット後に走らせない）。
+ */
+async function runOne(ctx: Ctx, call: BatchCall, handler: Handler): Promise<BatchItem> {
+  const deferred: Array<() => Promise<void>> = []
+  const value = await handler({ ...ctx, afterCommit: (task) => { deferred.push(task) } }, ...call.args)
+  for (const task of deferred) ctx.afterCommit(task)
+  return { result: value === undefined ? null : value }
 }
 
 /** ふつうの `/api/rpc/<method>` の失敗と同じ code・message（`toApiError`）にする。internal の原因はサーバーのログにだけ出る */

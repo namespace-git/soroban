@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { openTestDb, type TestDb } from './helpers'
+import { DRIVER_NAMES, openTestDb, type TestDb } from './helpers'
 
 let db: TestDb
 
@@ -15,10 +15,8 @@ beforeEach(async () => {
   await db.pg.exec('truncate public.typed')
 })
 
-// PGlite のアダプタと、本物の postgres.js（TCP のブリッジ経由。prepare あり・なし）で、同じ結果になること
-const NAMES = ['PGlite', 'postgres.js (prepare あり)', 'postgres.js (prepare なし)']
-
-describe.each(NAMES)('Sql: %s', (name) => {
+// PGlite のアダプタと、本物の node-postgres（TCP のブリッジ経由）で、同じ結果になること
+describe.each(DRIVER_NAMES)('Sql: %s', (name) => {
   const sql = () => db.drivers.find((d) => d.name === name)!.sql
 
   describe('get / all / run', () => {

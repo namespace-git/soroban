@@ -73,7 +73,7 @@ export interface Bridge {
 
 /**
  * PGlite を TCP の Postgres サーバーに見せる（wire protocol をそのまま PGlite に渡す）。
- * 本物の postgres.js で `server/db/postgres.ts` を通すためのもの。接続は 1 本ずつ順に処理する。
+ * 本物の node-postgres（pg）で `server/db/postgres.ts` を通すためのもの。接続は 1 本ずつ順に処理する。
  */
 export async function startBridge(pg: PGlite): Promise<Bridge> {
   let chain: Promise<unknown> = Promise.resolve()
@@ -118,29 +118,28 @@ export interface NamedSql {
 export interface TestDb {
   pg: PGlite
   pglite: PgliteSql
-  /** 同じ DB を PGlite のアダプタと、postgres.js（TCP のブリッジ経由）の両方から触れる */
+  /** 同じ DB を PGlite のアダプタと、node-postgres（TCP のブリッジ経由）の両方から触れる */
   drivers: NamedSql[]
   close(): Promise<void>
 }
+
+/** `TestDb.drivers` の名前（`describe.each` に使う） */
+export const DRIVER_NAMES = ['PGlite', 'pg (node-postgres)'] as const
 
 export async function openTestDb(): Promise<TestDb> {
   const pglite = await openPglite()
   await setupSchema(pglite.pg)
   const bridge = await startBridge(pglite.pg)
   const ends: Array<() => Promise<void>> = []
-  const withEnd = (name: string, options: { prepare: boolean }): NamedSql => {
-    const db = createPostgresSql(bridge.url, options)
+  const withEnd = (name: string): NamedSql => {
+    const db = createPostgresSql(bridge.url)
     ends.push(() => db.end())
     return { name, sql: db }
   }
   return {
     pg: pglite.pg,
     pglite,
-    drivers: [
-      { name: 'PGlite', sql: pglite },
-      withEnd('postgres.js (prepare あり)', { prepare: true }),
-      withEnd('postgres.js (prepare なし)', { prepare: false }),
-    ],
+    drivers: [{ name: DRIVER_NAMES[0], sql: pglite }, withEnd(DRIVER_NAMES[1])],
     close: async () => {
       for (const end of ends) await end()
       await bridge.close()

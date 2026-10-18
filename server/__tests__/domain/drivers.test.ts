@@ -3,12 +3,12 @@ import { createPostgresSql, type PostgresSql } from '../../db/postgres'
 import * as cash from '../../domain/cash'
 import * as master from '../../domain/master'
 import { loadTagsFor } from '../../domain/_shared'
-import { startBridge, type Bridge } from '../rpc/helpers'
+import { DRIVER_NAMES, startBridge, type Bridge } from '../rpc/helpers'
 import { memberOf, newWorld, openDomainDb, type DomainDb, type Member } from './helpers'
 
-// 本番のドライバ（postgres.js）でも、PGlite のアダプタと同じ結果になること。
+// 本番のドライバ（node-postgres）でも、PGlite のアダプタと同じ結果になること。
 // 配列の引数（= any(?::uuid[])）・bigint の合計・date / timestamptz の読み出し・for update・returning など、
-// ドメインが使う SQL を、PGlite を TCP で見せた入口（rpc/helpers.ts の startBridge）の上の postgres.js で流す
+// ドメインが使う SQL を、PGlite を TCP で見せた入口（rpc/helpers.ts の startBridge）の上の node-postgres で流す
 
 let dom: DomainDb
 let bridge: Bridge
@@ -25,13 +25,13 @@ afterAll(async () => {
   await dom.close()
 })
 
-const DRIVERS = ['PGlite', 'postgres.js (prepare あり)', 'postgres.js (prepare なし)'] as const
+const DRIVERS = DRIVER_NAMES
 
 /** 新しい世帯 A を作り、指定のドライバ越しに操作する Member を返す */
 async function memberVia(driver: (typeof DRIVERS)[number]): Promise<Member> {
   const world = await newWorld(dom)
   if (driver === 'PGlite') return world.a
-  const sql = createPostgresSql(bridge.url, { prepare: driver === 'postgres.js (prepare あり)' })
+  const sql = createPostgresSql(bridge.url)
   opened.push(sql)
   return memberOf({ root: sql }, world.a.householdId, world.a.userId)
 }

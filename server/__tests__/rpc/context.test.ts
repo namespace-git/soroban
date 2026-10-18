@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { withHousehold } from '../../context'
-import { HOUSEHOLD_A, HOUSEHOLD_B, USER_A, USER_B, openTestDb, type TestDb } from './helpers'
+import { DRIVER_NAMES, HOUSEHOLD_A, HOUSEHOLD_B, USER_A, USER_B, openTestDb, type TestDb } from './helpers'
 
 let db: TestDb
 // withHousehold を一度も通る前の search_path（これと比べる。途中で漏れた後の値と比べると見逃す）
@@ -21,9 +21,7 @@ beforeEach(async () => {
   await db.pg.query(`insert into app.note (household_id, body) values ($1, 'A-1'), ($1, 'A-2'), ($2, 'B-1')`, [HOUSEHOLD_A, HOUSEHOLD_B])
 })
 
-const NAMES = ['PGlite', 'postgres.js (prepare あり)', 'postgres.js (prepare なし)']
-
-describe.each(NAMES)('withHousehold: %s', (name) => {
+describe.each(DRIVER_NAMES)('withHousehold: %s', (name) => {
   const root = () => db.drivers.find((d) => d.name === name)!.sql
   const a = { householdId: HOUSEHOLD_A, userId: USER_A }
   const b = { householdId: HOUSEHOLD_B, userId: USER_B }

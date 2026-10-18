@@ -34,7 +34,7 @@ await build({
     target: 'node22',
     rollupOptions: {
       // ネイティブ・WASM を持つものは bundle せず、実行時に node_modules から読む
-      external: ['better-sqlite3', '@electric-sql/pglite', 'postgres', 'adm-zip', /^node:/],
+      external: ['better-sqlite3', '@electric-sql/pglite', 'pg', 'adm-zip', /^node:/],
       output: { format: 'es', entryFileNames: 'cli.mjs', inlineDynamicImports: true },
     },
   },

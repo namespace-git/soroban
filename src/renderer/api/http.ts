@@ -6,7 +6,8 @@
 //   失敗  {"error": {"code": "…", "message": "<日本語>"}}
 //
 //   まとめ  POST ${base}/rpc/_batch   Authorization: Bearer <JWT>   本文 {"calls": [{"method": "listTags", "args": []}, …]}
-//     読み取り（READ_ONLY_METHODS）だけを、同じタイミングで出たぶん 1 本の HTTP にまとめて送る（1〜25 本）。
+//     読み取り（READ_ONLY_METHODS）だけを、同じタイミングで出たぶん 1 本の HTTP にまとめて送る（1 束 MAX_CALLS_PER_BATCH 本まで、
+//     あふれたぶんは別の束にして MAX_CONCURRENT_BATCHES 束まで並行。サーバーが受けられるのは 1〜25 本）。
 //     成功  200 {"results": [{"result": <値>} | {"error": {"code", "message"}}, …]}（同じ順・同じ数）
 //     1 本の error はその呼び出しだけを失敗させる。要求ごと失敗（401・500・通信失敗・JSON でない）はまとめた全員が同じ失敗になる。
 //     サーバーがまだ _batch を知らない（404／501）ときは 1 本ずつに戻し、以後このクライアントではまとめない。
@@ -43,10 +44,17 @@ type RpcBody = {
 /** まとめの応答 1 本の中の 1 件（成功か失敗のどちらか） */
 type BatchEntry = RpcBody
 
-/** 1 つの _batch に入れる呼び出しの上限（サーバーの上限と同じ） */
-const MAX_CALLS_PER_BATCH = 25
-/** 同時に飛ばす _batch の数。これより多いぶんは、先の束が終わるのを待つ */
-const MAX_CONCURRENT_BATCHES = 4
+/**
+ * 1 つの _batch に入れる呼び出しの数。サーバーの受け入れ上限（25 本）よりずっと小さく送る。
+ * 束の中は 1 つの接続で順に処理されるので（SQL 1 本あたり約 17ms、ほぼ DB との往復）、大きい束ほど遅い。
+ * 小さい束を並行で飛ばしたほうが、全体は速い（本番の実測：61 本の束で 1.2 秒）
+ */
+export const MAX_CALLS_PER_BATCH = 8
+/**
+ * 同時に飛ばす _batch の数。これより多いぶんは、先の束が終わるのを待つ。
+ * Hyperdrive の接続の上限が 10 本なので、まとめ以外の 1 本ずつの呼び出し（書き込みなど）の分を残して 5
+ */
+export const MAX_CONCURRENT_BATCHES = 5
 
 /**
  * 引数を JSON の素の値にした文字列にする（`[...]`）。
@@ -204,7 +212,7 @@ export function createHttpApi(options: HttpApiOptions): SorobanApi {
     })
   }
 
-  /** 待ち行列を吐き出す。1 本だけ（またはまとめをやめたあと）は今までどおり、2 本以上は 25 本ずつの束にして _batch で */
+  /** 待ち行列を吐き出す。1 本だけ（またはまとめをやめたあと）は今までどおり、2 本以上は MAX_CALLS_PER_BATCH 本ずつの束にして _batch で */
   function flush(): void {
     flushArmed = false
     const items = queue

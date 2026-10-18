@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { PGlite } from '@electric-sql/pglite'
-import postgres from 'postgres'
+import nodePostgres from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { secretsOf, UsageError } from '../../../tools/migrate-to-web/args'
 import {
@@ -101,16 +101,15 @@ describe('接続文字列の組み立て', () => {
     }
   })
 
-  it('postgres.js が読んだパスワード・ユーザーも、元の値になる（実際に接続はしない）', async () => {
+  it('node-postgres（pg）が読んだパスワード・ユーザーも、元の値になる（実際に接続はしない）', () => {
     for (const pw of ['p@ss:w/ord#1?x=y&z', '100%real%40', '日本語パスワード']) {
-      const client = postgres(buildDatabaseUrl(target, pw), { max: 1 })
-      try {
-        expect(client.options.pass).toBe(pw)
-        expect(client.options.user).toBe('postgres.ref')
-        expect(client.options.host).toEqual(['aws-0.pooler.supabase.com'])
-      } finally {
-        await client.end({ timeout: 0 })
-      }
+      // new しただけでは接続しない（connect() を呼ぶまで）
+      const client = new nodePostgres.Client(buildDatabaseUrl(target, pw))
+      expect(client.password).toBe(pw)
+      expect(client.user).toBe('postgres.ref')
+      expect(client.host).toBe('aws-0.pooler.supabase.com')
+      expect(client.port).toBe(5432)
+      expect(client.database).toBe('postgres')
     }
   })
 

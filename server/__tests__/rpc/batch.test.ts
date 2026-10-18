@@ -10,11 +10,13 @@ import {
 import '../../domain/index'
 import { seedItems } from '../domain/core-helpers'
 import { SUPABASE_URL, newWorld, openDomainDb, type DomainDb, type World } from '../domain/helpers'
-import { makeKey, signToken, startBridge, stubJwks, type Bridge, type KeyPair } from './helpers'
+import { DRIVER_NAMES, makeKey, signToken, startBridge, stubJwks, type Bridge, type KeyPair } from './helpers'
 
 // まとめ送り `POST /api/rpc/_batch`（server/rpc.ts の parseBatchCalls・dispatchBatch）。
-// JWT → 認証 → 1 つの世帯のトランザクションの中で 1 本ずつ savepoint → `{"results": [...]}`、までを通して確かめる。
-// 本物のマイグレーションを流した PGlite（server/__tests__/domain/helpers.ts）と、同じ DB を TCP で見せた postgres.js の両方で流す
+// JWT → 認証 → 1 つの世帯のトランザクションの中で順に（savepoint は張らない）→ `{"results": [...]}`、までを通して確かめる。
+// 失敗した 1 本が JS の例外（ApiError）なら同じトランザクションで続け、SQL のエラーなら今のトランザクションをロールバックで終わらせて
+// 残りを新しいトランザクションで続ける。
+// 本物のマイグレーションを流した PGlite（server/__tests__/domain/helpers.ts）と、同じ DB を TCP で見せた node-postgres の両方で流す
 
 let dom: DomainDb
 let bridge: Bridge
@@ -84,6 +86,34 @@ async function batch(body: unknown, opts: Opts = {}) {
 const calls = (...pairs: Array<[string, unknown[]?]>) => ({ calls: pairs.map(([method, args]) => ({ method, args: args ?? [] })) })
 
 const txOf = async (ctx: Ctx) => (await ctx.sql.get<{ tx: number }>('select txid_current() as tx'))!.tx
+
+/**
+ * root を包んで、世帯のトランザクションの数・その中で張られた入れ子の tx（＝ savepoint）の数・流れた SQL の文を記録する。
+ * 入れ子の tx は `sql.tx` の入れ子でしか張れない（どのドライバでも savepoint はそこから出る）ので、数えればよい
+ */
+function spyRoot(root: Sql) {
+  const log = { transactions: 0, nested: 0, statements: [] as string[] }
+  const watch = (sql: Sql): Sql => ({
+    get: <T>(text: string, ...params: unknown[]) => { log.statements.push(text); return sql.get<T>(text, ...params) },
+    all: <T>(text: string, ...params: unknown[]) => { log.statements.push(text); return sql.all<T>(text, ...params) },
+    run: (text: string, ...params: unknown[]) => { log.statements.push(text); return sql.run(text, ...params) },
+    tx: <T>(fn: (inner: Sql) => Promise<T>) => { log.nested += 1; return sql.tx(fn) },
+  })
+  const spied: Sql = {
+    get: <T>(text: string, ...params: unknown[]) => root.get<T>(text, ...params),
+    all: <T>(text: string, ...params: unknown[]) => root.all<T>(text, ...params),
+    run: (text: string, ...params: unknown[]) => root.run(text, ...params),
+    tx: <T>(fn: (inner: Sql) => Promise<T>) => { log.transactions += 1; return root.tx((inner) => fn(watch(inner))) },
+  }
+  return { root: spied, log }
+}
+
+const savepointStatement = /\bsavepoint\b/i
+
+/** SQL のエラー（22P02）で落ちる偽のハンドラ。ふつうに呼べば bad_request「値の形が正しくありません」になる */
+const sqlFailure: Handler = async (ctx) => void (await ctx.sql.get(`select 'not-a-uuid'::uuid`))
+/** 今のトランザクションの識別子を返す偽のハンドラ */
+const txIdentity: Handler = async (ctx) => ({ n: (await ctx.sql.get<{ n: number }>('select 41 + 1 as n'))!.n, tx: await txOf(ctx) })
 
 /** 偽の phased ハンドラ（read → call → finish）。`registerPhasedHandler` が作るのと同じ形（`phased` 付きの関数） */
 function phasedHandler(parts: NonNullable<Handler['phased']>): Handler {
@@ -172,12 +202,12 @@ describe('正常：ふつうに呼んだ結果と同じ', () => {
   })
 })
 
-// 本番のドライバ（postgres.js）でも savepoint が効くこと。PGlite と同じ内容を、両方で流す
-const ROOTS = ['PGlite', 'postgres.js (prepare あり)', 'postgres.js (prepare なし)'] as const
+// 本番のドライバ（node-postgres）でも、失敗のあとのトランザクションの扱いが同じになること。PGlite と同じ内容を、2 つで流す
+const ROOTS = DRIVER_NAMES
 
 function rootFor(name: (typeof ROOTS)[number]): Sql {
   if (name === 'PGlite') return dom.root
-  const sql = createPostgresSql(bridge.url, { prepare: name === 'postgres.js (prepare あり)' })
+  const sql = createPostgresSql(bridge.url)
   opened.push(sql)
   return sql
 }
@@ -200,16 +230,77 @@ describe.each(ROOTS)('1 本の失敗は、その 1 本だけ error：%s', (name)
     expect((results[2] as { result: unknown[] }).result.length).toBeGreaterThan(0)
   })
 
-  it('SQL が失敗した 1 本（22P02）のあとも、トランザクションは生きている（「中断している」で落ちない）', async () => {
+  it('正常なら savepoint を張らない：世帯のトランザクションは 1 つ、入れ子の tx は 0 回、savepoint の文も流れない', async () => {
+    const spy = spyRoot(rootFor(name))
+    // 通信の側からも見る（node-postgres のときだけ。PGlite のアダプタは通信を通らない）。ブリッジが DB に渡した生のバイト列から文を探す
+    const wire = name === 'PGlite' ? null : vi.spyOn(dom.pg, 'execProtocolRaw')
+    const sentToDb = () => (wire ? wire.mock.calls.map((c) => Buffer.from(c[0] as Uint8Array).toString('latin1')).join('\n') : '')
+    try {
+      // 対照：ハンドラが入れ子の tx を張れば、数にも文にも出る（数え方が効いていることの確認）
+      const nested: Handler = async (ctx) => ctx.sql.tx(async (sql) => (await sql.get<{ n: number }>('select 1 as n'))!.n)
+      const control = await batch(calls(['listTags'], ['getSettings']), { root: spy.root, handlers: { listTags: nested, getSettings: txIdentity } })
+      expect(control.json.results![0]).toEqual({ result: 1 })
+      expect(spy.log.nested).toBe(1)
+      if (wire) expect(sentToDb()).toMatch(savepointStatement)
+
+      spy.log.transactions = 0
+      spy.log.nested = 0
+      spy.log.statements.length = 0
+      wire?.mockClear()
+
+      const names = ['listTags', 'getSettings', 'listRuns', 'listCashAccounts', 'listLiabilities'] as const
+      const r = await batch(calls(...names.map((m): [string, unknown[]] => [m, []])), {
+        root: spy.root,
+        handlers: { listTags: txIdentity, getSettings: txIdentity, listRuns: txIdentity, listCashAccounts: txIdentity, listLiabilities: txIdentity },
+      })
+      expect(r.status).toBe(200)
+      const txs = (r.json.results as Array<{ result: { n: number; tx: number } }>).map((x) => x.result.tx)
+      expect(txs).toHaveLength(5)
+      expect(new Set(txs).size).toBe(1)
+      expect(spy.log.transactions).toBe(1)
+      expect(spy.log.nested).toBe(0)
+      expect(spy.log.statements.length).toBeGreaterThan(0)
+      expect(spy.log.statements.filter((s) => savepointStatement.test(s))).toEqual([])
+      if (wire) {
+        expect(sentToDb()).not.toMatch(savepointStatement)
+        // begin と commit は流れている（通信を見られていることの確認）
+        expect(sentToDb()).toMatch(/\bbegin\b/i)
+      }
+    } finally {
+      wire?.mockRestore()
+    }
+  })
+
+  it('UserError の 1 本のあとも、同じトランザクションで続く（新しいトランザクションを張らない）', async () => {
+    const spy = spyRoot(rootFor(name))
+    const userError: Handler = async (ctx) => {
+      await txOf(ctx)
+      throw new UserError('見つかりません', 'not_found')
+    }
+    const r = await batch(calls(['listTags'], ['getSettings'], ['listRuns'], ['listCashAccounts']), {
+      root: spy.root, handlers: { listTags: txIdentity, getSettings: userError, listRuns: txIdentity, listCashAccounts: txIdentity },
+    })
+    expect(r.status).toBe(200)
+    const [a, b, c, d] = r.json.results as Array<{ result?: { n: number; tx: number }; error?: unknown }>
+    expect(a.result?.n).toBe(42)
+    expect(b).toEqual({ error: { code: 'not_found', message: '見つかりません' } })
+    expect(c.result?.n).toBe(42)
+    expect(d.result?.n).toBe(42)
+    // 失敗の前後でも、同じ 1 つのトランザクション
+    expect(new Set([a.result?.tx, c.result?.tx, d.result?.tx]).size).toBe(1)
+    expect(spy.log.transactions).toBe(1)
+    expect(spy.log.nested).toBe(0)
+  })
+
+  it('SQL が失敗した 1 本（22P02）のあと、残りは新しいトランザクションで正しく返る（「中断している」で落ちない）', async () => {
     const root = rootFor(name)
-    const bad: Handler = async (ctx) => void (await ctx.sql.get(`select 'not-a-uuid'::uuid`))
-    const good: Handler = async (ctx) => ({ n: (await ctx.sql.get<{ n: number }>('select 41 + 1 as n'))!.n, tx: await txOf(ctx) })
-    const table: Handlers = { listTags: good, getSettings: bad, listRuns: good, listCashAccounts: bad, listLiabilities: good }
+    const table: Handlers = { listTags: txIdentity, getSettings: sqlFailure, listRuns: txIdentity, listCashAccounts: sqlFailure, listLiabilities: txIdentity }
 
     const ordinaryBad = await call('getSettings', [], { root, handlers: table })
     expect(ordinaryBad.json.error).toEqual({ code: 'bad_request', message: '値の形が正しくありません' })
 
-    const r = await batch(calls(['listTags'], ['getSettings'], ['listRuns'], ['listCashAccounts'], ['listLiabilities']), { root, handlers: table })
+    const spy = spyRoot(root)
+    const r = await batch(calls(['listTags'], ['getSettings'], ['listRuns'], ['listCashAccounts'], ['listLiabilities']), { root: spy.root, handlers: table })
     expect(r.status).toBe(200)
     const [a, b, c, d, e] = r.json.results as Array<{ result?: { n: number; tx: number }; error?: unknown }>
     expect(a.result?.n).toBe(42)
@@ -217,14 +308,97 @@ describe.each(ROOTS)('1 本の失敗は、その 1 本だけ error：%s', (name)
     expect(c.result?.n).toBe(42)
     expect(d).toEqual({ error: ordinaryBad.json.error })
     expect(e.result?.n).toBe(42)
-    // 失敗の前後でも、同じトランザクション（巻き戻したのは savepoint だけ）
-    expect(new Set([a.result?.tx, c.result?.tx, e.result?.tx]).size).toBe(1)
+    // 失敗のたびに今のトランザクションを終わらせて、残りは新しいトランザクション：a｜b を含む区切り、c｜d を含む区切り、e だけの区切り
+    expect(new Set([a.result?.tx, c.result?.tx, e.result?.tx]).size).toBe(3)
+    expect(spy.log.transactions).toBe(3)
+    expect(spy.log.nested).toBe(0)
+    // 成功した 3 本は、それぞれ 1 回だけ SQL を流した（壊れたトランザクションに入って 25P02 で落ち、やり直した、ではない）
+    expect(spy.log.statements.filter((s) => s.includes('41 + 1'))).toHaveLength(3)
   })
 
-  it('失敗した 1 本の書き込みは巻き戻り、成功した本のは残る（最後にコミット）', async () => {
+  it('SQL が失敗したあとの呼び出しが「current transaction is aborted」（25P02）で落ちない。失敗は 1 本ずつ、残りは全部成功', async () => {
     const root = rootFor(name)
-    const failing: Handler = async (ctx) => {
-      await ctx.sql.run(`insert into tag (name, sort_order) values ('巻き戻る', 0)`)
+    const spyError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const table: Handlers = {
+        listTags: sqlFailure, getSettings: txIdentity, listRuns: sqlFailure, listCashAccounts: sqlFailure,
+        listLiabilities: txIdentity, listCashEntries: txIdentity, getCashMonth: txIdentity,
+      }
+      const r = await batch(
+        calls(['listTags'], ['getSettings'], ['listRuns'], ['listCashAccounts'], ['listLiabilities'], ['listCashEntries'], ['getCashMonth']),
+        { root, handlers: table },
+      )
+      expect(r.status).toBe(200)
+      const results = r.json.results as Array<{ result?: { n: number }; error?: { code: string; message: string } }>
+      const failed = { error: { code: 'bad_request', message: '値の形が正しくありません' } }
+      expect(results.map((x) => (x.error ? 'error' : x.result?.n))).toEqual(['error', 42, 'error', 'error', 42, 42, 42])
+      for (const i of [0, 2, 3]) expect(results[i]).toEqual(failed)
+      // 25P02・「aborted」は、応答にも（internal に丸まった形でも）ログにも出ない
+      expect(r.text).not.toMatch(/aborted|25P02|internal/)
+      for (const c of spyError.mock.calls) expect(JSON.stringify(c)).not.toMatch(/aborted|25P02/)
+    } finally {
+      spyError.mockRestore()
+    }
+  })
+
+  it('SQL を握りつぶして UserError にした 1 本のあと、次の呼び出しは 25P02 で落ちず、新しいトランザクションでやり直される', async () => {
+    const root = rootFor(name)
+    const spyError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      // SQL の失敗を自分で受けて、日本語の UserError に包んで投げる（トランザクションは壊れているのに、例外は ApiError）
+      const masking: Handler = async (ctx) => {
+        try {
+          await ctx.sql.get(`select 'not-a-uuid'::uuid`)
+        } catch {
+          throw new UserError('値を確かめてください')
+        }
+      }
+      const spy = spyRoot(root)
+      const r = await batch(calls(['listTags'], ['getSettings'], ['listRuns'], ['listCashAccounts']), {
+        root: spy.root, handlers: { listTags: txIdentity, getSettings: masking, listRuns: txIdentity, listCashAccounts: txIdentity },
+      })
+      expect(r.status).toBe(200)
+      const [a, b, c, d] = r.json.results as Array<{ result?: { n: number; tx: number }; error?: { code: string; message: string } }>
+      expect(a.result?.n).toBe(42)
+      expect(b).toEqual({ error: { code: 'bad_request', message: '値を確かめてください' } })
+      // 次の呼び出しは、落ちた呼び出しとして出さない。新しいトランザクションで本当に走る
+      expect(c.result?.n).toBe(42)
+      expect(d.result?.n).toBe(42)
+      expect(c.result?.tx).toBe(d.result?.tx)
+      expect(c.result?.tx).not.toBe(a.result?.tx)
+      expect(spy.log.transactions).toBe(2)
+      expect(r.text).not.toMatch(/aborted|25P02|internal/)
+      for (const logged of spyError.mock.calls) expect(JSON.stringify(logged)).not.toMatch(/aborted|25P02/)
+    } finally {
+      spyError.mockRestore()
+    }
+  })
+
+  it('素の Error（迷う例外）も、安全側で新しいトランザクションに移る。結果は元の順番', async () => {
+    const root = rootFor(name)
+    const spyError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const boom: Handler = async () => {
+        throw new Error('想定外')
+      }
+      const spy = spyRoot(root)
+      const r = await batch(calls(['listTags'], ['getSettings'], ['listRuns']), {
+        root: spy.root, handlers: { listTags: txIdentity, getSettings: boom, listRuns: txIdentity },
+      })
+      const [a, b, c] = r.json.results as Array<{ result?: { n: number; tx: number }; error?: { code: string; message: string } }>
+      expect(a.result?.n).toBe(42)
+      expect(b).toEqual({ error: { code: 'internal', message: INTERNAL_MESSAGE } })
+      expect(c.result?.n).toBe(42)
+      expect(c.result?.tx).not.toBe(a.result?.tx)
+      expect(spy.log.transactions).toBe(2)
+    } finally {
+      spyError.mockRestore()
+    }
+  })
+
+  it('成功した本の書き込みは残る（最後にコミット）。UserError の 1 本があっても同じ', async () => {
+    const root = rootFor(name)
+    const failing: Handler = async () => {
       throw new UserError('途中で失敗しました', 'conflict')
     }
     const keeping: Handler = async (ctx, tagName: string) => {
@@ -241,6 +415,59 @@ describe.each(ROOTS)('1 本の失敗は、その 1 本だけ error：%s', (name)
     ])
     const names = (await w.a.run((c) => c.sql.all<{ name: string }>('select name from tag order by name'))).map((t) => t.name)
     expect(names).toEqual(['残る1', '残る2'])
+  })
+
+  it('SQL が失敗した区切りはロールバックで終わる：その区切りの書き込みは残らず、新しいトランザクションの書き込みは残る', async () => {
+    const root = rootFor(name)
+    const keeping: Handler = async (ctx, tagName: string) => {
+      await ctx.sql.run(`insert into tag (name, sort_order) values (?, 1)`, tagName)
+      return 'ok'
+    }
+    const r = await batch(calls(['listTags', ['巻き戻る']], ['getSettings'], ['listRuns', ['残る']]), {
+      root, handlers: { listTags: keeping, getSettings: sqlFailure, listRuns: keeping },
+    })
+    expect(r.json.results).toEqual([
+      { result: 'ok' },
+      { error: { code: 'bad_request', message: '値の形が正しくありません' } },
+      { result: 'ok' },
+    ])
+    const names = (await w.a.run((c) => c.sql.all<{ name: string }>('select name from tag order by name'))).map((t) => t.name)
+    expect(names).toEqual(['残る'])
+  })
+
+  it('afterCommit：SQL の失敗でロールバックした区切りの分は走らず、新しいトランザクションで成功した分はコミットのあとに走る', async () => {
+    const root = rootFor(name)
+    const ran: string[] = []
+    const queue = (label: string): Handler => async (ctx) => {
+      ctx.afterCommit(async () => void ran.push(label))
+      return label
+    }
+    const failing: Handler = async (ctx) => {
+      ctx.afterCommit(async () => void ran.push('failed'))
+      await ctx.sql.get(`select 'not-a-uuid'::uuid`)
+    }
+    const r = await batch(calls(['listTags'], ['getSettings'], ['listRuns'], ['listCashAccounts']), {
+      root, handlers: { listTags: queue('rolled-back'), getSettings: failing, listRuns: queue('kept-1'), listCashAccounts: queue('kept-2') },
+    })
+    expect(r.json.results).toEqual([
+      { result: 'rolled-back' },
+      { error: { code: 'bad_request', message: '値の形が正しくありません' } },
+      { result: 'kept-1' },
+      { result: 'kept-2' },
+    ])
+    expect(ran).toEqual(['kept-1', 'kept-2'])
+  })
+
+  it('SQL が失敗しても phased のハンドラは走る（ふつうのハンドラのトランザクションが終わったあとで）', async () => {
+    const root = rootFor(name)
+    const phased = phasedHandler({ read: async () => 'in', call: async (i: string) => `${i}-called`, finish: async (_ctx, _i, c) => c })
+    const r = await batch(calls(['getSettings'], ['testGemini'], ['listTags']), {
+      root, handlers: { getSettings: sqlFailure, testGemini: phased, listTags: txIdentity },
+    })
+    const results = r.json.results as Array<{ result?: unknown; error?: unknown }>
+    expect(results[0]).toEqual({ error: { code: 'bad_request', message: '値の形が正しくありません' } })
+    expect(results[1]).toEqual({ result: 'in-called' })
+    expect((results[2] as { result: { n: number } }).result.n).toBe(42)
   })
 
   it('素の Error は internal に丸まり、原因はログにだけ出る（ふつうの RPC と同じ code・message）', async () => {

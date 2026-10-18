@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { withHousehold } from '../../context'
-import { fromPostgresJs } from '../../db/postgres'
-import { HOUSEHOLD_A, HOUSEHOLD_B, USER_A, USER_B, openTestDb, type TestDb } from './helpers'
+import { fromPgClient, type PgClientLike, type PgQueryConfig } from '../../db/postgres'
+import { DRIVER_NAMES, HOUSEHOLD_A, HOUSEHOLD_B, USER_A, USER_B, openTestDb, type TestDb } from './helpers'
 
 // withHousehold が入ってすぐに流す設定（search_path・role・app.household_id・app.user_id）は、1 本の select にまとめてある
 // （server/context.ts の ENTER_HOUSEHOLD_SQL）。まとめたあとも安全であることの確認：
@@ -10,7 +10,7 @@ import { HOUSEHOLD_A, HOUSEHOLD_B, USER_A, USER_B, openTestDb, type TestDb } fro
 //   (c) commit のあとも rollback のあとも、同じ接続で role・search_path・app.* が元に戻る（次の人に残らない）
 // context.test.ts が基本の動きを見ているので、ここは「元に戻ること」を厳しく（接続の状態を丸ごと比べて）見る。
 //
-// テストの DB は 1 本の PGlite（postgres.js 経由でも、ブリッジで同じ 1 本につながる）。
+// テストの DB は 1 本の PGlite（node-postgres 経由でも、ブリッジで同じ 1 本につながる）。
 // つまり withHousehold のあとに流す最初のクエリは、必ず直前の接続の状態をそのまま受ける＝漏れていれば見える。
 
 let db: TestDb
@@ -56,42 +56,32 @@ describe('入る前の接続の状態', () => {
 })
 
 describe('トランザクションの頭は 1 本の select（往復を減らす）', () => {
-  // postgres.js の偽物。どの接続（root／begin が渡す scoped）で、どの SQL がどんな引数で流れたかを記録する
+  // pg の Client の偽物。1 本の接続に、どの SQL がどんな引数で流れたかを順に記録する
   function recordingClient() {
-    const log: Array<{ via: string; text: string; params?: unknown[] }> = []
-    const make = (via: string): never => {
-      const client = {
-        unsafe: async (text: string, params: unknown[]) => {
-          log.push({ via, text, params })
-          return Object.assign([{}], { count: 1 })
-        },
-        begin: async (cb: (sql: never) => unknown) => {
-          log.push({ via, text: 'begin' })
-          return cb(make('scoped'))
-        },
-        end: async () => {},
-      }
-      return client as never
+    const log: Array<{ text: string; params?: unknown[] }> = []
+    const client: PgClientLike = {
+      connect: async () => {},
+      query: async (config: PgQueryConfig) => {
+        log.push({ text: config.text, params: config.values })
+        return { rows: [{}], rowCount: 1 }
+      },
+      end: async () => {},
+      on: () => client,
     }
-    return { client: make('root'), log }
+    return { client, log }
   }
 
-  it('begin のあと、世帯の設定は select 1 本だけ。そのあとに fn の SQL が続く', async () => {
+  it('begin のあと、世帯の設定は select 1 本だけ。そのあとに fn の SQL が続き、最後に commit', async () => {
     const { client, log } = recordingClient()
-    await withHousehold(fromPostgresJs(client), { householdId: HOUSEHOLD_A, userId: USER_A }, async (ctx) => {
+    await withHousehold(fromPgClient(client), { householdId: HOUSEHOLD_A, userId: USER_A }, async (ctx) => {
       await ctx.sql.get('select 1 as marker')
     })
-    expect(log.map((l) => `${l.via}: ${l.text.slice(0, 20)}`)).toEqual([
-      'root: begin',
-      'scoped: select set_config(\'s',
-      'scoped: select 1 as marker',
-    ])
-    expect(log.filter((l) => l.via === 'root' && l.text !== 'begin')).toEqual([]) // 外側の接続には流さない
+    expect(log.map((l) => l.text.slice(0, 20))).toEqual(['begin', "select set_config('s", 'select 1 as marker', 'commit'])
   })
 
   it('その 1 本は、search_path・role・app.household_id・app.user_id を、すべて local（第 3 引数 true）で設定する', async () => {
     const { client, log } = recordingClient()
-    await withHousehold(fromPostgresJs(client), { householdId: HOUSEHOLD_B, userId: USER_B }, async () => {})
+    await withHousehold(fromPgClient(client), { householdId: HOUSEHOLD_B, userId: USER_B }, async () => {})
     const enter = log[1]
     // 引数は世帯と人の 2 つだけ（search_path と role は固定の文字列）。uuid は小文字にそろえて渡る
     expect(enter.params).toEqual([HOUSEHOLD_B, USER_B])
@@ -109,16 +99,14 @@ describe('トランザクションの頭は 1 本の select（往復を減らす
 
   it('uuid でない id は、begin する前に断る（DB に何も流さない）', async () => {
     const { client, log } = recordingClient()
-    await expect(withHousehold(fromPostgresJs(client), { householdId: "x'); select 1; --", userId: USER_A }, async () => 1)).rejects.toThrow(
+    await expect(withHousehold(fromPgClient(client), { householdId: "x'); select 1; --", userId: USER_A }, async () => 1)).rejects.toThrow(
       'uuid ではありません',
     )
     expect(log).toEqual([])
   })
 })
 
-const NAMES = ['PGlite', 'postgres.js (prepare あり)', 'postgres.js (prepare なし)']
-
-describe.each(NAMES)('まとめたあとの安全性: %s', (name) => {
+describe.each(DRIVER_NAMES)('まとめたあとの安全性: %s', (name) => {
   const root = () => db.drivers.find((d) => d.name === name)!.sql
   const a = { householdId: HOUSEHOLD_A, userId: USER_A }
   const b = { householdId: HOUSEHOLD_B, userId: USER_B }

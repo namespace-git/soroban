@@ -1,15 +1,19 @@
 // HTTP クライアント（api/http.ts）の「読み取りのまとめ送り」を固定する。
-//   要求  POST <base>/rpc/_batch  本文 {"calls": [{"method", "args"}, …]}（1〜25 本。READ_ONLY_METHODS だけ）
+//   要求  POST <base>/rpc/_batch  本文 {"calls": [{"method", "args"}, …]}（1 束 MAX_CALLS_PER_BATCH 本まで。READ_ONLY_METHODS だけ）
 //   成功  200 {"results": [{"result"} | {"error": {"code", "message"}}, …]}（同じ順・同じ数）
 //   - 同じタイミング（setTimeout(0) の 1 回の区切り）で出た読み取りが 1 つの束になる。1 本だけなら今までどおり /rpc/<method>
-//   - 束は 25 本ずつ。同時に飛ぶ束は 4 つまで
+//   - 束は MAX_CALLS_PER_BATCH（8）本ずつ。同時に飛ぶ束は MAX_CONCURRENT_BATCHES（5）つまで
+//     （数字はテストに直書きせず、http.ts の定数から読む。サーバーの上限 25 より小さく送る）
 //   - 書き込みはまとめず即送る。飛んでいる最中の同じ読み取りは束の中でも 1 本
 //   - 1 本の error はその呼び出しだけ失敗、要求ごとの失敗は全員が同じ失敗
 //   - サーバーが _batch を知らない（404／501）ときは 1 本ずつに戻し、以後まとめない
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { reactive } from 'vue'
-import { createHttpApi, ApiError } from '../http'
+import { createHttpApi, ApiError, MAX_CALLS_PER_BATCH, MAX_CONCURRENT_BATCHES } from '../http'
 import { READ_ONLY_METHODS } from '../../../shared/read-only-methods'
+
+/** サーバーが 1 回で受ける上限（server/rpc.ts の BATCH_MAX_CALLS）。画面の束はこれ以下でなければならない */
+const SERVER_MAX_CALLS = 25
 
 type Body = { args?: unknown[]; calls?: { method: string; args: unknown[] }[] }
 type FetchCall = { url: string; init: RequestInit; body: Body }
@@ -141,56 +145,80 @@ describe('createHttpApi の読み取りのまとめ送り（_batch）', () => {
     expect(calls.map((c) => c.url)).toEqual(['/api/rpc/_batch', '/api/rpc/getInbox'])
   })
 
-  it('30 本は 25 本と 5 本の 2 束。順番どおりで、それぞれに正しい結果（トークンは束ごとに 1 回）', async () => {
+  it('束の大きさは、サーバーの上限より小さく、同時の束は Hyperdrive の接続（10 本）に余裕を残す', () => {
+    expect(MAX_CALLS_PER_BATCH).toBeGreaterThanOrEqual(1)
+    expect(MAX_CALLS_PER_BATCH).toBeLessThanOrEqual(SERVER_MAX_CALLS)
+    expect(MAX_CONCURRENT_BATCHES).toBeGreaterThanOrEqual(1)
+    // まとめ以外の 1 本ずつの呼び出し（書き込みなど）の分の接続を残す
+    expect(MAX_CONCURRENT_BATCHES).toBeLessThan(10)
+  })
+
+  it('束の上限を超えると複数の束に分かれる。順番どおりで、それぞれに正しい結果（トークンは束ごとに 1 回）', async () => {
     const api = rpc()
-    const results = await Promise.all(Array.from({ length: 30 }, (_, i) => api.listSales({ page: i })))
-    expect(calls).toHaveLength(2)
-    expect(calls.map((c) => c.url)).toEqual(['/api/rpc/_batch', '/api/rpc/_batch'])
-    expect(calls.map((c) => c.body.calls!.length)).toEqual([25, 5])
+    // 満杯の束 2 つ + 5 本 ＝ 3 束（同時に飛べる束の数に収まる大きさ）
+    const total = MAX_CALLS_PER_BATCH * 2 + 5
+    expect(Math.ceil(total / MAX_CALLS_PER_BATCH)).toBeLessThanOrEqual(MAX_CONCURRENT_BATCHES)
+    const results = await Promise.all(Array.from({ length: total }, (_, i) => api.listSales({ page: i })))
+    expect(calls).toHaveLength(3)
+    expect(calls.map((c) => c.url)).toEqual(['/api/rpc/_batch', '/api/rpc/_batch', '/api/rpc/_batch'])
+    expect(calls.map((c) => c.body.calls!.length)).toEqual([MAX_CALLS_PER_BATCH, MAX_CALLS_PER_BATCH, 5])
     expect(calls[0].body.calls![0].args).toEqual([{ page: 0 }])
-    expect(calls[0].body.calls![24].args).toEqual([{ page: 24 }])
-    expect(calls[1].body.calls![0].args).toEqual([{ page: 25 }])
-    expect(results).toEqual(Array.from({ length: 30 }, (_, i) => ({ method: 'listSales', args: [{ page: i }] })))
-    expect(getToken).toHaveBeenCalledTimes(2)
+    expect(calls[0].body.calls![MAX_CALLS_PER_BATCH - 1].args).toEqual([{ page: MAX_CALLS_PER_BATCH - 1 }])
+    expect(calls[1].body.calls![0].args).toEqual([{ page: MAX_CALLS_PER_BATCH }])
+    expect(calls[2].body.calls![0].args).toEqual([{ page: MAX_CALLS_PER_BATCH * 2 }])
+    expect(results).toEqual(Array.from({ length: total }, (_, i) => ({ method: 'listSales', args: [{ page: i }] })))
+    expect(getToken).toHaveBeenCalledTimes(3)
   })
 
-  it('25 本ちょうどは 1 束。26 本は 25 本と 1 本（1 本のほうも _batch）', async () => {
+  it('上限ちょうどは 1 束。1 本多いと満杯の束と 1 本の束（1 本のほうも _batch）', async () => {
     const api = rpc()
-    await Promise.all(Array.from({ length: 25 }, (_, i) => api.listSales({ page: i })))
-    expect(calls.map((c) => c.body.calls!.length)).toEqual([25])
+    await Promise.all(Array.from({ length: MAX_CALLS_PER_BATCH }, (_, i) => api.listSales({ page: i })))
+    expect(calls.map((c) => c.body.calls!.length)).toEqual([MAX_CALLS_PER_BATCH])
     calls.length = 0
-    await Promise.all(Array.from({ length: 26 }, (_, i) => api.listSales({ page: i })))
-    expect(calls.map((c) => [c.url, c.body.calls!.length])).toEqual([['/api/rpc/_batch', 25], ['/api/rpc/_batch', 1]])
+    await Promise.all(Array.from({ length: MAX_CALLS_PER_BATCH + 1 }, (_, i) => api.listSales({ page: i })))
+    expect(calls.map((c) => [c.url, c.body.calls!.length])).toEqual([['/api/rpc/_batch', MAX_CALLS_PER_BATCH], ['/api/rpc/_batch', 1]])
   })
 
-  it('同時に飛ぶ束は 4 つまで。前の束が終わると次が飛ぶ', async () => {
+  it('束はサーバーの上限（25 本）を超えない。大きな塊でも、どの束も MAX_CALLS_PER_BATCH 以下', async () => {
+    const api = rpc()
+    const total = SERVER_MAX_CALLS * 4 + 3
+    const results = await Promise.all(Array.from({ length: total }, (_, i) => api.listSales({ page: i })))
+    expect(results).toHaveLength(total)
+    for (const c of calls) expect(c.body.calls!.length).toBeLessThanOrEqual(MAX_CALLS_PER_BATCH)
+    expect(calls.reduce((n, c) => n + c.body.calls!.length, 0)).toBe(total)
+  })
+
+  it('同時に飛ぶ束は MAX_CONCURRENT_BATCHES まで。前の束が終わると次が飛ぶ', async () => {
     const waiting: { call: FetchCall; resolve(res: Response): void }[] = []
     handler = (call) => new Promise<Response>((resolve) => waiting.push({ call, resolve }))
     const api = rpc()
-    // 25 本 × 5 束 + 3 本
-    const ps = Array.from({ length: 128 }, (_, i) => api.listSales({ page: i }))
+    // 満杯の束 (MAX_CONCURRENT_BATCHES + 1) 個 + 3 本
+    const fullBundles = MAX_CONCURRENT_BATCHES + 1
+    const total = MAX_CALLS_PER_BATCH * fullBundles + 3
+    const ps = Array.from({ length: total }, (_, i) => api.listSales({ page: i }))
     await settle()
-    expect(calls).toHaveLength(4)
-    expect(calls.map((c) => c.body.calls!.length)).toEqual([25, 25, 25, 25])
+    expect(calls).toHaveLength(MAX_CONCURRENT_BATCHES)
+    expect(calls.map((c) => c.body.calls!.length)).toEqual(Array(MAX_CONCURRENT_BATCHES).fill(MAX_CALLS_PER_BATCH))
 
-    // 先頭の束が終わると、5 つ目が飛ぶ
+    // 先頭の束が終わると、次の満杯の束が飛ぶ
     waiting[0].resolve(echo(waiting[0].call))
     await settle()
-    expect(calls).toHaveLength(5)
-    expect(calls[4].body.calls![0].args).toEqual([{ page: 100 }])
+    expect(calls).toHaveLength(MAX_CONCURRENT_BATCHES + 1)
+    expect(calls[MAX_CONCURRENT_BATCHES].body.calls![0].args).toEqual([{ page: MAX_CALLS_PER_BATCH * MAX_CONCURRENT_BATCHES }])
+    expect(calls[MAX_CONCURRENT_BATCHES].body.calls!.length).toBe(MAX_CALLS_PER_BATCH)
 
     // もう 1 つ終わると、最後の 3 本の束が飛ぶ
     waiting[1].resolve(echo(waiting[1].call))
     await settle()
-    expect(calls).toHaveLength(6)
-    expect(calls[5].body.calls!.length).toBe(3)
+    expect(calls).toHaveLength(MAX_CONCURRENT_BATCHES + 2)
+    expect(calls[MAX_CONCURRENT_BATCHES + 1].body.calls!.length).toBe(3)
 
-    // 同時に飛んでいるのは常に 4 つ以内（残りを全部返して、全員に正しい結果が届く）
+    // 同時に飛んでいるのは常に MAX_CONCURRENT_BATCHES 以内（残りを全部返して、全員に正しい結果が届く）
     for (let i = 2; i < waiting.length; i++) waiting[i].resolve(echo(waiting[i].call))
     await settle()
     const results = await Promise.all(ps)
-    expect(results).toEqual(Array.from({ length: 128 }, (_, i) => ({ method: 'listSales', args: [{ page: i }] })))
-    expect(calls).toHaveLength(6)
+    expect(results).toEqual(Array.from({ length: total }, (_, i) => ({ method: 'listSales', args: [{ page: i }] })))
+    expect(calls).toHaveLength(MAX_CONCURRENT_BATCHES + 2)
   })
 
   it('束の中の 1 本が error なら、その呼び出しだけ ApiError（code・message）。他は成功', async () => {
@@ -381,11 +409,13 @@ describe('createHttpApi の読み取りのまとめ送り（_batch）', () => {
     it('同時に飛ばせず待っていた束も、まとめをやめたあとは _batch を試さず 1 本ずつ送る', async () => {
       handler = (call) => (call.url.endsWith('/rpc/_batch') ? notFound() : echo(call))
       const api = rpc()
-      // 25 本 × 5 束（4 束が同時に飛び、5 束目は待つ）。4 束とも 404 で、5 束目は _batch を試されない
-      const results = await Promise.all(Array.from({ length: 125 }, (_, i) => api.listSales({ page: i })))
-      expect(results).toEqual(Array.from({ length: 125 }, (_, i) => ({ method: 'listSales', args: [{ page: i }] })))
-      expect(calls.filter((c) => c.url.endsWith('/rpc/_batch'))).toHaveLength(4)
-      expect(calls.filter((c) => c.url.endsWith('/rpc/listSales'))).toHaveLength(125)
+      // 満杯の束 (MAX_CONCURRENT_BATCHES + 1) 個（MAX_CONCURRENT_BATCHES 束が同時に飛び、最後の 1 束は待つ）。
+      // 先に飛んだ束は全部 404 で、待っていた最後の束は _batch を試されない
+      const total = MAX_CALLS_PER_BATCH * (MAX_CONCURRENT_BATCHES + 1)
+      const results = await Promise.all(Array.from({ length: total }, (_, i) => api.listSales({ page: i })))
+      expect(results).toEqual(Array.from({ length: total }, (_, i) => ({ method: 'listSales', args: [{ page: i }] })))
+      expect(calls.filter((c) => c.url.endsWith('/rpc/_batch'))).toHaveLength(MAX_CONCURRENT_BATCHES)
+      expect(calls.filter((c) => c.url.endsWith('/rpc/listSales'))).toHaveLength(total)
     })
   })
 
