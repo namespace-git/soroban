@@ -1655,10 +1655,15 @@ const runLabel: Record<string, string> = {
   border-color: transparent;
   background: transparent;
 }
-.table-panel td input:hover,
 .table-panel td input:focus {
   border-color: var(--line);
   background: var(--surface);
+}
+@media (hover: hover) and (pointer: fine) {
+  .table-panel td input:hover {
+    border-color: var(--line);
+    background: var(--surface);
+  }
 }
 
 .panel-foot {
@@ -1728,10 +1733,15 @@ const runLabel: Record<string, string> = {
   border-color: transparent;
   background: transparent;
 }
-.accounts-table select:hover,
 .accounts-table select:focus {
   border-color: var(--line);
   background: var(--surface);
+}
+@media (hover: hover) and (pointer: fine) {
+  .accounts-table select:hover {
+    border-color: var(--line);
+    background: var(--surface);
+  }
 }
 
 /* 1024px 幅だと名前や操作ボタンが折り返って崩れるため、テーブルごと横スクロールにする
@@ -1761,10 +1771,15 @@ const runLabel: Record<string, string> = {
   background: transparent;
   font-size: var(--fs-13);
 }
-.keywords-cell textarea:hover,
 .keywords-cell textarea:focus {
   border-color: var(--line);
   background: var(--surface);
+}
+@media (hover: hover) and (pointer: fine) {
+  .keywords-cell textarea:hover {
+    border-color: var(--line);
+    background: var(--surface);
+  }
 }
 
 .ai-key-url, .track-key-url { user-select: all; font-size: var(--fs-12); background: var(--surface-hi); padding: 1px 6px; border-radius: var(--radius-sm); }
@@ -1866,7 +1881,9 @@ const runLabel: Record<string, string> = {
   .stack-table thead { display: none; }
   .stack-table tbody tr { padding: 12px 0; border-top: 1px solid var(--line-soft); }
   .table-panel .stack-table tbody tr { padding: 12px 14px; }
-  .stack-table tbody tr:hover { background: transparent; }
+  @media (hover: hover) and (pointer: fine) {
+    .stack-table tbody tr:hover { background: transparent; }
+  }
   .stack-table td { padding: 0; border: 0; min-width: 0; }
   .stack-table td.num,
   .stack-table td.actions { text-align: left; }

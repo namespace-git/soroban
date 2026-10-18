@@ -496,7 +496,9 @@ h3 {
   text-decoration: underline dotted;
   cursor: pointer;
 }
-.tl-link:hover:not(:disabled) { background: transparent; color: var(--text); }
+@media (hover: hover) and (pointer: fine) {
+  .tl-link:hover:not(:disabled) { background: transparent; color: var(--text); }
+}
 
 .kv {
   display: grid;

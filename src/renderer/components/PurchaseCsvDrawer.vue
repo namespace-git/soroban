@@ -461,7 +461,9 @@ function skipOrder(index: number): ParsedOrder | undefined {
     border: 1px solid var(--line);
     border-radius: var(--radius-md);
   }
-  .preview-table tbody tr:hover { background: var(--surface); }
+  @media (hover: hover) and (pointer: fine) {
+    .preview-table tbody tr:hover { background: var(--surface); }
+  }
   .preview-table tbody tr.problem { background: var(--warn-bg); border-color: var(--warn-line); }
   .preview-table td { display: block; min-width: 0; padding: 0; border: none; }
   .preview-table td[data-label]::before {

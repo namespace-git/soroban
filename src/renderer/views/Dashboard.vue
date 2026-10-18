@@ -2,7 +2,7 @@
 // ホーム＝受信箱。「今やること」を1本のリストに束ね、上から順に片付ければ終わる形にする。
 // 数字・文言（title/detail/profit_hint）は main（getInbox）が組み立て済みのものをそのまま出す。
 // レンダラー側では利益を再計算しない。
-import { ref, reactive, computed, onMounted, watch, inject, type Ref } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, inject, type Ref } from 'vue'
 import type { Inbox, InboxItem, InboxKind, ShippingMethod, DashboardStats, ListingStatus } from '../../shared/types'
 import { CHANNEL_LABEL } from '../../shared/types'
 import Icon from '../components/Icon.vue'
@@ -27,7 +27,7 @@ const groupLabels: Record<InboxKind, string> = {
 
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
-const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+const toast = inject<(text: string, kind: 'ok' | 'warn', action?: { label: string; run: () => void | Promise<void> }) => void>('toast')!
 const goto = inject<(t: string, payload?: {
   modelCode?: string
   stage?: 'listed' | 'pending' | 'done' | 'all'
@@ -64,7 +64,79 @@ async function load() {
 onMounted(load)
 watch(revision, load)
 
-const totalItems = computed(() => (inbox.value?.groups ?? []).reduce((sum, g) => sum + g.items.length, 0))
+// --- 発送方法を選んだあとの「済」の行 ---
+// 送料を入れる行は、選んで読み直すと黙って消え、下の行が指の下にせり上がる（誤タップのもと）。
+// そこで、選んだ行は読み直しの前に「済　<発送方法> ¥<料金>」に替えてその場に残し、1.2 秒後に高さを 180ms で畳んでから外す。
+// 料金は表示だけで、計算には使わない（粗利などは main が返したものをそのまま出す）。
+const HOLD_MS = 1200
+const COLLAPSE_MS = 180 // style.css の --dur と同じ
+interface Held {
+  seq: number
+  kind: InboxKind
+  item: InboxItem     // 押した時点の行。読み直しで消えても描ける
+  hint: string        // グループごと消えるときの見出し用
+  index: number       // グループの中の並び（表示している行の中での位置）
+  height: number      // 押した時点の行の高さ。「済」に替えても動かさない
+  label: string       // 「ゆうパケット ¥200」
+  reloaded: boolean   // 読み直しが終わった
+  elapsed: boolean    // 1.2 秒たった
+  collapsing: boolean
+}
+const held = reactive(new Map<string, Held>())
+const holdKey = (kind: InboxKind, id: string) => `${kind}:${id}`
+let holdSeq = 0
+const holdTimers = new Set<ReturnType<typeof setTimeout>>()
+function later(fn: () => void, ms: number) {
+  const t = setTimeout(() => { holdTimers.delete(t); fn() }, ms)
+  holdTimers.add(t)
+}
+onBeforeUnmount(() => { holdTimers.forEach(clearTimeout); holdTimers.clear() })
+function reducedMotion(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+interface DisplayItem { item: InboxItem; hold: Held | null }
+interface DisplayGroup {
+  kind: InboxKind
+  hint: string
+  items: DisplayItem[]
+  open: number         // 「済」を除いた、まだやることの数
+  collapsing: boolean  // 残っているのが畳み始めた「済」だけ＝見出しごと畳む
+}
+// サーバーが並べる順。グループごと消えた行の見出しを、元の位置に戻すのに使う
+const GROUP_ORDER: InboxKind[] = ['ship', 'shipping', 'link', 'release', 'confirm', 'collect', 'reminder']
+
+// 画面に出す行。main が返した行のうち「済」にした行は本物を出さず、押した時点の行を元の位置に差す
+const displayGroups = computed<DisplayGroup[]>(() => {
+  const groups: DisplayGroup[] = (inbox.value?.groups ?? []).map(g => ({
+    kind: g.kind,
+    hint: g.hint,
+    items: g.items.filter(i => !held.has(holdKey(g.kind, i.id))).map(item => ({ item, hold: null })),
+    open: 0,
+    collapsing: false,
+  }))
+  const byKind = new Map<InboxKind, Held[]>()
+  for (const h of held.values()) byKind.set(h.kind, [...(byKind.get(h.kind) ?? []), h])
+  for (const [kind, hs] of byKind) {
+    let g = groups.find(x => x.kind === kind)
+    if (!g) {
+      g = { kind, hint: hs[0].hint, items: [], open: 0, collapsing: false }
+      const at = groups.findIndex(x => GROUP_ORDER.indexOf(x.kind) > GROUP_ORDER.indexOf(kind))
+      groups.splice(at === -1 ? groups.length : at, 0, g)
+    }
+    for (const h of [...hs].sort((a, b) => a.index - b.index)) {
+      g.items.splice(Math.min(h.index, g.items.length), 0, { item: h.item, hold: h })
+    }
+  }
+  for (const g of groups) {
+    g.open = g.items.filter(d => !d.hold).length
+    g.collapsing = g.items.length > 0 && g.items.every(d => d.hold?.collapsing)
+  }
+  return groups
+})
+// 「済」の行だけが残っていても、一覧は出し続ける（空の案内に替えると、その場に残した意味がなくなる）
+const displayCount = computed(() => displayGroups.value.reduce((sum, g) => sum + g.items.length, 0))
+const totalItems = computed(() => displayGroups.value.reduce((sum, g) => sum + g.open, 0))
 
 // 操作中の行は disabled にする（連打防止）。key は InboxItem.id
 const busy = reactive(new Set<string>())
@@ -106,9 +178,70 @@ function onThumbError(id: string) {
 }
 
 // --- ship / shipping：行内の発送方法セレクト ---
-async function setShipping(item: InboxItem, methodId: string) {
-  if (!item.sale) return
-  await withBusy(item.id, () => window.soroban.updateSale(item.sale!.id, { shipping_method_id: methodId || null }))
+function displayIndex(kind: InboxKind, id: string): number {
+  const i = displayGroups.value.find(g => g.kind === kind)?.items.findIndex(d => d.item.id === id) ?? -1
+  return Math.max(i, 0)
+}
+function beginHold(kind: InboxKind, item: InboxItem, height: number, label: string) {
+  const key = holdKey(kind, item.id)
+  const seq = ++holdSeq
+  held.set(key, {
+    seq, kind, item, label, height,
+    hint: displayGroups.value.find(g => g.kind === kind)?.hint ?? '',
+    index: displayIndex(kind, item.id),
+    reloaded: false, elapsed: false, collapsing: false,
+  })
+  later(() => {
+    const h = held.get(key)
+    if (!h || h.seq !== seq) return // 早く外れた／同じ行でやり直した
+    h.elapsed = true
+    settleHold(key)
+  }, HOLD_MS)
+}
+// 1.2 秒たち、読み直しも終わったら畳む。どちらかが遅れたら、遅れた方を待つ（読み直し前の古い行を出さないため）
+function settleHold(key: string) {
+  const h = held.get(key)
+  if (!h || h.collapsing || !h.reloaded || !h.elapsed) return
+  if (reducedMotion()) { held.delete(key); return }
+  const seq = h.seq
+  h.collapsing = true
+  later(() => { if (held.get(key)?.seq === seq) held.delete(key) }, COLLAPSE_MS)
+}
+function endReload(key: string) {
+  const h = held.get(key)
+  if (!h) return
+  h.reloaded = true
+  // 読み直しても行が残っている＝片付いていない。「済」をやめて本物の行に戻す
+  const stillThere = inbox.value?.groups.find(g => g.kind === h.kind)?.items.some(i => i.id === h.item.id)
+  if (stillThere) held.delete(key)
+  else settleHold(key)
+}
+
+async function setShipping(item: InboxItem, kind: InboxKind, el: HTMLSelectElement) {
+  const sale = item.sale
+  if (!sale) return
+  const methodId = el.value
+  // 「選択…」に戻した＝送料を空に戻す。「入れました」とも「済」とも言わない
+  if (!methodId) {
+    await withBusy(item.id, () => window.soroban.updateSale(sale.id, { shipping_method_id: null }))
+    return
+  }
+  const method = methods.value.find(m => m.id === methodId)
+  const label = method ? `${method.name} ${yen(method.fee)}` : ''
+  const height = el.closest<HTMLElement>('.inbox-row')?.offsetHeight ?? 0
+  try {
+    await withBusy(item.id, async () => {
+      await window.soroban.updateSale(sale.id, { shipping_method_id: methodId })
+      toast(label ? `${label} を入れました` : '発送方法を入れました', 'ok')
+      // 送料を入れる行は読み直すと消える。読み直しの前に「済」に替えておく（消える瞬間を作らない）
+      if (kind === 'shipping') beginHold(kind, item, height, label || '発送方法')
+    })
+  } catch (e) {
+    el.value = ''
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    endReload(holdKey(kind, item.id))
+  }
 }
 
 // --- link：候補を紐付ける／私物にする ---
@@ -117,8 +250,22 @@ async function linkCandidate(item: InboxItem) {
   await withBusy(item.id, () => window.soroban.linkInventory(item.sale!.id, [item.candidate!.inventory_item_id]))
 }
 async function markPersonal(item: InboxItem) {
-  if (!item.sale) return
-  await withBusy(item.id, () => window.soroban.updateSale(item.sale!.id, { kind: 'personal' }))
+  const sale = item.sale
+  if (!sale) return
+  await withBusy(item.id, () => window.soroban.updateSale(sale.id, { kind: 'personal' }))
+  // 確認ダイアログは挟まない（タップ数を増やさない）。間違えたときは通知の「元に戻す」で、種別を戻すだけ
+  toast('私物にしました', 'ok', {
+    label: '元に戻す',
+    run: async () => {
+      try {
+        await window.soroban.updateSale(sale.id, { kind: 'resale' })
+        await load()
+        changed()
+      } catch (e) {
+        toast(e instanceof Error ? e.message : String(e), 'warn')
+      }
+    },
+  })
 }
 function gotoSaleAll(item: InboxItem) {
   goto('sales', { stage: 'all', focusId: item.sale?.id })
@@ -231,136 +378,154 @@ function gotoTopModel() {
             <span class="dim">{{ totalItems }} 件 ・ 上から順に片付ければ終わり</span>
           </div>
 
-          <EmptyState v-if="totalItems === 0" title="今日やることはありません" hint="「取り込む」で新しい動きがあれば表示されます" />
+          <EmptyState v-if="displayCount === 0" title="今日やることはありません" hint="「取り込む」で新しい動きがあれば表示されます" />
 
           <template v-else>
-            <div v-for="group in inbox.groups" :key="group.kind" v-show="group.items.length" class="group">
-              <p class="group-title">
-                <span class="group-label">{{ groupLabels[group.kind] }}</span>
-                <span class="n" :class="{ soft: group.kind === 'reminder' }">{{ group.items.length }}</span>
-                <span class="group-hint">{{ group.hint }}</span>
-              </p>
+            <!-- .slot は畳むための入れ物（畳むとき以外は何もしない）。グループは、残りが「済」だけになったら見出しごと畳む -->
+            <div v-for="group in displayGroups" :key="group.kind" class="slot group-slot" :class="{ collapsing: group.collapsing }">
+              <div class="group">
+                <p class="group-title">
+                  <span class="group-label">{{ groupLabels[group.kind] }}</span>
+                  <span class="n" :class="{ soft: group.kind === 'reminder' || group.open === 0 }">{{ group.open }}</span>
+                  <span class="group-hint">{{ group.hint }}</span>
+                </p>
 
-              <div v-for="item in group.items" :key="item.id" class="inbox-row">
-                <div class="row-thumb">
-                  <img
-                    v-if="showThumb(item)"
-                    class="row-thumb-img"
-                    :src="item.thumb_url!"
-                    alt=""
-                    loading="lazy"
-                    @error="onThumbError(item.id)"
-                  />
-                  <span v-else class="row-thumb-ph" :class="{ warn: group.kind === 'collect' }">
-                    {{ group.kind === 'collect' ? '!' : placeholderChar(item.title) }}
-                  </span>
-                </div>
+                <div
+                  v-for="{ item, hold } in group.items"
+                  :key="item.id"
+                  class="slot"
+                  :class="{ collapsing: !!hold?.collapsing && !group.collapsing }"
+                  :style="hold && !hold.collapsing ? { minHeight: hold.height + 'px' } : undefined"
+                >
+                  <div class="slot-in">
+                    <div class="inbox-row" :class="{ held: !!hold }">
+                      <div class="row-thumb">
+                        <img
+                          v-if="showThumb(item)"
+                          class="row-thumb-img"
+                          :src="item.thumb_url!"
+                          alt=""
+                          loading="lazy"
+                          @error="onThumbError(item.id)"
+                        />
+                        <span v-else class="row-thumb-ph" :class="{ warn: group.kind === 'collect' }">
+                          {{ group.kind === 'collect' ? '!' : placeholderChar(item.title) }}
+                        </span>
+                      </div>
 
-                <div class="row-main">
-                  <div class="row-labels">
-                    <StatusChip v-if="item.sale" tone="neutral" :label="CHANNEL_LABEL[item.sale.channel]" :title="`出品先：${CHANNEL_LABEL[item.sale.channel]}`" />
-                    <StatusChip v-if="item.release" tone="neutral" :label="CHANNEL_LABEL[item.release.listing_channel]" :title="`出品先：${CHANNEL_LABEL[item.release.listing_channel]}`" />
-                    <StatusPill v-if="group.kind === 'ship'" tone="solid-info" label="発送してください" />
-                    <StatusPill v-if="group.kind === 'release'" tone="solid-warn" label="出品停止中" />
-                    <StatusChip v-if="group.kind === 'confirm' && item.purchase" tone="neutral" :label="item.purchase.shop_account_name" />
+                      <div class="row-main">
+                        <div class="row-labels">
+                          <StatusChip v-if="item.sale" tone="neutral" :label="CHANNEL_LABEL[item.sale.channel]" :title="`出品先：${CHANNEL_LABEL[item.sale.channel]}`" />
+                          <StatusChip v-if="item.release" tone="neutral" :label="CHANNEL_LABEL[item.release.listing_channel]" :title="`出品先：${CHANNEL_LABEL[item.release.listing_channel]}`" />
+                          <StatusPill v-if="group.kind === 'ship'" tone="solid-info" label="発送してください" />
+                          <StatusPill v-if="group.kind === 'release'" tone="solid-warn" label="出品停止中" />
+                          <StatusChip v-if="group.kind === 'confirm' && item.purchase" tone="neutral" :label="item.purchase.shop_account_name" />
+                        </div>
+                        <div class="row-title one-line" :title="item.title">{{ item.title }}</div>
+                        <!-- 「済」の行：補足と粗利の見込みは、送料を入れる前の言い方のままなので出さない（高さだけ残す） -->
+                        <div v-if="hold" class="row-sub" aria-hidden="true">&nbsp;</div>
+                        <div v-else-if="item.release" class="row-sub two-lines" :title="`押さえている在庫（${item.release.items.length} 点）：${releaseHeldText(item)}`">
+                          <b>押さえている在庫 {{ item.release.items.length }} 点：</b>{{ releaseHeldText(item) }}
+                        </div>
+                        <div v-else class="row-sub">
+                          <span class="dim">{{ item.detail }}</span>
+                          <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint" :class="profitHintClass(item.profit_hint)">
+                            ・ {{ profitHintText(group.kind, item.profit_hint) }}
+                          </b>
+                          <!-- スマホ幅だけ：区切りの「・」なしで、自分の行に出す（デスクトップ幅では出さない。上の文は一切変えない） -->
+                          <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint-m" :class="profitHintClass(item.profit_hint)">{{ profitHintText(group.kind, item.profit_hint) }}</b>
+                        </div>
+                      </div>
+
+                      <div class="row-act">
+                        <!-- 発送方法を入れた行：選んだ場所に、入れたものを出す（1.2 秒後に畳まれる） -->
+                        <span v-if="hold" class="held-done"><Icon name="check" :size="14" class="held-check" />済　{{ hold.label }}</span>
+
+                        <!-- 発送する：発送方法が未定ならセレクトを出す -->
+                        <template v-else-if="group.kind === 'ship'">
+                          <select
+                            v-if="!item.sale?.shipping_method_id"
+                            class="invalid"
+                            :disabled="busy.has(item.id)"
+                            @change="setShipping(item, group.kind, $event.target as HTMLSelectElement)"
+                          >
+                            <option value="">選択…</option>
+                            <option v-for="m in methods" :key="m.id" :value="m.id">{{ m.name }}　{{ yen(m.fee) }}</option>
+                          </select>
+                          <button class="sm" :disabled="busy.has(item.id)" @click="openTransaction(item)">
+                            取引画面を開く <Icon name="external" :size="12" />
+                          </button>
+                        </template>
+
+                        <!-- 送料を入れる：セレクトを選べば「済」に替わり、1.2 秒後に畳まれる -->
+                        <template v-else-if="group.kind === 'shipping'">
+                          <select
+                            class="invalid"
+                            :disabled="busy.has(item.id)"
+                            @change="setShipping(item, group.kind, $event.target as HTMLSelectElement)"
+                          >
+                            <option value="">選択…</option>
+                            <option v-for="m in methods" :key="m.id" :value="m.id">{{ m.name }}　{{ yen(m.fee) }}</option>
+                          </select>
+                        </template>
+
+                        <!-- 在庫を紐付ける -->
+                        <template v-else-if="group.kind === 'link'">
+                          <template v-if="item.candidate">
+                            <button class="sm" :disabled="busy.has(item.id)" @click="linkCandidate(item)">
+                              {{ item.candidate.item_code }} を紐付ける
+                            </button>
+                            <button class="sm link-btn" @click="gotoSaleAll(item)"><Icon name="link" :size="14" /> 在庫を選ぶ</button>
+                          </template>
+                          <template v-else>
+                            <button class="sm" :disabled="busy.has(item.id)" @click="gotoSaleAll(item)">在庫を選ぶ</button>
+                            <button class="link-action" :disabled="busy.has(item.id)" @click="markPersonal(item)">私物にする</button>
+                          </template>
+                        </template>
+
+                        <!-- 仕入の価格を入れる -->
+                        <template v-else-if="group.kind === 'confirm'">
+                          <button class="sm" @click="goConfirmPurchase(item)">価格を入れて確定</button>
+                        </template>
+
+                        <!-- 取り込みの問題 -->
+                        <template v-else-if="group.kind === 'collect'">
+                          <!-- Web 版：押しても開けるウィンドウが無いので、ボタンは出さず、やることを文で伝える -->
+                          <span v-if="isWeb && item.run?.status === 'auth_required'" class="web-hint" title="取り込み担当の PC のそろばんでログインしてください"><span>取り込み担当の PC の</span><span>そろばんでログインしてください</span></span>
+                          <button
+                            v-else-if="item.run?.status === 'auth_required'"
+                            class="sm"
+                            title="ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください"
+                            @click="openLoginForRun"
+                          >ログインする</button>
+                          <button v-else class="sm" :disabled="busy.has(item.id)" @click="retryCollect(item)">もう一度取り込む</button>
+                          <span v-if="!isWeb && item.run?.status === 'auth_required'" class="m-hint">ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください</span>
+                        </template>
+
+                        <!-- 止めた出品の在庫を外す：1 クリックで全部。押した行はその場で消える -->
+                        <template v-else-if="group.kind === 'release'">
+                          <button
+                            class="sm"
+                            :disabled="busy.has(item.id)"
+                            title="出品から在庫を外すだけです。在庫も販売の記録も消えません。"
+                            @click="releaseListing(item)"
+                          >{{ releaseButtonLabel(item) }}</button>
+                          <span class="m-hint">出品から在庫を外すだけです。在庫も販売の記録も消えません。</span>
+                        </template>
+
+                        <!-- 忘れていませんか -->
+                        <template v-else-if="group.kind === 'reminder'">
+                          <button
+                            v-if="item.reminder"
+                            class="sm"
+                            :disabled="busy.has(item.id)"
+                            @click="reminderAction(item)"
+                          >{{ item.reminder.action_label }}</button>
+                          <button class="link-action" :disabled="busy.has(item.id)" @click="snooze(item)">今はいい</button>
+                        </template>
+                      </div>
+                    </div>
                   </div>
-                  <div class="row-title one-line" :title="item.title">{{ item.title }}</div>
-                  <div v-if="item.release" class="row-sub two-lines" :title="`押さえている在庫（${item.release.items.length} 点）：${releaseHeldText(item)}`">
-                    <b>押さえている在庫 {{ item.release.items.length }} 点：</b>{{ releaseHeldText(item) }}
-                  </div>
-                  <div v-else class="row-sub">
-                    <span class="dim">{{ item.detail }}</span>
-                    <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint" :class="profitHintClass(item.profit_hint)">
-                      ・ {{ profitHintText(group.kind, item.profit_hint) }}
-                    </b>
-                    <!-- スマホ幅だけ：区切りの「・」なしで、自分の行に出す（デスクトップ幅では出さない。上の文は一切変えない） -->
-                    <b v-if="profitHintText(group.kind, item.profit_hint)" class="profit-hint-m" :class="profitHintClass(item.profit_hint)">{{ profitHintText(group.kind, item.profit_hint) }}</b>
-                  </div>
-                </div>
-
-                <div class="row-act">
-                  <!-- 発送する：発送方法が未定ならセレクトを出す -->
-                  <template v-if="group.kind === 'ship'">
-                    <select
-                      v-if="!item.sale?.shipping_method_id"
-                      class="invalid"
-                      :disabled="busy.has(item.id)"
-                      @change="setShipping(item, ($event.target as HTMLSelectElement).value)"
-                    >
-                      <option value="">選択…</option>
-                      <option v-for="m in methods" :key="m.id" :value="m.id">{{ m.name }}　{{ yen(m.fee) }}</option>
-                    </select>
-                    <button class="sm" :disabled="busy.has(item.id)" @click="openTransaction(item)">
-                      取引画面を開く <Icon name="external" :size="12" />
-                    </button>
-                  </template>
-
-                  <!-- 送料を入れる：セレクトを選べばその場で行が消える -->
-                  <template v-else-if="group.kind === 'shipping'">
-                    <select
-                      class="invalid"
-                      :disabled="busy.has(item.id)"
-                      @change="setShipping(item, ($event.target as HTMLSelectElement).value)"
-                    >
-                      <option value="">選択…</option>
-                      <option v-for="m in methods" :key="m.id" :value="m.id">{{ m.name }}　{{ yen(m.fee) }}</option>
-                    </select>
-                  </template>
-
-                  <!-- 在庫を紐付ける -->
-                  <template v-else-if="group.kind === 'link'">
-                    <template v-if="item.candidate">
-                      <button class="sm" :disabled="busy.has(item.id)" @click="linkCandidate(item)">
-                        {{ item.candidate.item_code }} を紐付ける
-                      </button>
-                      <button class="sm link-btn" @click="gotoSaleAll(item)"><Icon name="link" :size="14" /> 在庫を選ぶ</button>
-                    </template>
-                    <template v-else>
-                      <button class="sm" :disabled="busy.has(item.id)" @click="gotoSaleAll(item)">在庫を選ぶ</button>
-                      <button class="link-action" :disabled="busy.has(item.id)" @click="markPersonal(item)">私物にする</button>
-                    </template>
-                  </template>
-
-                  <!-- 仕入の価格を入れる -->
-                  <template v-else-if="group.kind === 'confirm'">
-                    <button class="sm" @click="goConfirmPurchase(item)">価格を入れて確定</button>
-                  </template>
-
-                  <!-- 取り込みの問題 -->
-                  <template v-else-if="group.kind === 'collect'">
-                    <!-- Web 版：押しても開けるウィンドウが無いので、ボタンは出さず、やることを文で伝える -->
-                    <span v-if="isWeb && item.run?.status === 'auth_required'" class="web-hint" title="取り込み担当の PC のそろばんでログインしてください"><span>取り込み担当の PC の</span><span>そろばんでログインしてください</span></span>
-                    <button
-                      v-else-if="item.run?.status === 'auth_required'"
-                      class="sm"
-                      title="ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください"
-                      @click="openLoginForRun"
-                    >ログインする</button>
-                    <button v-else class="sm" :disabled="busy.has(item.id)" @click="retryCollect(item)">もう一度取り込む</button>
-                    <span v-if="!isWeb && item.run?.status === 'auth_required'" class="m-hint">ログインのウィンドウが開きます。ログインしたら閉じて「取り込む」を押してください</span>
-                  </template>
-
-                  <!-- 止めた出品の在庫を外す：1 クリックで全部。押した行はその場で消える -->
-                  <template v-else-if="group.kind === 'release'">
-                    <button
-                      class="sm"
-                      :disabled="busy.has(item.id)"
-                      title="出品から在庫を外すだけです。在庫も販売の記録も消えません。"
-                      @click="releaseListing(item)"
-                    >{{ releaseButtonLabel(item) }}</button>
-                    <span class="m-hint">出品から在庫を外すだけです。在庫も販売の記録も消えません。</span>
-                  </template>
-
-                  <!-- 忘れていませんか -->
-                  <template v-else-if="group.kind === 'reminder'">
-                    <button
-                      v-if="item.reminder"
-                      class="sm"
-                      :disabled="busy.has(item.id)"
-                      @click="reminderAction(item)"
-                    >{{ item.reminder.action_label }}</button>
-                    <button class="link-action" :disabled="busy.has(item.id)" @click="snooze(item)">今はいい</button>
-                  </template>
                 </div>
               </div>
             </div>
@@ -467,9 +632,30 @@ function gotoTopModel() {
 }
 .inbox-head h2 { margin: 0; }
 
+/* --- 畳むための入れ物（.slot）---
+   行（とグループ）を高さごと畳む。grid の行を 1fr → 0fr に動かすと、中身の高さを測らずに畳める。
+   畳むとき以外は、幅いっぱいの 1 マスなだけで見た目は変わらない。
+   行は padding・罫線を持つので、そのままでは 0 まで縮まない。padding の無い .slot-in で包んで、そちらを縮める。 */
+.slot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1fr;
+  min-height: 0; /* 「済」の間だけ行の高さを保つ min-height（インライン）を、畳むときに 0 へ動かせるよう明示しておく */
+}
+.slot > * { min-height: 0; }
+.slot-in { display: grid; grid-template-columns: minmax(0, 1fr); }
+/* 動かすのは畳むときだけ。「済」に替える瞬間（min-height が 0 → 行の高さになる）は動かさない */
+.slot.collapsing {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: grid-template-rows var(--dur) var(--ease), min-height var(--dur) var(--ease), opacity var(--dur) var(--ease), margin-top var(--dur) var(--ease);
+}
+
 /* --- グループ見出し --- */
-.group { margin-top: 14px; }
-.group:first-of-type { margin-top: 0; }
+.group-slot { margin-top: 14px; }
+.group-slot.collapsing { margin-top: 0; }
 .group-title {
   display: flex;
   flex-wrap: wrap;
@@ -503,7 +689,7 @@ function gotoTopModel() {
   padding: 10px 8px;
   border-top: 1px solid var(--line-soft);
 }
-.group > .inbox-row:first-of-type { border-top: 0; }
+.group > .slot:first-of-type > .slot-in > .inbox-row { border-top: 0; }
 
 .row-thumb {
   width: 44px;
@@ -549,7 +735,22 @@ function gotoTopModel() {
   text-decoration: underline dotted;
   cursor: pointer;
 }
-.link-action:hover:not(:disabled) { background: transparent; color: var(--text); }
+@media (hover: hover) and (pointer: fine) {
+  .link-action:hover:not(:disabled) { background: transparent; color: var(--text); }
+}
+
+/* --- 発送方法を入れた行（「済」。1.2 秒だけ残って畳まれる）--- */
+.inbox-row.held .row-thumb { opacity: .6; }
+.inbox-row.held .row-title { color: var(--text-dim); }
+.held-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-14);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.held-check { color: var(--profit); flex: 0 0 auto; }
 
 /* スマホ幅だけで出す補足（デスクトップ幅ではボタンの title＝ホバーで読めるもの） */
 .m-hint { display: none; }
@@ -591,7 +792,9 @@ function gotoTopModel() {
   color: var(--text);
 }
 .review-row:first-of-type { border-top: 0; }
-.review-row:hover { background: var(--surface-hi); }
+@media (hover: hover) and (pointer: fine) {
+  .review-row:hover { background: var(--surface-hi); }
+}
 .review-row b { font-size: var(--fs-14); font-weight: 700; }
 
 /* ============================================================
@@ -643,6 +846,8 @@ function gotoTopModel() {
     color: var(--text-dim);
   }
   .web-hint { flex: 1 1 100%; max-width: none; text-align: left; }
+  /* 「済」は、選んだセレクトがあった場所（全幅・44px）にそのまま出す */
+  .held-done { flex: 1 1 100%; min-height: 44px; }
   .row-act > button {
     display: inline-flex;
     align-items: center;

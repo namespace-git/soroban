@@ -1023,7 +1023,9 @@ async function deleteCurrent() {
   text-align: left;
   cursor: pointer;
 }
-.expense-row:hover:not(:disabled) { background: var(--surface-hi); }
+@media (hover: hover) and (pointer: fine) {
+  .expense-row:hover:not(:disabled) { background: var(--surface-hi); }
+}
 .expense-row.on { background: var(--brand-soft); }
 
 .row-thumb {
@@ -1327,10 +1329,14 @@ async function deleteCurrent() {
     border-radius: var(--radius);
     box-shadow: var(--shadow-1);
   }
-  .expense-row:hover:not(:disabled) { background: var(--surface); }
+  @media (hover: hover) and (pointer: fine) {
+    .expense-row:hover:not(:disabled) { background: var(--surface); }
+  }
   /* 開いている（開いていた）経費：塗りつぶすとサムネイル（同じクリーム色）が消えるので、黄の枠で示す */
-  .expense-row.on,
-  .expense-row.on:hover:not(:disabled) { background: var(--surface); box-shadow: inset 0 0 0 2px var(--brand), var(--shadow-1); }
+  .expense-row.on { background: var(--surface); box-shadow: inset 0 0 0 2px var(--brand), var(--shadow-1); }
+  @media (hover: hover) and (pointer: fine) {
+    .expense-row.on:hover:not(:disabled) { background: var(--surface); box-shadow: inset 0 0 0 2px var(--brand), var(--shadow-1); }
+  }
   .row-thumb { width: 48px; height: 48px; }
   .row-main .row-labels { min-height: 0; }
   /* 名前と補助は切らずに 2 行まで（ホバーの title は読めない） */
@@ -1372,7 +1378,9 @@ async function deleteCurrent() {
     border: 1px solid var(--line);
     border-radius: var(--radius-md);
   }
-  .lines-table tbody tr:hover { background: var(--surface); }
+  @media (hover: hover) and (pointer: fine) {
+    .lines-table tbody tr:hover { background: var(--surface); }
+  }
   .lines-table td { display: block; min-width: 0; padding: 0; border: none; }
   .lines-table td.c-name { grid-column: 1 / -1; padding-right: 48px; }
   .lines-table td.c-cat { grid-column: 1 / -1; }

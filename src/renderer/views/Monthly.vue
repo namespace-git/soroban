@@ -1012,7 +1012,9 @@ async function doReopen() {
     padding: 10px 0;
     border-bottom: 1px solid var(--line-soft);
   }
-  .tag-table tbody tr:hover { background: transparent; }
+  @media (hover: hover) and (pointer: fine) {
+    .tag-table tbody tr:hover { background: transparent; }
+  }
   .tag-table td { display: block; min-width: 0; padding: 0; border: none; text-align: left; }
   .tag-table td.tag-cell { grid-column: 1 / -1; }
   .tag-table td[data-label]::before {

@@ -2,6 +2,8 @@
 //   - 対象は READ_ONLY_METHODS の読み取りだけ。同時に出た同じメソッド・同じ引数は HTTP 1 本
 //   - 結果は使い回さない（終わったら忘れる）。キャッシュではない
 //   - 相乗りした呼び出しには別々のコピーを返す（画面が戻り値を書き換えても他に影響しない）
+// 読み取りは同じタイミングのぶんを 1 本の _batch にまとめて送る（まとめ送りは http-batch.test.ts）。
+// ここでは、待ち行列に 1 本だけのときの `/rpc/<method>` の送り方を主に使う
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createHttpApi, ApiError } from '../http'
 import { READ_ONLY_METHODS } from '../../../shared/read-only-methods'
@@ -24,8 +26,12 @@ describe('createHttpApi の重複まとめ（飛んでいる最中の同じ読�
     return createHttpApi({ base: '/api', getToken: async () => 'jwt-abc', onUnauthorized })
   }
 
-  /** fetch が実際に呼ばれるところまで（トークン待ちの数 tick）進める */
+  /**
+   * fetch が実際に呼ばれるところまで進める。読み取りはまとめ送りの区切り（setTimeout(0)）まで送られないので、
+   * タイマーを 1 回またいでから、トークン待ちの数 tick を進める
+   */
   async function flush() {
+    await new Promise<void>((r) => setTimeout(r, 0))
     for (let i = 0; i < 10; i++) await Promise.resolve()
   }
 
@@ -94,16 +100,24 @@ describe('createHttpApi の重複まとめ（飛んでいる最中の同じ読�
     await Promise.all([p1, p2])
   })
 
-  it('引数が違えば別々に送る（メソッドが違っても別々）', async () => {
+  it('引数が違えば別々の呼び出しのまま（メソッドが違っても別々）。同じタイミングなら 1 本の _batch に並ぶ', async () => {
     const api = make()
     const p1 = api.listSales({ onlyPending: true })
     const p2 = api.listSales({ onlyPending: false })
     const p3 = api.listSales()
     const p4 = api.getDashboard()
     await flush()
-    expect(calls).toHaveLength(4)
-    expect(calls.map((c) => c.url)).toEqual(['/api/rpc/listSales', '/api/rpc/listSales', '/api/rpc/listSales', '/api/rpc/getDashboard'])
-    pending.forEach((p, i) => p.resolve(json(200, { result: i })))
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('/api/rpc/_batch')
+    expect(calls[0].body).toEqual({
+      calls: [
+        { method: 'listSales', args: [{ onlyPending: true }] },
+        { method: 'listSales', args: [{ onlyPending: false }] },
+        { method: 'listSales', args: [] },
+        { method: 'getDashboard', args: [] },
+      ],
+    })
+    pending[0].resolve(json(200, { results: [0, 1, 2, 3].map((result) => ({ result })) }))
     expect(await Promise.all([p1, p2, p3, p4])).toEqual([0, 1, 2, 3])
   })
 

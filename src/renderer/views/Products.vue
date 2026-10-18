@@ -702,7 +702,9 @@ const estimateCompare = computed(() => {
   border-radius: var(--radius-sm);
 }
 .prow:first-child { border-top: none; }
-.prow:hover { background: var(--surface-hi); }
+@media (hover: hover) and (pointer: fine) {
+  .prow:hover { background: var(--surface-hi); }
+}
 .prow.selected { background: var(--brand-soft); }
 
 .prow-thumb .thumb, .prow-thumb .thumb-placeholder {
@@ -857,10 +859,14 @@ const estimateCompare = computed(() => {
     box-shadow: var(--shadow-1);
   }
   .prow:first-child { border-top: none; }
-  .prow:hover { background: var(--surface); }
+  @media (hover: hover) and (pointer: fine) {
+    .prow:hover { background: var(--surface); }
+  }
   /* 最後に見た型番：塗りつぶすとサムネイル（同じクリーム色）が消えるので、黄の枠で示す */
-  .prow.selected,
-  .prow.selected:hover { background: var(--surface); box-shadow: inset 0 0 0 2px var(--brand), var(--shadow-1); }
+  .prow.selected { background: var(--surface); box-shadow: inset 0 0 0 2px var(--brand), var(--shadow-1); }
+  @media (hover: hover) and (pointer: fine) {
+    .prow.selected:hover { background: var(--surface); box-shadow: inset 0 0 0 2px var(--brand), var(--shadow-1); }
+  }
   .prow-thumb { grid-area: thumb; }
   .prow-thumb .thumb, .prow-thumb .thumb-placeholder { width: 48px; height: 48px; }
   .prow-body { grid-area: body; }
@@ -956,7 +962,9 @@ const estimateCompare = computed(() => {
     border-top: 1px solid var(--line-soft);
   }
   .item-table tbody tr:first-child, .sale-table tbody tr:first-child { border-top: 0; }
-  .item-table tbody tr:hover, .sale-table tbody tr:hover { background: transparent; }
+  @media (hover: hover) and (pointer: fine) {
+    .item-table tbody tr:hover, .sale-table tbody tr:hover { background: transparent; }
+  }
   .item-table td, .sale-table td { padding: 0; border: 0; min-width: 0; }
   .item-table td.num, .sale-table td.num { text-align: left; }
   .item-table td[data-label]::before,

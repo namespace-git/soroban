@@ -3,7 +3,7 @@ import { isRealized, realizedTotals } from '../../shared/recognition'
 // 売上タブ：出品中（メルカリの出品）と販売（成約済み）を1つの作業リストにまとめる。
 // 上＝進捗ストリップ（getSalesProgress）で段階を選ぶ、その下＝利益の入力（送料未入力／未紐付け）で絞る、
 // 下＝行のグリッド（1行1販売）。既定の並びは「未確定（粗利が出ていない行）が先、次に日付降順」。1件10秒。
-import { ref, onMounted, computed, watch, inject, nextTick, type Ref } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount, computed, watch, inject, nextTick, type Ref } from 'vue'
 import type {
   SaleProfit, ShippingMethod, SaleKind, SaleInput, SaleFilter, SaleTotals, Tag,
   Listing, ListingStatus, CollectorRun, SaleStatus, SalesProgress, SalesChannel, InventoryItem,
@@ -56,7 +56,7 @@ type SalesGotoPayload = {
 
 const ask = inject<(title: string, opts?: PromptOptions) => Promise<string | null>>('prompt')!
 const confirmDialog = inject<(title: string, opts?: { message?: string; okLabel?: string; danger?: boolean }) => Promise<boolean>>('confirm')!
-const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+const toast = inject<(text: string, kind: 'ok' | 'warn', action?: { label: string; run: () => void | Promise<void> }) => void>('toast')!
 
 const revision = inject<Ref<number>>('revision')!
 const changed = inject<() => void>('changed', () => {})
@@ -379,6 +379,86 @@ const toolbarRevenue = computed<number | null>(() => {
   return filteredRows.value.reduce((sum, r) => sum + (r.sale?.price ?? 0), 0)
 })
 
+// --- 発送方法を選んだあとの「済」の行 ---
+// 送料未入力の行は、選んで読み直すと一覧から外れる（「送料未入力」の絞り込み）か、既定の並びで下へ移る
+// （粗利が出た行は「未確定が先」の外へ出る）。どちらも行が黙って消え、下の行が指の下にせり上がる（誤タップのもと）。
+// そこで、選んだ行は読み直しの前に「済　<発送方法> ¥<料金>」に替えてその場に残し、1.2 秒後に高さを 180ms で畳んでから外す。
+// 料金は表示だけで、計算には使わない（粗利などは main が返したものをそのまま出す）。
+const HOLD_MS = 1200
+const COLLAPSE_MS = 180 // style.css の --dur と同じ
+interface Held {
+  seq: number
+  row: Row            // 押した時点の行。読み直しで消えても描ける
+  index: number       // 一覧の中での位置（表示している行の中での位置）
+  height: number      // 押した時点の行の高さ。「済」に替えても動かさない
+  label: string       // 「ゆうパケット ¥200」
+  reloaded: boolean   // 読み直しが終わった
+  elapsed: boolean    // 1.2 秒たった
+  collapsing: boolean
+}
+const held = reactive(new Map<string, Held>())
+let holdSeq = 0
+const holdTimers = new Set<ReturnType<typeof setTimeout>>()
+function later(fn: () => void, ms: number) {
+  const t = setTimeout(() => { holdTimers.delete(t); fn() }, ms)
+  holdTimers.add(t)
+}
+onBeforeUnmount(() => { holdTimers.forEach(clearTimeout); holdTimers.clear() })
+function reducedMotion(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+interface DisplayRow { row: Row; hold: Held | null }
+/** 読み直した行のうち「済」にした行は本物を出さず、押した時点の行を元の位置に差す。skipKey の「済」は無いものとして並べる */
+function mergeHeld(real: Row[], skipKey?: string): DisplayRow[] {
+  const out: DisplayRow[] = real
+    .filter(r => r.key === skipKey || !held.has(r.key))
+    .map(row => ({ row, hold: null }))
+  const holds = [...held.values()].filter(h => h.row.key !== skipKey).sort((a, b) => a.index - b.index)
+  for (const h of holds) out.splice(Math.min(h.index, out.length), 0, { row: h.row, hold: h })
+  return out
+}
+const displayRows = computed<DisplayRow[]>(() => mergeHeld(filteredRows.value))
+
+// 段階・絞り込み・並び替えを変えたら、残していた「済」は捨てる（別の一覧に前の行が混ざらないように）
+watch(
+  [stage, listedFilter, listingStatusFilter, tagFilter, searchText, period, monthFilter, inputFilter, statusFilter, channelFilter, sortOption],
+  () => held.clear(),
+)
+
+function beginHold(row: Row, height: number, label: string) {
+  const seq = ++holdSeq
+  held.set(row.key, {
+    seq, row, height, label,
+    index: Math.max(displayRows.value.findIndex(d => d.row.key === row.key), 0),
+    reloaded: false, elapsed: false, collapsing: false,
+  })
+  later(() => {
+    const h = held.get(row.key)
+    if (!h || h.seq !== seq) return // 早く外れた／同じ行でやり直した
+    h.elapsed = true
+    settleHold(row.key)
+  }, HOLD_MS)
+}
+// 1.2 秒たち、読み直しも終わったら畳む。どちらかが遅れたら、遅れた方を待つ（読み直し前の古い行を出さないため）
+function settleHold(key: string) {
+  const h = held.get(key)
+  if (!h || h.collapsing || !h.reloaded || !h.elapsed) return
+  if (reducedMotion()) { held.delete(key); return }
+  const seq = h.seq
+  h.collapsing = true
+  later(() => { if (held.get(key)?.seq === seq) held.delete(key) }, COLLAPSE_MS)
+}
+function endReload(key: string) {
+  const h = held.get(key)
+  if (!h) return
+  h.reloaded = true
+  // 読み直しても同じ位置にいる＝動かない行。「済」をやめて本物の行に戻す（粗利の確定の動きがそのまま見える）
+  const at = mergeHeld(filteredRows.value, key).findIndex(d => d.row.key === key)
+  if (at === h.index) held.delete(key)
+  else settleHold(key)
+}
+
 function matchesStage(st: Stage, s: SaleProfit): boolean {
   if (st === 'to_ship') return s.status === 'waiting_shipment'
   if (st === 'in_transit') return s.status === 'shipped' || s.status === 'delivered'
@@ -400,8 +480,13 @@ async function loadTotals() {
   totals.value = sumSaleTotals(sales.value)
 }
 
-async function load() {
-  loaded.value = false
+/**
+ * 読み直す。既定は一覧を Skeleton に戻してから（段階や絞り込みが変わったときは前の中身を見せない）。
+ * quiet のときは一覧をそのままにして中身だけ入れ替える（行を「済」にして残している間に、一覧ごと消さないため）。
+ * watch / @changed に直接渡さないこと（引数が quiet に入る）。
+ */
+async function load(quiet = false) {
+  if (!quiet) loaded.value = false
   if (stage.value === 'listed') {
     const base = await window.soroban.listListings({
       status: listingStatusFilter.value === 'all' ? ['active', 'suspended'] : [listingStatusFilter.value],
@@ -551,7 +636,7 @@ onMounted(async () => {
 })
 watch(revision, loadTags)
 watch(revision, loadProgress)
-watch([revision, stage, listedFilter, listingStatusFilter, tagFilter], load)
+watch([revision, stage, listedFilter, listingStatusFilter, tagFilter], () => load())
 
 // --- サムネイル。読み込み失敗したら以後プレースホルダに固定する ---
 const thumbFailed = ref<Set<string>>(new Set())
@@ -746,11 +831,37 @@ async function submit() {
 
 // --- 送料・梱包材費 ---
 
-async function setShipping(sale: SaleProfit, methodId: string) {
-  await window.soroban.updateSale(sale.id, { shipping_method_id: methodId || null })
-  await load()
-  await loadProgress()
-  changed()
+async function setShipping(row: Row, sale: SaleProfit, el: HTMLSelectElement) {
+  const methodId = el.value
+  // 「選択…」に戻した＝送料を空に戻す。「入れました」とも「済」とも言わない
+  if (!methodId) {
+    await window.soroban.updateSale(sale.id, { shipping_method_id: null })
+    await load()
+    await loadProgress()
+    changed()
+    return
+  }
+  const method = methods.value.find(m => m.id === methodId)
+  const label = method ? `${method.name} ${yen(method.fee)}` : ''
+  const height = el.closest<HTMLElement>('.work-row')?.offsetHeight ?? 0
+  const needed = !sale.is_shipping_confirmed // 送料が決まっていなかった行だけ、読み直しで外れる／動く
+  try {
+    await window.soroban.updateSale(sale.id, { shipping_method_id: methodId })
+  } catch (e) {
+    el.value = sale.shipping_method_id ?? ''
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+    return
+  }
+  toast(label ? `${label} を入れました` : '発送方法を入れました', 'ok')
+  // 読み直しの前に「済」に替えておく（消える・動く瞬間を作らない）
+  if (needed) beginHold(row, height, label || '発送方法')
+  try {
+    await load(true)
+    await loadProgress()
+    changed()
+  } finally {
+    endReload(row.key)
+  }
 }
 
 // --- 出品時に決める発送方法（出品中の行） ---
@@ -1061,7 +1172,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
         </label>
         <label class="field">
           <span>価格（税込・受け取った額）</span>
-          <input type="number" v-model.number="form.price" />
+          <input type="number" inputmode="numeric" v-model.number="form.price" />
         </label>
         <label class="field">
           <span>区分</span>
@@ -1208,8 +1319,12 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
         <option value="price_asc">価格が低い順</option>
       </select>
       <span class="grow" />
-      <span class="toolbar-count">
-        {{ filteredRows.length }} 件<template v-if="toolbarRevenue !== null"> ・ 合計 {{ yen(toolbarRevenue) }}</template><template v-if="monthFilter"> ・ {{ monthFilter }} の販売</template>
+      <!-- 読み込み中は件数も合計も出さない（まだ何も入っていないのに「0 件 ・ 合計 ¥0」と言わない）。スマホ幅で行の高さが動かないよう、空の行は残す -->
+      <span class="toolbar-count" :aria-busy="!loaded">
+        <template v-if="loaded">
+          {{ filteredRows.length }} 件<template v-if="toolbarRevenue !== null"> ・ 合計 {{ yen(toolbarRevenue) }}</template><template v-if="monthFilter"> ・ {{ monthFilter }} の販売</template>
+        </template>
+        <template v-else>&nbsp;</template>
       </span>
     </div>
 
@@ -1228,7 +1343,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
     <Skeleton v-if="!loaded" :rows="6" />
 
     <template v-else>
-      <div v-if="filteredRows.length" class="panel work-panel">
+      <div v-if="displayRows.length" class="panel work-panel">
         <div class="work-row work-row-hdr">
           <div class="cell-thumb"></div>
           <div class="cell-product">商品</div>
@@ -1241,238 +1356,252 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
           <div class="cell-ops"></div>
         </div>
 
+        <!-- .slot は畳むための入れ物（畳むとき以外は何もしない）。「済」にした行は高さを保ち、1.2 秒後に畳む -->
         <div
-          v-for="r in filteredRows" :key="r.key"
-          :data-row-id="r.id"
-          class="work-row"
-          :class="{
-            focused: focusedId === r.id,
-            settled: r.kind === 'sale' && !!r.sale && !rowUnresolved(r),
-            'needs-shipment': r.kind === 'sale' && r.sale?.status === 'waiting_shipment',
-            'needs-input': rowUnresolved(r),
-          }"
+          v-for="{ row: r, hold } in displayRows" :key="r.key"
+          class="slot"
+          :class="{ collapsing: !!hold?.collapsing }"
+          :style="hold && !hold.collapsing ? { minHeight: hold.height + 'px' } : undefined"
         >
-          <div
-            class="cell-thumb"
-            :class="{ clickable: rowClickable(r) }"
-            :title="rowClickTitle(r)"
-            :role="rowClickable(r) ? 'button' : undefined"
-            :tabindex="rowClickable(r) ? 0 : undefined"
-            @keydown.enter="onRowClick(r)"
-            @keydown.space.prevent="onRowClick(r)"
-            @click="onRowClick(r)"
-          >
-            <img
-              v-if="showThumb(r)"
-              class="thumb"
-              :src="rowThumbUrl(r)!"
-              alt=""
-              loading="lazy"
-              @error="onThumbError(r.key)"
-            />
-            <span v-else class="thumb-placeholder">{{ placeholderChar(r) }}</span>
-          </div>
-
-          <div class="cell-product">
-            <div class="row-labels">
-              <StatusChip tone="neutral" :label="CHANNEL_LABEL[rowChannel(r)]" :title="`出品先：${CHANNEL_LABEL[rowChannel(r)]}`" />
-              <StatusPill v-if="r.kind === 'sale' && r.sale?.status && SALE_STATUS_PILL[r.sale.status]"
-                :tone="SALE_STATUS_PILL[r.sale.status].tone" :label="SALE_STATUS_PILL[r.sale.status].label"
-                :title="SALE_STATUS_PILL[r.sale.status].title" />
-              <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="LISTING_STATUS_LABEL[r.listing.status]" />
-              <StatusChip v-if="r.sale && !r.sale.status" tone="neutral" :label="r.sale.source === 'manual' ? '手入力' : '状態未取得'" />
-              <!-- スマホ幅だけ：粗利がまだ出ない理由を状態ラベル（①）に出す。表の列が無いので、ここで一目で分かるように -->
-              <template v-if="r.sale && r.sale.kind === 'resale'">
-                <StatusPill v-if="!r.sale.is_shipping_confirmed" class="m-flag" tone="warn" label="送料未入力" />
-                <StatusPill v-if="r.sale.unmatched === 1" class="m-flag" tone="warn" label="未紐付け" />
-              </template>
-            </div>
-            <span
-              class="row-title"
-              :class="{ clickable: rowClickable(r) }"
-              :title="rowTitle(r)"
-              :role="rowClickable(r) ? 'button' : undefined"
-              :tabindex="rowClickable(r) ? 0 : undefined"
-              @keydown.enter="onRowClick(r)"
-              @keydown.space.prevent="onRowClick(r)"
-              @click="onRowClick(r)"
-            >{{ rowTitle(r) }}</span>
-
-            <template v-if="r.kind === 'sale' && r.sale">
-              <div class="row-sub">{{ saleSubText(r.sale) }}</div>
-              <div class="chip-row fixed-row" :title="saleChipRowTitle(r.sale)">
-                <button
-                  v-if="r.sale.kind === 'resale'"
-                  class="kind-toggle"
-                  title="私物に変更する（確認あり）"
-                  @click="r.sale && setKind(r.sale, 'personal')"
-                >
-                  <StatusChip tone="brand" :label="SALE_KIND_LABEL.resale" />
-                </button>
-                <StatusChip v-else tone="neutral" label="私物" />
-                <StatusChip v-if="r.sale.source === 'collector'" tone="neutral" label="自動取得" />
-                <CodeChip v-for="mc in r.sale.model_codes" :key="mc" kind="model" :code="mc" />
-                <div class="chip-tags">
-                  <StatusChip v-for="t in r.sale.tags" :key="t.id" tone="info" :label="t.name" />
-                  <span
-                    v-for="t in r.sale.inherited_tags" :key="'inh-' + t.id"
-                    class="chip-inherited-wrap"
-                    :title="tagOriginTitle(t.from)"
-                  >
-                    <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
-                    <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
-                  </span>
-                </div>
+          <div class="slot-in">
+            <div
+              :data-row-id="r.id"
+              class="work-row"
+              :class="{
+                focused: focusedId === r.id,
+                held: !!hold,
+                settled: !hold && r.kind === 'sale' && !!r.sale && !rowUnresolved(r),
+                'needs-shipment': r.kind === 'sale' && r.sale?.status === 'waiting_shipment',
+                'needs-input': !hold && rowUnresolved(r),
+              }"
+            >
+              <div
+                class="cell-thumb"
+                :class="{ clickable: rowClickable(r) }"
+                :title="rowClickTitle(r)"
+                :role="rowClickable(r) ? 'button' : undefined"
+                :tabindex="rowClickable(r) ? 0 : undefined"
+                @keydown.enter="onRowClick(r)"
+                @keydown.space.prevent="onRowClick(r)"
+                @click="onRowClick(r)"
+              >
+                <img
+                  v-if="showThumb(r)"
+                  class="thumb"
+                  :src="rowThumbUrl(r)!"
+                  alt=""
+                  loading="lazy"
+                  @error="onThumbError(r.key)"
+                />
+                <span v-else class="thumb-placeholder">{{ placeholderChar(r) }}</span>
               </div>
-              <div class="note-row fixed-row">
-                <template v-if="r.sale.note">
-                  <Icon name="note" :size="14" class="icon-note" />
-                  <span class="note-label">メモ</span>
-                  <span class="note-text" :title="r.sale.note">{{ r.sale.note }}</span>
+
+              <div class="cell-product">
+                <div class="row-labels">
+                  <StatusChip tone="neutral" :label="CHANNEL_LABEL[rowChannel(r)]" :title="`出品先：${CHANNEL_LABEL[rowChannel(r)]}`" />
+                  <StatusPill v-if="r.kind === 'sale' && r.sale?.status && SALE_STATUS_PILL[r.sale.status]"
+                    :tone="SALE_STATUS_PILL[r.sale.status].tone" :label="SALE_STATUS_PILL[r.sale.status].label"
+                    :title="SALE_STATUS_PILL[r.sale.status].title" />
+                  <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="LISTING_STATUS_LABEL[r.listing.status]" />
+                  <StatusChip v-if="r.sale && !r.sale.status" tone="neutral" :label="r.sale.source === 'manual' ? '手入力' : '状態未取得'" />
+                  <!-- スマホ幅だけ：粗利がまだ出ない理由を状態ラベル（①）に出す。表の列が無いので、ここで一目で分かるように -->
+                  <template v-if="r.sale && r.sale.kind === 'resale'">
+                    <StatusPill v-if="!r.sale.is_shipping_confirmed && !hold" class="m-flag" tone="warn" label="送料未入力" />
+                    <StatusPill v-if="r.sale.unmatched === 1" class="m-flag" tone="warn" label="未紐付け" />
+                  </template>
+                </div>
+                <!-- 押せる範囲は .title-hit（スマホ幅では上下に広げて 44px 以上）。文字の大きさと並びは変えない -->
+                <div
+                  class="title-hit"
+                  :class="{ clickable: rowClickable(r) }"
+                  :role="rowClickable(r) ? 'button' : undefined"
+                  :tabindex="rowClickable(r) ? 0 : undefined"
+                  @keydown.enter="onRowClick(r)"
+                  @keydown.space.prevent="onRowClick(r)"
+                  @click="onRowClick(r)"
+                ><span class="row-title" :title="rowTitle(r)">{{ rowTitle(r) }}</span></div>
+
+                <template v-if="r.kind === 'sale' && r.sale">
+                  <div class="row-sub">{{ saleSubText(r.sale) }}</div>
+                  <div class="chip-row fixed-row" :title="saleChipRowTitle(r.sale)">
+                    <button
+                      v-if="r.sale.kind === 'resale'"
+                      class="kind-toggle"
+                      title="私物に変更する（確認あり）"
+                      @click="r.sale && setKind(r.sale, 'personal')"
+                    >
+                      <StatusChip tone="brand" :label="SALE_KIND_LABEL.resale" />
+                    </button>
+                    <StatusChip v-else tone="neutral" label="私物" />
+                    <StatusChip v-if="r.sale.source === 'collector'" tone="neutral" label="自動取得" />
+                    <CodeChip v-for="mc in r.sale.model_codes" :key="mc" kind="model" :code="mc" />
+                    <div class="chip-tags">
+                      <StatusChip v-for="t in r.sale.tags" :key="t.id" tone="info" :label="t.name" />
+                      <span
+                        v-for="t in r.sale.inherited_tags" :key="'inh-' + t.id"
+                        class="chip-inherited-wrap"
+                        :title="tagOriginTitle(t.from)"
+                      >
+                        <span class="chip-origin-mark">{{ tagOriginMark(t.from) }}</span>
+                        <StatusChip tone="neutral" :label="t.name" class="chip-inherited" />
+                      </span>
+                    </div>
+                  </div>
+                  <div class="note-row fixed-row">
+                    <template v-if="r.sale.note">
+                      <Icon name="note" :size="14" class="icon-note" />
+                      <span class="note-label">メモ</span>
+                      <span class="note-text" :title="r.sale.note">{{ r.sale.note }}</span>
+                    </template>
+                  </div>
+                </template>
+
+                <template v-else-if="r.listing">
+                  <div class="row-sub" title="更新日から推定">{{ listingSubText(r.listing) }}</div>
+                  <div class="chip-row fixed-row" :title="listingChipRowTitle(r.listing)">
+                    <div class="chip-tags">
+                      <CodeChip v-for="mc in r.listing.model_codes" :key="mc" kind="model" :code="mc" />
+                      <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
+                      <StatusChip
+                        v-if="seenStale(r.listing)"
+                        tone="neutral"
+                        label="前回の取り込みで見えず"
+                        title="1ページ目に無かっただけかもしれません。売れていれば売上に出ます"
+                      />
+                    </div>
+                  </div>
+                  <!-- 出品にはメモが無いが、販売行と高さを揃えるため同じ分だけ確保する -->
+                  <div class="note-row fixed-row"></div>
                 </template>
               </div>
-            </template>
 
-            <template v-else-if="r.listing">
-              <div class="row-sub" title="更新日から推定">{{ listingSubText(r.listing) }}</div>
-              <div class="chip-row fixed-row" :title="listingChipRowTitle(r.listing)">
-                <div class="chip-tags">
-                  <CodeChip v-for="mc in r.listing.model_codes" :key="mc" kind="model" :code="mc" />
-                  <StatusChip v-if="r.listing.likes != null" tone="neutral" :label="`いいね ${r.listing.likes}`" />
-                  <StatusChip
-                    v-if="seenStale(r.listing)"
-                    tone="neutral"
-                    label="前回の取り込みで見えず"
-                    title="1ページ目に無かっただけかもしれません。売れていれば売上に出ます"
-                  />
+              <div class="cell-meta">
+                <div class="cell-price num">
+                  <span class="m-label">価格</span>
+                  {{ yen(r.kind === 'sale' ? (r.sale?.price ?? 0) : (r.listing?.price ?? 0)) }}
+                  <div v-if="r.kind === 'sale' && r.sale && r.sale.kind !== 'personal'" class="faint fee-line">
+                    手数料 −{{ yen(r.sale.fee) }}
+                    <StatusChip
+                      v-if="showFeeActualChip(r.sale)"
+                      tone="info"
+                      label="実額"
+                      title="手数料の実額（率の見込みではなく実際にかかった手数料）"
+                    />
+                  </div>
+                </div>
+
+                <div class="cell-ship">
+                  <span class="m-label">発送方法（送料）</span>
+                  <!-- 発送方法を入れた行：選んだ場所に、入れたものを出す（1.2 秒後に畳まれる） -->
+                  <span v-if="hold" class="held-done"><Icon name="check" :size="14" class="held-check" />済　{{ hold.label }}</span>
+                  <template v-else-if="r.kind === 'listing' && r.listing">
+                    <select
+                      class="ship-select"
+                      :value="r.listing.shipping_method_id ?? ''"
+                      @change="r.listing && setListingShipping(r.listing, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option value="">未定</option>
+                      <option v-for="m in methods" :key="m.id" :value="m.id">
+                        {{ m.name }}　{{ yen(m.fee) }}
+                      </option>
+                    </select>
+                  </template>
+                  <template v-else-if="r.kind === 'sale' && r.sale">
+                    <span v-if="r.sale.kind === 'personal'" class="faint">—</span>
+                    <span v-else-if="r.sale.shipping_source === 'actual' && r.sale.shipping_fee > 0" class="shipping-actual">
+                      {{ yen(r.sale.shipping_fee) }}
+                      <StatusChip tone="ok" label="実額" title="送料の実額（実際に払った送料）" />
+                    </span>
+                    <select
+                      v-else
+                      class="ship-select"
+                      :value="r.sale.shipping_method_id ?? ''"
+                      :class="{ invalid: !r.sale.is_shipping_confirmed }"
+                      :title="(r.sale.shipping_source === 'actual' && r.sale.shipping_fee === 0 && !r.sale.is_shipping_confirmed) ? 'メルカリ側の送料は0円でした。自分で払った送料の発送方法を選んでください' : undefined"
+                      @change="r.sale && setShipping(r, r.sale, $event.target as HTMLSelectElement)"
+                    >
+                      <option value="">{{ (r.sale.shipping_source === 'actual' && r.sale.shipping_fee === 0 && !r.sale.is_shipping_confirmed) ? '選択…（メルカリ便以外）' : '選択…' }}</option>
+                      <option v-for="m in methods" :key="m.id" :value="m.id">
+                        {{ m.name }}　{{ yen(m.fee) }}
+                      </option>
+                    </select>
+                  </template>
+                </div>
+
+                <div class="cell-cost">
+                  <span class="m-label">{{ costHeaderLabel }}</span>
+                  <span v-if="r.sale?.kind === 'personal'" class="faint">対象外（私物）</span>
+                  <AllocationCell v-else-if="r.sale"
+                    :linked="r.sale.item_count > 0" :cost="r.sale.cost"
+                    :codes="saleItemCodes.get(r.sale.id) ?? []" :automatic="!!r.sale.auto_linked"
+                    :hint="!r.sale.item_count ? costCandidateText(r.sale) : null"
+                    @open="openSaleAlloc(r.sale)" />
+                  <AllocationCell v-else-if="r.listing"
+                    :linked="r.listing.items.length > 0" :cost="r.listing.reserved_cost"
+                    :codes="r.listing.items.map(it => it.item_code)"
+                    :readonly="!['active', 'suspended'].includes(r.listing.status)"
+                    @open="openListingAlloc(r.listing)" />
+                </div>
+
+                <div class="cell-profit num">
+                  <span class="m-label">{{ rowProfitLabel(r) }}</span>
+                  <Transition name="settle" mode="out-in">
+                    <!-- 「済」の間は、送料を入れる前の言い方（「送料を選ぶと確定」）を出さない -->
+                    <span v-if="hold" key="held" class="faint">—</span>
+                    <span v-else-if="r.kind === 'sale' && r.sale && r.sale.kind === 'personal'" key="personal" class="faint">私物</span>
+                    <strong
+                      v-else-if="r.kind === 'sale' && r.sale && !rowUnresolved(r)"
+                      :key="'c' + r.sale.gross_profit"
+                      :class="r.sale.gross_profit >= 0 ? 'profit' : 'loss'"
+                    >{{ !isRealized(r.sale) ? '見込み ' : '' }}{{ yen(r.sale.gross_profit) }}</strong>
+                    <div v-else-if="r.kind === 'sale' && r.sale" key="u" class="profit-na">
+                      <span class="faint">{{ pendingReasonLabel(r.sale) }}</span>
+                      <span v-if="profitWhyText(r.sale)" class="why">{{ profitWhyText(r.sale) }}</span>
+                    </div>
+                    <strong
+                      v-else-if="r.kind === 'listing' && r.listing && r.listing.expected_profit != null"
+                      :key="'l' + r.listing.expected_profit"
+                      :class="r.listing.expected_profit >= 0 ? 'profit' : 'loss'"
+                    >{{ yen(r.listing.expected_profit) }}</strong>
+                    <span v-else key="d" class="faint">—</span>
+                  </Transition>
                 </div>
               </div>
-              <!-- 出品にはメモが無いが、販売行と高さを揃えるため同じ分だけ確保する -->
-              <div class="note-row fixed-row"></div>
-            </template>
-          </div>
 
-          <div class="cell-meta">
-            <div class="cell-price num">
-              <span class="m-label">価格</span>
-              {{ yen(r.kind === 'sale' ? (r.sale?.price ?? 0) : (r.listing?.price ?? 0)) }}
-              <div v-if="r.kind === 'sale' && r.sale && r.sale.kind !== 'personal'" class="faint fee-line">
-                手数料 −{{ yen(r.sale.fee) }}
-                <StatusChip
-                  v-if="showFeeActualChip(r.sale)"
-                  tone="info"
-                  label="実額"
-                  title="手数料の実額（率の見込みではなく実際にかかった手数料）"
-                />
+              <div class="cell-ops">
+                <template v-if="r.kind === 'sale' && r.sale">
+                  <button
+                    v-if="r.sale.mercari_item_id"
+                    class="icon ghost"
+                    :aria-label="`${CHANNEL_LABEL[r.sale.channel]}で開く`"
+                    :title="`${CHANNEL_LABEL[r.sale.channel]}の取引画面を開く`"
+                    @click.stop="r.sale && openChannelPageExternal(r.sale.channel, 'transaction', r.sale.mercari_item_id)"
+                  >
+                    <Icon name="external" :size="14" />
+                  </button>
+                  <button class="sm ghost fade-btn" @click="r.sale && openTagPicker(r.sale, $event)" title="タグを編集する">タグ</button>
+                  <button v-if="canOpenTimeline(r.sale)" class="sm ghost" @click="openTimelineForSale(r.sale)">履歴</button>
+                  <button class="sm ghost fade-btn" @click="r.sale && editNote(r.sale)" title="メモを編集する">メモ</button>
+                  <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editPackaging(r.sale)" title="梱包材費を編集する">梱包</button>
+                  <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editFee(r.sale)" title="販売手数料を実額に直す（空欄で率の計算に戻ります）">手数料</button>
+                  <button v-if="r.sale.kind === 'personal'" class="sm ghost fade-btn" @click="r.sale && setKind(r.sale, 'resale')">{{ SALE_KIND_LABEL.resale }}にする</button>
+                  <button class="icon ghost" aria-label="削除" @click="r.sale && remove(r.sale)">
+                    <Icon name="trash" :size="16" />
+                  </button>
+                </template>
+                <template v-else-if="r.listing && (r.listing.status === 'active' || r.listing.status === 'suspended')">
+                  <button
+                    class="icon ghost"
+                    :aria-label="`${CHANNEL_LABEL[r.listing.channel]}で開く`"
+                    :title="`${CHANNEL_LABEL[r.listing.channel]}の商品ページを開く`"
+                    @click.stop="r.listing && openChannelPageExternal(r.listing.channel, 'item', r.listing.mercari_item_id)"
+                  >
+                    <Icon name="external" :size="14" />
+                  </button>
+                  <button class="sm ghost" @click="r.listing && endListing(r.listing)">取り下げ</button>
+                </template>
               </div>
             </div>
-
-            <div class="cell-ship">
-              <span class="m-label">発送方法（送料）</span>
-              <template v-if="r.kind === 'listing' && r.listing">
-                <select
-                  class="ship-select"
-                  :value="r.listing.shipping_method_id ?? ''"
-                  @change="r.listing && setListingShipping(r.listing, ($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="">未定</option>
-                  <option v-for="m in methods" :key="m.id" :value="m.id">
-                    {{ m.name }}　{{ yen(m.fee) }}
-                  </option>
-                </select>
-              </template>
-              <template v-else-if="r.kind === 'sale' && r.sale">
-                <span v-if="r.sale.kind === 'personal'" class="faint">—</span>
-                <span v-else-if="r.sale.shipping_source === 'actual' && r.sale.shipping_fee > 0" class="shipping-actual">
-                  {{ yen(r.sale.shipping_fee) }}
-                  <StatusChip tone="ok" label="実額" title="送料の実額（実際に払った送料）" />
-                </span>
-                <select
-                  v-else
-                  class="ship-select"
-                  :value="r.sale.shipping_method_id ?? ''"
-                  :class="{ invalid: !r.sale.is_shipping_confirmed }"
-                  :title="(r.sale.shipping_source === 'actual' && r.sale.shipping_fee === 0 && !r.sale.is_shipping_confirmed) ? 'メルカリ側の送料は0円でした。自分で払った送料の発送方法を選んでください' : undefined"
-                  @change="r.sale && setShipping(r.sale, ($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="">{{ (r.sale.shipping_source === 'actual' && r.sale.shipping_fee === 0 && !r.sale.is_shipping_confirmed) ? '選択…（メルカリ便以外）' : '選択…' }}</option>
-                  <option v-for="m in methods" :key="m.id" :value="m.id">
-                    {{ m.name }}　{{ yen(m.fee) }}
-                  </option>
-                </select>
-              </template>
-            </div>
-
-            <div class="cell-cost">
-              <span class="m-label">{{ costHeaderLabel }}</span>
-              <span v-if="r.sale?.kind === 'personal'" class="faint">対象外（私物）</span>
-              <AllocationCell v-else-if="r.sale"
-                :linked="r.sale.item_count > 0" :cost="r.sale.cost"
-                :codes="saleItemCodes.get(r.sale.id) ?? []" :automatic="!!r.sale.auto_linked"
-                :hint="!r.sale.item_count ? costCandidateText(r.sale) : null"
-                @open="openSaleAlloc(r.sale)" />
-              <AllocationCell v-else-if="r.listing"
-                :linked="r.listing.items.length > 0" :cost="r.listing.reserved_cost"
-                :codes="r.listing.items.map(it => it.item_code)"
-                :readonly="!['active', 'suspended'].includes(r.listing.status)"
-                @open="openListingAlloc(r.listing)" />
-            </div>
-
-            <div class="cell-profit num">
-              <span class="m-label">{{ rowProfitLabel(r) }}</span>
-              <Transition name="settle" mode="out-in">
-                <span v-if="r.kind === 'sale' && r.sale && r.sale.kind === 'personal'" key="personal" class="faint">私物</span>
-                <strong
-                  v-else-if="r.kind === 'sale' && r.sale && !rowUnresolved(r)"
-                  :key="'c' + r.sale.gross_profit"
-                  :class="r.sale.gross_profit >= 0 ? 'profit' : 'loss'"
-                >{{ !isRealized(r.sale) ? '見込み ' : '' }}{{ yen(r.sale.gross_profit) }}</strong>
-                <div v-else-if="r.kind === 'sale' && r.sale" key="u" class="profit-na">
-                  <span class="faint">{{ pendingReasonLabel(r.sale) }}</span>
-                  <span v-if="profitWhyText(r.sale)" class="why">{{ profitWhyText(r.sale) }}</span>
-                </div>
-                <strong
-                  v-else-if="r.kind === 'listing' && r.listing && r.listing.expected_profit != null"
-                  :key="'l' + r.listing.expected_profit"
-                  :class="r.listing.expected_profit >= 0 ? 'profit' : 'loss'"
-                >{{ yen(r.listing.expected_profit) }}</strong>
-                <span v-else key="d" class="faint">—</span>
-              </Transition>
-            </div>
-          </div>
-
-          <div class="cell-ops">
-            <template v-if="r.kind === 'sale' && r.sale">
-              <button
-                v-if="r.sale.mercari_item_id"
-                class="icon ghost"
-                :aria-label="`${CHANNEL_LABEL[r.sale.channel]}で開く`"
-                :title="`${CHANNEL_LABEL[r.sale.channel]}の取引画面を開く`"
-                @click.stop="r.sale && openChannelPageExternal(r.sale.channel, 'transaction', r.sale.mercari_item_id)"
-              >
-                <Icon name="external" :size="14" />
-              </button>
-              <button class="sm ghost fade-btn" @click="r.sale && openTagPicker(r.sale, $event)" title="タグを編集する">タグ</button>
-              <button v-if="canOpenTimeline(r.sale)" class="sm ghost" @click="openTimelineForSale(r.sale)">履歴</button>
-              <button class="sm ghost fade-btn" @click="r.sale && editNote(r.sale)" title="メモを編集する">メモ</button>
-              <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editPackaging(r.sale)" title="梱包材費を編集する">梱包</button>
-              <button v-if="r.sale.kind !== 'personal'" class="sm ghost fade-btn" @click="r.sale && editFee(r.sale)" title="販売手数料を実額に直す（空欄で率の計算に戻ります）">手数料</button>
-              <button v-if="r.sale.kind === 'personal'" class="sm ghost fade-btn" @click="r.sale && setKind(r.sale, 'resale')">{{ SALE_KIND_LABEL.resale }}にする</button>
-              <button class="icon ghost" aria-label="削除" @click="r.sale && remove(r.sale)">
-                <Icon name="trash" :size="16" />
-              </button>
-            </template>
-            <template v-else-if="r.listing && (r.listing.status === 'active' || r.listing.status === 'suspended')">
-              <button
-                class="icon ghost"
-                :aria-label="`${CHANNEL_LABEL[r.listing.channel]}で開く`"
-                :title="`${CHANNEL_LABEL[r.listing.channel]}の商品ページを開く`"
-                @click.stop="r.listing && openChannelPageExternal(r.listing.channel, 'item', r.listing.mercari_item_id)"
-              >
-                <Icon name="external" :size="14" />
-              </button>
-              <button class="sm ghost" @click="r.listing && endListing(r.listing)">取り下げ</button>
-            </template>
           </div>
         </div>
       </div>
@@ -1511,7 +1640,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
       :open="!!timelineItemId"
       :inventory-item-id="timelineItemId"
       @close="timelineItemId = null"
-      @changed="load"
+      @changed="load()"
     />
   </div>
 </template>
@@ -1563,7 +1692,9 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   height: auto;
   cursor: pointer;
 }
-.input-pill-btn:hover:not(:disabled) { background: transparent; filter: brightness(.97); }
+@media (hover: hover) and (pointer: fine) {
+  .input-pill-btn:hover:not(:disabled) { background: transparent; filter: brightness(.97); }
+}
 .input-pill-btn.active { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 999px; }
 
 .totals-bar {
@@ -1586,12 +1717,53 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   padding: 10px 10px;
   border-top: 1px solid var(--line-soft);
 }
-.work-row:first-child { border-top: 0; }
 .work-row-hdr {
   padding: 6px 10px;
+  border-top: 0;
   color: var(--text-faint);
   font-size: var(--fs-12);
 }
+
+/* --- 畳むための入れ物（.slot）---
+   行を高さごと畳む。grid の行を 1fr → 0fr に動かすと、中身の高さを測らずに畳める。
+   畳むとき以外は、幅いっぱいの 1 マスなだけで見た目は変わらない。
+   行は padding・罫線を持つので、そのままでは 0 まで縮まない。padding の無い .slot-in で包んで、そちらを縮める。 */
+.slot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1fr;
+  min-height: 0; /* 「済」の間だけ行の高さを保つ min-height（インライン）を、畳むときに 0 へ動かせるよう明示しておく */
+}
+.slot > * { min-height: 0; }
+.slot-in { display: grid; grid-template-columns: minmax(0, 1fr); }
+/* 動かすのは畳むときだけ。「済」に替える瞬間（min-height が 0 → 行の高さになる）は動かさない */
+.slot.collapsing {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: grid-template-rows var(--dur) var(--ease), min-height var(--dur) var(--ease), opacity var(--dur) var(--ease);
+}
+
+/* --- 発送方法を入れた行（「済」。1.2 秒だけ残って畳まれる）---
+   行は元のまま（高さも変えない）。選んだ場所だけ「済」に替え、ほかは薄くして、触れないようにする */
+.work-row.held { pointer-events: none; }
+.work-row.held .cell-thumb,
+.work-row.held .cell-product,
+.work-row.held .cell-price,
+.work-row.held .cell-cost,
+.work-row.held .cell-profit,
+.work-row.held .cell-ops { opacity: .55; }
+.held-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  font-size: var(--fs-14);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.held-check { color: var(--profit); flex: 0 0 auto; }
 .work-row.focused { background: var(--brand-soft); }
 /* 資産が確定した行（粗利確定・私物）はグレーに沈める。未確定の行が相対的に目立つ */
 .work-row.settled { background: var(--surface-hi); }
@@ -1688,7 +1860,13 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   opacity: .35;
   transition: opacity var(--dur) var(--ease);
 }
-.work-row:hover .fade-btn { opacity: 1; }
+/* 行に触れたら濃くなる（マウスのある端末だけ）。マウスの無い端末では最初から濃くしておく */
+@media (hover: hover) and (pointer: fine) {
+  .work-row:hover .fade-btn { opacity: 1; }
+}
+@media (hover: none), (pointer: coarse) {
+  .fade-btn { opacity: 1; }
+}
 
 .kind-toggle {
   flex-shrink: 0;
@@ -1699,7 +1877,9 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   height: auto;
   cursor: pointer;
 }
-.kind-toggle:hover:not(:disabled) { background: transparent; }
+@media (hover: hover) and (pointer: fine) {
+  .kind-toggle:hover:not(:disabled) { background: transparent; }
+}
 
 .month-chip-btn {
   flex-shrink: 0;
@@ -1710,7 +1890,9 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   height: auto;
   cursor: pointer;
 }
-.month-chip-btn:hover:not(:disabled) { background: transparent; }
+@media (hover: hover) and (pointer: fine) {
+  .month-chip-btn:hover:not(:disabled) { background: transparent; }
+}
 
 .ship-select {
   width: 100%;
@@ -1850,6 +2032,12 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   .cell-product .row-labels { min-height: 0; margin-bottom: 6px; }
   .m-flag { display: inline-flex; }
   .work-row .row-title { -webkit-line-clamp: 3; min-height: 0; }
+  /* 題を押せる範囲：文字の大きさと並びはそのまま、上下に 12px ずつ広げて高さ 44px 以上にする。
+     広げた分は負の margin で打ち消す。前後の要素（状態ラベル・補助の行）に重なるが、どちらも押せない文字なので、
+     上に出して（z-index）題の方が押される */
+  .title-hit { position: relative; z-index: 1; margin: -12px 0; padding: 12px 0; }
+  /* 「済」は、選んだセレクトがあった場所（44px）にそのまま出す */
+  .cell-ship .held-done { min-height: 44px; }
   .work-row .row-sub { -webkit-line-clamp: 2; min-height: 0; }
   .work-row .chip-row.fixed-row { flex-wrap: wrap; min-height: 0; }
   .work-row .chip-row.fixed-row .chip-tags { flex-wrap: wrap; overflow: visible; }

@@ -1087,7 +1087,9 @@ tr.focused { background: var(--brand-soft); }
     border: 1px solid var(--line);
     border-radius: var(--radius-md);
   }
-  .lines-table tbody tr:hover { background: var(--surface); }
+  @media (hover: hover) and (pointer: fine) {
+    .lines-table tbody tr:hover { background: var(--surface); }
+  }
   .lines-table td { display: block; min-width: 0; padding: 0; border: none; }
   .lines-table td.name-cell { grid-column: 1 / -1; padding-right: 48px; }
   .lines-table td.model-cell { grid-column: 1 / -1; font-size: var(--fs-12); }
@@ -1125,7 +1127,9 @@ tr.focused { background: var(--brand-soft); }
     border-radius: var(--radius);
     box-shadow: var(--shadow-1);
   }
-  .table-panel tbody tr:hover { background: var(--surface); }
+  @media (hover: hover) and (pointer: fine) {
+    .table-panel tbody tr:hover { background: var(--surface); }
+  }
   .table-panel tbody tr.focused { background: var(--brand-soft); }
   /* 要対応（価格未入力の下書き）：売上タブのカードと同じ、左に橙の帯 */
   .table-panel tbody tr.needs-input { box-shadow: inset 4px 0 0 var(--warn), var(--shadow-1); }

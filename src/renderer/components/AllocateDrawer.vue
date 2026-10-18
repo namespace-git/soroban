@@ -25,7 +25,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
 
-const toast = inject<(text: string, kind: 'ok' | 'warn') => void>('toast')!
+const toast = inject<(text: string, kind: 'ok' | 'warn', action?: { label: string; run: () => void | Promise<void> }) => void>('toast')!
 const choose = inject<(title: string, choices: ConfirmChoice[], opts?: { message?: string }) => Promise<string | null>>('choose')!
 
 const candidates = ref<InventoryItem[]>([])
@@ -199,8 +199,15 @@ const profitLabel = computed(() => {
 // チェックが変わるたびに main へ見積もりを頼む（手数料・送料は画面で計算しない）。
 // 150ms デバウンスし、応答が前後しても最後に投げた要求の結果だけを反映する
 const estimate = ref<ProfitEstimate | null>(null)
+// estimate がどの在庫の組み合わせの見積もりか。確定の通知に出す粗利が、いま選んでいる分のものか確かめるのに使う
+const estimateKey = ref('')
 let estimateTimer: ReturnType<typeof setTimeout> | undefined
 let estimateSeq = 0
+
+function selectionKey(ids: string[]): string {
+  return [...ids].sort().join(',')
+}
+const currentKey = computed(() => selectionKey([...matchedItems.value.map(m => m.id), ...picked.value]))
 
 async function runEstimate() {
   const seq = ++estimateSeq
@@ -211,13 +218,13 @@ async function runEstimate() {
   let channel: SalesChannel | undefined
   let fee: number | null | undefined
   if (props.mode === 'listing') {
-    if (!props.listing) { estimate.value = null; return }
+    if (!props.listing) { estimate.value = null; estimateKey.value = ''; return }
     priceVal = props.listing.price
     shippingMethodId = props.listing.shipping_method_id
     packagingCost = 0 // 出品はまだ梱包費が無い（見込み粗利は送料込み・梱包前）
     channel = props.listing.channel
   } else {
-    if (!props.sale) { estimate.value = null; return }
+    if (!props.sale) { estimate.value = null; estimateKey.value = ''; return }
     priceVal = props.sale.price
     shippingMethodId = props.sale.shipping_method_id
     packagingCost = props.sale.packaging_cost
@@ -233,7 +240,10 @@ async function runEstimate() {
     channel,
     fee,
   })
-  if (seq === estimateSeq) estimate.value = result
+  if (seq === estimateSeq) {
+    estimate.value = result
+    estimateKey.value = selectionKey(inventoryItemIds)
+  }
 }
 
 function scheduleEstimate() {
@@ -254,6 +264,13 @@ function truncate(text: string, n: number): string {
 }
 function soldToLabel(sold: { title: string; price: number }): string {
   return `販売「${truncate(sold.title, 12)}」${yen(sold.price)} に紐付け済み`
+}
+/** 紐付けを確定したときの通知。在庫コードは 3 つまで、残りは「ほか n 点」。粗利が無ければその部分は出さない */
+function linkedToastText(codes: string[], profit: number | null, label: string): string {
+  const shown = codes.slice(0, 3).join('、')
+  const rest = codes.length - 3
+  const head = rest > 0 ? `${shown} ほか${rest}点` : shown
+  return `${head} を紐付けました${profit === null ? '' : ` ・ ${label} ${yen(profit)}`}`
 }
 
 // picked の中に販売済み（他の販売に紐付いた）在庫が含まれるなら、付け替えの警告を出してから進む
@@ -277,6 +294,13 @@ async function confirmPick() {
     takeFromSale = true
   }
   const opts = takeFromSale ? { takeFromSale: true } : undefined
+  // 確定して閉じたあとの通知に使う。シートが出していた見積もり（粗利）はここで控える
+  // （閉じると props が空になり、粗利の見出しも見積もりも使えなくなる）。いま選んでいる分の見積もりでなければ粗利は出さない
+  const doneText = linkedToastText(
+    candidates.value.filter(c => ids.includes(c.id)).map(c => c.item_code),
+    estimate.value && estimateKey.value === currentKey.value ? estimate.value.gross_profit : null,
+    profitLabel.value,
+  )
   try {
     if (props.mode === 'listing' && props.listing) {
       const moved = candidates.value.filter(c => ids.includes(c.id) && c.listing).length
@@ -295,6 +319,7 @@ async function confirmPick() {
       picked.value = new Set()
       emit('changed')
       emit('close')
+      toast(doneText, 'ok')
     }
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), 'warn')
@@ -445,7 +470,7 @@ function placeholderChar(): string {
 
       <template v-if="selectionMode === 'product'">
         <p class="faint product-help">型番が一致する未紐付け在庫を、仕入日の古い順に選びます。</p>
-        <label class="product-quantity">追加する点数 <input v-model.number="productQuantity" type="number" min="1" step="1" aria-label="追加する点数" /></label>
+        <label class="product-quantity">追加する点数 <input v-model.number="productQuantity" type="number" inputmode="numeric" min="1" step="1" aria-label="追加する点数" /></label>
         <div class="candidates">
           <div v-for="p in products" :key="p.code" class="product-row">
             <img v-if="productInfo.get(p.code)?.thumb_url && !failedProductImages.has(productInfo.get(p.code)!.thumb_url!)"
@@ -501,11 +526,15 @@ function placeholderChar(): string {
     <template #footer>
       <div class="match-footer">
         <div class="calc">
-          <span class="faint">{{ totalCount }}点</span>
-          <span class="num">原価 {{ yen(totalCost) }}</span>
-          <strong class="num" :class="previewProfit >= 0 ? 'profit' : 'loss'">
-            {{ profitLabel }} {{ yen(previewProfit) }}
-          </strong>
+          <template v-if="totalCount > 0">
+            <span class="faint">{{ totalCount }}点</span>
+            <span class="num">原価 {{ yen(totalCost) }}</span>
+            <strong class="num" :class="previewProfit >= 0 ? 'profit' : 'loss'">
+              {{ profitLabel }} {{ yen(previewProfit) }}
+            </strong>
+          </template>
+          <!-- 何も選んでいないときの粗利は「在庫なし」の数字で、正常に見えてしまう。数字は出さず、やることを言う -->
+          <span v-else class="faint">在庫を選ぶと粗利が出ます</span>
         </div>
         <button v-if="canReserve" class="primary" :disabled="!picked.size || pickingProduct || loading" @click="confirmPick">
           {{ confirmLabel }}
@@ -577,7 +606,9 @@ function placeholderChar(): string {
 }
 .blocked-help { margin: 2px 0 8px; }
 .blocked-item { flex-wrap: wrap; cursor: default; }
-.blocked-item:hover { background: transparent; }
+@media (hover: hover) and (pointer: fine) {
+  .blocked-item:hover { background: transparent; }
+}
 
 .ended-note { padding: 6px 8px; }
 
@@ -602,7 +633,10 @@ function placeholderChar(): string {
   cursor: pointer;
   line-height: 1.3;
 }
-.item:hover { background: var(--surface-hi); }
+/* hover は、マウスのある端末だけ。指で触った行が「触れたまま」の色で残らないように */
+@media (hover: hover) and (pointer: fine) {
+  .item:hover { background: var(--surface-hi); }
+}
 .item.sold { background: var(--warn-bg); }
 .item.on { background: var(--accent-soft); }
 .matched-item { cursor: default; }

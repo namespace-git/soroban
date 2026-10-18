@@ -24,6 +24,7 @@ import { useWebCollect, describeJob, formatRemaining } from './components/web-co
 import { parseOpenTarget } from './components/web-glue'
 import { runSourceLabel } from './utils/collector-run'
 import { yen } from './format'
+import { pushBackLayer, useBackClose } from './composables/useBackClose'
 
 type Tab = 'dashboard' | 'sales' | 'purchases' | 'inventory' | 'products' | 'monthly' | 'expenses' | 'settings' | 'help'
 /**
@@ -63,8 +64,24 @@ const tabs: Array<{ key: Tab; label: string; icon: IconName }> = [
 
 const tab = ref<Tab>('dashboard')
 const collecting = ref(false)
-const notice = ref<{ text: string; kind: 'ok' | 'warn' } | null>(null)
+// 通知（トースト）。action があるときは通知の中にボタンを出す（例：「元に戻す」。押すと run() して通知を閉じる）
+type NoticeAction = { label: string; run: () => void | Promise<void> }
+type Notice = { text: string; kind: 'ok' | 'warn'; action?: NoticeAction }
+const notice = ref<Notice | null>(null)
 let noticeTimer: ReturnType<typeof setTimeout> | undefined
+
+// 本文（<main>）。タブを替えたら先頭から読ませるために、ここのスクロールを触る
+const mainEl = ref<HTMLElement | null>(null)
+
+/** 本文を先頭へ。smooth は「今いるタブをもう一度押した」とき（動きを減らす設定なら即時）。タブを替えたときは描画のあとに即時 */
+function scrollMainTop(smooth = false) {
+  if (smooth) {
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    mainEl.value?.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' })
+    return
+  }
+  void nextTick(() => { if (mainEl.value) mainEl.value.scrollTop = 0 })
+}
 
 // 子からデータ再読み込みを促すためのカウンタ
 const revision = ref(0)
@@ -72,8 +89,29 @@ provide('revision', revision)
 // 直近の goto() 呼び出しに添えられた情報（型番など）。切替先の view が inject して読む
 const gotoPayload = ref<GotoPayload | null>(null)
 provide('gotoPayload', gotoPayload)
-function goto(t: Tab, payload?: GotoPayload) { tab.value = t; gotoPayload.value = payload ?? null }
+function goto(t: Tab, payload?: GotoPayload) {
+  tab.value = t
+  gotoPayload.value = payload ?? null
+  // 行を指定された（focusId）ときは、各画面がその行へスクロールする。それ以外は先頭から
+  if (!payload?.focusId) scrollMainTop()
+}
 provide('goto', goto)
+
+// 端末の「戻る」：ホーム以外のタブにいるあいだ、履歴に「タブの層」を 1 段だけ積む。
+// 一番上のシート → ホーム → アプリを閉じる、の順で戻れる。ホーム以外のタブ同士の移動では積み増さない
+let tabLayer: { release(): void } | null = null
+watch(tab, (t) => {
+  if (t === 'dashboard') {
+    const layer = tabLayer
+    tabLayer = null
+    layer?.release()
+  } else if (!tabLayer) {
+    tabLayer = pushBackLayer(() => {
+      tabLayer = null // 戻るで外れた層。ここで release すると履歴を余計に戻してしまう
+      goto('dashboard')
+    })
+  }
+})
 
 // --- Web 版：「取り込む」は取り込み担当の PC への依頼。通知から開く ---
 // window.sorobanWeb は Web 版（auth/boot.ts）だけが差す。Electron 版では undefined で、この節は何もしない
@@ -140,6 +178,8 @@ function onSearchSelect(hit: SearchHit) {
 
 function closeSearch() {
   searchOpen.value = false
+  // スマホ幅は上のバーが検索欄に替わっている。「戻る」で結果を閉じたら、欄と入力も「キャンセル」と同じく戻す
+  if (isMobile.value) closeMobileSearch()
 }
 
 // ナビの要対応バッジ・上部バーの取り込み状態はシェル自身も読む
@@ -210,6 +250,8 @@ function onMobileChange(e: { matches: boolean }) {
 
 // 「その他」のシート。タブを選ぶ・外を押す・Esc で閉じる
 const moreOpen = ref(false)
+// 端末の「戻る」で閉じる（一番上のシート → ホーム → アプリを閉じる）
+useBackClose(() => moreOpen.value, () => { moreOpen.value = false })
 const moreActive = computed(() => moreTabs.some(t => t.key === tab.value))
 // 上のバーの検索は、スマホ幅では虫めがねを押すと入力欄が上のバー全体に広がる
 const mobileSearch = ref(false)
@@ -222,9 +264,17 @@ async function logout() {
   await webAccount?.logout()
 }
 
+// 下のタブバー・縦ナビ・「その他」のシートから。今いるタブをもう一度押したら先頭へ、別のタブなら先頭から開く。
+// tab を先に替える：タブの層（戻る）を積むのが、シートの層を外すより先になる
 function selectTab(key: Tab) {
+  if (key === tab.value) {
+    moreOpen.value = false
+    scrollMainTop(true)
+    return
+  }
   tab.value = key
   moreOpen.value = false
+  scrollMainTop()
 }
 
 async function openMobileSearch() {
@@ -314,7 +364,8 @@ function chooseDialog(
 
 provide('confirm', confirmDialog)
 provide('choose', chooseDialog)
-provide('toast', (text: string, kind: 'ok' | 'warn') => showNotice({ text, kind }))
+// 通知。action を渡すと通知の中にボタンが出る（押すと run() を呼んで通知を閉じる。「元に戻す」など）
+provide('toast', (text: string, kind: 'ok' | 'warn', action?: NoticeAction) => showNotice({ text, kind, action }))
 // main.ts の errorHandler から。処理が失敗したのに何も起きない、を防ぐ
 function onSorobanError(e: Event) {
   // Electron の IPC が付ける "Error invoking remote method 'x': " は人には要らない
@@ -403,12 +454,22 @@ async function reportRun(runs: CollectorRun[]) {
   revision.value++
 }
 
-function showNotice(n: { text: string; kind: 'ok' | 'warn' } | null) {
+// 自動で消えるまでの時間。ボタン付きの ok は押す間を長めに。warn も手で閉じるまで頭を覆い続けないよう消す（閉じるボタンは残す）
+const NOTICE_MS = { ok: 5000, okWithAction: 6000, warn: 10000 }
+
+function showNotice(n: Notice | null) {
   clearTimeout(noticeTimer)
   notice.value = n
-  if (n?.kind === 'ok') {
-    noticeTimer = setTimeout(() => { notice.value = null }, 5000)
-  }
+  if (!n) return
+  const ms = n.kind === 'warn' ? NOTICE_MS.warn : n.action ? NOTICE_MS.okWithAction : NOTICE_MS.ok
+  noticeTimer = setTimeout(() => { notice.value = null }, ms)
+}
+
+// 通知の中のボタン。先に通知を閉じる（run() が新しい通知を出しても、それを消さない）
+async function onNoticeAction() {
+  const action = notice.value?.action
+  showNotice(null)
+  await action?.run()
 }
 
 async function collect() {
@@ -526,6 +587,10 @@ onUnmounted(() => {
   window.removeEventListener('soroban:error', onSorobanError)
   window.removeEventListener('keydown', onGlobalKeydown)
   mobileMql?.removeEventListener('change', onMobileChange)
+  // タブの層が残っていたら外す（作り直した App が、消えた App の「戻る」を引き継がないように）
+  const layer = tabLayer
+  tabLayer = null
+  layer?.release()
   if (webApi) {
     if ('serviceWorker' in navigator) navigator.serviceWorker.removeEventListener('message', onSwMessage)
     document.removeEventListener('visibilitychange', onVisibilityChange)
@@ -553,7 +618,7 @@ watch(dataRevision, loadProfitStrip)
             :class="{ active: tab === t.key }"
             :aria-current="tab === t.key ? 'page' : undefined"
             :title="t.label"
-            @click="tab = t.key"
+            @click="selectTab(t.key)"
           >
             <Icon :name="t.icon" :size="20" />
             <span class="nav-label">{{ t.label }}</span>
@@ -636,7 +701,8 @@ watch(dataRevision, loadProfitStrip)
           <div v-if="notice" class="toast" :class="notice.kind">
             <Icon v-if="notice.kind === 'warn'" class="toast-warn-icon" name="alert" :size="14" />
             <span class="toast-text">{{ notice.text }}</span>
-            <button class="ghost sm" @click="notice = null">閉じる</button>
+            <button v-if="notice.action" class="sm toast-action" @click="onNoticeAction">{{ notice.action.label }}</button>
+            <button class="ghost sm" @click="showNotice(null)">閉じる</button>
           </div>
         </Transition>
       </div>
@@ -650,7 +716,7 @@ watch(dataRevision, loadProfitStrip)
         </div>
       </Transition>
 
-      <main>
+      <main ref="mainEl">
         <Dashboard v-if="tab === 'dashboard'" />
         <Sales v-else-if="tab === 'sales'" />
         <Purchases v-else-if="tab === 'purchases'" />
@@ -826,7 +892,10 @@ watch(dataRevision, loadProfitStrip)
   text-align: center;
   cursor: pointer;
 }
-.nav-item:hover { background: var(--surface-hi); color: var(--text-dim); }
+/* hover は、マウスのある端末だけ（タッチで触れたあとに色が残らない） */
+@media (hover: hover) and (pointer: fine) {
+  .nav-item:hover { background: var(--surface-hi); color: var(--text-dim); }
+}
 .nav-item.active { color: var(--text); font-weight: 700; }
 
 .nav-label { flex: none; }
@@ -969,7 +1038,7 @@ main {
   position: fixed;
   top: calc(var(--topbar-h) + 12px);
   right: 24px;
-  z-index: 50;
+  z-index: 110; /* ドロワー・「その他」・検索の幕（100 / 60 / 62）より上。シートを開いたままでも通知が見える（確認ダイアログ 110 とは同じ層で、あとから描かれるダイアログが上） */
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -1110,7 +1179,8 @@ main {
     align-items: stretch;
     max-width: none;
   }
-  .toast { border-radius: var(--radius-md); }
+  .toast { border-radius: var(--radius-md); padding: 6px 8px 6px 16px; }
+  .toast button { min-height: 40px; } /* 親指で押せる高さ（通知の中の「元に戻す」「閉じる」） */
   .collect-banner button { min-height: 44px; }
   /* 待ちのバナーは上のバーの下に流し込む（本文を少し押し下げる。取り消しはそのまま 1 タップ） */
   .collect-banner-flow {
@@ -1147,7 +1217,9 @@ main {
     font-size: var(--fs-11);
     white-space: nowrap;
   }
-  .tabbar-item:hover:not(:disabled) { background: transparent; }
+  @media (hover: hover) and (pointer: fine) {
+    .tabbar-item:hover:not(:disabled) { background: transparent; }
+  }
   .tabbar-item.active { color: var(--text); font-weight: 700; box-shadow: inset 0 3px 0 var(--brand); }
   .tabbar-badge { position: absolute; top: 4px; left: calc(50% + 6px); }
 
@@ -1187,7 +1259,9 @@ main {
     color: var(--text-dim);
     font-size: var(--fs-12);
   }
-  .more-item:hover:not(:disabled) { background: transparent; }
+  @media (hover: hover) and (pointer: fine) {
+    .more-item:hover:not(:disabled) { background: transparent; }
+  }
   .more-item.active { background: var(--brand-soft); color: var(--text); font-weight: 700; }
   .more-foot {
     margin-top: 8px;

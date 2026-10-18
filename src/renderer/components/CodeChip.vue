@@ -55,7 +55,7 @@ async function onClick() {
 <template>
   <span
     class="chip code-chip" :class="kind"
-    title="クリックでコピー（【】付き）"
+    title="押すとコピー（【】付き）"
     @click.stop="onClick"
   >{{ copied ? 'コピー済み' : code }}</span>
 </template>
@@ -74,5 +74,7 @@ async function onClick() {
 }
 .chip.item  { background: var(--brand-soft); color: var(--brand-ink); }
 .chip.model { background: var(--surface-hi); color: var(--text-dim); }
-.chip:hover { filter: brightness(.97); }
+@media (hover: hover) and (pointer: fine) {
+  .chip:hover { filter: brightness(.97); }
+}
 </style>

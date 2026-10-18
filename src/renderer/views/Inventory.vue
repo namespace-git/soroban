@@ -673,7 +673,7 @@ async function editNote(item: InventoryItem) {
       <span class="toolbar-count">{{ totalCount }} 点 ・ 合計 {{ yen(totalCost) }}</span>
     </div>
     <p class="faint hint-row">
-      在庫コード（S-0012）をクリックするとコピーできます。メルカリのタイトルに貼るとその1点が自動で紐付きます。2個セットは【S-0012】【S-0013】のように並べます
+      在庫コード（S-0012）を押すとコピーできます。メルカリのタイトルに貼るとその1点が自動で紐付きます。2個セットは【S-0012】【S-0013】のように並べます
     </p>
 
     <!-- 型番ごと -->
@@ -1014,7 +1014,9 @@ async function editNote(item: InventoryItem) {
   height: auto;
   cursor: pointer;
 }
-.aging-chip-btn:hover:not(:disabled) { background: transparent; }
+@media (hover: hover) and (pointer: fine) {
+  .aging-chip-btn:hover:not(:disabled) { background: transparent; }
+}
 
 .link-action {
   display: inline-flex;
@@ -1031,7 +1033,9 @@ async function editNote(item: InventoryItem) {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.link-action:hover:not(:disabled) { background: transparent; color: var(--text); }
+@media (hover: hover) and (pointer: fine) {
+  .link-action:hover:not(:disabled) { background: transparent; color: var(--text); }
+}
 
 /* --- 型番ごとのグループカード --- */
 .group { padding: 0; margin-bottom: 16px; overflow: hidden; }
@@ -1312,7 +1316,9 @@ tr.focused { background: var(--brand-soft); }
     border-radius: var(--radius);
     box-shadow: var(--shadow-1);
   }
-  .table-panel tbody tr:hover { background: var(--surface); }
+  @media (hover: hover) and (pointer: fine) {
+    .table-panel tbody tr:hover { background: var(--surface); }
+  }
   .table-panel tbody tr.focused { background: var(--brand-soft); }
   .table-panel td { display: block; min-width: 0; padding: 0; border: none; width: auto; }
   .table-panel td.thumb-cell { position: absolute; top: 12px; left: 12px; }

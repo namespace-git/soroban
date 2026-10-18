@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import Icon from './Icon.vue'
+import { useBackClose } from '../composables/useBackClose'
+import {
+  SWIPE_SETTLE_MS, SWIPE_SLOP, pushSwipeSample, shouldCloseBySwipe, swipeVelocity,
+  type SwipeSample,
+} from './drawer-swipe'
 
 const props = withDefaults(defineProps<{
   open: boolean
@@ -18,6 +23,107 @@ let lastFocused: HTMLElement | null = null
 function close() {
   emit('close')
 }
+
+// 「戻る」（Android の戻るボタンなど）で閉じる。ヘッダーの×と同じ意味
+useBackClose(() => props.open, close)
+
+// --- スマホ幅（767px 以下）の下からのシート：ヘッダーとつまみを下に引いて閉じる ---
+// 引いている間は指についてくる（transform）。80px 以上引いて離すか、0.5px/ms 以上で払うと閉じ、
+// 足りなければ 180ms で元に戻す。本文（.drawer-body）のスクロールとは別の面なので喧嘩しない。
+// 判定の値と関数は drawer-swipe.ts。デスクトップ幅（768px 以上）では何もしない
+type SheetMode = 'idle' | 'drag' | 'out' | 'back'
+const SHEET_QUERY = '(max-width: 767px)'
+const sheetMode = ref<SheetMode>('idle')
+const sheetY = ref(0)
+let sheetTimer: ReturnType<typeof setTimeout> | undefined
+let drag: { id: number; startY: number; samples: SwipeSample[]; active: boolean } | null = null
+
+function reducedMotion(): boolean {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+// idle のときは transform を付けない（開閉のスライドは CSS のクラスが担う。インラインが勝つと閉じる動きが消える）
+const sheetStyle = computed<Record<string, string>>(() => {
+  const style: Record<string, string> = { width: `${props.width}px` }
+  const settle = reducedMotion() ? 'none' : 'transform var(--dur) var(--ease)'
+  if (sheetMode.value === 'drag') {
+    style.transform = `translateY(${sheetY.value}px)`
+    style.transition = 'none'
+  } else if (sheetMode.value === 'out') {
+    style.transform = 'translateY(100%)'
+    style.transition = settle
+  } else if (sheetMode.value === 'back') {
+    style.transform = 'translateY(0)'
+    style.transition = settle
+  }
+  return style
+})
+
+function springBack() {
+  clearTimeout(sheetTimer)
+  sheetY.value = 0
+  if (reducedMotion()) {
+    sheetMode.value = 'idle'
+    return
+  }
+  sheetMode.value = 'back'
+  sheetTimer = setTimeout(() => { sheetMode.value = 'idle' }, SWIPE_SETTLE_MS + 40)
+}
+
+async function dismissBySwipe() {
+  sheetMode.value = 'out'
+  close()
+  await nextTick()
+  // 親が閉じなかったときは、画面の外に置き去りにせず元に戻す
+  if (props.open) springBack()
+}
+
+function onSheetPointerDown(e: PointerEvent) {
+  if (drag || !props.open) return
+  if (!window.matchMedia(SHEET_QUERY).matches) return
+  if (e.pointerType === 'mouse' && e.button !== 0) return
+  // ×ボタンやヘッダーに置かれた操作部品の押下は奪わない
+  if ((e.target as HTMLElement).closest('button, a, input, select, textarea, [role="button"]')) return
+  clearTimeout(sheetTimer)
+  drag = { id: e.pointerId, startY: e.clientY, samples: [{ t: e.timeStamp, y: e.clientY }], active: false }
+  try {
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  } catch {
+    // 取れなくても、引く動き自体は続けられる
+  }
+}
+
+function onSheetPointerMove(e: PointerEvent) {
+  if (!drag || e.pointerId !== drag.id) return
+  drag.samples = pushSwipeSample(drag.samples, { t: e.timeStamp, y: e.clientY })
+  const dy = e.clientY - drag.startY
+  if (!drag.active) {
+    if (Math.abs(dy) < SWIPE_SLOP) return
+    drag.active = true
+    sheetMode.value = 'drag'
+  }
+  // 上へは動かさない（下へ引いた分だけついてくる）
+  sheetY.value = Math.max(0, dy)
+}
+
+function onSheetPointerUp(e: PointerEvent) {
+  if (!drag || e.pointerId !== drag.id) return
+  const d = drag
+  drag = null
+  if (!d.active) return // タップ（引いていない）
+  const dy = e.clientY - d.startY
+  if (shouldCloseBySwipe(dy, swipeVelocity(d.samples, e.timeStamp))) void dismissBySwipe()
+  else springBack()
+}
+
+function onSheetPointerCancel(e: PointerEvent) {
+  if (!drag || e.pointerId !== drag.id) return
+  const d = drag
+  drag = null
+  if (d.active) springBack()
+}
+
+onBeforeUnmount(() => clearTimeout(sheetTimer))
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') close()
@@ -45,6 +151,11 @@ function onScrimPointerCancel() {
 
 watch(() => props.open, async (isOpen) => {
   if (isOpen) {
+    // 開き直すときは、前に引いた状態を持ち越さない（閉じるときは触らない：閉じる動きの最中に位置が戻ると跳ねる）
+    clearTimeout(sheetTimer)
+    sheetMode.value = 'idle'
+    sheetY.value = 0
+    drag = null
     lastFocused = document.activeElement as HTMLElement | null
     await nextTick()
     // 本文の最初の入力へ。ヘッダーの閉じるボタンに当てない
@@ -66,22 +177,32 @@ watch(() => props.open, async (isOpen) => {
         <div
           ref="panel"
           class="drawer"
-          :style="{ width: `${width}px` }"
+          :style="sheetStyle"
           role="dialog"
           aria-modal="true"
           aria-labelledby="drawer-title"
         >
-          <header class="drawer-head">
-            <div class="drawer-head-main">
-              <h2 id="drawer-title" class="drawer-title">{{ title }}</h2>
-              <div v-if="$slots['header-sub']" class="drawer-head-sub">
-                <slot name="header-sub" />
+          <!-- つまみ（スマホ幅だけ）とヘッダーが、下に引いて閉じる面。本文は含めない -->
+          <div
+            class="drawer-top"
+            @pointerdown="onSheetPointerDown"
+            @pointermove="onSheetPointerMove"
+            @pointerup="onSheetPointerUp"
+            @pointercancel="onSheetPointerCancel"
+          >
+            <div class="drawer-grip" aria-hidden="true" />
+            <header class="drawer-head">
+              <div class="drawer-head-main">
+                <h2 id="drawer-title" class="drawer-title">{{ title }}</h2>
+                <div v-if="$slots['header-sub']" class="drawer-head-sub">
+                  <slot name="header-sub" />
+                </div>
               </div>
-            </div>
-            <button class="icon ghost" aria-label="閉じる" @click="close">
-              <Icon name="close" :size="18" />
-            </button>
-          </header>
+              <button class="icon ghost" aria-label="閉じる" @click="close">
+                <Icon name="close" :size="18" />
+              </button>
+            </header>
+          </div>
 
           <div class="drawer-body">
             <slot />
@@ -143,6 +264,10 @@ watch(() => props.open, async (isOpen) => {
   }
 }
 
+.drawer-top { flex-shrink: 0; }
+/* つまみはスマホ幅のシートだけ（下の @media で出す） */
+.drawer-grip { display: none; }
+
 .drawer-head {
   display: flex;
   align-items: flex-start;
@@ -189,8 +314,25 @@ watch(() => props.open, async (isOpen) => {
   .drawer-leave-to .drawer {
     transform: translateY(100%);
   }
+  /* 引いて閉じる面（つまみ＋ヘッダー）。縦の指の動きをブラウザに取られない（スクロール・引っ張って更新に化けない） */
+  .drawer-top {
+    touch-action: none;
+  }
+  /* つまみ：幅 36px・高さ 4px の丸い棒。ヘッダーの上の余白ぶんを詰めて、高さを増やしすぎない */
+  .drawer-grip {
+    display: flex;
+    justify-content: center;
+    padding-top: 6px;
+  }
+  .drawer-grip::before {
+    content: '';
+    width: 36px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--line);
+  }
   .drawer-head {
-    padding: 12px 8px 10px 16px;
+    padding: 4px 8px 10px 16px;
   }
   .drawer-head button.icon {
     width: 44px;

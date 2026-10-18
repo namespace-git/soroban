@@ -145,8 +145,19 @@ export async function dispatchAgent(method: string, args: unknown[], deps: Agent
 }
 
 /**
- * 世帯の中で agent として動く。`withHousehold`（context.ts）と同じ順：
- * `set local search_path` → `set local role soroban_api`（ここから RLS が効く）→ `set_config(..., true)`。
+ * 世帯に入った直後の設定。`withHousehold`（context.ts の `ENTER_HOUSEHOLD_SQL`）と同じ形の **1 本の select**
+ * （DB との往復を 3 回から 1 回にする）。`search_path` を `app, public` に、`role` を `soroban_api` に
+ * （ここから RLS が効く）、`app.household_id` を引数の世帯に、`app.user_id` を空に。
+ * 第 3 引数 true＝`SET LOCAL` と同じで、トランザクションが終われば（commit でも rollback でも）元に戻る。
+ * 4 つは互いの値を読まないので並びに意味は無い。`?` は世帯の 1 個だけ（`search_path` と `role` は固定の文字列）。
+ */
+const ENTER_AGENT_HOUSEHOLD_SQL =
+  "select set_config('search_path', 'app, public', true), set_config('role', 'soroban_api', true), " +
+  "set_config('app.household_id', ?, true), set_config('app.user_id', '', true)"
+
+/**
+ * 世帯の中で agent として動く。`withHousehold`（context.ts）と同じく、入ってすぐ `ENTER_AGENT_HOUSEHOLD_SQL`（上）の 1 本で
+ * `search_path`・`role`（soroban_api）・`app.household_id` を local で設定する。
  * agent は人ではないので `app.user_id` は空（押した人を名乗らない）。`ctx.userId` は PC の id。
  */
 async function withAgent<T>(
@@ -154,9 +165,7 @@ async function withAgent<T>(
 ): Promise<T> {
   const after = newAfterCommit()
   const result = await root.tx(async (sql) => {
-    await sql.run('set local search_path = app, public')
-    await sql.run('set local role soroban_api')
-    await sql.get("select set_config('app.household_id', ?, true), set_config('app.user_id', '', true)", agent.householdId)
+    await sql.get(ENTER_AGENT_HOUSEHOLD_SQL, agent.householdId)
     // userJwt は null：agent は人ではないので、Storage を人の権限で呼ぶ処理（server/storage.ts）は使えない
     return fn({
       sql, householdId: agent.householdId, userId: agent.agentId, agentId: agent.agentId, mediaBase, env,

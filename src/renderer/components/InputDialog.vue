@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
+import { useBackClose } from '../composables/useBackClose'
 
 // Electron は window.prompt() を実装していないため、各画面はこれを使う。
 export type PromptOptions = {
@@ -35,6 +36,9 @@ function submit() {
 function cancel() {
   emit('cancel')
 }
+
+// 「戻る」（Android の戻るボタンなど）で閉じる。Esc・幕のクリックと同じ「キャンセル」（cancel）
+useBackClose(() => props.open, cancel)
 
 // スクリムでの pointerdown → pointerup が両方ともスクリム自身のときだけ閉じる（マウスもタッチも同じ）。
 // 本文内でのドラッグ選択やスライダー操作が外に抜けて離しても閉じないようにする。

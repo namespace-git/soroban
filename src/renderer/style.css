@@ -307,8 +307,15 @@ button {
   cursor: pointer;
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-button:hover:not(:disabled) { background: var(--line-soft); }
+/* hover は、マウスのある端末だけ。タッチでは指を離したあとも :hover が残って色が戻らないため（以下の :hover も同じ） */
+@media (hover: hover) and (pointer: fine) {
+  button:hover:not(:disabled) { background: var(--line-soft); }
+}
 button:disabled { opacity: .45; cursor: default; }
+/* タッチでは押した瞬間の手ごたえを、少し薄くして返す（マウスの見た目は変えない） */
+@media (hover: none), (pointer: coarse) {
+  button:active:not(:disabled) { opacity: .7; }
+}
 
 button.primary {
   background: var(--primary);
@@ -316,14 +323,18 @@ button.primary {
   color: #fff;
   padding: 0 18px;
 }
-button.primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+@media (hover: hover) and (pointer: fine) {
+  button.primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+}
 
 button.ghost {
   background: transparent;
   border-color: transparent;
   color: var(--text-dim);
 }
-button.ghost:hover:not(:disabled) { background: var(--surface-hi); }
+@media (hover: hover) and (pointer: fine) {
+  button.ghost:hover:not(:disabled) { background: var(--surface-hi); }
+}
 
 button.danger { color: var(--loss); }
 
@@ -415,7 +426,9 @@ td {
   border-bottom: 1px solid var(--line-soft);
   vertical-align: middle;
 }
-tbody tr:hover { background: var(--surface-hi); }
+@media (hover: hover) and (pointer: fine) {
+  tbody tr:hover { background: var(--surface-hi); }
+}
 tr.selected { background: var(--accent-soft); }
 
 td.actions {
@@ -424,7 +437,9 @@ td.actions {
 }
 td.actions button { color: inherit; }
 td.actions button.primary { color: #fff; }
-tr:hover td.actions { color: var(--text-dim); }
+@media (hover: hover) and (pointer: fine) {
+  tr:hover td.actions { color: var(--text-dim); }
+}
 
 table.compact td { padding: 6px 12px; }
 
@@ -614,16 +629,20 @@ tr.total-row.loss > td {
 }
 /* 結果の文が長いときは文のほうが折り返す。警告アイコンと「閉じる」は縮めない（縦に割れる・潰れるのを防ぐ） */
 .toast .toast-warn-icon { color: var(--warn-solid); flex-shrink: 0; }
-.toast .toast-text { min-width: 0; overflow-wrap: anywhere; }
+/* 文が余りを取る＝ボタン（「元に戻す」＋「閉じる」）は右端にまとまる。ボタンごとに margin-left:auto を持つと間が割れる */
+.toast .toast-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .toast button {
-  margin-left: auto;
   flex-shrink: 0;
   white-space: nowrap;
   color: #fff;
   background: transparent;
   border-color: transparent;
 }
-.toast button:hover:not(:disabled) { background: rgba(255,255,255,.16); }
+/* 通知の中の操作（「元に戻す」など）。「閉じる」と見分けるため太字 */
+.toast button.toast-action { font-weight: 700; }
+@media (hover: hover) and (pointer: fine) {
+  .toast button:hover:not(:disabled) { background: rgba(255,255,255,.16); }
+}
 
 /* --- ナビ --- */
 

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
+import { useBackClose } from '../composables/useBackClose'
 
 // OS の confirm() / alert() の代わり。確認の2択にも、複数ボタンの選択にも使う
 export type ConfirmChoice = {
@@ -27,6 +28,9 @@ function choose(value: string) {
 function cancel() {
   emit('cancel')
 }
+
+// 「戻る」（Android の戻るボタンなど）で閉じる。Esc・幕のクリックと同じ「いいえ」（cancel）
+useBackClose(() => props.open, cancel)
 
 // スクリムでの pointerdown → pointerup が両方ともスクリム自身のときだけ閉じる（マウスもタッチも同じ）。
 // 本文内でのドラッグ選択やスライダー操作が外に抜けて離しても閉じないようにする。
@@ -164,9 +168,12 @@ watch(() => props.open, async (isOpen) => {
   border-color: var(--loss-solid);
   color: #fff;
 }
-.danger-solid:hover:not(:disabled) {
-  background: var(--loss);
-  border-color: var(--loss);
+/* タッチでは、タップしたあとに色が残る（hover が貼りつく）ので、マウスのときだけ */
+@media (hover: hover) and (pointer: fine) {
+  .danger-solid:hover:not(:disabled) {
+    background: var(--loss);
+    border-color: var(--loss);
+  }
 }
 
 /* 開閉とも 180ms でスクリムのフェード + パネルのスケール */

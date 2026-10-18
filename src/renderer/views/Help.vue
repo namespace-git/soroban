@@ -252,7 +252,9 @@ function onLightboxScrimUp(e: MouseEvent) {
   height: 32px;
   padding: 0 10px;
 }
-.help-toc-item:hover:not(:disabled) { background: var(--surface-hi); color: var(--text); }
+@media (hover: hover) and (pointer: fine) {
+  .help-toc-item:hover:not(:disabled) { background: var(--surface-hi); color: var(--text); }
+}
 
 .help-content {
   flex: 1;
@@ -325,7 +327,9 @@ function onLightboxScrimUp(e: MouseEvent) {
   cursor: zoom-in;
   transition: border-color var(--dur) var(--ease);
 }
-.help-figure-btn:hover { border-color: var(--text-faint); }
+@media (hover: hover) and (pointer: fine) {
+  .help-figure-btn:hover { border-color: var(--text-faint); }
+}
 .help-figure-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .help-figure-img {
   display: block;

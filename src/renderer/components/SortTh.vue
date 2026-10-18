@@ -39,8 +39,10 @@ const ariaSort = computed<'ascending' | 'descending' | 'none'>(() =>
   cursor: pointer;
   user-select: none;
 }
-.sortable:hover {
-  color: var(--text);
+@media (hover: hover) and (pointer: fine) {
+  .sortable:hover {
+    color: var(--text);
+  }
 }
 .sort-arrow {
   font-size: 10px;

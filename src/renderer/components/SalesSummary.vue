@@ -277,7 +277,7 @@ const gridLines = computed(() => domainMin.value < 0
           <div class="chart-tooltip-row" :class="tooltip.p.netProfit < 0 ? 'loss' : 'profit'">純利益 {{ yen(tooltip.p.netProfit) }}</div>
         </div>
       </div>
-      <p v-if="loaded && showChart" class="chart-hint">濃色：実績（取引完了・状態未設定の手入力） ／ 淡色・破線：見込みを含む合計。月をクリックすると販売を表示します</p>
+      <p v-if="loaded && showChart" class="chart-hint">濃色：実績（取引完了・状態未設定の手入力） ／ 淡色・破線：見込みを含む合計。月を押すと販売を表示します</p>
     </div>
   </div>
 </template>

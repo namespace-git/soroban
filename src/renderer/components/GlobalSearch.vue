@@ -9,6 +9,7 @@ import Drawer from './Drawer.vue'
 import StatusChip from './StatusChip.vue'
 import EmptyState from './EmptyState.vue'
 import { yen } from '../format'
+import { useBackClose } from '../composables/useBackClose'
 
 const props = defineProps<{
   open: boolean
@@ -31,13 +32,19 @@ onMounted(() => {
 })
 onUnmounted(() => mobileMql?.removeEventListener('change', onMobileChange))
 
+// 「戻る」（Android の戻るボタンなど）で閉じる。スマホ幅の結果の面だけ（デスクトップ幅の Drawer は自分で持つ）。
+// 上のバーの「キャンセル」と同じ意味で、閉じるのは親（App.vue）の close
+useBackClose(() => props.open && isMobile.value, () => emit('close'))
+
 const KIND_LABEL: Record<SearchHit['kind'], string> = {
   inventory: '在庫', listing: '出品', sale: '売上', purchase: '仕入',
 }
-const KIND_ORDER: SearchHit['kind'][] = ['inventory', 'listing', 'sale', 'purchase']
+const KIND_ORDER_DESKTOP: SearchHit['kind'][] = ['inventory', 'listing', 'sale', 'purchase']
+// スマホは「売れたもの・出品中のもの」を先に（毎日見るのは売上と出品）
+const KIND_ORDER_MOBILE: SearchHit['kind'][] = ['sale', 'listing', 'purchase', 'inventory']
 
 const groups = computed(() =>
-  KIND_ORDER
+  (isMobile.value ? KIND_ORDER_MOBILE : KIND_ORDER_DESKTOP)
     .map(kind => ({ kind, label: KIND_LABEL[kind], hits: props.hits.filter(h => h.kind === kind) }))
     .filter(g => g.hits.length > 0),
 )
@@ -174,7 +181,10 @@ function onThumbError(h: SearchHit) {
   text-align: left;
   cursor: pointer;
 }
-.hit-row:hover { background: var(--surface-hi); }
+/* タッチでは、タップしたあとに灰色が残る（hover が貼りつく）ので、マウスのときだけ */
+@media (hover: hover) and (pointer: fine) {
+  .hit-row:hover { background: var(--surface-hi); }
+}
 
 .thumb, .thumb-placeholder {
   width: 40px;

@@ -339,7 +339,9 @@ function expenseContent(e: Expense): string {
     padding: 12px 14px;
     border-bottom: 1px solid var(--line-soft);
   }
-  .sales-table tbody tr:hover { background: transparent; }
+  @media (hover: hover) and (pointer: fine) {
+    .sales-table tbody tr:hover { background: transparent; }
+  }
   .sales-table td { display: block; min-width: 0; padding: 0; border: none; }
   .sales-table td.sold-cell { grid-column: 1 / -1; font-size: var(--fs-12); }
   .sales-table td.title-cell { grid-column: 1 / -1; max-width: none; }
@@ -375,7 +377,9 @@ function expenseContent(e: Expense): string {
     padding: 10px 14px;
     border-bottom: 1px solid var(--line-soft);
   }
-  .expense-table tbody tr:hover { background: transparent; }
+  @media (hover: hover) and (pointer: fine) {
+    .expense-table tbody tr:hover { background: transparent; }
+  }
   .expense-table td { display: block; min-width: 0; padding: 0; border: none; }
   .expense-table td.exp-shop { grid-column: 1; grid-row: 1; font-weight: 600; }
   .expense-table td.exp-amount { grid-column: 2; grid-row: 1; }
