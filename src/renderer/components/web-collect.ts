@@ -2,14 +2,21 @@
 //
 // デスクトップ版は押すとその場で取り込む（collect()）。Web 版は取り込み担当の PC に頼む：
 //   押す → requestCollect（積む） → PC が拾う（running） → 終わる（done / partial / failed）
-// 積まれた・走っている間（queued・running）だけ、数秒ごとに getCollectStatus を読む。終わったら止める。
-// 画面が裏に回っている間は読まない（戻ってきたとき 1 回読み直す）。
+// getCollectStatus を読み直す間隔は 3 段：
+//   積まれた・走っている間（queued・running）  数秒ごと
+//   何もしていない間                           2 分ごと（他の端末の取り込みや、PC の登録を拾う）
+//   何もしていない間で、PC が動いていない表示  20 秒ごと（PC が取り込み担当に登録されたら早く消す）
+// 画面が裏に回っている間は読まない（戻ってきたとき 1 回読み直して、そこからまた周期が始まる）。
 import { computed, ref } from 'vue'
 import type { CollectorRun } from '../../shared/types'
 import type { CollectJob, CollectStatus, WebApi } from '../../shared/web-types'
 
 /** 走っている間に状態を読み直す間隔 */
 export const COLLECT_POLL_MS = 4000
+/** 何もしていない間に状態を読み直す間隔 */
+export const COLLECT_IDLE_POLL_MS = 120_000
+/** 何もしていない間で、「取り込み担当の PC が動いていません」を出しているときの間隔（PC が登録されたら早く消すため） */
+export const COLLECT_OFFLINE_POLL_MS = 20_000
 
 export function isActiveJob(job: CollectJob | null | undefined): boolean {
   return !!job && (job.status === 'queued' || job.status === 'running')
@@ -90,11 +97,18 @@ export interface WebCollectDeps {
   onFinished(job: CollectJob): void
   /** 画面が見えているか。裏に回っている間は読まない */
   isVisible?: () => boolean
+  /** 積まれた・走っている間の間隔 */
   pollMs?: number
+  /** 何もしていない間の間隔 */
+  idlePollMs?: number
+  /** 何もしていない間で、PC が動いていない表示のときの間隔 */
+  offlinePollMs?: number
 }
 
 export function useWebCollect(deps: WebCollectDeps) {
   const pollMs = deps.pollMs ?? COLLECT_POLL_MS
+  const idlePollMs = deps.idlePollMs ?? COLLECT_IDLE_POLL_MS
+  const offlinePollMs = deps.offlinePollMs ?? COLLECT_OFFLINE_POLL_MS
   const visible = deps.isVisible ?? (() => typeof document === 'undefined' || document.visibilityState !== 'hidden')
 
   const status = ref<CollectStatus | null>(null)
@@ -157,11 +171,13 @@ export function useWebCollect(deps: WebCollectDeps) {
   function schedule() {
     clearTimeout(pollTimer)
     pollTimer = undefined
-    if (!started || !visible() || !isActiveJob(job.value)) return
+    if (!started || !visible()) return
+    // 積まれた・走っている間は pollMs。何もしていない間も読み直す（開いた時点の「PC が動いていない」を残さない）
+    const ms = isActiveJob(job.value) ? pollMs : agentsOffline.value ? offlinePollMs : idlePollMs
     pollTimer = setTimeout(() => {
       pollTimer = undefined
       if (started && visible()) void refresh()
-    }, pollMs)
+    }, ms)
   }
 
   function apply(s: CollectStatus) {
@@ -183,7 +199,7 @@ export function useWebCollect(deps: WebCollectDeps) {
     try {
       apply(await deps.api.getCollectStatus())
     } catch {
-      // 通信が一瞬切れても、走っている間は次の周期でまた読む（ここで画面を止めない）
+      // 通信が一瞬切れても、次の周期でまた読む（ここで画面を止めない）
       schedule()
     }
   }

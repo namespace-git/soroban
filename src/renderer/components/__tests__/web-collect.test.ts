@@ -1,11 +1,15 @@
 // Web 版の「取り込む」ボタンの状態（components/web-collect.ts）。
-//   - 積まれた・走っている間だけ数秒ごとに状態を読み、終わったら止まる（裏に回っている間は読まない）
+//   - 積まれた・走っている間は数秒ごと、何もしていない間は 2 分ごと（PC が動いていない表示のあいだは 20 秒ごと）に状態を読む
+//     （裏に回っている間は読まない。戻ったら 1 回読んで、そこからまた周期が始まる）
 //   - 終わりの見せ方は、デスクトップの collect() の結果（CollectorRun[]）と同じ文
 //   - PC が動いていない・クールダウン中は、押す前から分かる
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { CollectorRun } from '../../../shared/types'
 import type { CollectJob, CollectStatus } from '../../../shared/web-types'
-import { COLLECT_POLL_MS, describeJob, formatRemaining, isActiveJob, useWebCollect, widestRemaining } from '../web-collect'
+import {
+  COLLECT_IDLE_POLL_MS, COLLECT_OFFLINE_POLL_MS, COLLECT_POLL_MS,
+  describeJob, formatRemaining, isActiveJob, useWebCollect, widestRemaining,
+} from '../web-collect'
 
 function job(over: Partial<CollectJob> = {}): CollectJob {
   return {
@@ -114,7 +118,12 @@ describe('useWebCollect（状態を読む・押す・取り消す）', () => {
     vi.useRealTimers()
   })
 
-  function setup(opts: { reads?: Array<CollectStatus | Error>; visible?: () => boolean; request?: () => Promise<CollectJob> } = {}) {
+  function setup(opts: {
+    reads?: Array<CollectStatus | Error>
+    visible?: () => boolean
+    request?: () => Promise<CollectJob>
+    intervals?: { pollMs?: number; idlePollMs?: number; offlinePollMs?: number }
+  } = {}) {
     const reads = [...(opts.reads ?? [])]
     const finished: CollectJob[] = []
     const api = {
@@ -126,11 +135,11 @@ describe('useWebCollect（状態を読む・押す・取り消す）', () => {
       }),
       cancelCollectJob: vi.fn(async () => {}),
     }
-    const c = useWebCollect({ api, onFinished: j => finished.push(j), isVisible: opts.visible ?? (() => true) })
+    const c = useWebCollect({ api, onFinished: j => finished.push(j), isVisible: opts.visible ?? (() => true), ...opts.intervals })
     return { c, api, finished }
   }
 
-  it('押す → 待ち → 取り込み中 → 完了。走っている間だけ数秒ごとに読み、終わったら止まる', async () => {
+  it('押す → 待ち → 取り込み中 → 完了。走っている間は数秒ごとに読み、終わったら何もしていない間隔（2 分）に戻る', async () => {
     const { c, api, finished } = setup({
       reads: [
         status(null),
@@ -140,7 +149,9 @@ describe('useWebCollect（状態を読む・押す・取り消す）', () => {
     })
     await c.start()
     expect(api.getCollectStatus).toHaveBeenCalledTimes(1)
-    expect(vi.getTimerCount()).toBe(0) // 走っていないあいだは読み続けない
+    expect(vi.getTimerCount()).toBe(1) // 何もしていないあいだの周期（2 分）だけ。数秒ごとには読まない
+    await vi.advanceTimersByTimeAsync(COLLECT_POLL_MS)
+    expect(api.getCollectStatus).toHaveBeenCalledTimes(1)
 
     await c.request()
     expect(api.requestCollect).toHaveBeenCalledTimes(1)
@@ -157,11 +168,14 @@ describe('useWebCollect（状態を読む・押す・取り消す）', () => {
     expect(finished[0].status).toBe('done')
     expect(c.active.value).toBe(false)
 
-    // 終わったら読むのをやめる（クールダウンの数え下げは画面の中だけで、通信はしない）
+    // 終わったら数秒ごとの読みはやめる（クールダウンの数え下げは画面の中だけで、通信はしない）。次に読むのは 2 分後
     const reads = api.getCollectStatus.mock.calls.length
     await vi.advanceTimersByTimeAsync(30_000)
     expect(api.getCollectStatus.mock.calls.length).toBe(reads)
     expect(finished).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(COLLECT_IDLE_POLL_MS - 30_000)
+    expect(api.getCollectStatus.mock.calls.length).toBe(reads + 1)
+    expect(finished).toHaveLength(1) // 終わった要求を読み直しても、知らせは 2 度出さない
   })
 
   it('開いた時点で走っていた要求は追い続け、終わったら知らせる。もう終わっていたものは知らせない', async () => {
@@ -220,6 +234,138 @@ describe('useWebCollect（状態を読む・押す・取り消す）', () => {
     await vi.advanceTimersByTimeAsync(COLLECT_POLL_MS)
     expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
     expect(finished).toHaveLength(1)
+  })
+
+  describe('何もしていない間の読み直し', () => {
+    it('PC が動いていない表示のままなら 20 秒ごとに読み直し、動き出したら表示が消えて 2 分ごとになる', async () => {
+      // 窓が開いてから PC が取り込み担当に登録される（PC の窓の中の Web 版は必ずこうなる）
+      const { c, api } = setup({ reads: [status(null, { agents: 0 }), status(null, { agents: 0 }), status(null, { agents: 1 })] })
+      await c.start()
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(1)
+      expect(c.statusLine.value).toEqual({ text: '取り込み担当の PC が動いていません', warn: true, short: 'PC 停止中' })
+
+      await vi.advanceTimersByTimeAsync(COLLECT_OFFLINE_POLL_MS - 1)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(2)
+      expect(c.statusLine.value?.text).toBe('取り込み担当の PC が動いていません') // まだ 0 台。表示は残る
+
+      await vi.advanceTimersByTimeAsync(COLLECT_OFFLINE_POLL_MS)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
+      expect(c.agentsOffline.value).toBe(false)
+      expect(c.statusLine.value).toBeNull() // 「動いていません」が消える
+
+      // 動いている表示になったら 20 秒では読まない
+      await vi.advanceTimersByTimeAsync(COLLECT_OFFLINE_POLL_MS * 2)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
+      await vi.advanceTimersByTimeAsync(COLLECT_IDLE_POLL_MS - COLLECT_OFFLINE_POLL_MS * 2)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(4)
+    })
+
+    it('PC が動いている（agents_online が 1 以上）なら 2 分ごと。20 秒では読まない', async () => {
+      const { c, api } = setup({ reads: [status(null, { agents: 1 })] })
+      await c.start()
+      await vi.advanceTimersByTimeAsync(COLLECT_OFFLINE_POLL_MS)
+      await vi.advanceTimersByTimeAsync(COLLECT_IDLE_POLL_MS - COLLECT_OFFLINE_POLL_MS - 1)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(COLLECT_IDLE_POLL_MS)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
+    })
+
+    it('動いている PC が途中で 0 台になれば、20 秒ごとに切り替わって表示が出る', async () => {
+      const { c, api } = setup({ reads: [status(null, { agents: 2 }), status(null, { agents: 0 })] })
+      await c.start()
+      expect(c.statusLine.value).toBeNull()
+      await vi.advanceTimersByTimeAsync(COLLECT_IDLE_POLL_MS)
+      expect(c.statusLine.value?.warn).toBe(true)
+      await vi.advanceTimersByTimeAsync(COLLECT_OFFLINE_POLL_MS)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
+    })
+
+    it('裏に回っている間は読まない。戻ったら 1 回読み、そこからまた周期が始まる', async () => {
+      let visible = true
+      const { c, api } = setup({
+        visible: () => visible,
+        reads: [status(null, { agents: 0 }), status(null, { agents: 0 }), status(null, { agents: 1 })],
+      })
+      await c.start()
+      visible = false
+      await vi.advanceTimersByTimeAsync(COLLECT_IDLE_POLL_MS * 3)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0) // 裏にいる間は周期も止まっている
+
+      visible = true
+      c.onVisible()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(2)
+      expect(c.agentsOffline.value).toBe(true)
+
+      // まだ 0 台。20 秒後にまた読み、1 台になったら表示が消える
+      await vi.advanceTimersByTimeAsync(COLLECT_OFFLINE_POLL_MS)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
+      expect(c.statusLine.value).toBeNull()
+    })
+
+    it('積まれた・走っている間は今まで通りの間隔（PC が動いていなくても）', async () => {
+      const { c, api } = setup({ reads: [status(job({ status: 'queued' }), { agents: 0 })] })
+      await c.start()
+      await vi.advanceTimersByTimeAsync(COLLECT_POLL_MS - 1)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(COLLECT_POLL_MS)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
+    })
+
+    it('読み取りに失敗しても周期は続く（PC が動いていない表示は消えず、次の周期でまた読む）', async () => {
+      const { c, api } = setup({ reads: [status(null, { agents: 0 }), new Error('サーバーにつながりません'), status(null, { agents: 1 })] })
+      await c.start()
+      await vi.advanceTimersByTimeAsync(COLLECT_OFFLINE_POLL_MS) // 失敗
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(2)
+      expect(c.agentsOffline.value).toBe(true)
+      await vi.advanceTimersByTimeAsync(COLLECT_OFFLINE_POLL_MS)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
+      expect(c.statusLine.value).toBeNull()
+    })
+
+    it('stop すると読まない', async () => {
+      const { c, api } = setup({ reads: [status(null, { agents: 0 })] })
+      await c.start()
+      c.stop()
+      await vi.advanceTimersByTimeAsync(COLLECT_IDLE_POLL_MS * 2)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('タイマーは二重に走らない（戻る・押すを重ねても、周期は常に 1 本）', async () => {
+      const { c, api } = setup({ reads: [status(null, { agents: 1 })] })
+      await c.start()
+      expect(vi.getTimerCount()).toBe(1)
+      c.onVisible()
+      c.onVisible()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(vi.getTimerCount()).toBe(1)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
+
+      await c.request() // 周期が数秒ごとに置き換わる（足されない）
+      expect(vi.getTimerCount()).toBe(1)
+    })
+
+    it('間隔は差し替えられる', async () => {
+      const { c, api } = setup({
+        reads: [status(null, { agents: 0 }), status(null, { agents: 1 })],
+        intervals: { idlePollMs: 5000, offlinePollMs: 1000 },
+      })
+      await c.start()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(4999)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(api.getCollectStatus).toHaveBeenCalledTimes(3)
+    })
   })
 
   it('PC が動いていない（agents_online が 0）と、押す前から上のバーに出る（警告）', async () => {
