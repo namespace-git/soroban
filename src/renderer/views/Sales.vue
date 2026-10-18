@@ -1908,7 +1908,9 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
 .held-check { color: var(--profit); flex: 0 0 auto; }
 .work-row.focused { background: var(--brand-soft); }
 /* 資産が確定した行（粗利確定・私物）はグレーに沈める。未確定の行が相対的に目立つ */
-.work-row.settled { background: var(--surface-hi); }
+/* 済んだ行（配送中・取引完了など）はグレーの面。罫も同じ淡さだと境目が消えるので、上下の罫だけ濃くする */
+.work-row.settled { background: var(--surface-hi); border-top-color: var(--line-strong); }
+.work-row.settled + .work-row { border-top-color: var(--line-strong); }
 /* 発送してください（waiting_shipment）は今日の作業として目立たせる */
 .work-row.needs-shipment { box-shadow: inset 3px 0 0 var(--warn); }
 
@@ -2205,6 +2207,9 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   /* 今日の作業（発送してください）と、粗利がまだ出ないカードは、左に橙の帯 */
   .work-row.needs-shipment,
   .work-row.needs-input { box-shadow: inset 4px 0 0 var(--warn), var(--shadow-1); }
+  /* 済んだカードはグレーの面。地（canvas）とほぼ同じ色で輪郭が消えるので、影の代わりに 1px の輪郭を付ける
+     （inset なので大きさは変わらない） */
+  .work-row.settled { box-shadow: inset 0 0 0 1px var(--line-strong); }
 
   .cell-thumb { align-self: start; }
   .thumb, .thumb-placeholder { width: 48px; height: 48px; }

@@ -16,6 +16,7 @@
   --surface-nav:   #ffffff;   /* サイドナビ */
   --line:          #e6e4dd;   /* 罫（表の行・入力枠） */
   --line-soft:     #efede8;   /* 表の行罫 */
+  --line-strong:   #d6d3c8;   /* グレーの面（surface-hi）の上でも見える罫。済んだ行・カードの境目 */
 
   /* インク */
   --text:          #26262a;
