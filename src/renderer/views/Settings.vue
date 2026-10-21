@@ -31,7 +31,7 @@ const goto = inject<(t: string, payload?: { search?: string; status?: string; st
 const isWeb = !!window.sorobanWeb
 
 // スマホ幅（App.vue の MOBILE_QUERY と同じ）。Web 版のスマホ幅では、スマホで使う節（通知・取り込み担当の PC・お金の口座・
-// 借りたお金・発送方法・タグ）だけを出し、手数料・取り込み・仕入先・AI 読み取り・データなどパソコンで直す節は出さない。
+// 借りたお金・発送方法・タグ・配送状況の 17TRACK・AI 読み取りの API キー）だけを出し、手数料・取り込み・仕入先・データなどパソコンで直す節は出さない。
 // パソコンのブラウザ（幅 768px 以上）と Electron では isLite が偽で、今までと同じ（全部出す）
 const MOBILE_QUERY = '(max-width: 767px)'
 const mobileMql = window.matchMedia(MOBILE_QUERY)
@@ -1068,7 +1068,7 @@ const runLabel: Record<string, string> = {
         </p>
       </div>
 
-      <!-- 取り込み（配送状況の 17TRACK・実行履歴を含む。スマホ幅の Web 版では出さない） -->
+      <!-- 取り込み（配送状況の 17TRACK・実行履歴を含む。スマホ幅の Web 版では出さない。17TRACK の欄だけは、下の専用の節で出す） -->
       <div v-if="!isLite" class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="refresh" :size="16" /></span>
@@ -1146,6 +1146,7 @@ const runLabel: Record<string, string> = {
             <span>17TRACK の API キー</span>
             <input
               type="password" style="width:260px"
+              autocomplete="off" autocapitalize="off" spellcheck="false"
               v-model="trackingApiKeyInput"
               :disabled="!trackingApiStatus?.safe_storage"
               placeholder="新しいキーを入力"
@@ -1522,8 +1523,65 @@ const runLabel: Record<string, string> = {
         </div>
       </div>
 
-      <!-- AI 読み取り（Gemini）（スマホ幅の Web 版では出さない） -->
-      <div v-if="!isLite" class="panel">
+      <!-- 配送状況（17TRACK）：スマホ幅の Web 版だけ。パソコン幅では上の「取り込み」の中に同じ欄がある。
+           スマホでも API キーを貼れるように、同じ状態・同じ関数（trackingApiKeyInput・saveTrackingKey ほか）で出す -->
+      <div v-if="isLite" class="panel">
+        <div class="section-head">
+          <span class="section-head-icon"><Icon name="truck" :size="16" /></span>
+          <h2 class="section-head-title">配送状況（17TRACK）</h2>
+        </div>
+        <label class="row hint">
+          <input
+            type="checkbox"
+            :checked="settings.track_shipping !== '0'"
+            @change="toggleTrackShipping(($event.target as HTMLInputElement).checked)"
+          />
+          配送状況を 17TRACK で自動確認して到着済にする（メロジョイの注文詳細は配送中までしか教えてくれません）
+        </label>
+
+        <div class="fields">
+          <label class="field">
+            <span>17TRACK の API キー</span>
+            <input
+              type="password"
+              autocomplete="off" autocapitalize="off" spellcheck="false"
+              v-model="trackingApiKeyInput"
+              :disabled="!trackingApiStatus?.safe_storage"
+              placeholder="新しいキーを入力"
+            />
+            <span v-if="trackingApiStatus?.configured" class="faint">保存済み（••••）</span>
+          </label>
+        </div>
+        <div class="row">
+          <button class="sm" :disabled="!trackingApiStatus?.safe_storage || !trackingApiKeyInput.trim() || savingTrackingKey" @click="saveTrackingKey">
+            {{ savingTrackingKey ? '保存中…' : '保存' }}
+          </button>
+          <button v-if="trackingApiStatus?.configured" class="sm ghost" @click="deleteTrackingKey">削除</button>
+        </div>
+        <p v-if="trackingApiStatus && !trackingApiStatus.safe_storage" class="faint hint">
+          サーバーに暗号化の鍵（SECRET_KEYS）が入っていないため、API キーを保存できません。
+        </p>
+        <p v-else-if="trackingApiStatus && !trackingApiStatus.configured" class="faint hint">
+          API キーが無いあいだは、上のチェックを入れても自動確認は動きません。
+          仕入の詳細の「配送状況を確認」も押せません。
+        </p>
+        <p v-else-if="trackingApiStatus" class="faint hint">
+          未登録の追跡番号 {{ trackingApiStatus.unregistered }} 件・確認待ち {{ trackingApiStatus.watching }} 件。
+          17TRACK の無料枠は登録した追跡番号の数で減ります。
+        </p>
+        <p class="faint hint">
+          まだ到着していない仕入は、取り込み担当の PC ではなくサーバーが、数分おきに少しずつ 17TRACK の API で確認します。
+          キーが違う・混み合っている等で読めなかったときはその回は打ち切り、次の回でまた試します。
+        </p>
+        <p class="faint hint">
+          キーの取得：17TRACK の API アカウント（個人アカウントとは別）を作り、
+          管理画面の Settings → Security → Access Key で発行します
+          ↗　<code class="track-key-url">https://user.17track.net/ja/register?app=api</code>
+        </p>
+      </div>
+
+      <!-- AI 読み取り（Gemini）（スマホ幅の Web 版でも出す：キーを貼れるように） -->
+      <div class="panel">
         <div class="section-head">
           <span class="section-head-icon"><Icon name="receipt" :size="16" /></span>
           <h2 class="section-head-title">AI 読み取り（Gemini）</h2>
@@ -1546,6 +1604,7 @@ const runLabel: Record<string, string> = {
             <span>API キー</span>
             <input
               type="password" style="width:260px"
+              autocomplete="off" autocapitalize="off" spellcheck="false"
               v-model="aiApiKeyInput"
               :disabled="!aiStatus?.safe_storage"
               placeholder="新しいキーを入力"
@@ -1628,7 +1687,7 @@ const runLabel: Record<string, string> = {
       </div>
 
       <!-- Web 版のスマホ幅だけ：出していない節の行き先 -->
-      <p v-if="isLite" class="pc-only-note">手数料・取り込み・仕入先・AI 読み取り・データの設定は、パソコンで開いてください。</p>
+      <p v-if="isLite" class="pc-only-note">手数料・取り込み・仕入先・データの設定は、パソコンで開いてください。</p>
     </template>
 
     <TagPicker
@@ -2019,7 +2078,7 @@ const runLabel: Record<string, string> = {
   /* アプリの更新：ボタンと結果の文を折り返して縦に */
   .update-row { flex-wrap: wrap; }
 
-  /* 出していない節（手数料・取り込み・仕入先・AI 読み取り・データ）の行き先。最後に 1 行 */
+  /* 出していない節（手数料・取り込み・仕入先・データ）の行き先。最後に 1 行 */
   .pc-only-note {
     margin: 16px 8px 0;
     font-size: var(--fs-13);
