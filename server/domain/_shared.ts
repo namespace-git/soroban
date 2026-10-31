@@ -93,6 +93,12 @@ export function monthBounds(month: string): { start: string; end: string } {
 /** integer 列に入る最大（Postgres の integer は 32 ビット）。これを超える数は DB で 22003 になる */
 export const MAX_INT4 = 2_147_483_647
 
+/**
+ * 紐付けの候補（suggestInventory / suggestForListing）の件数の上限。画面は「件数を切らない」つもりで
+ * Number.MAX_SAFE_INTEGER を渡してくる（デスクトップは上限なし）ので、断らずにここまで丸める
+ */
+export const SUGGEST_MAX = 10_000
+
 /** 金額を桁区切りの「¥2,699」形式にする（Workers の Intl に頼らず自前で区切る） */
 export function yenText(n: number): string {
   const sign = n < 0 ? '-' : ''

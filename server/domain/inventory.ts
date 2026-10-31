@@ -7,7 +7,7 @@ import type {
 import {
   argEnum, argId, argIds, argInt, argNullableText, argObject, argOptBool, argOptEnum, argOptInt, argOptObject,
   argText, assertTagsExist, extractItemCodes, matchesQuery, normalizeName, rowsToCsv, sortAndSlice, splitEvenly,
-  todayJst,
+  SUGGEST_MAX, todayJst,
 } from './_shared'
 import {
   attachInventoryTags, inventoryViewColumns, type InventoryRow,
@@ -268,7 +268,7 @@ export async function suggestInventory(
   ctx: Ctx, saleId: string, limit = 20, opts?: { includeSold?: boolean },
 ): Promise<InventoryItem[]> {
   const id = argId('販売', saleId)
-  const max = argInt('件数', limit, { min: 1, max: 1000 })
+  const max = argInt('件数', limit, { min: 1, max: SUGGEST_MAX })
   const sale = await ctx.sql.get<{ title: string; model_codes: string[] }>(
     'select title, model_codes from sale where id = ?', id,
   )
@@ -619,7 +619,7 @@ registerHandler('linkInventory', (ctx, saleId, inventoryItemIds, opts) =>
   linkInventory(ctx, saleId, inventoryItemIds, 'manual', parseTakeFromSale(opts)))
 registerHandler('unlinkInventory', (ctx, saleId, inventoryItemId) => unlinkInventory(ctx, saleId, inventoryItemId))
 registerHandler('suggestInventory', (ctx, saleId, limit, opts) =>
-  suggestInventory(ctx, saleId, argOptInt('件数', limit, { min: 1, max: 1000 }) ?? 20, parseIncludeSold(opts)))
+  suggestInventory(ctx, saleId, Math.min(argOptInt('件数', limit, { min: 1, max: Number.MAX_SAFE_INTEGER }) ?? 20, SUGGEST_MAX), parseIncludeSold(opts)))
 registerHandler('suggestProductInventory', (ctx, modelCode, quantity, excludeIds) =>
   suggestProductInventory(ctx, modelCode, quantity, excludeIds ?? []))
 registerHandler('listInventory', (ctx, status) =>

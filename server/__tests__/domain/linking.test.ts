@@ -83,6 +83,17 @@ describe('紐付け（linking）', () => {
     expect(suggestions[0]?.id).toBe(boxItem.id)
   })
 
+  it('紐付けの画面が件数を Number.MAX_SAFE_INTEGER で頼んでも断らずに候補を返す（API の入口経由）', async () => {
+    await db.createPurchase({
+      shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,
+      lines: [{ name: 'いちごスフレの箱【Z074】', unit_price: 3000, quantity: 1 }],
+    })
+    const saleId = await db.createSale({ title: 'いちごスフレ【Z074-3】', sold_at: '2026-01-10', price: 1000 })
+    const res = await w.a.call('suggestInventory', saleId, Number.MAX_SAFE_INTEGER, { includeSold: false })
+    expect(res.status).toBe(200)
+    expect(res.body.result).toHaveLength(1)
+  })
+
   it('複数型番（まとめ売り）は自動確定せず、両方が候補に出る', async () => {
     await db.createPurchase({
       shop_account_id: shopId, ordered_at: '2026-01-01', shipping_fee: 0,

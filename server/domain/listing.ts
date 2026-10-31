@@ -8,7 +8,7 @@ import { LISTING_STATUS_LABEL } from '../../src/shared/types'
 import {
   argArray, argEnum, argId, argIds, argInt, argNullableId, argObject, argOptArray, argOptBool, argOptInt, argOptObject,
   argText, calcFee, extractCodeQuantities, extractCodes, extractItemCodes, matchesQuery, mediaUrl, normalizeName,
-  settingStr, sortAndSlice, subtractDaysJst, todayJst,
+  SUGGEST_MAX, settingStr, sortAndSlice, subtractDaysJst, todayJst,
 } from './_shared'
 import { attachInventoryTags, inventoryViewColumns, type InventoryRow } from './derive'
 import {
@@ -360,7 +360,7 @@ export async function suggestForListing(
   ctx: Ctx, itemId: string, limit = 20, opts?: { includeSold?: boolean },
 ): Promise<InventoryItem[]> {
   const channelItemId = argText('出品', itemId, { max: ITEM_ID_MAX })
-  const max = argInt('件数', limit, { min: 1, max: 1000 })
+  const max = argInt('件数', limit, { min: 1, max: SUGGEST_MAX })
   const listing = await findListing(ctx, channelItemId)
   if (!listing) return []
 
@@ -633,7 +633,7 @@ registerHandler('unreserveInventory', (ctx, mercariItemId, inventoryItemId) =>
 registerHandler('suggestForListing', (ctx, mercariItemId, limit, opts) => {
   const o = argOptObject('オプション', opts)
   return suggestForListing(
-    ctx, mercariItemId, argOptInt('件数', limit, { min: 1, max: 1000 }) ?? 20,
+    ctx, mercariItemId, Math.min(argOptInt('件数', limit, { min: 1, max: Number.MAX_SAFE_INTEGER }) ?? 20, SUGGEST_MAX),
     o ? { includeSold: argOptBool('販売済みを含める', o.includeSold) } : undefined,
   )
 })
