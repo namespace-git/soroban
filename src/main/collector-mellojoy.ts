@@ -205,14 +205,54 @@ function parseFulfillmentSection(block: string, now: Date): OrderFulfillment {
 
   let carrier: string | null = null
   let trackingNumber: string | null = null
-  const trackingPMatch =
-    /<p\b[^>]*>([\s\S]*?<a\b[^>]*href="[^"]*17track\.net[^"]*"[^>]*>[^<]*<\/a>[\s\S]*?)<\/p>/.exec(block)
-  if (trackingPMatch) {
-    const pBlock = trackingPMatch[1]
-    const aMatch = /<a\b[^>]*href="[^"]*17track\.net[^"]*"[^>]*>([^<]*)<\/a>/.exec(pBlock)
-    trackingNumber = aMatch ? decodeEntities(aMatch[1]).trim() || null : null
-    const spanMatch = /<span[^>]*>([^<]*)<\/span>/.exec(pBlock)
-    carrier = spanMatch ? decodeEntities(spanMatch[1]).trim() || null : null
+  const aOpenMatch = /<a\b[^>]*href="[^"]*17track\.net[^"]*"[^>]*>/.exec(block)
+  if (aOpenMatch) {
+    const aOpen = aOpenMatch[0]
+    const aInnerStart = aOpenMatch.index + aOpen.length
+    const aEnd = block.indexOf('</a>', aInnerStart)
+    const aInner = aEnd === -1 ? block.slice(aInnerStart) : block.slice(aInnerStart, aEnd)
+
+    // 追跡番号：href の nums= → 無ければ <a> の中身（旧形式）
+    const hrefMatch = /href="([^"]*)"/.exec(aOpen)
+    const numsMatch = hrefMatch ? /[#?&]nums=([^&#]*)/.exec(decodeEntities(hrefMatch[1])) : null
+    let num = ''
+    if (numsMatch) {
+      let raw = numsMatch[1]
+      try {
+        raw = decodeURIComponent(raw)
+      } catch {
+        // 壊れたエスケープはそのまま
+      }
+      num = decodeEntities(raw).split(',')[0].trim()
+    }
+    if (!num) num = decodeEntities(stripTags(aInner)).trim()
+    trackingNumber = /^[A-Za-z0-9-]{6,40}$/.test(num) ? num : null
+
+    // 業者：aria-label → 旧形式（リンクを含む <p> 内の最初の span）→ <a> 内の最初の中身のある span
+    const ariaMatch = /aria-label="([^"]*)"/.exec(aOpen)
+    const ariaCarrier = ariaMatch ? /^(.+?) の荷物 (\S+) を追跡/.exec(decodeEntities(ariaMatch[1])) : null
+    if (ariaCarrier) {
+      carrier = ariaCarrier[1].trim() || null
+    } else {
+      const pMatch =
+        /<p\b[^>]*>([\s\S]*?<a\b[^>]*href="[^"]*17track\.net[^"]*"[^>]*>[^<]*<\/a>[\s\S]*?)<\/p>/.exec(block)
+      if (pMatch) {
+        const spanMatch = /<span[^>]*>([^<]*)<\/span>/.exec(pMatch[1])
+        carrier = spanMatch ? decodeEntities(spanMatch[1]).trim() || null : null
+      }
+      if (!carrier) {
+        const spanRe = /<span\b([^>]*)>([^<]*)<\/span>/g
+        let sm: RegExpExecArray | null
+        while ((sm = spanRe.exec(aInner))) {
+          if (/aria-hidden/.test(sm[1])) continue
+          const t = decodeEntities(sm[2]).trim()
+          if (t) {
+            carrier = t
+            break
+          }
+        }
+      }
+    }
   }
 
   const history: OrderFulfillment['history'] = []

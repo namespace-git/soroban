@@ -349,6 +349,35 @@ describe('collector-mellojoy（electronに依存しない部分）', () => {
       })
     })
 
+    const newFormatHtml = (ariaAttr: string) => `
+      <h1>注文 (#3)</h1>
+      <section aria-label="フルフィルメント状況：確認済み"><div><h2>フルフィルメント状況：確認済み</h2></div>
+        <div><div><h3>確認済み</h3></div><div><p>9月27日</p></div></div>
+        <div><style>.x{color:red}</style><div><span><a ${ariaAttr}href="https://t.17track.net/#nums=SF6047936617474" target="_blank" rel="noopener noreferrer"><div><div><div><img src="x.png" alt=""></div></div><div><span>SF Express</span></div><div><div><div><strong><span aria-hidden="true">·</span></strong></div><span>SF6047936617474</span></div></div></div></a></span></div></div>
+      </section>
+    `
+
+    it('新形式（<p>なし・aリンク内が入れ子）：番号・業者・状態が読める', () => {
+      const detail = parseOrderDetailHtml(
+        newFormatHtml('aria-label="SF Express の荷物 SF6047936617474 を追跡 (新しいウィンドウで開く)" '), now)
+      expect(detail.fulfillment?.trackingNumber).toBe('SF6047936617474')
+      expect(detail.fulfillment?.carrier).toBe('SF Express')
+      expect(detail.fulfillment?.statusText).toBe('確認済み')
+    })
+
+    it('新形式で aria-label が無くても、href の nums から番号、a内の span から業者が読める', () => {
+      const detail = parseOrderDetailHtml(newFormatHtml(''), now)
+      expect(detail.fulfillment?.trackingNumber).toBe('SF6047936617474')
+      expect(detail.fulfillment?.carrier).toBe('SF Express')
+    })
+
+    it('17track のリンクが無ければ追跡番号・業者は null', () => {
+      const html = pendingHtml.replace('</section>', '<p><span>SF Express</span> <a href="https://example.com/">SF6047878426775</a></p></section>')
+      const detail = parseOrderDetailHtml(html, now)
+      expect(detail.fulfillment?.trackingNumber).toBeNull()
+      expect(detail.fulfillment?.carrier).toBeNull()
+    })
+
     it('配送のsectionが無い注文は fulfillment: null', () => {
       const detail = parseOrderDetailHtml('<h1>注文 (#1)</h1><p>本文</p>', now)
       expect(detail.fulfillment).toBeNull()
