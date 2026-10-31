@@ -198,6 +198,27 @@ describe('collector-mellojoy（electronに依存しない部分）', () => {
     })
   })
 
+  describe('parseOrderListHtml（詳細リンクの探し方）', () => {
+    it('新形式：aria-label が変わっても /account/orders/<数字> のリンクを採り、返品・再購入のリンクは拾わない', () => {
+      const rows = parseOrderListHtml(`<article aria-labelledby="order-#321472">
+        <a aria-label="注文 #321472 のアイテムを返品する" href="https://shopify.com/69465800944/account/orders/7259528855792/cancellations-and-returns">返品</a>
+        <a aria-label="注文 #321472、確認済み、￥8,397 JPY を表示" href="https://shopify.com/69465800944/account/orders/7259528855792?region_country=JP" target="_self">詳細</a>
+        <a aria-label="注文 (#321472) の再購入" href="https://www.mellojoyjapan.com/cart/?a=1&amp;b=2">再購入</a>
+        <h2 role="presentation">確認済み</h2><span>￥8,397 JPY</span>
+      </article>`)
+      expect(rows[0].href).toBe('https://shopify.com/69465800944/account/orders/7259528855792?region_country=JP')
+      expect(rows[0]).toMatchObject({ status: '確認済み', total: 8397 })
+    })
+
+    it('詳細リンクが無い article では href は空', () => {
+      const rows = parseOrderListHtml(`<article aria-labelledby="order-#321473">
+        <a href="https://shopify.com/1/account/orders/9/cancellations-and-returns">返品</a>
+        <h2 role="presentation">確認済み</h2><span>￥100 JPY</span>
+      </article>`)
+      expect(rows[0].href).toBe('')
+    })
+  })
+
   describe('fulfillmentFromStatus', () => {
     it('2026-09-23の一覧のように状態がspanで囲まれていても読める', () => {
       const rows = parseOrderListHtml(`<article aria-labelledby="order-#270882">
@@ -835,11 +856,11 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
 
   it('除外済みの注文は詳細を開かず、次の注文へ進む（残りの取得枠は消費しない）', async () => {
     state.opts.listHtml = buildListHtml([
-      { orderNo: '#100001', href: 'https://shop.example.com/order/100001' },
-      { orderNo: '#100002', href: 'https://shop.example.com/order/100002' },
+      { orderNo: '#100001', href: 'https://shop.example.com/account/orders/100001' },
+      { orderNo: '#100002', href: 'https://shop.example.com/account/orders/100002' },
     ])
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/100002': buildDetailHtml('#100002', 1000),
+      'https://shop.example.com/account/orders/100002': buildDetailHtml('#100002', 1000),
     }
     vi.mocked(db.isMellojoyOrderExcluded).mockImplementation(
       (_shopAccountId: string, orderKey: string) => orderKey === '#100001',
@@ -847,17 +868,17 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
 
     const run = await collectShopOrders('shop-1', true)
 
-    expect(state.loadedUrls).not.toContain('https://shop.example.com/order/100001')
-    expect(state.loadedUrls).toContain('https://shop.example.com/order/100002')
+    expect(state.loadedUrls).not.toContain('https://shop.example.com/account/orders/100001')
+    expect(state.loadedUrls).toContain('https://shop.example.com/account/orders/100002')
     expect(db.createPurchase).toHaveBeenCalledTimes(1)
     expect(run.status).toBe('ok')
     expect(run.message).toContain('不一致で除外済み・スキップ 1 件')
   })
 
   it('詳細ページでキーワード不一致と判明したら markMellojoyOrderExcluded を呼ぶ', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#100003', href: 'https://shop.example.com/order/100003' }])
+    state.opts.listHtml = buildListHtml([{ orderNo: '#100003', href: 'https://shop.example.com/account/orders/100003' }])
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/100003': buildDetailHtml('#100003', 1000),
+      'https://shop.example.com/account/orders/100003': buildDetailHtml('#100003', 1000),
     }
     vi.mocked(db.getShopAccount).mockReturnValue({ id: 'shop-1', import_keywords: '該当しないキーワード' } as never)
     vi.mocked(db.parseKeywords).mockReturnValue(['該当しないキーワード'])
@@ -871,8 +892,19 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
     expect(run.status).toBe('ok')
   })
 
+  it('詳細リンクが読めない注文は詳細を開かず（一覧を開き直さず）、失敗に「リンクが見つかりませんでした」が入る', async () => {
+    state.opts.listHtml = buildListHtml([{ orderNo: '#400001', href: '' }])
+
+    const run = await collectShopOrders('shop-1', true)
+
+    expect(state.loadedUrls).toHaveLength(1)
+    expect(run.status).toBe('failed')
+    expect(run.message).toContain('#400001：注文の詳細へのリンクが見つかりませんでした')
+    expect(db.createPurchase).not.toHaveBeenCalled()
+  })
+
   it('詳細取得の対象が全件失敗（解析不能）なら failed になる', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#200001', href: 'https://shop.example.com/order/200001' }])
+    state.opts.listHtml = buildListHtml([{ orderNo: '#200001', href: 'https://shop.example.com/account/orders/200001' }])
     // detailHtmlByUrl に何も積まない → outerHTML が空文字 → 明細0行 → shouldSkipDetail で失敗扱い
 
     const run = await collectShopOrders('shop-1', true)
@@ -881,20 +913,20 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('既取込のみ（詳細取得の対象0件）なら ok のまま', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/order/300001' }])
+    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/account/orders/300001' }])
     vi.mocked(db.existingImportKeys).mockReturnValue(new Set(['mellojoy:#300001']))
 
     const run = await collectShopOrders('shop-1', true)
 
     expect(run.status).toBe('ok')
     expect(db.createPurchase).not.toHaveBeenCalled()
-    expect(state.loadedUrls).not.toContain('https://shop.example.com/order/300001')
+    expect(state.loadedUrls).not.toContain('https://shop.example.com/account/orders/300001')
   })
 
   it('既取込の自動更新商品も詳細からバリアント別の画像を保存し、仕入は作り直さない', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/order/300001' }])
+    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/account/orders/300001' }])
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/300001': buildDetailHtml('#300001', 1000)
+      'https://shop.example.com/account/orders/300001': buildDetailHtml('#300001', 1000)
         .replace('<span>数量</span>1', '<img src="https://cdn.example.com/a_128x128.jpg?v=2"><span>数量</span>1')
         .replace('<span>テスト商品</span>', '<span>テスト商品</span><small>【A001-2】青</small>'),
     }
@@ -916,7 +948,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('既取込の画像巡回で詳細が読めなかったときは image_checked_at を刻まない（次回また候補に残る）', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/order/300001' }])
+    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/account/orders/300001' }])
     // detailHtmlByUrl に何も積まない → outerHTML が空文字 → shouldSkipDetail で読めなかった扱い
     vi.mocked(db.existingImportKeys).mockReturnValue(new Set(['mellojoy:#300001']))
     vi.mocked(db.purchaseDetailRevisitCandidates).mockReturnValue([{ id: 'existing', import_key: 'mellojoy:#300001' }])
@@ -928,7 +960,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('既存画像の確認は新規の残り枠で巡回し、一覧1＋詳細5ページまで', async () => {
-    const orders = Array.from({ length: 7 }, (_, i) => ({ orderNo: `#${300001 + i}`, href: `https://shop.example.com/order/${i}` }))
+    const orders = Array.from({ length: 7 }, (_, i) => ({ orderNo: `#${300001 + i}`, href: `https://shop.example.com/account/orders/${i}` }))
     state.opts.listHtml = buildListHtml(orders)
     state.opts.detailHtmlByUrl = Object.fromEntries(orders.map(o => [o.href, buildDetailHtml(o.orderNo, 1000)]))
     const existing = orders.slice(1).map((o, i) => ({ id: `p${i}`, import_key: `mellojoy:${o.orderNo}` }))
@@ -944,8 +976,8 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('画像のダウンロード失敗は件数だけ結果に記録し、収集全体は failed にしない（画像は補助データ）', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/order/300001' }])
-    state.opts.detailHtmlByUrl = { 'https://shop.example.com/order/300001': buildDetailHtml('#300001', 1000) }
+    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/account/orders/300001' }])
+    state.opts.detailHtmlByUrl = { 'https://shop.example.com/account/orders/300001': buildDetailHtml('#300001', 1000) }
     vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue([{ id: 'line-1', image_url: 'https://cdn.example.com/a.jpg' }])
     state.opts.fetchImpl = async () => ({ ok: false, arrayBuffer: async () => new ArrayBuffer(0) })
     const run = await collectShopOrders('shop-1', true)
@@ -955,9 +987,9 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('下書き取り込みでもバリアント付きの商品名で画像URLを保存する', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/order/300001' }])
+    state.opts.listHtml = buildListHtml([{ orderNo: '#300001', href: 'https://shop.example.com/account/orders/300001' }])
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/300001': buildDetailHtml('#300001', 1000)
+      'https://shop.example.com/account/orders/300001': buildDetailHtml('#300001', 1000)
         .replace('<span>配送</span>', '<span>不明な費用</span>')
         .replace('<span>数量</span>1', '<img src="https://cdn.example.com/a_128x128.jpg"><span>数量</span>1')
         .replace('<span>テスト商品</span>', '<span>テスト商品</span><small>【A001-2】青</small>'),
@@ -971,7 +1003,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('複数注文でも画像の試行回数は1回30枚まで', async () => {
-    const orders = Array.from({ length: 5 }, (_, i) => ({ orderNo: `#${300001 + i}`, href: `https://shop.example.com/order/${i}` }))
+    const orders = Array.from({ length: 5 }, (_, i) => ({ orderNo: `#${300001 + i}`, href: `https://shop.example.com/account/orders/${i}` }))
     state.opts.listHtml = buildListHtml(orders)
     state.opts.detailHtmlByUrl = Object.fromEntries(orders.map(o => [o.href, buildDetailHtml(o.orderNo, 1000)]))
     vi.mocked(db.purchaseLinesNeedingImage).mockReturnValue(Array.from({ length: 12 }, (_, i) => ({ id: `line-${i}`, image_url: `https://cdn.example.com/${i}.jpg` })))
@@ -983,7 +1015,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('画像の保存で StoreStoppedError が来たら、次の注文の詳細を開かずに止める（failed を記録）', async () => {
-    const orders = Array.from({ length: 4 }, (_, i) => ({ orderNo: `#${700001 + i}`, href: `https://shop.example.com/order/${i}` }))
+    const orders = Array.from({ length: 4 }, (_, i) => ({ orderNo: `#${700001 + i}`, href: `https://shop.example.com/account/orders/${i}` }))
     state.opts.listHtml = buildListHtml(orders)
     state.opts.detailHtmlByUrl = Object.fromEntries(orders.map(o => [o.href, buildDetailHtml(o.orderNo, 1000)]))
     vi.mocked(db.createPurchase).mockReturnValue('purchase-700001')
@@ -1005,12 +1037,12 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
 
   it('状態表示に「キャンセル」の文字がなくても合計￥0なら一覧の時点で除外する（詳細を開かない）', async () => {
     state.opts.listHtml = buildListHtml([
-      { orderNo: '#500001', href: 'https://shop.example.com/order/500001', status: '確認済み', total: 0 },
+      { orderNo: '#500001', href: 'https://shop.example.com/account/orders/500001', status: '確認済み', total: 0 },
     ])
 
     const run = await collectShopOrders('shop-1', true)
 
-    expect(state.loadedUrls).not.toContain('https://shop.example.com/order/500001')
+    expect(state.loadedUrls).not.toContain('https://shop.example.com/account/orders/500001')
     expect(db.createPurchase).not.toHaveBeenCalled()
     expect(run.message).toContain('キャンセル 1')
     expect(run.status).toBe('ok')
@@ -1020,12 +1052,12 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
     // 一覧に ￥...JPY の表記が無い＝parseOrderListHtml では total が null になり active に残る
     state.opts.listHtml = `
       <article aria-labelledby="order-#400001">
-        <a aria-label="注文を表示するテスト" href="https://shop.example.com/order/400001">link</a>
+        <a aria-label="注文を表示するテスト" href="https://shop.example.com/account/orders/400001">link</a>
         <h2 role="presentation">確認済み</h2>
       </article>
     `
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/400001': `
+      'https://shop.example.com/account/orders/400001': `
         <h1>注文 (#400001)</h1>
         <span>確認日: 1月1日</span>
         <h3 id="MoneyLine-Heading1">注文合計</h3>
@@ -1038,7 +1070,7 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
 
     const run = await collectShopOrders('shop-1', true)
 
-    expect(state.loadedUrls).toContain('https://shop.example.com/order/400001')
+    expect(state.loadedUrls).toContain('https://shop.example.com/account/orders/400001')
     expect(db.markMellojoyOrderExcluded).toHaveBeenCalledWith('shop-1', '#400001', hashKeywords([]))
     expect(db.createPurchase).not.toHaveBeenCalled()
     expect(run.message).toContain('キャンセル 1')
@@ -1055,9 +1087,9 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('確定した仕入は createPurchase の直後に画像を保存し、messageに件数が出る', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#600001', href: 'https://shop.example.com/order/600001' }])
+    state.opts.listHtml = buildListHtml([{ orderNo: '#600001', href: 'https://shop.example.com/account/orders/600001' }])
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/600001': buildDetailHtml('#600001', 1000),
+      'https://shop.example.com/account/orders/600001': buildDetailHtml('#600001', 1000),
     }
     vi.mocked(db.createPurchase).mockReturnValue('purchase-600001')
     vi.mocked(db.purchaseLinesNeedingImage).mockImplementation((purchaseId: string) =>
@@ -1074,9 +1106,9 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('詳細に配送のsectionがあれば db.applyFulfillmentFromShop を呼び、messageに件数が出る', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#600002', href: 'https://shop.example.com/order/600002' }])
+    state.opts.listHtml = buildListHtml([{ orderNo: '#600002', href: 'https://shop.example.com/account/orders/600002' }])
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/600002': buildDetailHtml('#600002', 1000) + `
+      'https://shop.example.com/account/orders/600002': buildDetailHtml('#600002', 1000) + `
         <section aria-label="フルフィルメント状況：配達中">
           <p><span>SF Express</span> <a href="https://t.17track.net/#nums=SF6047878426775">SF6047878426775</a></p>
           <div><h3>配達中</h3><time><span>9月23日</span></time></div>
@@ -1099,9 +1131,9 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
   })
 
   it('配送のsectionが無ければ db.applyFulfillmentFromShop を呼ばない', async () => {
-    state.opts.listHtml = buildListHtml([{ orderNo: '#600003', href: 'https://shop.example.com/order/600003' }])
+    state.opts.listHtml = buildListHtml([{ orderNo: '#600003', href: 'https://shop.example.com/account/orders/600003' }])
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/600003': buildDetailHtml('#600003', 1000),
+      'https://shop.example.com/account/orders/600003': buildDetailHtml('#600003', 1000),
     }
     vi.mocked(db.createPurchase).mockReturnValue('purchase-600003')
 
@@ -1221,13 +1253,13 @@ describe('refetchPurchaseImages()', () => {
     )
     state.opts.listHtml = `
       <article aria-labelledby="order-#270882">
-        <a aria-label="注文を表示するテスト" href="https://shop.example.com/order/270882">link</a>
+        <a aria-label="注文を表示するテスト" href="https://shop.example.com/account/orders/270882">link</a>
         <h2 role="presentation">確認済み</h2>
         <span>￥1,000 JPY</span>
       </article>
     `
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/270882': `
+      'https://shop.example.com/account/orders/270882': `
         <h1>注文 (#270882)</h1>
         <div role="table" aria-labelledby="ResourceList1">
           <div role="row">
@@ -1247,7 +1279,7 @@ describe('refetchPurchaseImages()', () => {
 
     const result = await refetchPurchaseImages('purchase-1')
 
-    expect(state.loadedUrls).toContain('https://shop.example.com/order/270882')
+    expect(state.loadedUrls).toContain('https://shop.example.com/account/orders/270882')
     expect(db.setPurchaseLineImageUrls).toHaveBeenCalledWith('purchase-1', [
       { name: 'テスト商品 【A001-2】青', image_url: 'https://cdn.example.com/a_400x400.jpg?v=1' },
     ])
@@ -1263,13 +1295,13 @@ describe('refetchPurchaseImages()', () => {
     )
     state.opts.listHtml = `
       <article aria-labelledby="order-#270882">
-        <a aria-label="注文を表示するテスト" href="https://shop.example.com/order/270882">link</a>
+        <a aria-label="注文を表示するテスト" href="https://shop.example.com/account/orders/270882">link</a>
         <h2 role="presentation">確認済み</h2>
         <span>￥1,000 JPY</span>
       </article>
     `
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/270882': `
+      'https://shop.example.com/account/orders/270882': `
         <h1>注文 (#270882)</h1>
         <div role="table" aria-labelledby="ResourceList1">
           <div role="row">
@@ -1302,13 +1334,13 @@ describe('refetchPurchaseImages()', () => {
     )
     state.opts.listHtml = `
       <article aria-labelledby="order-#270882">
-        <a aria-label="注文を表示するテスト" href="https://shop.example.com/order/270882">link</a>
+        <a aria-label="注文を表示するテスト" href="https://shop.example.com/account/orders/270882">link</a>
         <h2 role="presentation">確認済み</h2>
         <span>￥1,000 JPY</span>
       </article>
     `
     state.opts.detailHtmlByUrl = {
-      'https://shop.example.com/order/270882': `
+      'https://shop.example.com/account/orders/270882': `
         <h1>注文 (#270882)</h1>
         <div role="table" aria-labelledby="ResourceList1">
           <div role="row">

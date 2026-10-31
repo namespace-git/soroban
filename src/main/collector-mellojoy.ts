@@ -297,9 +297,20 @@ export function parseOrderListHtml(html: string): OrderListRow[] {
     if (rows.has(orderNo)) continue
     const block = m[2]
 
-    const linkTagMatch = /<a\b[^>]*aria-label="注文を表示する[^"]*"[^>]*>/.exec(block)
-    const hrefMatch = linkTagMatch ? /href="([^"]*)"/.exec(linkTagMatch[0]) : null
-    const href = hrefMatch ? decodeEntities(hrefMatch[1]) : ''
+    // aria-label の文言は変わるので頼らない。href が `/account/orders/<数字>` で終わる最初の <a> を詳細リンクとする
+    // （返品の `/cancellations-and-returns` など別の段は除く）
+    let href = ''
+    const anchorRe = /<a\b[^>]*>/g
+    let a: RegExpExecArray | null
+    while ((a = anchorRe.exec(block))) {
+      const hm = /\shref="([^"]*)"/.exec(a[0])
+      if (!hm) continue
+      const candidate = decodeEntities(hm[1])
+      if (/\/account\/orders\/\d+(?:[?#].*)?$/.test(candidate)) {
+        href = candidate
+        break
+      }
+    }
 
     const statusMatch = /<h2\b[^>]*role="presentation"[^>]*>([\s\S]*?)<\/h2>/.exec(block)
     const status = statusMatch ? stripTags(statusMatch[1]) : ''
@@ -889,6 +900,7 @@ export async function refetchPurchaseImages(purchaseId: string): Promise<{ saved
     const order = parseOrderListHtml(listHtml).find(o => o.orderNo === orderNo)
     if (!order) throw new Error('注文一覧に見つかりませんでした')
 
+    if (!order.href) throw new Error('注文の詳細へのリンクが見つかりませんでした')
     const detailUrl = new URL(order.href, listUrl).toString()
     await win.loadURL(detailUrl)
     await randomWait()
@@ -1026,6 +1038,7 @@ export async function collectShopOrders(
       if (pagesOpened >= MAX_PAGES_PER_RUN) break
 
       try {
+        if (!order.href) throw new Error('注文の詳細へのリンクが見つかりませんでした')
         const detailUrl = new URL(order.href, listUrl).toString()
         await win.loadURL(detailUrl)
         pagesOpened++
@@ -1103,6 +1116,7 @@ export async function collectShopOrders(
       // 下で「位置だけ進める」呼び出しをする
       let revisited = false
       try {
+        if (!order.href) throw new Error('注文の詳細へのリンクが見つかりませんでした')
         await win.loadURL(new URL(order.href, listUrl).toString())
         pagesOpened++
         await randomWait()
