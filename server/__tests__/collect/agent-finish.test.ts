@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createShopAccount } from '../../domain/master'
 import { collectNotification } from '../../agent/notify'
+import { parseSecretKeys, putSecret, SECRET_TRACK17 } from '../../secrets'
 import type { Member } from '../domain/helpers'
+import { addPurchases, fakeApiKey, keyRing, newKey } from '../integrations/helpers'
 import {
   ask, closeFixture, count, leaseOf, openFixture, registerPc, resetWorld, startJob, type Fixture, type Pc,
 } from './helpers'
@@ -244,6 +246,48 @@ describe('終わりの通知（kind = collect）', () => {
     await pc.call('finish', lease, { status: 'failed', run_ids: [] })
     expect(await count(f, 'select count(*)::int as n from app.notification_delivery where household_id = $1', f.world.b.householdId)).toBe(0)
     expect(await count(f, 'select count(*)::int as n from app.notification_event where household_id = $1', f.world.b.householdId)).toBe(0)
+  })
+})
+
+describe('終わりで 17TRACK の確認を積む（enqueueAllTracking）', () => {
+  const queued = async (): Promise<string[]> =>
+    (await f.dom.pg.query<{ tracking_number: string }>(
+      'select tracking_number from app.purchase where household_id = $1 and tracking_queued_at is not null order by tracking_number',
+      [a.householdId])).rows.map((r) => r.tracking_number)
+  const seed = async (withKey = true): Promise<void> => {
+    if (withKey) await a.run((ctx) => putSecret(ctx, parseSecretKeys(keyRing([1, newKey()])), SECRET_TRACK17, fakeApiKey()))
+    await addPurchases(a, [
+      { number: 'Q1', queued: false }, { number: 'Q2', queued: false, fulfillment: 'delivered' }, { number: null, queued: false },
+    ])
+  }
+
+  it('done・partial の後、追跡番号があって未到着の仕入だけ積む（到着済み・番号なしは積まない）', async () => {
+    await seed()
+    const m = await record(ok('mercari'))
+    expect((await pc.call('finish', lease, { status: 'done', run_ids: [m.id] })).status).toBe(200)
+    expect(await queued()).toEqual(['Q1'])
+
+    await resetWorld(f)
+    a = f.world.a
+    pc = await registerPc(f, a, 'リビングの PC')
+    lease = leaseOf(await startJob(f, a, pc))
+    await seed()
+    const m2 = await record(ok('mercari'))
+    expect((await pc.call('finish', lease, { status: 'partial', run_ids: [m2.id] })).status).toBe(200)
+    expect(await queued()).toEqual(['Q1'])
+  })
+
+  it('cancelled では積まない', async () => {
+    await seed()
+    expect((await pc.call('finish', lease, { status: 'cancelled', run_ids: [] })).status).toBe(200)
+    expect(await queued()).toEqual([])
+  })
+
+  it('API キーが無ければ積まない', async () => {
+    await seed(false)
+    const m = await record(ok('mercari'))
+    expect((await pc.call('finish', lease, { status: 'done', run_ids: [m.id] })).status).toBe(200)
+    expect(await queued()).toEqual([])
   })
 })
 

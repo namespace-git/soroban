@@ -5,6 +5,7 @@ import type { CollectorRun, CollectorSource, RunStatus } from '../../src/shared/
 import { argEnum, argId, argIds, argInt, argNullableText, argObject } from '../domain/_shared'
 import { finishRun, listShopAccounts, startRun } from '../domain/master'
 import { UserError } from '../errors'
+import { enqueueAllTracking } from '../cron/tracking-queue'
 import { registerAgentHandler } from './handler'
 import { assertLease, beginStage, parseLease, type AgentCtx } from './lease'
 import { COLLECT_NOTIFICATION_URL, collectNotification, describeProblems } from './notify'
@@ -103,6 +104,9 @@ async function finish(ctx: AgentCtx, rawLease: unknown, rawInput: unknown): Prom
     'select status, finished_at from app.finish_collect_job(?, ?, ?, ?::jsonb)',
     lease.job_id, lease.lease_token, status, JSON.stringify({ runs, message: shown }),
   )
+
+  // 取り込みで追跡番号が入った分の 17TRACK 確認を積む（定期実行が見るのは積まれたものだけ）
+  if (status !== 'cancelled') await enqueueAllTracking(ctx)
 
   let notified = false
   const note = collectNotification(status, runs, await agentName(ctx), message)
