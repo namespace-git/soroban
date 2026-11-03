@@ -4,7 +4,7 @@ import StatusChip from './StatusChip.vue'
 import Icon from './Icon.vue'
 import { yen } from '../format'
 
-defineProps<{ linked: boolean; cost: number; codes: string[]; automatic?: boolean; hint?: string | null; readonly?: boolean }>()
+defineProps<{ linked: boolean; cost: number; codes: string[]; automatic?: boolean; hint?: string | null; readonly?: boolean; noInventory?: boolean }>()
 defineEmits<{ open: [] }>()
 </script>
 
@@ -15,7 +15,9 @@ defineEmits<{ open: [] }>()
     <div class="allocation-info">
       <div class="allocation-state">
         <span v-if="linked" class="num"><span class="allocation-cost-label">原価 </span>{{ yen(cost) }}</span>
-        <!-- スマホ幅では、同じ「未紐付け」が状態ラベルにも出る（Sales.vue）。そちらを残し、ここは .allocation-unlinked ごと隠す -->
+        <!-- スマホ幅では、同じ「未紐付け」「在庫なし」が状態ラベルにも出る（Sales.vue）。そちらを残し、ここは .allocation-unlinked ごと隠す。
+             在庫なし＝商品が戻ってきた販売を人が確定したもの。要対応ではないので橙にしない -->
+        <StatusChip v-else-if="noInventory" class="allocation-unlinked" tone="neutral" label="在庫なし" />
         <StatusChip v-else class="allocation-unlinked" tone="warn" label="未紐付け" />
       </div>
       <div v-if="codes.length" class="allocation-codes">
@@ -24,10 +26,10 @@ defineEmits<{ open: [] }>()
       <span v-if="automatic" class="faint">自動紐付け</span>
       <span v-if="hint" class="faint allocation-hint" :title="hint">{{ hint }}</span>
     </div>
-    <!-- 橙（link-btn）は「まだ紐付いていない」ときだけ。紐付け済み・確認だけのときは中立のボタン -->
-    <button type="button" class="sm allocation-btn" :class="{ 'link-btn': !linked && !readonly }" @click="$emit('open')">
+    <!-- 橙（link-btn）は「まだ紐付いていない」ときだけ。紐付け済み・在庫なし・確認だけのときは中立のボタン -->
+    <button type="button" class="sm allocation-btn" :class="{ 'link-btn': !linked && !readonly && !noInventory }" @click="$emit('open')">
       <Icon name="link" :size="14" />
-      {{ readonly ? '紐付けを確認' : linked ? '紐付けを編集' : '在庫を選ぶ' }}
+      {{ readonly ? '紐付けを確認' : linked || noInventory ? '紐付けを編集' : '在庫を選ぶ' }}
     </button>
   </div>
 </template>

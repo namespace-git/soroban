@@ -349,6 +349,7 @@ function registerIpc(): void {
   handle('linkInventory', (saleId, ids, opts) => db.linkInventory(saleId, ids, 'manual', opts))
   handle('autoLinkPending', (saleIds) => db.autoLinkPending(saleIds))
   handle('unlinkInventory', (saleId, id) => db.unlinkInventory(saleId, id))
+  handle('setSaleNoInventory', (saleId, on) => db.setSaleNoInventory(saleId, on))
   handle('suggestInventory', (saleId, limit, opts) => db.suggestInventory(saleId, limit, opts))
   handle('suggestProductInventory', (modelCode, quantity, excludeIds) => db.suggestProductInventory(modelCode, quantity, excludeIds))
   handle('getAutoLinkBlockers', (saleId) => db.getAutoLinkBlockers(saleId))

@@ -303,6 +303,11 @@ CREATE TABLE IF NOT EXISTS sale (
   -- （sale_profit の unmatched は、揃うまで 1 のままにするためにこれを見る）
   expected_item_count INTEGER,
 
+  -- 1 = 「在庫なしで確定」。売れて売上は入ったが、相手が受け取りを拒否して商品だけ戻ってきた等、
+  -- 紐付ける在庫が無い販売。在庫 0 点・原価 0 円のまま紐付け済みとして数える
+  -- （sale_profit の unmatched が 0）。在庫を紐付けると 0 に戻る（db.ts の linkInventory）
+  no_inventory       INTEGER NOT NULL DEFAULT 0 CHECK (no_inventory IN (0,1)),
+
   -- メルカリの取引の進み具合。NULL = まだ取れていない（取引中タブと販売履歴から埋める）
   status             TEXT
                      CHECK (status IN ('waiting_payment','waiting_shipment','shipped','delivered','completed')),
@@ -684,13 +689,16 @@ SELECT
   s.price - s.fee - s.shipping_fee - s.packaging_cost
     - COALESCE(SUM(i.landed_cost), 0) AS gross_profit,
   COUNT(sl.id) AS item_count,
+  -- no_inventory = 1（在庫なしで確定）は、紐付けた在庫が 0 点でも紐付け済み（unmatched = 0）。
   -- expected_item_count（見積もった点数）が分かっていて、まだそこに届いていなければ
   -- 揃うまでは unmatched のまま（在庫コード・型番の個数表記が一部しか見つからなかった場合）
   CASE
+    WHEN s.no_inventory = 1 THEN 0
     WHEN COUNT(sl.id) = 0 THEN 1
     WHEN s.expected_item_count IS NOT NULL AND COUNT(sl.id) < s.expected_item_count THEN 1
     ELSE 0
   END AS unmatched,
+  s.no_inventory,
   -- 1 なら紐付けのどれかが型番の自動確定
   COALESCE(MAX(CASE WHEN sl.link_source = 'auto' THEN 1 ELSE 0 END), 0) AS auto_linked
 FROM sale s

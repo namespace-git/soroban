@@ -56,6 +56,10 @@ const pickedOpen = ref(false)
 const autoPickedId = ref<string | null>(null)
 // 開いて最初の読み込みが終わったときだけ、自動チェックを試す（紐付け解除のあとの再読み込みでは試さない）
 let autoPickPending = false
+// 「在庫なしで確定」の印（sale モードだけ）。取り消した直後に、親が販売を読み直す前でも表示を戻せるよう手元にも持つ
+const noInventory = ref(false)
+const settingNoInventory = ref(false)
+watch(() => [props.sale?.id, props.sale?.no_inventory] as const, ([, flag]) => { noInventory.value = flag === 1 }, { immediate: true })
 
 // チェックが変わるたびに main へ見積もりを頼む（手数料・送料は画面で計算しない）。
 // 150ms デバウンスし、応答が前後しても最後に投げた要求の結果だけを反映する。
@@ -260,7 +264,8 @@ watch(maxQuantity, (max) => {
  * 他の出品に取ってある在庫・販売済みの在庫は対象外（奪わない）。チェックを入れるだけで、確定は人が押す
  */
 function applyAutoPick() {
-  if (!canReserve.value || matchedItems.value.length > 0 || picked.value.size > 0) return
+  // 「在庫なしで確定」済みの販売は、戻ってきた在庫に勝手にチェックを入れない
+  if (!canReserve.value || noInventory.value || matchedItems.value.length > 0 || picked.value.size > 0) return
   const matches = candidates.value.filter(isMatchedCandidate)
   if (matches.length !== 1) return
   const only = matches[0]
@@ -501,6 +506,56 @@ async function unlink(itemId: string) {
   }
 }
 
+/**
+ * 商品が戻ってきた販売（受け取り拒否など）を、在庫なし・原価 ¥0 のまま紐付け済みにする。
+ * 紐付けている在庫があれば全部外して在庫に戻すので、確認ダイアログではっきり言う（確定は人）
+ */
+async function confirmNoInventory() {
+  if (props.mode !== 'sale' || !props.sale || settingNoInventory.value) return
+  const saleId = props.sale.id
+  const releasing = matchedItems.value.length > 0
+  const lines = ['原価 ¥0 のまま、紐付け済みとして数えます（要対応・未紐付けから外れます）。']
+  if (releasing) {
+    const codes = matchedItems.value.map(m => m.item_code)
+    lines.push(`紐付けている在庫 ${codes.length}点（${codes.slice(0, 3).join('、')}${codes.length > 3 ? '…' : ''}）を外して、在庫に戻します。`)
+  }
+  lines.push('あとからこの画面で取り消せます。')
+  const choice = await choose('在庫なしで確定します', [
+    { label: 'キャンセル', value: 'cancel', tone: 'ghost' },
+    { label: '在庫なしで確定', value: 'confirm', tone: releasing ? 'danger' : 'primary' },
+  ], { message: lines.join('\n') })
+  if (choice !== 'confirm') return
+  settingNoInventory.value = true
+  try {
+    await window.soroban.setSaleNoInventory(saleId, true)
+    picked.value = new Set()
+    emit('changed')
+    emit('close')
+    toast('在庫なしで確定しました', 'ok')
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    settingNoInventory.value = false
+  }
+}
+
+/** 取り消して未紐付けに戻す。確認なしの 1 タップ（外した在庫は戻さない） */
+async function cancelNoInventory() {
+  if (props.mode !== 'sale' || !props.sale || settingNoInventory.value) return
+  settingNoInventory.value = true
+  try {
+    await window.soroban.setSaleNoInventory(props.sale.id, false)
+    noInventory.value = false
+    emit('changed')
+    await load()
+    toast('未紐付けに戻しました', 'ok')
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    settingNoInventory.value = false
+  }
+}
+
 /** 状態ラベル（①）。出品側の在庫状態が押す前に分かるよう、出品先と状態を短く出す */
 function blockerStatusLabel(b: AutoLinkBlocker): string {
   return `${CHANNEL_LABEL[b.listing_channel]}・${LISTING_STATUS_LABEL[b.listing_status]}`
@@ -568,7 +623,20 @@ function placeholderChar(): string {
     </template>
 
     <p class="panel-title">在庫の紐付け</p>
-    <p class="faint allocation-help">{{ mode === 'listing' ? '出品中は在庫を予約します。売れたら、その在庫を販売に引き継ぎます。' : 'この販売の原価に使う在庫を選びます。' }}</p>
+    <p class="faint allocation-help" :class="{ 'has-action': mode === 'sale' && !noInventory }">{{ mode === 'listing' ? '出品中は在庫を予約します。売れたら、その在庫を販売に引き継ぎます。' : 'この販売の原価に使う在庫を選びます。' }}</p>
+    <!-- 商品が戻ってきた販売（受け取り拒否など）。確定は人が確認ダイアログを読んでから。取り消しは確認なしの 1 タップ。
+         候補の一覧を押し下げないよう、どちらも 1 行に収める。出品モードには出さない -->
+    <div v-if="mode === 'sale' && sale && !noInventory" class="no-inventory-row">
+      <span class="faint">商品が戻ってきた販売（受け取り拒否など）は</span>
+      <button class="sm ghost" :disabled="loading || settingNoInventory" @click="confirmNoInventory">在庫なしで確定</button>
+    </div>
+    <div v-else-if="mode === 'sale' && sale" class="matched-block">
+      <p class="panel-title">在庫なしで確定済み</p>
+      <div class="no-inventory-row">
+        <span class="faint">原価 ¥0 のまま、紐付け済みとして数えています。</span>
+        <button class="sm ghost" :disabled="settingNoInventory" @click="cancelNoInventory">取り消す</button>
+      </div>
+    </div>
     <p v-if="loading" class="faint" role="status">在庫を読み込んでいます…</p>
     <div v-if="matchedItems.length" class="matched-block">
       <p class="panel-title">紐付け済み</p>
@@ -761,6 +829,17 @@ function placeholderChar(): string {
 
 <style scoped>
 .allocation-help { margin: 4px 0 16px; font-size: var(--fs-12); }
+/* 説明文のすぐ下に「在庫なしで確定」の 1 行が続くときは、間を詰める */
+.allocation-help.has-action { margin-bottom: 6px; }
+.no-inventory-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-bottom: 14px;
+  font-size: var(--fs-12);
+}
+.matched-block .no-inventory-row { margin-bottom: 0; }
 /* 出品／販売タイトル（Drawer.vue の見出し）は切れずに折り返して全文を見せる */
 :deep(.drawer-title) {
   white-space: normal;
@@ -999,7 +1078,12 @@ function placeholderChar(): string {
   .name-sub { min-height: 0; -webkit-line-clamp: 2; }
   .matched-item button,
   .picked-row button,
-  .blocked-item button { height: 44px; border-color: var(--line); }
+  .blocked-item button,
+  .no-inventory-row button { height: 44px; border-color: var(--line); }
+  /* 文は折り返してボタンの横に収める（ボタンが次の行に落ちて、候補を押し下げない） */
+  .no-inventory-row { flex-wrap: nowrap; gap: 10px; margin-bottom: 12px; }
+  .no-inventory-row > .faint { flex: 1 1 0; min-width: 0; }
+  .no-inventory-row button { flex: 0 0 auto; }
   .blocked-item .name-cell { flex: 1 1 100%; }
   .picked-row { gap: 6px 8px; }
 

@@ -110,6 +110,7 @@ const API_METHOD_TABLE = {
   linkInventory: true,
   autoLinkPending: true,
   unlinkInventory: true,
+  setSaleNoInventory: true,
   getAutoLinkBlockers: true,
   suggestInventory: true,
   suggestProductInventory: true,

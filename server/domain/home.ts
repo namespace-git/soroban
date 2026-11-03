@@ -227,6 +227,7 @@ export async function getHealthChecks(ctx: Ctx): Promise<HealthCheck[]> {
     select count(*) as c from sale s
      where s.kind = 'resale'
        and s.sold_at <= ?::date
+       and s.no_inventory = 0
        and not exists (select 1 from sale_line sl where sl.household_id = s.household_id and sl.sale_id = s.id)
   `, threshold30)
   if (unmatchedOld > 0) {
@@ -296,6 +297,7 @@ export async function getHealthChecks(ctx: Ctx): Promise<HealthCheck[]> {
   const listingBlocksSale = await count(ctx, `
     select count(*) as c from sale s
      where s.kind = 'resale'
+       and s.no_inventory = 0
        and not exists (select 1 from sale_line sl where sl.household_id = s.household_id and sl.sale_id = s.id)
        and cardinality(s.model_codes) = 1
        and exists (

@@ -599,7 +599,7 @@ async function loadSaleItemInfo() {
 type CostCandidate = { id: string; item_code: string; landed_cost: number; model_code: string | null }
 const costCandidates = ref<Map<string, CostCandidate | null>>(new Map())
 async function loadCostCandidates() {
-  const targets = sales.value.filter(s => s.kind === 'resale' && s.item_count === 0 && isPendingSale(s))
+  const targets = sales.value.filter(s => s.kind === 'resale' && s.item_count === 0 && s.no_inventory !== 1 && isPendingSale(s))
   if (!targets.length) { costCandidates.value = new Map(); return }
   const pairs = await Promise.all(targets.map(async s => {
     const sugg = await window.soroban.suggestInventory(s.id, 1)
@@ -609,7 +609,8 @@ async function loadCostCandidates() {
   costCandidates.value = new Map(pairs)
 }
 function costCandidateText(s: SaleProfit): string | null {
-  if (s.item_count > 0 || s.kind !== 'resale') return null
+  // 在庫なしで確定した販売に、戻ってきた在庫の候補は出さない
+  if (s.item_count > 0 || s.kind !== 'resale' || s.no_inventory === 1) return null
   const c = costCandidates.value.get(s.id)
   if (c === undefined) return null
   if (c === null) return '候補なし'
@@ -1516,10 +1517,12 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                   <StatusChip v-if="r.kind === 'listing' && r.listing" :tone="STATUS_TONE[r.listing.status]" :label="LISTING_STATUS_LABEL[r.listing.status]" />
                   <StatusChip v-if="r.sale && !r.sale.status" tone="neutral" :label="r.sale.source === 'manual' ? '手入力' : '状態未取得'" />
                   <!-- スマホ幅だけ：粗利がまだ出ない理由を状態ラベル（①）に出す。表の列が無いので、ここで一目で分かるように。
-                       「未紐付け」はここに 1 回だけ出し、在庫の紐付けのセル（AllocationCell）のチップは隠す -->
+                       「未紐付け」はここに 1 回だけ出し、在庫の紐付けのセル（AllocationCell）のチップは隠す。
+                       「在庫なし」（商品が戻ってきて人が確定した販売）は要対応ではないので中立の色 -->
                   <template v-if="r.sale && r.sale.kind === 'resale'">
                     <StatusPill v-if="!r.sale.is_shipping_confirmed && !hold" class="m-flag" tone="warn" label="送料未入力" />
                     <StatusPill v-if="r.sale.unmatched === 1" class="m-flag" tone="warn" label="未紐付け" />
+                    <StatusPill v-else-if="r.sale.no_inventory === 1" class="m-flag" tone="neutral" label="在庫なし" />
                   </template>
                 </div>
                 <!-- 押せる範囲は .title-hit（スマホ幅では上下に広げて 44px 以上）。文字の大きさと並びは変えない -->
@@ -1640,13 +1643,13 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                   </template>
                 </div>
 
-                <!-- has-flag：スマホ幅では「未紐付け」が状態ラベルに出ているので、ここのチップは隠す。
+                <!-- has-flag：スマホ幅では「未紐付け」「在庫なし」が状態ラベルに出ているので、ここのチップは隠す。
                      info-none：隠したあと、原価・コード・ひとことが何も無い（候補も無い）なら、情報の行ごと畳む -->
                 <div
                   class="cell-cost"
                   :class="{
-                    'has-flag': r.sale?.kind === 'resale' && r.sale?.unmatched === 1,
-                    'info-none': r.sale?.kind === 'resale' && r.sale?.unmatched === 1 && r.sale?.item_count === 0 && !costCandidateText(r.sale),
+                    'has-flag': r.sale?.kind === 'resale' && (r.sale?.unmatched === 1 || r.sale?.no_inventory === 1),
+                    'info-none': r.sale?.kind === 'resale' && (r.sale?.unmatched === 1 || r.sale?.no_inventory === 1) && r.sale?.item_count === 0 && !costCandidateText(r.sale),
                   }"
                 >
                   <span class="m-label">{{ costHeaderLabel }}</span>
@@ -1654,6 +1657,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
                   <AllocationCell v-else-if="r.sale"
                     :linked="r.sale.item_count > 0" :cost="r.sale.cost"
                     :codes="saleItemCodes.get(r.sale.id) ?? []" :automatic="!!r.sale.auto_linked"
+                    :no-inventory="r.sale.no_inventory === 1"
                     :hint="!r.sale.item_count ? costCandidateText(r.sale) : null"
                     @open="openSaleAlloc(r.sale)" />
                   <AllocationCell v-else-if="r.listing"
@@ -2271,7 +2275,7 @@ async function openChannelPageExternal(channel: SalesChannel, kind: 'item' | 'tr
   .cell-ship .shipping-actual { min-height: 44px; }
 
   /* 在庫の紐付け：情報（原価・在庫コード・自動紐付けのひとこと・候補）は 1 行にまとめ、ボタン（44px 高）は下の行の左。
-     「未紐付け」のチップは、状態ラベルに同じ語が出ているので隠す（.has-flag）。隠して何も残らないなら行ごと畳む（.info-none）。
+     「未紐付け」「在庫なし」のチップは、状態ラベルに同じ語が出ているので隠す（.has-flag）。隠して何も残らないなら行ごと畳む（.info-none）。
      「済」の間に薄くする（.held の opacity）は、入れ物が無い（display: contents）ので、ここで中身に直接かける */
   .cell-cost :deep(.allocation-info) {
     grid-area: info;

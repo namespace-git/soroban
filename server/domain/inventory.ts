@@ -148,6 +148,9 @@ export async function linkInventory(
     )
     await ctx.sql.run('delete from listing_line where inventory_item_id = ?', itemId)
   }
+
+  // 「在庫なしで確定」の販売に在庫を紐付けたら、印を戻す（ふつうの紐付け済みになる。sale.ts の setSaleNoInventory）
+  await ctx.sql.run('update sale set no_inventory = 0 where id = ? and no_inventory = 1', sale)
 }
 
 export async function unlinkInventory(ctx: Ctx, saleId: string, itemId: string): Promise<void> {

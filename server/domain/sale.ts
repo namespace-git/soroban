@@ -6,7 +6,7 @@ import type {
   SaleSource, SaleStatus, SaleTotals, SearchHit,
 } from '../../src/shared/types'
 import {
-  argArray, argDate, argEnum, argId, argIds, argInt, argNullableId, argNullableText, argNullableYen, argObject,
+  argArray, argBool, argDate, argEnum, argId, argIds, argInt, argNullableId, argNullableText, argNullableYen, argObject,
   argOptBool, argOptEnum, argOptId, argOptMonth, argOptText, argText, argYen, assertDateText,
   assertTagsExist, assertYen, calcFee, extractCodeQuantities, extractCodes, extractItemCodes, loadTagsFor, matchesAnyKeyword,
   matchesQuery, mediaUrl, mergeInheritedTags, monthBounds, realizedTotals, keywordsFor, setting, sortAndSlice, todayJst,
@@ -616,6 +616,24 @@ export async function deleteSale(ctx: Ctx, id: string): Promise<void> {
   }
 }
 
+/**
+ * 販売を「在庫なしで確定」にする／取り消す（返品で商品だけ戻ってきた販売など、紐付ける在庫が無いもの）。
+ * on = true：紐付いた在庫を全部外し（trg_sline_unsold で in_stock に戻る。unlinkInventory と同じ）、
+ * 在庫 0 点・原価 ¥0 のまま紐付け済み（sale_profit.unmatched = 0）にする。同じトランザクションで行う。
+ * on = false：印を外して未紐付けに戻す（外した在庫は戻さない）。
+ * どちらも何度呼んでも同じ結果。在庫を紐付けると印は外れる（linkInventory・takeOverListing）。
+ * updated_at は触らない（linkInventory と同じ。appendModelCodes の「人が手で触ったか」判定を変えない）
+ */
+export async function setSaleNoInventory(ctx: Ctx, saleId: string, on: boolean): Promise<void> {
+  const id = argId('販売', saleId)
+  const flag = argBool('在庫なしで確定', on)
+  const sale = await ctx.sql.get('select id from sale where id = ?', id)
+  if (!sale) throw new UserError('販売が見つかりません', 'not_found')
+
+  if (flag) await ctx.sql.run('delete from sale_line where sale_id = ?', id)
+  await ctx.sql.run('update sale set no_inventory = ? where id = ?', flag ? 1 : 0, id)
+}
+
 /** 取り込んだ販売の除外記録（deleteSale が作る）。次回の収集で再取り込みしないために見る */
 export async function isMercariItemExcluded(ctx: Ctx, mercariItemId: string): Promise<boolean> {
   const row = await ctx.sql.get('select 1 from sale_exclusion where channel_item_id = ?', mercariItemId)
@@ -664,7 +682,7 @@ export function saleProfitColumns(alias = 'sale_profit'): string {
     ${a}.title, ${a}.kind, ${a}.price, ${a}.fee, ${a}.fee_source, ${a}.shipping_fee, ${a}.packaging_cost,
     ${a}.is_shipping_confirmed, ${a}.shipping_method_id, ${a}.shipping_source, ${a}.note, ${a}.model_codes,
     ${a}.source, ${a}.status, ${a}.shipped_at, ${a}.delivered_at, ${a}.completed_at, ${a}.buyer,
-    ${a}.cost, ${a}.gross_profit, ${a}.item_count, ${a}.unmatched, ${a}.auto_linked
+    ${a}.cost, ${a}.gross_profit, ${a}.item_count, ${a}.unmatched, ${a}.auto_linked, ${a}.no_inventory
   `
 }
 
@@ -813,10 +831,12 @@ export function isYahooBundleSale(sale: { channel: SalesChannel; title: string }
  * まとめ買い（isYahooBundleSale）は常に候補止まり（expected_item_count も触らない）。
  */
 export async function autoLinkSale(ctx: Ctx, saleId: string): Promise<boolean> {
-  const sale = await ctx.sql.get<{ channel: SalesChannel; kind: SaleKind; title: string; model_codes: string[] }>(
-    'select channel, kind, title, model_codes from sale where id = ?', saleId,
-  )
+  const sale = await ctx.sql.get<{
+    channel: SalesChannel; kind: SaleKind; title: string; model_codes: string[]; no_inventory: number
+  }>('select channel, kind, title, model_codes, no_inventory from sale where id = ?', saleId)
   if (!sale || sale.kind !== 'resale') return false
+  // 人が「在庫なしで確定」にした販売には、あとから型番が入っても自動で紐付けない（印が静かに外れるのを防ぐ）
+  if (sale.no_inventory === 1) return false
   if (isYahooBundleSale(sale)) return false
 
   const already = await ctx.sql.get<{ c: number }>('select count(*) as c from sale_line where sale_id = ?', saleId)
@@ -851,10 +871,11 @@ export async function autoLinkSale(ctx: Ctx, saleId: string): Promise<boolean> {
  */
 export async function getAutoLinkBlockers(ctx: Ctx, saleId: string): Promise<AutoLinkBlocker[]> {
   const id = argId('販売', saleId)
-  const sale = await ctx.sql.get<{ channel: SalesChannel; kind: SaleKind; title: string; model_codes: string[] }>(
-    'select channel, kind, title, model_codes from sale where id = ?', id,
-  )
+  const sale = await ctx.sql.get<{
+    channel: SalesChannel; kind: SaleKind; title: string; model_codes: string[]; no_inventory: number
+  }>('select channel, kind, title, model_codes, no_inventory from sale where id = ?', id)
   if (!sale || sale.kind !== 'resale') return []
+  if (sale.no_inventory === 1) return []
   if (isYahooBundleSale(sale)) return []
 
   const already = await ctx.sql.get<{ c: number }>('select count(*) as c from sale_line where sale_id = ?', id)
@@ -1306,6 +1327,7 @@ registerHandler('saleTotals', (ctx, filter) => saleTotals(ctx, filter ?? undefin
 registerHandler('createSale', (ctx, input) => createSale(ctx, input))
 registerHandler('updateSale', (ctx, id, patch) => updateSale(ctx, id, patch))
 registerHandler('deleteSale', (ctx, id) => deleteSale(ctx, id))
+registerHandler('setSaleNoInventory', (ctx, saleId, on) => setSaleNoInventory(ctx, saleId, on))
 // 画面は「全件」のとき省略する（HTTP では null で届く）。空配列は「対象0件」で、省略（全件）とは別
 registerHandler('autoLinkPending', (ctx, saleIds) =>
   autoLinkPending(ctx, saleIds === undefined || saleIds === null ? undefined : argIds('販売', saleIds, { max: 10_000 })))

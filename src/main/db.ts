@@ -1360,6 +1360,19 @@ function migrate(): void {
     ).run()
   }
 
+  if (version < 35) {
+    // 「在庫なしで確定」の印。売れたが相手が受け取りを拒否して商品だけ戻ってきた販売など、
+    // 紐付ける在庫が無いものを、未紐付け（要対応）と区別するため。既存の行は全部 0（印なし）。
+    // sale_profit.unmatched がこの列を見る（ビューは起動のたびに作り直すので、ここでは触らない）
+    addColumnIfMissing('sale', 'no_inventory',
+      `INTEGER NOT NULL DEFAULT 0 CHECK (no_inventory IN (0,1))`)
+
+    db.prepare(
+      `INSERT INTO setting (key, value) VALUES ('schema_version', '35')
+         ON CONFLICT(key) DO UPDATE SET value = '35'`,
+    ).run()
+  }
+
   // mellojoy-watch の取り込みは取りやめた（ユーザーの指示）。
   // schema.sql の既定値挿入（毎起動・IF NOT EXISTS）で入り直しても構わないよう、
   // バージョンに関係なく毎回消しておく
@@ -3137,6 +3150,8 @@ export function linkInventory(
       ins.run(randomUUID(), saleId, itemId, source)
       delListing.run(itemId)
     }
+    // 在庫を紐付けたので「在庫なしで確定」の印は戻す（原価が入る販売を ¥0 のまま確定扱いにしない）
+    db.prepare('UPDATE sale SET no_inventory = 0 WHERE id = ? AND no_inventory = 1').run(saleId)
   })
   try {
     tx()
@@ -3152,6 +3167,29 @@ export function linkInventory(
 export function unlinkInventory(saleId: string, itemId: string): void {
   db.prepare('DELETE FROM sale_line WHERE sale_id = ? AND inventory_item_id = ?')
     .run(saleId, itemId)
+}
+
+/**
+ * 「在庫なしで確定」の付け外し。売れて売上は入ったが、相手が受け取りを拒否して商品だけ
+ * 戻ってきた販売など、紐付ける在庫が無いものを、未紐付け（要対応）と区別するための印。
+ *
+ * on = true：この販売に紐付いた在庫を全部外して在庫に戻し（trg_sline_unsold）、在庫 0 点・
+ * 原価 ¥0 のまま紐付け済み（sale_profit.unmatched = 0）にする。外すのと印を付けるのは同じ
+ * トランザクション。外した在庫は in_stock に戻るだけで、出品への引き当ては復元しない
+ * （unlinkInventory と同じ）。画面は確認ダイアログの後にだけ呼ぶ。
+ * on = false：印を外して未紐付けに戻す（外した在庫は戻さない）。
+ * どちらも何度呼んでも同じ結果。在庫を紐付けると印は戻る（linkInventory）。
+ */
+export function setSaleNoInventory(saleId: string, on: boolean): void {
+  const sale = db.prepare('SELECT id FROM sale WHERE id = ?').get(saleId)
+  if (!sale) throw new Error('販売が見つかりません')
+
+  const tx = db.transaction(() => {
+    if (on) db.prepare('DELETE FROM sale_line WHERE sale_id = ?').run(saleId)
+    db.prepare('UPDATE sale SET no_inventory = ?, updated_at = ? WHERE id = ?')
+      .run(on ? 1 : 0, new Date().toISOString(), saleId)
+  })
+  tx()
 }
 
 /**
@@ -3239,9 +3277,12 @@ function isYahooBundleSale(sale: { channel: SalesChannel; title: string }): bool
  * まとめ買い（isYahooBundleSale）は常に候補止まり（expected_item_count も触らない）。
  */
 export function autoLinkSale(saleId: string): boolean {
-  const sale = db.prepare('SELECT channel, kind, title, model_codes FROM sale WHERE id = ?').get(saleId) as
-    | { channel: SalesChannel; kind: SaleKind; title: string; model_codes: string } | undefined
+  const sale = db.prepare('SELECT channel, kind, title, model_codes, no_inventory FROM sale WHERE id = ?').get(saleId) as
+    | { channel: SalesChannel; kind: SaleKind; title: string; model_codes: string; no_inventory: number } | undefined
   if (!sale || sale.kind !== 'resale') return false
+  // 人が「在庫なしで確定」にした販売は、型番が合う在庫があっても紐付けない
+  // （紐付けると印が戻り、人の判断を自動で覆してしまう）
+  if (sale.no_inventory === 1) return false
   if (isYahooBundleSale(sale)) return false
 
   const already = db.prepare('SELECT COUNT(*) AS c FROM sale_line WHERE sale_id = ?')
@@ -3276,9 +3317,10 @@ export function autoLinkSale(saleId: string): boolean {
  * 読み取り専用。何も書き換えない。
  */
 export function getAutoLinkBlockers(saleId: string): AutoLinkBlocker[] {
-  const sale = db.prepare('SELECT channel, kind, title, model_codes FROM sale WHERE id = ?').get(saleId) as
-    | { channel: SalesChannel; kind: SaleKind; title: string; model_codes: string } | undefined
+  const sale = db.prepare('SELECT channel, kind, title, model_codes, no_inventory FROM sale WHERE id = ?').get(saleId) as
+    | { channel: SalesChannel; kind: SaleKind; title: string; model_codes: string; no_inventory: number } | undefined
   if (!sale || sale.kind !== 'resale') return []
+  if (sale.no_inventory === 1) return []
   if (isYahooBundleSale(sale)) return []
 
   const already = db.prepare('SELECT COUNT(*) AS c FROM sale_line WHERE sale_id = ?')
@@ -3911,6 +3953,8 @@ function takeOverListing(saleId: string, mercariItemId: string | null): boolean 
       )
       for (const l of lines) insLine.run(randomUUID(), saleId, l.inventory_item_id)
       db.prepare('DELETE FROM listing_line WHERE listing_id = ?').run(mercariItemId)
+      // 在庫を引き継いだので「在庫なしで確定」の印は戻す（linkInventory と同じ）
+      db.prepare('UPDATE sale SET no_inventory = 0 WHERE id = ? AND no_inventory = 1').run(saleId)
     }
     db.prepare(
       `UPDATE listing SET status = 'sold', updated_at = datetime('now') WHERE mercari_item_id = ?`,
@@ -5640,6 +5684,7 @@ export function getHealthChecks(): HealthCheck[] {
     SELECT COUNT(*) AS c FROM sale s
      WHERE s.kind = 'resale'
        AND s.sold_at <= ?
+       AND s.no_inventory = 0
        AND NOT EXISTS (SELECT 1 FROM sale_line sl WHERE sl.sale_id = s.id)
   `, threshold30).c
   if (unmatchedOld > 0) {
@@ -5709,6 +5754,7 @@ export function getHealthChecks(): HealthCheck[] {
   const listingBlocksSale = one<{ c: number }>(`
     SELECT COUNT(*) AS c FROM sale s
      WHERE s.kind = 'resale'
+       AND s.no_inventory = 0
        AND NOT EXISTS (SELECT 1 FROM sale_line sl WHERE sl.sale_id = s.id)
        AND json_array_length(s.model_codes) = 1
        AND EXISTS (

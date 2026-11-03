@@ -949,6 +949,7 @@ function buildSaleFixed(opts: {
     gross_profit: price - fee - opts.shipping.fee - packaging - cost,
     item_count: itemCount,
     unmatched: itemCount === 0 ? 1 : 0,
+    no_inventory: 0,
     auto_linked: opts.autoLinked ? 1 : 0,
     source,
     tags: [],
@@ -1798,7 +1799,8 @@ function recalcSale(sale: SaleProfit): void {
   const items = ids.map(id => inventory.find(it => it.id === id)).filter((it): it is InventoryItem => !!it)
   sale.item_count = items.length
   sale.cost = items.reduce((s, it) => s + it.landed_cost, 0)
-  sale.unmatched = sale.item_count === 0 ? 1 : 0
+  // 「在庫なしで確定」の販売は、在庫 0 点でも紐付け済み（未紐付けにしない）
+  sale.unmatched = sale.item_count === 0 && sale.no_inventory !== 1 ? 1 : 0
   sale.gross_profit = sale.price - sale.fee - sale.shipping_fee - sale.packaging_cost - sale.cost
   recalcSaleInheritedTags(sale)
 }
@@ -3241,6 +3243,7 @@ const api: SorobanApi = {
       gross_profit: price - fee,
       item_count: 0,
       unmatched: 1,
+      no_inventory: 0,
       auto_linked: 0,
       source: 'manual',
       tags: [],
@@ -3362,6 +3365,7 @@ const api: SorobanApi = {
     }
     saleLines.set(saleId, [...current, ...inventoryItemIds])
     sale.auto_linked = 0 // 人が確定した紐付けなので「自動」チップは外す
+    sale.no_inventory = 0 // 在庫を紐付けたので「在庫なしで確定」は外れる
     recalcSale(sale)
     return wait(undefined)
   },
@@ -3398,6 +3402,26 @@ const api: SorobanApi = {
       item.sold_to = null
     }
     sale.auto_linked = 0
+    recalcSale(sale)
+    return wait(undefined)
+  },
+
+  async setSaleNoInventory(saleId: string, on: boolean) {
+    const sale = findSale(saleId)
+    if (on) {
+      // 紐付けている在庫は全部外して在庫に戻す（unlinkInventory と同じ）
+      for (const itemId of saleLines.get(saleId) ?? []) {
+        const item = inventory.find(it => it.id === itemId)
+        if (item) {
+          item.status = 'in_stock'
+          item.thumb_url = null
+          item.sold_to = null
+        }
+      }
+      saleLines.set(saleId, [])
+      sale.auto_linked = 0
+    }
+    sale.no_inventory = on ? 1 : 0
     recalcSale(sale)
     return wait(undefined)
   },

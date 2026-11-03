@@ -26,7 +26,7 @@ const CATEGORY_LABEL: Record<ExpenseCategory, string> = {
 }
 
 const LOGGED_KINDS = [
-  'updateSale', 'linkInventory', 'confirmPurchase',
+  'updateSale', 'linkInventory', 'setSaleNoInventory', 'confirmPurchase',
   'reserveInventory', 'setListingShipping', 'updatePurchaseFulfillment',
 ]
 

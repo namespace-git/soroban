@@ -489,6 +489,8 @@ export async function takeOverListing(ctx: Ctx, saleId: string, itemId: string |
       )
     }
     await ctx.sql.run('delete from listing_line where listing_id = ?', listing.id)
+    // 「在庫なしで確定」の印が付いた販売に在庫が付いたら、印を戻す（linkInventory と同じ）
+    await ctx.sql.run('update sale set no_inventory = 0 where id = ? and no_inventory = 1', saleId)
   }
   await ctx.sql.run(`update listing set status = 'sold', updated_at = now() where id = ?`, listing.id)
 

@@ -1197,7 +1197,7 @@ describe('db（:memory:）', () => {
 
         expect(() => db.initDb(path)).not.toThrow()
 
-        expect(db.getSettings().schema_version).toBe('34')
+        expect(db.getSettings().schema_version).toBe('35')
         const sales = db.listSales()
         expect(sales.find(s => s.id === rateId)!.fee_source).toBe('rate')
         expect(sales.find(s => s.id === actualId)!.fee_source).toBe('actual')
@@ -1763,7 +1763,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
       const tagId = db.createTag('移行後タグ')
       db.setSaleTags(saleId, [tagId])
       expect(db.listSales().find(s => s.id === saleId)!.tags.map(t => t.id)).toEqual([tagId])
@@ -1958,7 +1958,7 @@ describe('db（:memory:）', () => {
   })
 
   it('migrate：schema_versionが30になる', () => {
-    expect(db.getSettings().schema_version).toBe('34')
+    expect(db.getSettings().schema_version).toBe('35')
   })
 
   it('migrate：Phase1の実物スキーマ（ビュー・トリガー込み）の既存DBが壊れず新列が使えるようになる', () => {
@@ -2044,7 +2044,7 @@ describe('db（:memory:）', () => {
       expect(saleAfter.cost).toBe(1050)
       expect(saleAfter.gross_profit).toBe(3000 - 300 - 0 - 0 - 1050)
       expect(db.getSettings().collect_interval_h).toBe('1')
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
 
       // タグ機能（version3）もこの経路で使えるようになっている
       const tagId = db.createTag('移行後タグ')
@@ -2078,7 +2078,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       const divisible = expense.lines.find(l => l.id === 'line-divisible')!
       expect(divisible).toMatchObject({ unit_price: 300, quantity: 4, amount: 1200 })
@@ -2105,7 +2105,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
       const expense = db.listExpenses('2026-01').find(e => e.id === expenseId)!
       expect(expense.registration_no).toBeNull()
     } finally {
@@ -2149,7 +2149,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
       // 既存の表示名はそのまま残る
       const p = db.listProducts().find(x => x.model_code === 'Z078-2')
       expect(p?.custom_name).toBe('旧表示名')
@@ -2920,7 +2920,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
       const p = db.getPurchase(purchaseId)
       expect(p.tracking_carrier).toBeNull()
       expect(p.tracking_number).toBeNull()
@@ -2960,7 +2960,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
       expect(db.getPurchaseTracking(purchaseId)!.tracking_registered_at).toBeNull()
 
       // 移行後は普通に登録できる
@@ -3002,7 +3002,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
       expect(db.getSettings().fee_rate_bp_yahoo).toBe('500')
 
       const sale = db.listSales().find(s => s.id === saleId)!
@@ -3054,7 +3054,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
 
       // 既存の実行記録が1件も減らない
       const runs = db.listRuns(10)
@@ -3122,7 +3122,7 @@ describe('db（:memory:）', () => {
 
       expect(() => db.initDb(path)).not.toThrow()
 
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
 
       // s1は変化なし
       expect(db.listSales().find(s => s.id === s1)!.model_codes).toEqual(['A040'])
@@ -3484,7 +3484,7 @@ describe('db（:memory:）', () => {
 
         // schema_versionは上がっていない＝migrate()の列追加ではなく、
         // 毎回のtablesSql実行に含まれるINSERT OR IGNOREで入ったことの確認
-        expect(db.getSettings().schema_version).toBe('34')
+        expect(db.getSettings().schema_version).toBe('35')
         expect(db.getSettings().yahoo_keyword).toBe('')
       } finally {
         try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
@@ -6646,7 +6646,7 @@ describe('db（:memory:）', () => {
         db.closeDb()
 
         expect(() => db.initDb(path)).not.toThrow()
-        expect(db.getSettings().schema_version).toBe('34')
+        expect(db.getSettings().schema_version).toBe('35')
         expect(db.getSettings().auto_release_suspended).toBe('1')
       } finally {
         try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
@@ -7815,7 +7815,7 @@ describe('お金の出入り（cash_account / liability / cash_entry）', () => 
       // 2回目：データが残り、テーブルの作り直しで消えない
       db.initDb(path)
       expect(db.listCashAccounts()[0].balance).toBe(1500)
-      expect(db.getSettings().schema_version).toBe('34')
+      expect(db.getSettings().schema_version).toBe('35')
     } finally {
       try { db.closeDb() } catch { /* 既に閉じていてもよい */ }
       rmSync(dir, { recursive: true, force: true })

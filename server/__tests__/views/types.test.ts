@@ -30,7 +30,7 @@ async function columnsOf(view: ViewName): Promise<Map<string, string>> {
 const INTEGER_COLUMNS: Record<ViewName, string[]> = {
   sale_profit: [
     'price', 'fee', 'shipping_fee', 'packaging_cost', 'is_shipping_confirmed', 'cost', 'gross_profit',
-    'item_count', 'unmatched', 'auto_linked',
+    'item_count', 'unmatched', 'auto_linked', 'no_inventory',
   ],
   monthly_summary: [
     'sales_count', 'revenue', 'total_fee', 'total_shipping', 'total_packaging', 'total_cost', 'gross_profit',
@@ -83,10 +83,14 @@ describe('ビューの列の型', () => {
     expect(iv.get('listing_id')).toBe('text')
   })
 
-  it('household_id は各ビューの最後の列（それ以外の列の並びは SQLite のまま）', async () => {
+  it('household_id は各ビューの最後の列（それ以外の列の並びは SQLite のまま）。後から足した列だけは household_id の後ろ', async () => {
+    // create or replace view は新しい列を最後にしか足せない（20261104000100_sale_no_inventory.sql）
+    const ADDED_AFTER_HOUSEHOLD_ID: Partial<Record<ViewName, string[]>> = { sale_profit: ['no_inventory'] }
     for (const view of VIEW_NAMES) {
       const names = [...(await columnsOf(view)).keys()]
-      expect(names[names.length - 1], view).toBe('household_id')
+      const added = ADDED_AFTER_HOUSEHOLD_ID[view] ?? []
+      expect(names.slice(names.length - added.length), view).toEqual(added)
+      expect(names[names.length - added.length - 1], view).toBe('household_id')
     }
   })
 })

@@ -262,8 +262,14 @@ export interface SaleProfit {
   cost: number
   gross_profit: number
   item_count: number
-  /** 1 なら在庫が未紐付け */
+  /** 1 なら在庫が未紐付け。no_inventory = 1 の販売は 0 */
   unmatched: number
+  /**
+   * 1 なら「在庫なしで確定」（受け取り拒否で商品だけ戻ったが、売上は入った など）。
+   * 紐付けた在庫は 0 点・原価 ¥0 のまま、紐付け済みとして数える（unmatched = 0。要対応・未紐付けの絞り込み・
+   * 自動紐付けの対象から外れる）。在庫を紐付けると 0 に戻る。付け外しは setSaleNoInventory
+   */
+  no_inventory: number
   /** 1 なら紐付けのどれかが型番の自動確定 */
   auto_linked: number
   /** collector = メルカリから自動取得 / manual = 手入力 */
@@ -1238,6 +1244,14 @@ export interface SorobanApi {
    */
   autoLinkPending(saleIds?: string[]): Promise<number>
   unlinkInventory(saleId: string, inventoryItemId: string): Promise<void>
+  /**
+   * 「在庫なしで確定」の付け外し（SaleProfit.no_inventory）。
+   * on = true：この販売に紐付いた在庫を**全部外して在庫に戻し**（unlinkInventory と同じ）、在庫 0 点・原価 ¥0 のまま
+   * 紐付け済みにする。同じトランザクションで行う。画面は確認ダイアログの後にだけ呼ぶ。
+   * on = false：取り消して未紐付けに戻す（外した在庫は戻さない）。
+   * どちらも何度呼んでも同じ結果。販売が無ければ日本語のエラー
+   */
+  setSaleNoInventory(saleId: string, on: boolean): Promise<void>
   /**
    * その販売が自動で紐付かない理由のうち、**在庫はあるのに出品に取ってあるせいで外れているもの**を返す。
    *
