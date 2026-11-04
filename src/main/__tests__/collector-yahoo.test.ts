@@ -12,9 +12,11 @@ import {
   formatYahooInconsistentNote,
   formatYahooRenderTimeoutNote,
   findUnknownYahooBreakdownLabels,
+  findUnknownYahooSalesStatuses,
   findUnknownYahooTradstats,
   formatYahooTruncatedTitleNote,
   formatYahooUnknownBreakdownNote,
+  formatYahooUnknownSalesStatusNote,
   formatYahooUnknownTradstatNote,
   hasYahooItemLinks,
   isYahooCollectEmpty,
@@ -25,9 +27,12 @@ import {
   parseYahooSellingHtml,
   parseYahooSoldHtml,
   saveIfUnknownYahooBreakdown,
+  saveIfUnknownYahooSalesStatus,
   saveIfUnknownYahooTradstat,
   splitYahooCombinedSales,
   summarizeYahooHtml,
+  YAHOO_SALES_STATUS_PAID,
+  YAHOO_SALES_STATUS_WAITING,
   zeroYahooPageNames,
   type YahooCombinedSale,
   type YahooSalesRow,
@@ -158,8 +163,23 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       expect(mapYahooTradstat('SELLER_SHIPPED')).toBe('shipped')
     })
 
-    it('知らない値は null（推測で埋めない）', () => {
+    it('発送済みのまま受け取り連絡が無い系（SELLER_SHIPPED_DEPOSIT_REQUESTED・SELLER_SHIPPED_REGULAR_ESCROW_EXPIRED。2026-10-31 に実物で観測）は shipped。完了にはしない（入金は③の「売上金」で判定する）', () => {
+      expect(mapYahooTradstat('SELLER_SHIPPED_DEPOSIT_REQUESTED')).toBe('shipped')
+      expect(mapYahooTradstat('SELLER_SHIPPED_REGULAR_ESCROW_EXPIRED')).toBe('shipped')
+      // もう「はじめて見る状態」ではないので、HTML を吐く対象にも入らない
+      const base: YahooScrapedSale = {
+        yahooItemId: 'z600000001', title: 'ダミー', price: 1000, tradstat: '', statusText: '',
+        thumbUrl: null, isBundle: false, bundleCount: null, titleWithoutBundle: 'ダミー',
+      }
+      expect(findUnknownYahooTradstats([
+        { ...base, tradstat: 'SELLER_SHIPPED_DEPOSIT_REQUESTED' },
+        { ...base, tradstat: 'SELLER_SHIPPED_REGULAR_ESCROW_EXPIRED' },
+      ])).toEqual([])
+    })
+
+    it('知らない値は null（推測で埋めない）。前方一致で拾わない（SELLER_SHIPPED_ に続く別の値も null）', () => {
       expect(mapYahooTradstat('SOME_UNKNOWN_STATUS')).toBeNull()
+      expect(mapYahooTradstat('SELLER_SHIPPED_SOMETHING_ELSE')).toBeNull()
       expect(mapYahooTradstat('')).toBeNull()
     })
   })
@@ -778,6 +798,128 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
       const sales = [makeSalesRow()]
       const { sales: combined } = combineYahooSales(sold, sales)
       expect(combined[0].status).toBeNull()
+    })
+
+    // ---- ③の状態が「売上金」なら取引完了（2026-10-31 に実物で観測：②が COMPLETE にならないまま売上金が入る取引がある） ----
+
+    it('③「売上金」×②SELLER_SHIPPED_DEPOSIT_REQUESTED → completed。計上日・完了日に使う soldAt は③の取扱日、送料の実額もそのまま乗る', () => {
+      const sold = [makeSoldRow({ tradstat: 'SELLER_SHIPPED_DEPOSIT_REQUESTED' })]
+      const sales = [makeSalesRow({
+        statusText: YAHOO_SALES_STATUS_PAID, handledDate: '2026-10-28',
+        settlementAmount: 6400, feeAmount: 320, shippingAmount: 490, receivedAmount: 5590,
+      })]
+      const { sales: combined, inconsistent } = combineYahooSales(sold, sales)
+      expect(inconsistent).toEqual([])
+      expect(combined).toHaveLength(1)
+      expect(combined[0]).toMatchObject({
+        status: 'completed', soldAt: '2026-10-28', price: 6400, fee: 320, shippingFee: 490,
+      })
+    })
+
+    it('③「売上金」×②SELLER_SHIPPED_REGULAR_ESCROW_EXPIRED → completed', () => {
+      const sold = [makeSoldRow({ tradstat: 'SELLER_SHIPPED_REGULAR_ESCROW_EXPIRED' })]
+      const sales = [makeSalesRow({ statusText: YAHOO_SALES_STATUS_PAID, handledDate: '2026-10-29' })]
+      const { sales: combined } = combineYahooSales(sold, sales)
+      expect(combined[0].status).toBe('completed')
+      expect(combined[0].soldAt).toBe('2026-10-29')
+    })
+
+    it('③「売上金」×②無し（③だけの行）→ completed。②が無くても売上金が入っていれば実績', () => {
+      const salesOnly = [makeSalesRow({
+        yahooItemId: 'z900000001', itemName: '売上金管理にしか無い商品名【Z9', handledDate: '2026-10-20',
+        statusText: YAHOO_SALES_STATUS_PAID,
+      })]
+      const { sales: combined } = combineYahooSales([], salesOnly)
+      expect(combined).toHaveLength(1)
+      expect(combined[0]).toMatchObject({ status: 'completed', soldAt: '2026-10-20', titleTruncated: true })
+    })
+
+    it('③「売上金」×②が未知の tradstat → completed（②が読めなくても入金済みなら完了。未知の②は別に知らせる）', () => {
+      const sold = [makeSoldRow({ tradstat: 'SOME_UNKNOWN_STATUS' })]
+      const sales = [makeSalesRow({ statusText: YAHOO_SALES_STATUS_PAID })]
+      expect(combineYahooSales(sold, sales).sales[0].status).toBe('completed')
+    })
+
+    it('③「受取連絡待ち」×②SELLER_SHIPPED → shipped（入金されるまでは完了にしない）', () => {
+      const sold = [makeSoldRow({ tradstat: 'SELLER_SHIPPED' })]
+      const sales = [makeSalesRow({ statusText: YAHOO_SALES_STATUS_WAITING })]
+      expect(combineYahooSales(sold, sales).sales[0].status).toBe('shipped')
+    })
+
+    it('③「受取連絡待ち」×②SELLER_SHIPPED_DEPOSIT_REQUESTED → shipped（まだ売上金になっていない）', () => {
+      const sold = [makeSoldRow({ tradstat: 'SELLER_SHIPPED_DEPOSIT_REQUESTED' })]
+      const sales = [makeSalesRow({ statusText: YAHOO_SALES_STATUS_WAITING })]
+      expect(combineYahooSales(sold, sales).sales[0].status).toBe('shipped')
+    })
+
+    it('③「受取連絡待ち」×②が未知の tradstat → null、③「受取連絡待ち」×②無し → null（今までどおり。推測で埋めない）', () => {
+      const unknownSold = [makeSoldRow({ tradstat: 'SOME_UNKNOWN_STATUS' })]
+      const waiting = [makeSalesRow({ statusText: YAHOO_SALES_STATUS_WAITING })]
+      expect(combineYahooSales(unknownSold, waiting).sales[0].status).toBeNull()
+      expect(combineYahooSales([], waiting).sales[0].status).toBeNull()
+    })
+
+    it('③「受取連絡待ち」×②COMPLETE → completed（③は状態を下げない。②が完了なら③が何でも完了のまま）', () => {
+      const sold = [makeSoldRow({ tradstat: 'COMPLETE' })]
+      for (const statusText of [YAHOO_SALES_STATUS_WAITING, '見たことのない文言', '']) {
+        const sales = [makeSalesRow({ statusText })]
+        expect(combineYahooSales(sold, sales).sales[0].status, `③=${statusText || '（空）'}`).toBe('completed')
+      }
+    })
+
+    it('③が知らない文言（「売上金」「受取連絡待ち」以外）なら推測で完了にしない：②SELLER_SHIPPED → shipped、②無し → null', () => {
+      const sold = [makeSoldRow({ tradstat: 'SELLER_SHIPPED' })]
+      for (const statusText of ['保留中', '売上金（保留）', '']) {
+        const sales = [makeSalesRow({ statusText })]
+        expect(combineYahooSales(sold, sales).sales[0].status, `③=${statusText || '（空）'}`).toBe('shipped')
+        expect(combineYahooSales([], sales).sales[0].status, `③=${statusText || '（空）'}・②無し`).toBeNull()
+      }
+    })
+
+    it('「売上金」でも内訳の式が崩れた行は販売にしない（status を決める前に inconsistent へ。完了扱いで黙って通さない）', () => {
+      const sold = [makeSoldRow({ tradstat: 'SELLER_SHIPPED_DEPOSIT_REQUESTED' })]
+      const sales = [makeSalesRow({
+        statusText: YAHOO_SALES_STATUS_PAID, amountsConsistent: false,
+        settlementAmount: 5000, feeAmount: 250, receivedAmount: 4000,
+        otherBreakdown: [{ label: '割引', amount: 750 }],
+      })]
+      const { sales: combined, inconsistent } = combineYahooSales(sold, sales)
+      expect(combined).toEqual([])
+      expect(inconsistent).toHaveLength(1)
+    })
+
+    it('HTML から読んだ行でも同じ：売上金管理の <td>売上金</td> と <span class="statusSuspend">受取連絡待ち</span> を statusText で区別でき、完了になるのは「売上金」の行だけ', () => {
+      const row = (id: string, date: string, statusCell: string) => `
+        <tr>
+          <td>ダミー商品${id}<br>(${id})</td>
+          <td>${date}</td>
+          ${statusCell}
+          <td>
+            <span class="u-fontSize16 u-textBold">4,750円</span>
+            <dl><dt>決済金額：</dt><dd>5,000円</dd></dl>
+            <dl><dt>販売手数料：</dt><dd>-250円</dd></dl>
+          </td>
+          <td></td>
+        </tr>`
+      const html = `<table id="salelst"><tbody>
+        <tr><th>取扱内容</th><th>取扱日</th><th>状態</th><th>金額</th><th>詳細</th></tr>
+        ${row('z610000001', '2026/10/30', '<td>売上金</td>')}
+        ${row('z610000002', '2026/10/31', '<td><span class="statusSuspend">受取連絡待ち</span></td>')}
+      </tbody></table>`
+      const rows = parseYahooSalesHtml(html)
+      expect(rows.map(r => [r.yahooItemId, r.statusText])).toEqual([
+        ['z610000001', YAHOO_SALES_STATUS_PAID],
+        ['z610000002', YAHOO_SALES_STATUS_WAITING],
+      ])
+      const sold = [
+        makeSoldRow({ yahooItemId: 'z610000001', tradstat: 'SELLER_SHIPPED_DEPOSIT_REQUESTED' }),
+        makeSoldRow({ yahooItemId: 'z610000002', tradstat: 'SELLER_SHIPPED_DEPOSIT_REQUESTED' }),
+      ]
+      const { sales: combined } = combineYahooSales(sold, rows)
+      expect(combined.map(c => [c.yahooItemId, c.status, c.soldAt])).toEqual([
+        ['z610000001', 'completed', '2026-10-30'],
+        ['z610000002', 'shipped', '2026-10-31'],
+      ])
     })
   })
 
@@ -1505,6 +1647,74 @@ describe('collector-yahoo（electronに依存しない部分）', () => {
 
     it('知らない値が6つ以上あるときは先頭5つ＋他n件に収める', () => {
       const note = formatYahooUnknownBreakdownNote(['a', 'b', 'c', 'd', 'e', 'f', 'g'], 'F', summarizeYahooHtml(''))
+      expect(note).toContain('（a・b・c・d・e・他2件）')
+    })
+
+    // ---- 売上金管理の「状態」（売上金／受取連絡待ち）以外の文言 ----
+
+    /** 状態だけ差し替えられる売上金管理の1行（実データは使わず、行はここで合成する） */
+    function salesRowWithStatus(statusText: string, yahooItemId = 'z620000001'): YahooSalesRow {
+      return {
+        yahooItemId, itemName: 'ダミー商品', handledDate: '2026-10-30', statusText,
+        receivedAmount: 4750, settlementAmount: 5000, feeAmount: 250, shippingAmount: null,
+        settleId: null, otherBreakdown: [], amountsConsistent: true,
+      }
+    }
+
+    it('実物の売上金管理（「受取連絡待ち」だけ）・「売上金」の行は知らない状態に入らず、保存も呼ばれず null', async () => {
+      const salesHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-salesmanagement.html'), 'utf-8')
+      const completeHtml = readFileSync(join(__dirname, 'fixtures', 'yahoo-salesmanagement-complete.html'), 'utf-8')
+      for (const html of [salesHtml, completeHtml]) {
+        const rows = parseYahooSalesHtml(html)
+        expect(rows.length).toBeGreaterThan(0)
+        expect(findUnknownYahooSalesStatuses(rows)).toEqual([])
+        const { calls, save } = spySave()
+        expect(await saveIfUnknownYahooSalesStatus(rows, html, save)).toBeNull()
+        expect(calls).toHaveLength(0)
+      }
+    })
+
+    it('知らない文言だけを拾う：「売上金」「受取連絡待ち」は入らず、重複なし、空文字は「（空）」', () => {
+      const rows = [
+        salesRowWithStatus(YAHOO_SALES_STATUS_PAID),
+        salesRowWithStatus(YAHOO_SALES_STATUS_WAITING),
+        salesRowWithStatus('保留中'),
+        salesRowWithStatus('保留中'),
+        salesRowWithStatus(''),
+        salesRowWithStatus('売上金（保留）'),
+        salesRowWithStatus(''),
+      ]
+      expect(findUnknownYahooSalesStatuses(rows)).toEqual(['保留中', '（空）', '売上金（保留）'])
+      expect(findUnknownYahooSalesStatuses([])).toEqual([])
+    })
+
+    it('知らない文言が1行でもあれば、保存が呼ばれ、note に値そのものと保存先が出る（書式は「売上金管理：はじめて見る状態がありました（…）→ HTMLを保存しました（確認のため開発者に渡してください：…）」）', async () => {
+      const html = '<html><body>売上金管理のダミー</body></html>'
+      const rows = [salesRowWithStatus(YAHOO_SALES_STATUS_PAID), salesRowWithStatus('保留中')]
+      const { calls, save } = spySave()
+      const note = await saveIfUnknownYahooSalesStatus(rows, html, save)
+      expect(calls).toEqual([html])
+      expect(note).toContain('売上金管理：はじめて見る状態がありました（保留中）')
+      expect(note).toContain('→ HTMLを保存しました（確認のため開発者に渡してください：')
+      expect(note).toContain(SAVED)
+      expect(note).toBe(formatYahooUnknownSalesStatusNote(['保留中'], SAVED, summarizeYahooHtml(html)))
+    })
+
+    it('0件のときは知らない状態が無いので吐かない（0件の保存は collect() の既存の分岐のまま）', async () => {
+      const { calls, save } = spySave()
+      expect(await saveIfUnknownYahooSalesStatus([], '<html></html>', save)).toBeNull()
+      expect(calls).toHaveLength(0)
+    })
+
+    it('保存に失敗しても throw しない（取り込みの成否を変えない）。その旨が note に出る', async () => {
+      const failing = async (): Promise<string> => { throw new Error('EACCES') }
+      const note = await saveIfUnknownYahooSalesStatus([salesRowWithStatus('保留中')], '<html></html>', failing)
+      expect(note).toContain('売上金管理：はじめて見る状態がありました（保留中）')
+      expect(note).toContain('保存に失敗しました（EACCES）')
+    })
+
+    it('知らない状態が6つ以上あるときは先頭5つ＋他n件に収める', () => {
+      const note = formatYahooUnknownSalesStatusNote(['a', 'b', 'c', 'd', 'e', 'f', 'g'], 'F', summarizeYahooHtml(''))
       expect(note).toContain('（a・b・c・d・e・他2件）')
     })
   })

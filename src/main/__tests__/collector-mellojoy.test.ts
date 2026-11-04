@@ -21,6 +21,8 @@ const state = vi.hoisted(() => ({
   loadedUrls: [] as string[],
   /** session のハンドラ付けと窓の生成の順（窓を作る前に権限を断っているかの確認用） */
   order: [] as string[],
+  /** 作られた窓（途中で窓が閉じられた場合の確認用） */
+  createdWindows: [] as Array<{ destroy: () => void }>,
   // partition 名 → 偽の session。権限のハンドラを付けた先と、付けた中身を見えるようにする
   sessions: {} as Record<string, {
     setUserAgent: ReturnType<typeof vi.fn>
@@ -44,6 +46,7 @@ vi.mock('electron', () => {
 
     constructor() {
       state.order.push('new BrowserWindow')
+      state.createdWindows.push(this)
       this.webContents = {
         getURL: () => this.currentUrl,
         executeJavaScript: async (script: string) => {
@@ -148,6 +151,7 @@ import {
   inferOrderDate, isCancelledDetail, isShopLoginUrl, parseOrderDetailHtml, parseOrderListHtml,
   refetchPurchaseImages, savePurchaseImages, shouldSkipDetail, toDetailImageUrl, toPurchaseInput,
 } from '../collector-mellojoy'
+import { WINDOW_CLOSED_MESSAGE } from '../collector'
 import * as db from '../db'
 import { AgentStoppedError, LeaseLostError } from '../agent/errors'
 import { denyPermissionCheck, denyPermissionRequest } from '../agent/mode'
@@ -881,6 +885,22 @@ describe('collectShopOrders()（フルフロー、DOM/dbはモック）', () => 
       fetchImpl: undefined,
     }
     state.loadedUrls = []
+    state.createdWindows = []
+  })
+
+  it('窓が閉じられて失敗したときは、「Object has been destroyed」ではなく共通の説明を実行記録に残す', async () => {
+    state.opts.listHtml = buildListHtml([{ orderNo: '#100009', href: 'https://shop.example.com/account/orders/100009' }])
+    const existingImportKeys = vi.fn(async () => {
+      // 人が取り込み中の窓を閉じた：窓が壊れた後の呼び出しは Electron がこの文言で落ちる
+      state.createdWindows[0].destroy()
+      throw new Error('Object has been destroyed')
+    })
+    const store = { ...localStore, existingImportKeys } as unknown as typeof localStore
+
+    const run = await collectShopOrders('shop-1', true, store)
+
+    expect(run.status).toBe('failed')
+    expect(run.message).toBe(WINDOW_CLOSED_MESSAGE)
   })
 
   it('除外済みの注文は詳細を開かず、次の注文へ進む（残りの取得枠は消費しない）', async () => {

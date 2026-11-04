@@ -174,9 +174,9 @@ vi.mock('../db', () => ({
 
 import { BrowserWindow } from 'electron'
 import {
-  buildUserAgent, collect, ensureSession, extractInProgressTotal, extractListingTotal, extractTotalCount,
-  isChallengeText, parseInProgressHtml, parseListingsHtml, parsePurchasedAt, parseSoldHtml, parseSoldRow,
-  randomWaitMs, revealForChallenge, thumbFileName,
+  buildUserAgent, collect, collectFailureMessage, ensureSession, extractInProgressTotal, extractListingTotal,
+  extractTotalCount, isChallengeText, parseInProgressHtml, parseListingsHtml, parsePurchasedAt, parseSoldHtml,
+  parseSoldRow, randomWaitMs, revealForChallenge, thumbFileName, WINDOW_CLOSED_MESSAGE,
 } from '../collector'
 import * as db from '../db'
 import { LeaseLostError } from '../agent/errors'
@@ -546,6 +546,30 @@ describe('collector（electronに依存しない部分）', () => {
     })
   })
 
+  describe('collectFailureMessage（収集の最後の catch で実行記録に残す文言）', () => {
+    it('窓が閉じられている（isDestroyed）なら、例外の文言ではなく共通の説明を返す', () => {
+      const win = new BrowserWindow({ show: false })
+      win.destroy()
+      expect(win.isDestroyed()).toBe(true)
+      expect(collectFailureMessage(new Error('Object has been destroyed'), win)).toBe(WINDOW_CLOSED_MESSAGE)
+      expect(collectFailureMessage('文字列で投げられた', win)).toBe(WINDOW_CLOSED_MESSAGE)
+    })
+
+    it('窓が生きていれば、今までどおり Error は message・それ以外は文字列にして返す', () => {
+      const win = new BrowserWindow({ show: false })
+      expect(win.isDestroyed()).toBe(false)
+      expect(collectFailureMessage(new Error('書き込みに失敗しました'), win)).toBe('書き込みに失敗しました')
+      expect(collectFailureMessage('文字列で投げられた', win)).toBe('文字列で投げられた')
+      expect(collectFailureMessage(42, win)).toBe('42')
+    })
+
+    it('共通の説明は、窓を閉じずに待つよう人に伝える日本語', () => {
+      expect(WINDOW_CLOSED_MESSAGE).toBe(
+        '取り込みの途中で窓が閉じられたので止めました。取り込み中に開く窓は終わると自動で閉じるので、閉じずにお待ちください',
+      )
+    })
+  })
+
   describe('ensureSession（外のサイトを開く窓の権限）', () => {
     beforeEach(() => { state.sessions = {} })
 
@@ -742,6 +766,27 @@ describe('collect()（フルフロー、DOM/dbはモック）', () => {
     expect(saveThumb).toHaveBeenCalledTimes(2)
     expect(db.upsertListings).not.toHaveBeenCalled()
     expect(run.status).toBe('failed')
+  })
+
+  it('窓が閉じられて失敗したときは、「Object has been destroyed」ではなく共通の説明を実行記録に残す', async () => {
+    state.opts.scrapeResult = {
+      sales: [{
+        mercariItemId: 'm100000001', title: 'テスト商品', price: 1000, fee: 100, shippingFee: 200,
+        otherCost: null, soldAt: '2026-01-05', thumbUrl: null,
+      }],
+      totalCount: 1,
+    }
+    const ingestSoldPage = vi.fn(async () => {
+      // 人が取り込み中の窓を閉じた：窓が壊れた後の呼び出しは Electron がこの文言で落ちる
+      ;(state.createdWindows[0] as unknown as { destroy: () => void }).destroy()
+      throw new Error('Object has been destroyed')
+    })
+    const store = { ...localStore, ingestSoldPage } as unknown as typeof localStore
+
+    const run = await collect(true, store)
+
+    expect(run.status).toBe('failed')
+    expect(run.message).toBe(WINDOW_CLOSED_MESSAGE)
   })
 
   it('キーワード設定時：タイトル不一致の販売は挿入されず、サムネイルも取得しない。除外数がmessageに出る', async () => {

@@ -105,7 +105,8 @@ vi.mock('node:fs/promises', () => ({
 // ページ間の待ち・画像の間の待ちを即時にし、テストを遅くしない
 vi.mock('node:timers/promises', () => ({ setTimeout: vi.fn(async () => {}) }))
 
-import { CHALLENGE_MESSAGE } from '../collector'
+import { writeFile } from 'node:fs/promises'
+import { CHALLENGE_MESSAGE, WINDOW_CLOSED_MESSAGE } from '../collector'
 import {
   collect, combineYahooSales, ensureSession, parseYahooSalesHtml, parseYahooSellingHtml, parseYahooSoldHtml,
 } from '../collector-yahoo'
@@ -345,6 +346,79 @@ describe('collect()（Yahoo!フリマ）が store の段へ渡すもの', () => 
     })
     expect(run.status).toBe('failed')
     expect(state.createdWindows[0].isDestroyed()).toBe(true)
+  })
+
+  it('窓が閉じられて失敗したときは、「Object has been destroyed」ではなく共通の説明を実行記録に残す（メルカリ・メロジョイと同じ文言）', async () => {
+    const { store, asStore } = createFakeStore()
+    store.ingestYahooSales.mockImplementationOnce(async () => {
+      // 人が取り込み中の窓を閉じた：窓が壊れた後の呼び出しは Electron がこの文言で落ちる
+      ;(state.createdWindows[0] as unknown as { destroy: () => void }).destroy()
+      throw new Error('Object has been destroyed')
+    })
+
+    const run = await collect(true, asStore)
+
+    expect(store.recordRun).toHaveBeenCalledTimes(1)
+    expect(store.recordRun.mock.calls[0][0]).toMatchObject({
+      source: 'yahoo', status: 'failed', fetched: 0, inserted: 0, message: WINDOW_CLOSED_MESSAGE,
+    })
+    expect(run.message).toBe(WINDOW_CLOSED_MESSAGE)
+    expect(run.message).not.toContain('Object has been destroyed')
+  })
+
+  describe('売上金管理の状態が「売上金」なら取引完了（②が COMPLETE にならない取引。2026-10-31 に実物で観測）', () => {
+    /** fixture の z100000010 の②を SELLER_SHIPPED_DEPOSIT_REQUESTED に、③を「売上金」に差し替える（行は合成） */
+    function withPaidDepositRequested(): { soldHtml: string; salesHtml: string } {
+      const sold = soldHtml.replace(
+        /(rcconid:z100000010;[^"]*tradstat:)SELLER_SHIPPED;/, '$1SELLER_SHIPPED_DEPOSIT_REQUESTED;',
+      )
+      const sales = salesHtml.replace(
+        /(\(z100000010\)<\/td>\s*<td>[^<]*<\/td>\s*)<td><span class="statusSuspend">受取連絡待ち<\/span><\/td>/,
+        '$1<td>売上金</td>',
+      )
+      expect(sold).not.toBe(soldHtml)
+      expect(sales).not.toBe(salesHtml)
+      return { soldHtml: sold, salesHtml: sales }
+    }
+
+    it('③が「売上金」の行だけ completed で store の段へ渡る（日付は③の取扱日）。③が「受取連絡待ち」の行は今までどおり shipped', async () => {
+      Object.assign(state.opts, withPaidDepositRequested())
+      const { store, asStore } = createFakeStore()
+
+      const run = await collect(true, asStore)
+
+      const [, rows] = store.ingestYahooSales.mock.calls[0]
+      expect(rows.map(r => [r.yahooItemId, r.status, r.soldAt])).toEqual([
+        ['z100000010', 'completed', '2026-09-28'],
+        ['z100000011', 'shipped', '2026-09-28'],
+        ['z100000012', 'shipped', '2026-09-28'],
+        ['z100000013', 'shipped', '2026-09-27'],
+      ])
+      // 知っている tradstat・状態だけなので、はじめて見る状態の HTML は吐かない
+      expect(writeFile).not.toHaveBeenCalled()
+      expect(run.status).toBe('ok')
+      expect(run.message).not.toContain('はじめて見る')
+    })
+
+    it('③に知らない状態の文言があれば、推測で完了にせず（shipped のまま）、HTML を保存して実行記録に知らせる', async () => {
+      const unknownStatusHtml = salesHtml.replace(
+        '<td><span class="statusSuspend">受取連絡待ち</span></td>',
+        '<td><span class="statusSuspend">保留中</span></td>',
+      )
+      expect(unknownStatusHtml).not.toBe(salesHtml)
+      state.opts.salesHtml = unknownStatusHtml
+      const { store, asStore } = createFakeStore()
+
+      const run = await collect(true, asStore)
+
+      const [, rows] = store.ingestYahooSales.mock.calls[0]
+      expect(rows[0]).toMatchObject({ yahooItemId: 'z100000010', status: 'shipped' })
+      expect(writeFile).toHaveBeenCalledWith(
+        expect.stringMatching(/yahoo-sales\.html$/), unknownStatusHtml, 'utf-8',
+      )
+      expect(run.status).toBe('ok')
+      expect(run.message).toContain('売上金管理：はじめて見る状態がありました（保留中）')
+    })
   })
 
   it('CAPTCHA が出たら何も書かずに止め、auth_required を記録する。窓は人に渡すので残す', async () => {

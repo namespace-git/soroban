@@ -4,7 +4,8 @@ import { mkdirSync } from 'node:fs'
 import { readdir, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
-  buildUserAgent, CHALLENGE_MESSAGE, isChallengeText, randomWait, revealForChallenge, thumbFileName,
+  buildUserAgent, CHALLENGE_MESSAGE, collectFailureMessage, isChallengeText, randomWait, revealForChallenge,
+  thumbFileName,
 } from './collector'
 import { localStore } from './store/local'
 import type { YahooCombinedSalesSplit as YahooSalesSplit } from './store/rules'
@@ -199,12 +200,18 @@ export function parseYahooSoldHtml(rawHtml: string): YahooScrapedSale[] {
  *   WAIT_FOR_SELLER_SHIP（売れて未発送。発送はこちらの番）    → waiting_shipment
  *   SELLER_SHIPPED（発送済み・受け取り評価待ち）              → shipped
  *   COMPLETE（取引完了。`COMPLETED` ではない。実物で 8 件）    → completed（実績＝取引完了）
+ *   SELLER_SHIPPED_DEPOSIT_REQUESTED（発送済みのまま受け取り連絡が無い系。2026-10-31 に実物で観測）
+ *                                                            → shipped（入金は③の「売上金」で判定する）
+ *   SELLER_SHIPPED_REGULAR_ESCROW_EXPIRED（同上。2026-10-31 に実物で観測）
+ *                                                            → shipped（同上）
  * 未知の値は推測で埋めず null を返す。
  */
 export function mapYahooTradstat(t: string): SaleStatus | null {
   if (t === 'NONE') return null
   if (t === 'WAIT_FOR_SELLER_SHIP') return 'waiting_shipment'
   if (t === 'SELLER_SHIPPED') return 'shipped'
+  if (t === 'SELLER_SHIPPED_DEPOSIT_REQUESTED') return 'shipped'
+  if (t === 'SELLER_SHIPPED_REGULAR_ESCROW_EXPIRED') return 'shipped'
   if (t === 'COMPLETE') return 'completed'
   return null
 }
@@ -224,6 +231,15 @@ export function extractYahooSoldTotal(rawHtml: string): number | null {
 // で引く。取扱内容の商品名は途中で切れているため型番はここから取らない。
 // ============================================================
 
+/**
+ * 売上金管理の「状態」の文言。「売上金」＝売上金が入った（取引完了と同じ扱い）。
+ * 買い手が受け取り連絡をしないまま期限が過ぎた取引も、②が COMPLETE にならないまま「売上金」になる
+ * （2026-10-31 に実物で観測）。だから完了の判定は②ではなくこちらで見る
+ */
+export const YAHOO_SALES_STATUS_PAID = '売上金'
+/** 売上金管理の「状態」の文言。「受取連絡待ち」＝まだ入金されていない */
+export const YAHOO_SALES_STATUS_WAITING = '受取連絡待ち'
+
 /** 「売上金管理」一覧（`#salelst`）の1行 */
 export interface YahooSalesRow {
   yahooItemId: string
@@ -234,7 +250,7 @@ export interface YahooSalesRow {
   itemName: string
   /** 取扱日（YYYY-MM-DD、正規化済み） */
   handledDate: string
-  /** 状態の日本語表示（取引完了の行は「売上金」、未完了の行は「受取連絡待ち」） */
+  /** 状態の日本語表示（入金済みの行は「売上金」、未入金の行は「受取連絡待ち」。YAHOO_SALES_STATUS_*） */
   statusText: string
   /** 受取額（金額欄の先頭の太字） */
   receivedAmount: number
@@ -909,7 +925,11 @@ export interface YahooCombinedSale {
   bundleCount: number | null
   /** 取扱日（③。計上日として使う） */
   soldAt: string
-  /** ②のtradstatをmapYahooTradstatで判定した状態。②に無ければ null（推測で埋めない） */
+  /**
+   * ③が「売上金」なら completed（売上金が入った＝実績。②が COMPLETE にならない取引があるため）。
+   * そうでなければ②のtradstatをmapYahooTradstatで判定した状態。②に無ければ null（推測で埋めない）。
+   * ③は状態を下げない（②が COMPLETE なら③が何でも completed）
+   */
   status: SaleStatus | null
   /** ②のサムネイルURL。②に無ければ null */
   thumbUrl: string | null
@@ -937,6 +957,10 @@ export interface YahooInconsistentSale {
  * amountsConsistent が false の行（決済金額－手数料－送料≠受取額。知らない内訳が増えて
  * 式が崩れた等）は sales に混ぜず、どの商品で何が合わないかが分かる形（inconsistent）で
  * 返す（黙って通すと送料が利益に残ってしまうし、件数だけ捨てると配偶者が直しようがない）。
+ *
+ * status は、③の状態が「売上金」なら completed（売上金が入った＝実績。受け取り連絡が無いまま期限が
+ * 過ぎた取引は②が COMPLETE にならないため）。そうでなければ②のtradstatから判定する（②に無ければ
+ * null）。③は状態を下げない（②が COMPLETE なら③が何でも completed）。完了日・計上日は③の取扱日。
  */
 export function combineYahooSales(
   soldRows: YahooScrapedSale[],
@@ -963,6 +987,9 @@ export function combineYahooSales(
     const hasFullTitle = !!(sold && sold.title)
     // 点数は②から。③の商品名は途中で `計` で切れていることがある（そのときは null になる）
     const salesBundle = parseYahooBundleTitle(s.itemName)
+    const status: SaleStatus | null = s.statusText === YAHOO_SALES_STATUS_PAID
+      ? 'completed'
+      : sold ? mapYahooTradstat(sold.tradstat) : null
     sales.push({
       yahooItemId: s.yahooItemId,
       title: hasFullTitle ? sold!.title : s.itemName,
@@ -973,7 +1000,7 @@ export function combineYahooSales(
       isBundle: !!sold?.isBundle || salesBundle.isBundle,
       bundleCount: sold?.bundleCount ?? salesBundle.bundleCount,
       soldAt: s.handledDate,
-      status: sold ? mapYahooTradstat(sold.tradstat) : null,
+      status,
       thumbUrl: sold?.thumbUrl ?? null,
     })
   }
@@ -1132,7 +1159,7 @@ function formatUnknownList(values: string[]): string {
 
 /**
  * 「取引中・取引完了」の行のうち、mapYahooTradstat が知らない tradstat（生の文字列）を重複なしで返す。
- * 知っている値（NONE / WAIT_FOR_SELLER_SHIP / SELLER_SHIPPED）は入らない。
+ * 知っている値（NONE と、mapYahooTradstat の一覧にある値）は入らない。
  * 空文字は「属性が読めなかった」という意味で、これも知らない形として '（空）' で返す。
  */
 export function findUnknownYahooTradstats(rows: YahooScrapedSale[]): string[] {
@@ -1140,6 +1167,22 @@ export function findUnknownYahooTradstats(rows: YahooScrapedSale[]): string[] {
   for (const r of rows) {
     if (r.tradstat !== 'NONE' && mapYahooTradstat(r.tradstat) === null) {
       const v = r.tradstat === '' ? '（空）' : r.tradstat
+      if (!unknown.includes(v)) unknown.push(v)
+    }
+  }
+  return unknown
+}
+
+/**
+ * 「売上金管理」の行のうち、状態が「売上金」「受取連絡待ち」のどちらでもないもの（生の文言）を重複なしで返す。
+ * 空文字は「状態のセルが読めなかった」という意味で、これも知らない形として '（空）' で返す。
+ * 知らない文言は推測で完了にしない（combineYahooSales は「売上金」のときだけ completed にする）。
+ */
+export function findUnknownYahooSalesStatuses(rows: YahooSalesRow[]): string[] {
+  const unknown: string[] = []
+  for (const r of rows) {
+    if (r.statusText !== YAHOO_SALES_STATUS_PAID && r.statusText !== YAHOO_SALES_STATUS_WAITING) {
+      const v = r.statusText === '' ? '（空）' : r.statusText
       if (!unknown.includes(v)) unknown.push(v)
     }
   }
@@ -1169,6 +1212,12 @@ export function formatYahooUnknownTradstatNote(values: string[], file: string, s
     + `→ HTMLを保存しました（確認のため開発者に渡してください：${file}｜${formatYahooHtmlSummary(summary)}）`
 }
 
+/** 売上金管理に知らない状態の文言が出たときの実行記録用の1行（知らない値そのものと保存先） */
+export function formatYahooUnknownSalesStatusNote(values: string[], file: string, summary: YahooHtmlSummary): string {
+  return `売上金管理：はじめて見る状態がありました（${formatUnknownList(values)}）`
+    + `→ HTMLを保存しました（確認のため開発者に渡してください：${file}｜${formatYahooHtmlSummary(summary)}）`
+}
+
 /** 恒等式が崩れた行に知らない内訳ラベルが出たときの実行記録用の1行 */
 export function formatYahooUnknownBreakdownNote(labels: string[], file: string, summary: YahooHtmlSummary): string {
   return `売上金管理：知らない内訳がありました（${formatUnknownList(labels)}）`
@@ -1191,6 +1240,26 @@ export async function saveIfUnknownYahooTradstat(
     return formatYahooUnknownTradstatNote(values, file, summarizeYahooHtml(html))
   } catch (e) {
     return `取引中・取引完了：はじめて見る取引の状態がありました（${formatUnknownList(values)}）`
+      + `→ HTMLの保存に失敗しました（${e instanceof Error ? e.message : String(e)}）`
+  }
+}
+
+/**
+ * 売上金管理で知らない状態の文言が1つでもあれば、HTML を save で保存して実行記録用の1行を返す。
+ * 無ければ保存せず null。保存に失敗しても取り込みは止めない（その旨を1行にして返す）。
+ */
+export async function saveIfUnknownYahooSalesStatus(
+  rows: YahooSalesRow[],
+  html: string,
+  save: (html: string) => Promise<string>,
+): Promise<string | null> {
+  const values = findUnknownYahooSalesStatuses(rows)
+  if (values.length === 0) return null
+  try {
+    const file = await save(html)
+    return formatYahooUnknownSalesStatusNote(values, file, summarizeYahooHtml(html))
+  } catch (e) {
+    return `売上金管理：はじめて見る状態がありました（${formatUnknownList(values)}）`
       + `→ HTMLの保存に失敗しました（${e instanceof Error ? e.message : String(e)}）`
   }
 }
@@ -1314,6 +1383,10 @@ export async function collect(silent: boolean, store: CollectorStore = localStor
     if (salesRows.length === 0) {
       const file = await saveYahooDebugHtml('sales', salesHtml)
       debugSavedNotes.push(formatYahooDebugSavedNote('売上金管理', file, summarizeYahooHtml(salesHtml)))
+    } else {
+      // 状態が「売上金」「受取連絡待ち」以外の行は推測で完了にしないので、押しただけで形が分かるように吐く
+      const note = await saveIfUnknownYahooSalesStatus(salesRows, salesHtml, html => saveYahooDebugHtml('sales', html))
+      if (note) debugSavedNotes.push(note)
     }
 
     if (isYahooCollectEmpty(scrapedListings.length, soldRows.length, salesRows.length)) {
@@ -1428,7 +1501,7 @@ export async function collect(silent: boolean, store: CollectorStore = localStor
   } catch (e) {
     return await record(
       'failed', 0, 0,
-      e instanceof Error ? e.message : String(e),
+      collectFailureMessage(e, win),
     )
   } finally {
     if (!keepWindowOpen && !win.isDestroyed()) win.destroy()

@@ -57,6 +57,19 @@ const MAX_PURCHASED_AT_PER_RUN = 3
 export const CHALLENGE_MESSAGE =
   '本人確認（CAPTCHA）が出ました。開いたウィンドウで完了してから、もう一度「取り込む」を押してください'
 
+/** 取り込みの途中で人が窓を閉じたときの実行記録（メルカリ・Yahoo!フリマ・メロジョイで共通） */
+export const WINDOW_CLOSED_MESSAGE =
+  '取り込みの途中で窓が閉じられたので止めました。取り込み中に開く窓は終わると自動で閉じるので、閉じずにお待ちください'
+
+/**
+ * 収集の最後の catch で実行記録に残す文言。窓が閉じられて失敗したときは、
+ * 「Object has been destroyed」のような中身の分からない文言ではなく共通の説明を返す
+ */
+export function collectFailureMessage(e: unknown, win: BrowserWindow): string {
+  if (win.isDestroyed()) return WINDOW_CLOSED_MESSAGE
+  return e instanceof Error ? e.message : String(e)
+}
+
 export interface ScrapedSale {
   mercariItemId: string
   title: string
@@ -1024,7 +1037,7 @@ export async function collect(silent: boolean, store: CollectorStore = localStor
   } catch (e) {
     return await record(
       'failed', 0, 0,
-      e instanceof Error ? e.message : String(e),
+      collectFailureMessage(e, win),
     )
   } finally {
     if (!keepWindowOpen && !win.isDestroyed()) win.destroy()

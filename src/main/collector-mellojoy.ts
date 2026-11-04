@@ -6,7 +6,9 @@ import { writeFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import * as db from './db'
 import { extractCode, extractMaterial } from './code'
-import { buildUserAgent, CHALLENGE_MESSAGE, isChallengeText, randomWait, revealForChallenge } from './collector'
+import {
+  buildUserAgent, CHALLENGE_MESSAGE, collectFailureMessage, isChallengeText, randomWait, revealForChallenge,
+} from './collector'
 import { localStore } from './store/local'
 import { StoreStoppedError, type CollectorStore } from './store/types'
 import { lockDownPermissions } from './agent/mode'
@@ -1220,7 +1222,7 @@ export async function collectShopOrders(
   } catch (e) {
     return await record(
       'failed', 0, 0,
-      e instanceof Error ? e.message : String(e),
+      collectFailureMessage(e, win),
     )
   } finally {
     if (!keepWindowOpen && !win.isDestroyed()) win.destroy()
